@@ -3,13 +3,16 @@
 //! `ui.rs` is platform-neutral by contract — if a change there would need
 //! mirroring in a shell, the split is wrong. Free-space reporting is the one
 //! piece of the core that needs a real OS call, so it lives here behind a
-//! neutral signature instead of leaking a `cfg` (or a Unix-only `df`) into the
-//! core. Every shell calls the same `ui.rs`; only this module varies.
+//! neutral signature instead of leaking a `cfg` into the core. Every shell
+//! calls the same `ui.rs`; only this module varies.
 
 /// Bytes available on the volume holding `path`, or `None` when it cannot be
 /// determined. Callers render `None` as an em dash — never as a blank field
-/// and never as `0`.
+/// and never as `0`. A path holding a NUL byte names no file and is `None`.
 pub fn free_space_bytes(path: &str) -> Option<u64> {
+    if path.contains('\0') {
+        return None;
+    }
     imp::free_space_bytes(path)
 }
 
@@ -156,32 +159,25 @@ mod imp {
             })
     }
 
-    /// Free bytes from `df -k` output: the "Available" column of the one data row.
-    pub fn parse_df_free(text: &str) -> Option<u64> {
-        // `df` wraps a long device name onto its own line, pushing the data
-        // columns onto the next — joining every line after the header back
-        // into one restores the normal column order before indexing into it.
-        let merged = text
-            .lines()
-            .skip(1)
-            .filter(|l| !l.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let kb: u64 = merged.split_whitespace().nth(3)?.parse().ok()?;
-        Some(kb.saturating_mul(1024))
-    }
-
+    /// Bytes available to an unprivileged writer on the volume holding `path`:
+    /// `statvfs` on the nearest existing ancestor, `f_bavail * f_frsize`; `None`
+    /// when `statvfs` fails.
     pub fn free_space_bytes(path: &str) -> Option<u64> {
-        let p = std::path::Path::new(path);
+        use std::os::unix::ffi::OsStrExt as _;
         // A destination that does not exist yet is normal (we are about to
         // create the file); probe the nearest existing ancestor so the number
         // still describes the right volume.
-        let probe = nearest_existing(p, |q| q.exists());
-        let out = std::process::Command::new("df")
-            .args(["-k", probe.to_str()?])
-            .output()
-            .ok()?;
-        parse_df_free(&String::from_utf8_lossy(&out.stdout))
+        let probe = nearest_existing(std::path::Path::new(path), |q| q.exists());
+        let c = std::ffi::CString::new(probe.as_os_str().as_bytes()).ok()?;
+        let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: `c` is a NUL-terminated path and `st` is a writable statvfs.
+        if unsafe { libc::statvfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: statvfs returned 0, so it filled `st`.
+        let st = unsafe { st.assume_init() };
+        #[allow(clippy::useless_conversion)]
+        Some(u64::from(st.f_bavail).saturating_mul(u64::from(st.f_frsize)))
     }
 }
 
@@ -257,9 +253,8 @@ mod tests {
                 .to_str()
                 .expect("temp dir is valid UTF-8"),
         );
-        // `> 0` was satisfied by a hard-coded `Some(1)`, which is exactly what
-        // a broken `df` parse would look like. Any real volume with room for a
-        // rip has far more than a mebibyte free.
+        // `> 0` is satisfied by a hard-coded `Some(1)`. Any real volume with
+        // room for a rip has far more than a mebibyte free.
         assert!(
             n.is_some_and(|b| b > 1_048_576),
             "no plausible free space reported: {n:?}"
@@ -356,16 +351,38 @@ mod tests {
         assert!(super::free_space_bytes(p.to_str().unwrap()).is_some_and(|b| b > 0));
     }
 
-    /// Nonsense input must not panic. A relative path that cannot exist is measured on the
-    /// current directory's volume on Unix and is `None` on Windows, as is an empty one.
+    /// Nonsense input must not panic. A path holding a NUL byte names no file on any OS and
+    /// is `None`; an empty one means the current directory on Unix and is `None` on Windows.
     #[test]
-    fn a_bogus_path_does_not_panic_and_a_relative_one_means_the_cwd() {
-        assert_eq!(super::free_space_bytes("\0\0\0").is_some(), cfg!(unix));
+    fn a_nul_path_is_none_and_an_empty_one_means_the_cwd() {
+        assert_eq!(super::free_space_bytes("\0\0\0"), None);
+        assert_eq!(super::free_space_bytes("/tmp/a\0b/out.mkv"), None);
         assert_eq!(
             super::free_space_bytes("").is_some(),
             cfg!(unix),
             "an empty path means the current directory on Unix"
         );
+    }
+
+    /// A real directory reports its volume's free bytes.
+    #[test]
+    fn a_real_temp_dir_reports_free_bytes() {
+        let dir = crate::ku_fixtures::TempDir::new("free-space");
+        let n = super::free_space_bytes(dir.path().to_str().expect("UTF-8 temp dir"));
+        assert!(n.is_some_and(|b| b > 0), "{n:?}");
+    }
+
+    /// A missing leaf several levels deep is measured on the directory that does exist.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_leaf_probes_its_existing_ancestor() {
+        let dir = crate::ku_fixtures::TempDir::new("free-space-leaf");
+        let leaf = dir.path().join("not/yet/made/out.mkv");
+        assert_eq!(
+            super::imp::nearest_existing(&leaf, |q| q.exists()),
+            dir.path()
+        );
+        assert!(super::free_space_bytes(leaf.to_str().unwrap()).is_some_and(|b| b > 0));
     }
 
     /// A relative destination that does not exist yet is measured on the current directory's
@@ -387,20 +404,6 @@ mod tests {
             super::imp::nearest_existing(Path::new("/gone/file.mkv"), none),
             Path::new("/")
         );
-    }
-
-    /// A long device name wraps `df`'s row onto two lines; the Available column is the same.
-    #[cfg(unix)]
-    #[test]
-    fn df_output_parses_whether_or_not_the_device_name_wraps() {
-        let plain = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
-                     /dev/disk1 1000 400 600 40% /\n";
-        let wrapped = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
-                       server.example.com:/export/a/very/long/name\n\
-                       1000 400 600 40% /mnt\n";
-        assert_eq!(super::imp::parse_df_free(plain), Some(600 * 1024));
-        assert_eq!(super::imp::parse_df_free(wrapped), Some(600 * 1024));
-        assert_eq!(super::imp::parse_df_free("Filesystem\n"), None);
     }
 
     /// Unit tests build real `App`s (`Settings::load`, which renames an

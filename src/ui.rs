@@ -29,6 +29,9 @@ pub struct Node {
     pub title_idx: usize,
     /// Arena index of the row whose tick this row shows (see [`Node::mirrors`]).
     mirror: Option<usize>,
+    /// The Length and Size cells, empty where the row has none ([`title_cells`]).
+    pub length: String,
+    pub size: String,
 }
 
 impl Node {
@@ -322,6 +325,7 @@ impl Tree {
                 }
             }
             let idx = arena.len();
+            let (length, size) = title_cells(r);
             arena.push(Node {
                 type_s: r.type_s.clone(),
                 desc: r.desc.clone(),
@@ -332,6 +336,8 @@ impl Tree {
                 pid: r.pid,
                 title_idx: r.title,
                 mirror: None,
+                length,
+                size,
             });
             match r.depth {
                 0 => roots.push(idx),
@@ -585,7 +591,7 @@ pub enum Page {
 // `de`), where a typo was indistinguishable from "disc has no German". Shells
 // now show a checklist of names and store ISO codes; this module owns both conversions.
 
-/// The languages offered in the pickers, as (stored code, English name).
+/// The languages offered in the pickers, as (stored code, `gui.lang.<code>` English fallback).
 ///
 /// ISO 639-2/T, which is what disc streams actually carry (`deu`, not `ger`;
 /// `fra`, not `fre`) — so a stored value can be compared to a stream tag
@@ -725,7 +731,7 @@ pub fn lang_selection_to_string(codes: &[String]) -> String {
     codes.join(",")
 }
 
-/// The picker button's title: the chosen languages in English, or a word
+/// The picker button's title: the chosen languages in the active locale, or a word
 /// meaning "no preference" — never an empty button, which reads as broken.
 pub fn lang_summary(stored: &str) -> String {
     let codes = lang_selection(stored);
@@ -739,17 +745,18 @@ pub fn lang_summary(stored: &str) -> String {
         .join(", ")
 }
 
-/// The English name for a stored code, falling back to the code itself so an
-/// unknown tag is still visible rather than blank.
+/// The name for a stored code: a picker language in the active locale (English when the
+/// catalog lacks `gui.lang.<code>`), any other known code in English, and an unknown tag as
+/// itself so it is still visible rather than blank.
 pub fn lang_display_name(code: &str) -> String {
-    PICKER_LANGUAGES
+    if let Some((c, english)) = PICKER_LANGUAGES
         .iter()
         .find(|(c, _)| c.eq_ignore_ascii_case(code))
-        .map(|(_, name)| (*name).to_string())
-        .or_else(|| {
-            isolang::Language::from_639_3(&code.to_ascii_lowercase())
-                .map(|l| l.to_name().to_string())
-        })
+    {
+        return crate::strings::get_or(&format!("gui.lang.{c}"), english);
+    }
+    isolang::Language::from_639_3(&code.to_ascii_lowercase())
+        .map(|l| l.to_name().to_string())
         .unwrap_or_else(|| code.to_string())
 }
 
@@ -1211,19 +1218,34 @@ pub struct InfoRows {
 impl InfoRows {
     /// `dest` is the output FILE, not the folder — the label says "Output
     /// file" and showing a directory there is simply wrong.
-    pub fn starting(source: &str, dest: &str) -> Self {
+    ///
+    /// `scanned` is what the scan says the rip will read
+    /// ([`scanned_source_bytes`]). A source that is a regular file (an ISO
+    /// image, a container) shows the file's length; anything else (a drive, a
+    /// disc folder) shows `scanned`, or an em dash without it.
+    pub fn starting(source: &str, dest: &str, scanned: Option<u64>) -> Self {
+        let file_len = std::fs::metadata(source)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.len());
         InfoRows {
             source: source.to_string(),
-            source_file: std::path::Path::new(source)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string(),
+            // A drive source (`disc://…`) has no file name: a dash, not the URL's tail.
+            source_file: if source.contains("://") {
+                "—".to_string()
+            } else {
+                std::path::Path::new(source)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("—")
+                    .to_string()
+            },
             // Never leave the row blank — a blank Information field reads as
             // a broken panel (reported). An unknown value is an em dash.
-            source_size: std::fs::metadata(source)
-                .map(|m| fmt_bytes(m.len()))
-                .unwrap_or_else(|_| "—".into()),
+            source_size: file_len
+                .or(scanned)
+                .map(fmt_bytes)
+                .unwrap_or_else(|| "—".into()),
             read_rate: "—".into(),
             output_file: dest.to_string(),
             output_size: "0 B".into(),
@@ -1256,6 +1278,28 @@ impl InfoRows {
             &self.free_space,
         ]
     }
+}
+
+/// What a rip from a drive or disc folder reads, from the scan: the disc's
+/// capacity for a whole-disc output, else the sum of the ticked titles' sizes.
+/// `None` when any part of that is unknown (a `0` size or capacity, a title the
+/// scan does not list, nothing ticked), so the row never shows a guess.
+pub fn scanned_source_bytes(
+    format: &str,
+    titles: &[usize],
+    title_sizes: &[u64],
+    capacity: u64,
+) -> Option<u64> {
+    if format.starts_with("Whole disc") {
+        return (capacity > 0).then_some(capacity);
+    }
+    if titles.is_empty() {
+        return None;
+    }
+    titles.iter().try_fold(0u64, |sum, t| {
+        let size = *title_sizes.get(*t)?;
+        (size > 0).then(|| sum.saturating_add(size))
+    })
 }
 
 /// Read rate for display. `speed_bps` is engine-derived; never recompute it.
@@ -1304,8 +1348,19 @@ pub fn stop_caption(stopping: bool, titles_done: usize, run_titles: usize) -> Op
 /// does not produce. It used to be a local MP4/M2TS/else-MKV test here, which
 /// told every ISO, folder, demux, chapter, JSON and .fvi run that it was
 /// writing an MKV.
-pub fn container_label(format: &str) -> &'static str {
-    crate::engine::container_word(format)
+/// The engine's word, localized where it is a word rather than a format name.
+pub fn container_label(format: &str) -> String {
+    let word = crate::engine::container_word(format);
+    match word {
+        "chapter" => crate::strings::get_or("gui.progress.word_chapter", "chapter"),
+        "track" => crate::strings::get_or("gui.progress.word_track", "track"),
+        "video track" => crate::strings::get_or("gui.progress.word_video_track", "video track"),
+        "audio track" => crate::strings::get_or("gui.progress.word_audio_track", "audio track"),
+        "subtitle track" => {
+            crate::strings::get_or("gui.progress.word_subtitle_track", "subtitle track")
+        }
+        _ => word.to_string(),
+    }
 }
 
 /// The `gui.format.*` translation key for a canonical output-format string, or
@@ -1452,12 +1507,6 @@ pub fn locale_code(sel: &str) -> &'static str {
     "auto"
 }
 
-/// Overall progress across a multi-title run.
-pub fn overall_pct(titles_done: usize, total: usize, current_pct: f64) -> f64 {
-    let total = total.max(1) as f64;
-    ((titles_done as f64 + current_pct / 100.0) / total * 100.0).min(100.0)
-}
-
 // ── settings dropdowns ────────────────────────────────────────────────────
 
 /// The option table for a settings dropdown: `(canonical, localized_label)`
@@ -1492,13 +1541,105 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
             ("Debug", g("gui.set.log_debug")),
         ],
         // Language: canonical is the locale code, label the endonym (shown
-        // as-is in every locale). Driven straight from the shipped list, so
-        // the picker can never drift from what freemkv-i18n can load.
+        // as-is in every locale) or, for "auto", the localized word. Driven straight from
+        // the shipped list, so the picker can never drift from what freemkv-i18n can load.
         "language" => LOCALES
             .iter()
-            .map(|(endonym, code)| (*code, (*endonym).to_string()))
+            .map(|(endonym, code)| match *code {
+                "auto" => (
+                    *code,
+                    crate::strings::get_or("gui.set.language_auto", "Auto"),
+                ),
+                _ => (*code, (*endonym).to_string()),
+            })
             .collect(),
         _ => vec![],
+    }
+}
+
+// ── title-row cells: the tree's Length and Size columns ───────────────────
+
+/// A row's Length and Size cells, as `(length, size)`.
+///
+/// Length is the running time of a Title row (depth 1), [`fmt_hms`]-formatted,
+/// and empty on every other row. Size is [`fmt_title_size`] of the row's
+/// `size_bytes`, empty where the scan reports none.
+pub fn title_cells(r: &crate::engine::Row) -> (String, String) {
+    let length = if r.depth == 1 {
+        fmt_hms(r.duration_secs.max(0.0) as u64)
+    } else {
+        String::new()
+    };
+    (length, r.size_bytes.map(fmt_title_size).unwrap_or_default())
+}
+
+/// A title's size in decimal units, as `freemkv info` reports it: `"6.8 GB"`,
+/// or whole megabytes below what would round to 1.0 GB (`"734 MB"`).
+pub fn fmt_title_size(bytes: u64) -> String {
+    if bytes >= 999_500_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{:.0} MB", bytes as f64 / 1e6)
+    }
+}
+
+#[cfg(test)]
+mod title_cell_tests {
+    use super::{fmt_title_size, title_cells};
+    use crate::engine::Row;
+
+    fn row(depth: u8, duration_secs: f64, size_bytes: Option<u64>) -> Row {
+        Row {
+            type_s: String::new(),
+            desc: String::new(),
+            depth,
+            checkable: depth > 0,
+            title: 0,
+            info: String::new(),
+            pid: None,
+            duration_secs,
+            lang: String::new(),
+            forced: false,
+            mirrors: None,
+            size_bytes,
+        }
+    }
+
+    #[test]
+    fn a_title_size_reads_in_gigabytes_or_whole_megabytes() {
+        assert_eq!(fmt_title_size(6_800_000_000), "6.8 GB");
+        assert_eq!(fmt_title_size(48_123_456_789), "48.1 GB");
+        assert_eq!(fmt_title_size(1_000_000_000), "1.0 GB");
+        assert_eq!(fmt_title_size(999_500_000), "1.0 GB");
+        assert_eq!(fmt_title_size(999_499_999), "999 MB");
+        assert_eq!(fmt_title_size(734_003_200), "734 MB");
+        assert_eq!(fmt_title_size(0), "0 MB");
+    }
+
+    #[test]
+    fn a_title_row_fills_both_cells() {
+        let cells = title_cells(&row(1, 8600.0, Some(6_800_000_000)));
+        assert_eq!(cells, ("2:23:20".to_string(), "6.8 GB".to_string()));
+        assert_eq!(title_cells(&row(1, 1290.9, Some(734_003_200))).0, "21:30");
+    }
+
+    #[test]
+    fn a_title_without_a_reported_size_leaves_size_empty() {
+        assert_eq!(
+            title_cells(&row(1, 600.0, None)),
+            ("10:00".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn disc_and_stream_rows_leave_both_cells_empty() {
+        for depth in [0, 2] {
+            assert_eq!(
+                title_cells(&row(depth, 0.0, None)),
+                (String::new(), String::new()),
+                "depth {depth}"
+            );
+        }
     }
 }
 
@@ -1740,6 +1881,18 @@ const SCANNERS: (ScanFn, ScanFn) = (scan_source, probe_source);
 #[cfg(test)]
 const SCANNERS: (ScanFn, ScanFn) = (tests::no_drive_scan, tests::no_drive_probe);
 
+/// The disc watch's media check. Unit tests get one that answers "unknown" untouched.
+#[cfg(not(test))]
+const PRESENCE: fn(&str) -> Option<bool> = crate::engine::disc_present;
+#[cfg(test)]
+const PRESENCE: fn(&str) -> Option<bool> = tests::no_drive_presence;
+
+/// How often the idle disc watch asks whether the open disc is still in its drive.
+const PRESENCE_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The longest Done or Start waits for a presence verdict before going on without it.
+const PRESENCE_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
 // The autodetect disc URL: try every drive, take the one holding media.
 // Named because the launch probe passes it through three places and a
 // typo in any of them would scan the wrong thing.
@@ -1772,6 +1925,11 @@ pub struct App {
     /// input to `fit`/`container_mismatch`, and gating those tests
     /// behind a fixture is why they did not run in CI.
     pub video_codecs: Vec<String>,
+    /// Each title's size and the disc's capacity, from the scan
+    /// (`Scanned::title_sizes`, `Scanned::capacity_bytes`): the Source size row
+    /// of a source that is not a file.
+    pub title_sizes: Vec<u64>,
+    pub capacity_bytes: u64,
     /// What each title NUMBER referred to on the scan the tree was built from,
     /// indexed by canonical title index.
     ///
@@ -1820,6 +1978,14 @@ pub struct App {
     ejecting: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
     /// The SCSI eject the worker runs — a seam so tests never touch a drive.
     eject_fn: fn(&str) -> Result<String, String>,
+    /// The disc watch's check in flight: the source it asks about, and its verdict.
+    presence: Option<(String, std::sync::mpsc::Receiver<Option<bool>>)>,
+    /// When the disc watch last asked; `None` asks on the next tick.
+    presence_at: Option<std::time::Instant>,
+    /// The disc watch's cadence: [`PRESENCE_EVERY`], zero in tests.
+    presence_every: std::time::Duration,
+    /// The media-presence check the worker runs — a seam so tests never touch a drive.
+    presence_fn: fn(&str) -> Option<bool>,
     /// A Check for updates in flight: its worker's one-line verdict, collected on the tick.
     update_check: Option<std::sync::mpsc::Receiver<String>>,
     /// The network check the worker runs — a seam so tests never reach GitHub.
@@ -1994,6 +2160,8 @@ impl App {
             result_outcome: crate::engine::RunOutcome::default(),
             selected_row: None,
             video_codecs: Vec::new(),
+            title_sizes: Vec::new(),
+            capacity_bytes: 0,
             title_ids: Vec::new(),
             disc_label: String::new(),
             seed: None,
@@ -2009,6 +2177,10 @@ impl App {
             probe_scan: SCANNERS.1,
             ejecting: None,
             eject_fn: crate::engine::eject_source,
+            presence: None,
+            presence_at: None,
+            presence_every: PRESENCE_EVERY,
+            presence_fn: PRESENCE,
             update_check: None,
             update_fn: crate::settings::check_for_update,
             reported_bad: 0,
@@ -2131,7 +2303,11 @@ impl App {
                 );
                 vec![Effect::Redraw]
             }
-            Cmd::Run => self.start_run(),
+            Cmd::Run => {
+                // No presence check may overlap the rip's drive open.
+                self.settle_presence();
+                self.start_run()
+            }
             Cmd::Cancel => {
                 if let Some(st) = &self.run {
                     st.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2235,7 +2411,11 @@ impl App {
         self.stop_opens();
         self.probe = None;
         self.pending = None;
-        self.open_inner(path, false)
+        let mut fx = self.open_inner(path, false);
+        if self.watching_disc() {
+            fx.push(Effect::StartTicking);
+        }
+        fx
     }
 
     /// Scan and preflight away from the UI thread; tick applies the result.
@@ -2388,9 +2568,10 @@ impl App {
         let msg = match self.update_check.as_ref().map(|rx| rx.try_recv()) {
             None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
             Some(Ok(m)) => m,
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                "Update check failed: worker stopped before returning a result".into()
-            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => crate::strings::get_or(
+                "gui.log.update_worker_stopped",
+                "Update check failed: worker stopped before returning a result",
+            ),
         };
         self.update_check = None;
         self.say(LogKind::Result, &msg);
@@ -2402,9 +2583,10 @@ impl App {
         let verdict = match self.ejecting.as_ref().map(|(_, rx)| rx.try_recv()) {
             None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
             Some(Ok(v)) => v,
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                Err("eject worker stopped before returning a result".into())
-            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Err(crate::strings::get_or(
+                "gui.log.eject_worker_stopped",
+                "eject worker stopped before returning a result",
+            )),
         };
         let ejected = self.ejecting.take().map(|(src, _)| src);
         match verdict {
@@ -2432,6 +2614,91 @@ impl App {
             ),
         }
         vec![Effect::Redraw]
+    }
+
+    // The disc watch runs only for an idle open disc: never during a rip, open, probe or eject.
+    fn watching_disc(&self) -> bool {
+        crate::engine::is_disc_source(&self.source)
+            && matches!(self.page, Page::Titles | Page::Result)
+            && self.run.is_none()
+            && self.probe.is_none()
+            && !self.opening()
+            && self.ejecting.is_none()
+    }
+
+    // Ask, off the UI thread, whether the open disc is still in its drive.
+    fn spawn_presence(&mut self) {
+        let (source, check) = (self.source.clone(), self.presence_fn);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("disc-presence".into())
+            .spawn(move || {
+                let _ = tx.send(check(&source));
+            });
+        self.presence_at = Some(std::time::Instant::now());
+        if spawned.is_ok() {
+            self.presence = Some((self.source.clone(), rx));
+        }
+    }
+
+    // Collect the watch's verdict, or start the next check once one is due.
+    fn poll_presence(&mut self) -> Vec<Effect> {
+        let verdict = match self.presence.as_ref().map(|(_, rx)| rx.try_recv()) {
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(v)) => v,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => None,
+            None => {
+                let due = self
+                    .presence_at
+                    .is_none_or(|t| t.elapsed() >= self.presence_every);
+                if due && self.watching_disc() {
+                    self.spawn_presence();
+                }
+                return Vec::new();
+            }
+        };
+        let checked = self.presence.take().map(|(src, _)| src);
+        self.apply_presence(checked, verdict)
+    }
+
+    // A verdict counts only for the disc it asked about, and only while that disc sits idle.
+    fn apply_presence(&mut self, checked: Option<String>, verdict: Option<bool>) -> Vec<Effect> {
+        if verdict != Some(false)
+            || checked.as_deref() != Some(self.source.as_str())
+            || !self.watching_disc()
+        {
+            return Vec::new();
+        }
+        // The disc left its drive. A rip's Result stays up until Done, which then has no
+        // tree to return to: the end-of-rip eject must not hide the outcome.
+        let page = self.page;
+        self.close_source();
+        if page == Page::Result {
+            self.page = Page::Result;
+        }
+        vec![Effect::Redraw]
+    }
+
+    // Done and Start act on the disc's presence now, not on the watch's next verdict. A
+    // verdict that is not in within PRESENCE_SETTLE is left to the tick.
+    fn settle_presence(&mut self) {
+        if !self.watching_disc() {
+            return;
+        }
+        if self.presence.is_none() {
+            self.spawn_presence();
+        }
+        let verdict = match self
+            .presence
+            .as_ref()
+            .map(|(_, rx)| rx.recv_timeout(PRESENCE_SETTLE))
+        {
+            Some(Ok(v)) => v,
+            Some(Err(std::sync::mpsc::RecvTimeoutError::Timeout)) | None => return,
+            Some(Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) => None,
+        };
+        let checked = self.presence.take().map(|(src, _)| src);
+        self.apply_presence(checked, verdict);
     }
 
     pub fn opening(&self) -> bool {
@@ -2528,6 +2795,8 @@ impl App {
                     self.say(LogKind::Detail, line);
                 }
                 self.video_codecs = sc.video_codecs.clone();
+                self.title_sizes = sc.title_sizes.clone();
+                self.capacity_bytes = sc.capacity_bytes;
                 // What the tree's title numbers refer to, kept so the request
                 // can carry it to the engine's own (later) scan.
                 self.title_ids = sc.title_ids.clone();
@@ -2624,22 +2893,27 @@ impl App {
         }
         // A number the engine would read as 0 ("single pass", "abort on any loss") is not
         // what the user typed; say so instead of starting a rip under a different rule.
+        // Named by the Settings row's own label, minus its trailing colon.
         let bad = [
             (
-                "Max passes",
+                crate::strings::get_or("gui.set.max_passes", "Max recovery passes :"),
                 &self.settings.max_passes,
                 self.settings.max_passes.trim().parse::<u32>().is_ok(),
             ),
             (
-                "Abort if more than N s lost",
+                crate::strings::get_or("gui.set.abort_lost", "Abort on lost seconds :"),
                 &self.settings.abort_lost_secs,
                 self.settings.abort_lost_secs.trim().parse::<u64>().is_ok(),
             ),
         ]
         .into_iter()
         .find(|(_, value, ok)| !value.trim().is_empty() && !ok)
-        .map(|(name, value, _)| (name, value.escape_debug().to_string()));
-        if let Some((name, value)) = bad {
+        .map(|(label, value, _)| (label, value.escape_debug().to_string()));
+        if let Some((label, value)) = bad {
+            let name = label
+                .trim_end()
+                .trim_end_matches([':', '：'])
+                .trim_end_matches(char::is_whitespace);
             self.say(
                 LogKind::Notice,
                 &crate::strings::fmt_or(
@@ -2726,7 +3000,13 @@ impl App {
             &self.settings.filename_template,
             &self.disc_label,
         );
-        self.info = Some(InfoRows::starting(&self.source, &out_file));
+        let scanned = scanned_source_bytes(
+            &self.effective_format(),
+            &titles,
+            &self.title_sizes,
+            self.capacity_bytes,
+        );
+        self.info = Some(InfoRows::starting(&self.source, &out_file, scanned));
         self.page = Page::Progress;
         self.say(
             LogKind::Result,
@@ -2839,6 +3119,7 @@ impl App {
         let mut probe_fx = self.poll_probe();
         probe_fx.extend(self.poll_eject());
         probe_fx.extend(self.poll_update());
+        probe_fx.extend(self.poll_presence());
         if let Some(rx) = &self.opening {
             match rx.try_recv() {
                 Ok(opened) => {
@@ -2873,7 +3154,10 @@ impl App {
                 && self.ejecting.is_none()
                 && self.update_check.is_none()
             {
-                fx.push(Effect::StopTicking);
+                // An idle disc keeps the tick for its watch, without a redraw per tick.
+                if self.presence.is_none() && !self.watching_disc() {
+                    fx.push(Effect::StopTicking);
+                }
             } else if fx.is_empty() {
                 fx.push(Effect::Redraw);
             }
@@ -2919,8 +3203,10 @@ impl App {
             self.result_outcome = st.outcome_now();
             self.run = None;
             self.page = Page::Result;
+            // The rip may have ejected its disc: the watch asks on the next tick.
+            self.presence_at = None;
             let mut fx = vec![Effect::Redraw];
-            if self.update_check.is_none() {
+            if self.update_check.is_none() && !self.watching_disc() {
                 fx.push(Effect::StopTicking);
             }
             if self.settings.notify_when_rip_finished {
@@ -2941,6 +3227,7 @@ impl App {
     }
 
     pub fn dismiss_result(&mut self) -> Vec<Effect> {
+        self.settle_presence();
         self.page = if self.tree.arena.is_empty() {
             Page::Empty
         } else {
@@ -2956,12 +3243,11 @@ impl App {
             .as_ref()
             .map(|st| *st.prog.lock().unwrap_or_else(|e| e.into_inner()))
             .unwrap_or_default();
-        let pct = if p.bytes_total > 0 {
-            p.bytes_done as f64 / p.bytes_total as f64 * 100.0
-        } else {
-            0.0
-        };
+        // Top bar: the current title; bottom bar: the whole run (a single title's mirrors it).
+        let pct = p.title_pct;
+        let overall = p.batch_pct.unwrap_or(pct);
         let elapsed = self.run_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let title_elapsed = p.title_started.map_or(elapsed, |t| t.elapsed().as_secs());
         let titles_done = self
             .run
             .as_ref()
@@ -2979,19 +3265,15 @@ impl App {
                 .as_ref()
                 .map(|i| i.as_array().map(|s| s.to_string())),
             bar_current: pct,
-            bar_overall: overall_pct(titles_done, self.run_titles, pct),
-            caption_current: bar_caption(pct, elapsed, p.eta_secs),
-            caption_overall: bar_caption(
-                overall_pct(titles_done, self.run_titles, pct),
-                elapsed,
-                None,
-            ),
+            bar_overall: overall,
+            caption_current: bar_caption(pct, title_elapsed, p.eta_secs),
+            caption_overall: bar_caption(overall, elapsed, None),
             show_overall_bar: self.run_titles > 1,
             saving_current: stop_caption(stopping, titles_done, self.run_titles).unwrap_or_else(
                 || {
                     crate::strings::fmt(
                         "gui.progress.saving_current",
-                        &[("container", container_label(&self.effective_format()))],
+                        &[("container", &container_label(&self.effective_format()))],
                     )
                 },
             ),
@@ -2999,7 +3281,7 @@ impl App {
                 || {
                     crate::strings::fmt(
                         "gui.progress.saving_overall",
-                        &[("container", container_label(&self.effective_format()))],
+                        &[("container", &container_label(&self.effective_format()))],
                     )
                 },
             ),
@@ -3042,6 +3324,8 @@ impl App {
                 depth,
                 type_s: n.type_s.clone(),
                 desc: n.desc.clone(),
+                length: n.length.clone(),
+                size: n.size.clone(),
                 check: if n.checkable() {
                     Some(self.tree.check_state(i))
                 } else {
@@ -3074,6 +3358,10 @@ pub struct Row {
     pub depth: u8,
     pub type_s: String,
     pub desc: String,
+    /// The Length cell (`"2:23:20"`); empty on every row but a title.
+    pub length: String,
+    /// The Size cell (`"6.8 GB"`); empty where the scan reports no size.
+    pub size: String,
     /// `None` means the row carries no checkbox at all.
     pub check: Option<Check>,
     /// Whether a click on the box does anything. `false` for a mirror row
@@ -3274,6 +3562,7 @@ mod tests {
             lang: lang.to_string(),
             forced,
             mirrors: None,
+            size_bytes: None,
         }
     }
 
@@ -3577,7 +3866,10 @@ mod tests {
         assert_eq!(app.source, PROBE_SOURCE, "the scanned source must be set");
         assert!(matches!(app.page, Page::Titles));
         assert_eq!(app.tree.title_count(), 1);
-        assert!(fx.contains(&Effect::StopTicking), "nothing left to poll");
+        assert!(
+            !fx.contains(&Effect::StopTicking),
+            "the open disc keeps the tick for its watch: {fx:?}"
+        );
     }
 
     /// The user did not wait. A probe landing after they opened something
@@ -3732,6 +4024,9 @@ mod tests {
         probe_source(path, keys, tok)
     }
     const NO_DRIVE_IN_TESTS: &str = "unit tests never open a drive";
+    pub(super) fn no_drive_presence(_: &str) -> Option<bool> {
+        None
+    }
 
     #[test]
     fn unit_tests_never_reach_a_real_drive() {
@@ -4273,6 +4568,8 @@ mod tests {
             pid,
             title_idx,
             mirror: None,
+            length: String::new(),
+            size: String::new(),
         }
     }
 
@@ -4309,7 +4606,7 @@ mod tests {
             volume_id: "PROBE_DISC".to_string(),
             rows: vec![crate::engine::Row {
                 type_s: "Title".to_string(),
-                desc: "1.  0 chapter(s)".to_string(),
+                desc: "1. (0 chapters)".to_string(),
                 depth: 1,
                 checkable: true,
                 title: 0,
@@ -4319,16 +4616,104 @@ mod tests {
                 lang: String::new(),
                 forced: false,
                 mirrors: None,
+                size_bytes: None,
             }],
             key_summary: "none".to_string(),
             title_count: 1,
             video_codecs: vec!["HEVC".to_string()],
+            title_sizes: Vec::new(),
+            capacity_bytes: 0,
             title_ids: Vec::new(),
             details: Vec::new(),
             keys: None,
             needs_disc: false,
             refusal: None,
         }
+    }
+
+    /// A drive's Source size is what the scan says the rip reads: the ticked titles' total,
+    /// or the disc's capacity for a whole-disc output.
+    #[test]
+    fn a_drive_source_sizes_from_the_scan() {
+        let sizes = [4_000_000_000, 0, 1_500_000_000];
+        let iso = "Whole disc → ISO image";
+        let mkv = "Selected titles → MKV";
+        assert_eq!(
+            scanned_source_bytes(mkv, &[0, 2], &sizes, 8_500_000_000),
+            Some(5_500_000_000)
+        );
+        assert_eq!(
+            scanned_source_bytes(iso, &[0], &sizes, 8_500_000_000),
+            Some(8_500_000_000)
+        );
+        assert_eq!(
+            scanned_source_bytes("Whole disc → decrypted folder", &[], &sizes, 8_500_000_000),
+            Some(8_500_000_000)
+        );
+        // Unknown is never a guess: an unsized title, a title the scan does not
+        // list, nothing ticked, or no capacity.
+        assert_eq!(scanned_source_bytes(mkv, &[0, 1], &sizes, 1), None);
+        assert_eq!(scanned_source_bytes(mkv, &[3], &sizes, 1), None);
+        assert_eq!(scanned_source_bytes(mkv, &[], &sizes, 1), None);
+        assert_eq!(scanned_source_bytes(iso, &[0], &sizes, 0), None);
+    }
+
+    /// The row shows a regular file's own length, else the scan's figure, else an em dash;
+    /// a folder's directory-entry size is never shown.
+    #[test]
+    fn the_source_size_row_uses_the_file_else_the_scan() {
+        let dir = crate::ku_fixtures::TempDir::new("info-source-size");
+        let iso = dir.path().join("Disc.iso");
+        std::fs::write(&iso, [0u8; 2048]).unwrap();
+        let iso = iso.to_str().unwrap();
+        let folder = dir.path().to_str().unwrap();
+        let row = |src: &str, scanned| InfoRows::starting(src, "/out/x.mkv", scanned);
+        assert_eq!(
+            row("disc://", Some(5 << 30)).source_size,
+            fmt_bytes(5 << 30)
+        );
+        assert_eq!(row("disc://", None).source_size, "—");
+        assert_eq!(row(folder, Some(3 << 30)).source_size, fmt_bytes(3 << 30));
+        assert_eq!(row(folder, None).source_size, "—");
+        assert_eq!(row(iso, Some(9 << 30)).source_size, fmt_bytes(2048));
+    }
+
+    /// Open keeps the scan's sizes for the Information panel, and a later
+    /// container open clears them.
+    #[test]
+    fn open_keeps_the_scans_title_sizes_and_capacity() {
+        let mut app = App::new();
+        let mut sc = probe_scan();
+        sc.title_sizes = vec![7_000_000_000];
+        sc.capacity_bytes = 8_500_000_000;
+        app.apply_scan("disc:///dev/sr0", Ok(sc), true);
+        assert_eq!(app.title_sizes, vec![7_000_000_000]);
+        assert_eq!(app.capacity_bytes, 8_500_000_000);
+        assert_eq!(
+            scanned_source_bytes(
+                &app.effective_format(),
+                &app.tree.ticked_titles(),
+                &app.title_sizes,
+                app.capacity_bytes,
+            )
+            .map(fmt_bytes),
+            Some(fmt_bytes(7_000_000_000))
+        );
+        app.apply_scan("/media/clip.mkv", Ok(probe_scan()), true);
+        assert!(app.title_sizes.is_empty());
+        assert_eq!(app.capacity_bytes, 0);
+    }
+
+    // A source pin: Start builds the panel from the scan's sizes for the ticked titles.
+    #[test]
+    fn start_sizes_the_source_row_from_the_scan() {
+        let src = include_str!("ui.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\n    fn start_run(&mut self)")
+            .expect("start_run definition present");
+        let body = &src[start..start + src[start..].find("\n    }\n").unwrap()];
+        assert!(body.contains("scanned_source_bytes(\n            &self.effective_format(),\n            &titles,\n            &self.title_sizes,\n            self.capacity_bytes,\n        );"));
+        assert!(body.contains("InfoRows::starting(&self.source, &out_file, scanned)"));
     }
 
     /// FK11, GUI half (KU §4.2 “GUI (image source or staged ISO) | An "Insert the disc"
@@ -4713,6 +5098,8 @@ mod tests {
                 title_count: 0,
                 key_summary: String::new(),
                 video_codecs: vec![],
+                title_sizes: Vec::new(),
+                capacity_bytes: 0,
                 title_ids: vec![],
                 rows: vec![],
                 details: vec![],
@@ -4919,6 +5306,154 @@ mod tests {
         );
     }
 
+    // A run's progress as its worker reports it, with both bars sampled after every step.
+    struct Bars {
+        app: App,
+        st: Arc<RunState>,
+        seen: Vec<(f64, f64)>,
+        // The sample at which the last title's final byte was written.
+        last_byte: Option<usize>,
+    }
+
+    impl Bars {
+        fn new(sizes: &[u64]) -> Self {
+            let mut app = App::new();
+            let st: Arc<RunState> = Arc::default();
+            app.run = Some(st.clone());
+            app.run_titles = sizes.len();
+            st.plan_titles(sizes.iter().copied().enumerate().collect());
+            let mut b = Bars {
+                app,
+                st,
+                seen: vec![],
+                last_byte: None,
+            };
+            b.sample();
+            b
+        }
+
+        fn sample(&mut self) -> (f64, f64) {
+            let v = self.app.view();
+            self.seen.push((v.bar_current, v.bar_overall));
+            (v.bar_current, v.bar_overall)
+        }
+
+        fn tick(&mut self, pass: &'static str, done: u64, total: u64) -> (f64, f64) {
+            self.st.progress(&freemkv_engine::Progress {
+                pass: pass.into(),
+                bytes_done: done,
+                bytes_total: total,
+                ..Default::default()
+            });
+            self.sample()
+        }
+
+        // One title written in four ticks, counted the way the worker counts it.
+        fn title(&mut self, idx: usize, size: u64) -> (f64, f64) {
+            self.st.title_start(idx);
+            assert_eq!(self.sample().0, 0.0, "title {idx} starts its bar at 0");
+            for q in 1..=4 {
+                self.tick("mux", size * q / 4, size);
+            }
+            if idx + 1 == self.app.run_titles {
+                self.last_byte = Some(self.seen.len() - 1);
+            }
+            self.st.titles_done.fetch_add(1, Ordering::SeqCst);
+            self.sample();
+            self.st.title_end(idx);
+            self.sample()
+        }
+
+        // The bottom bar never decreases; the top one only at a title's start (checked there).
+        fn assert_overall_monotonic(&self) {
+            for w in self.seen.windows(2) {
+                assert!(w[1].1 >= w[0].1, "overall went backwards: {:?}", self.seen);
+            }
+        }
+
+        fn assert_full_only_at_end(&self) {
+            assert_eq!(self.seen.last().unwrap().1, 100.0, "overall ends full");
+            let before = &self.seen[..self.last_byte.expect("the last title ran")];
+            assert!(
+                before.iter().all(|s| s.1 < 100.0),
+                "overall full before the last title ended: {:?}",
+                self.seen
+            );
+        }
+    }
+
+    #[test]
+    fn two_titles_reset_the_top_bar_and_fill_the_bottom_bar_by_halves() {
+        let mut b = Bars::new(&[1000, 1000]);
+        assert_eq!(b.title(0, 1000), (100.0, 50.0));
+        b.title(1, 1000);
+        // Halfway through the second title: the top bar is its half, the bottom three quarters.
+        assert!(b.seen.contains(&(50.0, 75.0)), "{:?}", b.seen);
+        b.assert_overall_monotonic();
+        b.assert_full_only_at_end();
+    }
+
+    #[test]
+    fn three_titles_never_run_either_bar_backwards_across_a_boundary() {
+        let mut b = Bars::new(&[600, 600, 600]);
+        let ends: Vec<f64> = (0..3).map(|i| b.title(i, 600).1).collect();
+        for (e, want) in ends.iter().zip([100.0 / 3.0, 200.0 / 3.0, 100.0]) {
+            assert!((e - want).abs() < 1e-9, "{ends:?}");
+        }
+        b.assert_overall_monotonic();
+        b.assert_full_only_at_end();
+        // Within a title the top bar only rises; it drops only at a start.
+        let resets = b.seen.windows(2).filter(|w| w[1].0 < w[0].0).count();
+        assert_eq!(
+            resets, 2,
+            "top bar resets once per later title: {:?}",
+            b.seen
+        );
+    }
+
+    #[test]
+    fn the_bottom_bar_weighs_titles_by_bytes_not_by_count() {
+        let mut b = Bars::new(&[100, 300, 600]);
+        assert_eq!(b.title(0, 100).1, 10.0);
+        assert_eq!(b.title(1, 300).1, 40.0);
+        assert_eq!(b.title(2, 600).1, 100.0);
+        b.assert_overall_monotonic();
+        b.assert_full_only_at_end();
+    }
+
+    #[test]
+    fn a_multipass_read_counts_toward_the_bottom_bar_and_never_rewinds_it() {
+        let mut b = Bars::new(&[1000, 1000]);
+        b.st.begin_read();
+        b.sample();
+        for q in 1..=4 {
+            b.tick("sweep", 500 * q, 2000);
+        }
+        assert_eq!(b.sample(), (100.0, 50.0), "read done: half the run's bytes");
+        // A patch pass is its own pass on the top bar; the read stays counted below.
+        assert_eq!(b.tick("patch-scrape", 0, 64), (0.0, 50.0));
+        assert_eq!(b.title(0, 1000).1, 75.0);
+        assert_eq!(b.title(1, 1000).1, 100.0);
+        b.assert_overall_monotonic();
+        b.assert_full_only_at_end();
+    }
+
+    #[test]
+    fn an_unknown_title_size_shows_no_batch_percentage() {
+        let mut b = Bars::new(&[0, 1000]);
+        b.title(0, 0);
+        b.title(1, 1000);
+        assert!(b.seen.iter().all(|s| s.1 == 0.0), "{:?}", b.seen);
+    }
+
+    #[test]
+    fn a_single_title_shows_one_bar_with_the_bottom_mirroring_it() {
+        let mut b = Bars::new(&[1000]);
+        b.st.title_start(0);
+        assert_eq!(b.tick("mux", 250, 1000), (25.0, 25.0));
+        assert!(!b.app.view().show_overall_bar);
+    }
+
     #[test]
     fn the_eject_button_shows_for_an_idle_disc_source_only() {
         let mut app = App::new();
@@ -4967,5 +5502,169 @@ mod tests {
         drain_eject(&mut app);
         assert_eq!(app.source, "/m/Other.iso");
         assert_eq!(app.page, Page::Titles);
+    }
+
+    // ── The disc watch: a disc that left its drive never leaves its titles behind ──
+
+    fn disc_gone(_: &str) -> Option<bool> {
+        Some(false)
+    }
+
+    fn disc_still_in(_: &str) -> Option<bool> {
+        Some(true)
+    }
+
+    // An idle disc source with its title tree, as a finished rip leaves it.
+    fn idle_disc(page: Page, presence: fn(&str) -> Option<bool>) -> App {
+        let mut app = app_with_titles(&["MPEG-2"]);
+        app.source = "disc://".into();
+        app.page = page;
+        app.presence_fn = presence;
+        app.presence_every = std::time::Duration::ZERO;
+        app
+    }
+
+    fn tick_until_watched(app: &mut App) {
+        for _ in 0..2_000 {
+            app.tick();
+            if app.presence.is_none() && app.presence_at.is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the presence check never finished");
+    }
+
+    #[test]
+    fn done_with_the_disc_gone_returns_to_the_start_screen() {
+        let mut app = idle_disc(Page::Result, disc_gone);
+        app.dismiss_result();
+        assert_eq!(app.page, Page::Empty, "no titles of a disc that is gone");
+        assert!(app.source.is_empty() && app.tree.arena.is_empty());
+    }
+
+    #[test]
+    fn done_with_the_disc_still_in_returns_to_its_titles() {
+        let mut app = idle_disc(Page::Result, disc_still_in);
+        app.dismiss_result();
+        assert_eq!(app.page, Page::Titles);
+        assert_eq!(app.source, "disc://");
+    }
+
+    #[test]
+    fn done_with_a_file_source_returns_to_its_titles() {
+        let mut app = idle_disc(Page::Result, disc_gone);
+        app.source = "/m/Movie.iso".into();
+        app.dismiss_result();
+        assert_eq!(app.page, Page::Titles);
+        assert_eq!(app.source, "/m/Movie.iso");
+    }
+
+    #[test]
+    fn a_disc_removed_while_idle_on_its_titles_resets_to_the_start_screen() {
+        let mut app = idle_disc(Page::Titles, disc_gone);
+        tick_until_watched(&mut app);
+        assert_eq!(app.page, Page::Empty);
+        assert!(app.source.is_empty() && app.tree.arena.is_empty());
+        assert!(
+            app.tick().contains(&Effect::StopTicking),
+            "nothing left to watch"
+        );
+    }
+
+    #[test]
+    fn an_idle_disc_keeps_the_tick_for_its_watch() {
+        let mut app = idle_disc(Page::Titles, disc_still_in);
+        tick_until_watched(&mut app);
+        let fx = app.tick();
+        assert!(!fx.contains(&Effect::StopTicking), "{fx:?}");
+        assert!(
+            !fx.contains(&Effect::Redraw),
+            "no redraw per idle tick: {fx:?}"
+        );
+        assert_eq!(app.page, Page::Titles);
+    }
+
+    #[test]
+    fn a_rip_that_ejected_its_disc_keeps_its_result_until_done() {
+        let mut app = idle_disc(Page::Progress, disc_gone);
+        let st = Arc::new(RunState::default());
+        st.finished.store(true, Ordering::Release);
+        app.run = Some(st);
+        let fx = app.tick();
+        assert!(
+            !fx.contains(&Effect::StopTicking),
+            "the watch needs the tick"
+        );
+        tick_until_watched(&mut app);
+        assert_eq!(app.page, Page::Result, "the outcome stays on screen");
+        assert!(
+            app.tree.arena.is_empty(),
+            "but the gone disc's titles do not"
+        );
+        app.dismiss_result();
+        assert_eq!(app.page, Page::Empty);
+    }
+
+    static PRESENCE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn counted_gone(_: &str) -> Option<bool> {
+        PRESENCE_CALLS.fetch_add(1, Ordering::SeqCst);
+        Some(false)
+    }
+
+    #[test]
+    fn the_watch_never_touches_the_drive_during_a_rip() {
+        let mut app = idle_disc(Page::Progress, counted_gone);
+        app.run = Some(Arc::default());
+        let before = PRESENCE_CALLS.load(Ordering::SeqCst);
+        for _ in 0..5 {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.presence.is_none(), "no check started");
+        assert_eq!(PRESENCE_CALLS.load(Ordering::SeqCst), before);
+        assert_eq!(app.page, Page::Progress);
+        assert_eq!(app.source, "disc://");
+    }
+
+    #[test]
+    fn a_verdict_that_lands_during_a_rip_is_dropped() {
+        let mut app = idle_disc(Page::Titles, disc_gone);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.presence = Some(("disc://".into(), rx));
+        app.run = Some(Arc::default());
+        app.page = Page::Progress;
+        tx.send(Some(false)).unwrap();
+        app.tick();
+        assert_eq!(app.source, "disc://");
+        assert_eq!(app.page, Page::Progress);
+    }
+
+    #[test]
+    fn an_app_eject_still_resets_and_a_late_verdict_spares_a_later_source() {
+        let mut app = idle_disc(Page::Titles, disc_still_in);
+        app.eject_fn = fake_eject_ok;
+        app.dispatch(Cmd::Eject);
+        drain_eject(&mut app);
+        assert_eq!(app.page, Page::Empty);
+        assert!(app.source.is_empty());
+        // A check still out for the ejected disc lands after a file was opened.
+        let mut app = idle_disc(Page::Titles, disc_gone);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.presence = Some(("disc://".into(), rx));
+        app.source = "/m/Other.iso".into();
+        tx.send(Some(false)).unwrap();
+        app.tick();
+        assert_eq!(app.source, "/m/Other.iso");
+        assert_eq!(app.page, Page::Titles);
+    }
+
+    #[test]
+    fn an_unknown_answer_keeps_the_disc_open() {
+        let mut app = idle_disc(Page::Titles, no_drive_presence);
+        tick_until_watched(&mut app);
+        assert_eq!(app.page, Page::Titles);
+        assert_eq!(app.source, "disc://");
     }
 }

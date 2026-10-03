@@ -113,6 +113,49 @@ fn group(desc: Option<&str>) -> adw::PreferencesGroup {
     grp
 }
 
+/// A dropdown popup row for a `GtkStringList`: the label wraps instead of
+/// ellipsizing, with a tick on the current choice as the default list has.
+fn wrapping_list_factory() -> gtk::SignalListItemFactory {
+    let f = gtk::SignalListItemFactory::new();
+    f.connect_setup(|_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        label.set_max_width_chars(48);
+        let tick = gtk::Image::from_icon_name("object-select-symbolic");
+        item.bind_property("selected", &tick, "opacity")
+            .transform_to(|_, sel: bool| Some(if sel { 1.0_f64 } else { 0.0 }))
+            .sync_create()
+            .build();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.append(&label);
+        row.append(&tick);
+        item.set_child(Some(&row));
+    });
+    f.connect_bind(|_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let text = item
+            .item()
+            .and_downcast::<gtk::StringObject>()
+            .map(|s| s.string());
+        let label = item
+            .child()
+            .and_then(|row| row.first_child())
+            .and_downcast::<gtk::Label>();
+        if let (Some(label), Some(text)) = (label, text) {
+            label.set_text(&text);
+        }
+    });
+    f
+}
+
 impl Form {
     fn entry(
         &mut self,
@@ -151,9 +194,13 @@ impl Form {
             .map(|(_, l)| l)
             .collect();
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        // The choice shows in full under the title, and the popup wraps long
+        // labels: the default factory cuts both at about 20 characters.
         let r = adw::ComboRow::builder()
             .title(row_title(label))
             .model(&gtk::StringList::new(&refs))
+            .use_subtitle(true)
+            .list_factory(&wrapping_list_factory())
             .build();
         grp.add(&r);
         self.combos.push((key, r.clone()));
@@ -347,6 +394,21 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     keydb_row.connect_activated(move |_| p.update_keydb(&me));
     let (me, p) = (shell.clone(), prefs.clone());
     test_row.connect_activated(move |_| p.test_keyserver(&me));
+    // A text field commits on Enter and when focus leaves it, through the
+    // same `commit` as closing, which writes only when something changed.
+    // Focus also leaves while the window is torn down; that is not an edit.
+    for (_, r) in &prefs.entries {
+        let (me, p) = (shell.clone(), prefs.clone());
+        r.connect_entry_activated(move |_| p.commit(&me));
+        let focus = gtk::EventControllerFocus::new();
+        let (me, p) = (shell.clone(), prefs.clone());
+        focus.connect_leave(move |_| {
+            if p.window.is_visible() {
+                p.commit(&me);
+            }
+        });
+        r.add_controller(focus);
+    }
     // Connected after `populate`, so filling the form is not a language pick.
     let (me, p) = (shell.clone(), prefs.clone());
     language.connect_selected_notify(move |_| {

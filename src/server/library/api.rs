@@ -76,6 +76,13 @@ pub fn handle(
             download(request, &library_json(&lib, &c));
         }
         (true, _, "/api/library") => json_response(request, 200, &library_json(&lib, &c)),
+        (true, _, "/api/library/raw") => {
+            let path = query_param(&url, "path").unwrap_or_default();
+            match lib.audits.raw(std::path::Path::new(&path)) {
+                Some(raw) => json_response(request, 200, &json!({"sections": raw}).to_string()),
+                None => err(request, 404, "no stored report for that file"),
+            }
+        }
         (true, _, "/api/library/console") => json_response(request, 200, &console_json(&lib)),
         (true, _, "/api/library/log") => {
             let title = query_param(&url, "title").unwrap_or_default();

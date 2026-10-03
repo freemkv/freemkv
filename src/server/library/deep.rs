@@ -42,7 +42,41 @@ pub struct Verdict {
     pub stderr_lines: usize,
     pub sample: Vec<String>,
     pub scanned: u64,
+    /// How far into the movie the decode got, in seconds.
+    #[serde(default)]
+    pub reached_secs: Option<f64>,
+    /// Where a damaged file fails, sampled after the verdict; `None` before this existed.
+    #[serde(default)]
+    pub forensic: Option<Forensic>,
 }
+
+/// Short decode and demux windows spread over a damaged file: where it fails, and in
+/// which layer. Buckets: `container_framing` (packets fail to copy: a muxer fault),
+/// `payload_bitstream` (frames decode damaged while copying clean: usually the source),
+/// `timestamp` (non-monotonic timestamps: a muxer fault), `inconclusive` (no window hit).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Forensic {
+    pub window_secs: u32,
+    pub windows: Vec<Window>,
+    pub buckets: Vec<String>,
+    pub pct_windows_corrupt: u32,
+    pub container_sample: Vec<String>,
+    pub timestamp_sample: Vec<String>,
+}
+
+/// One sampled window: where it starts and what each pass found there.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Window {
+    pub at_secs: u64,
+    pub payload_errors: u64,
+    pub container_errors: u64,
+    pub timestamp_errors: u64,
+}
+
+const FORENSIC_WINDOWS: u64 = 12;
+const FORENSIC_WINDOW_SECS: u32 = 5;
 
 // A bailed decode retries after 10 min, doubling per attempt, capped at 6 h.
 pub(super) fn retry_due(attempts: u32, last_try: u64, now: u64) -> bool {
@@ -193,7 +227,94 @@ pub fn classify(run: &Run, stage: &str, now: u64) -> Verdict {
         stderr_lines: run.lines.len(),
         sample: run.lines.iter().take(8).cloned().collect(),
         scanned: now,
+        reached_secs: None,
+        forensic: None,
     }
+}
+
+fn is_timestamp_fault(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    l.contains("non monoton") || l.contains("non-monoton")
+}
+
+/// Sample a damaged file in [`FORENSIC_WINDOWS`] windows, each decoded (the base video)
+/// and demuxed (every stream copied). `None` when stopped.
+pub fn forensic(
+    ffmpeg: &Path,
+    mkv: &Path,
+    duration: f64,
+    err_file: &Path,
+    stop: &dyn Fn() -> bool,
+) -> Option<Forensic> {
+    let bin = ffmpeg.to_string_lossy();
+    let file = mkv.to_string_lossy();
+    let len = FORENSIC_WINDOW_SECS.to_string();
+    let mut f = Forensic {
+        window_secs: FORENSIC_WINDOW_SECS,
+        ..Forensic::default()
+    };
+    for i in 0..FORENSIC_WINDOWS {
+        let at = (duration.max(0.0) * (i as f64 + 0.5) / FORENSIC_WINDOWS as f64) as u64;
+        let ss = at.to_string();
+        let head = [
+            &*bin, "-nostdin", "-v", "warning", "-ss", &ss, "-i", &*file, "-t", &len,
+        ];
+        let decode: Vec<&str> = head
+            .iter()
+            .copied()
+            .chain(["-map", "0:v:0", "-f", "null", "-"])
+            .collect();
+        let run = run_monitored(&decode, err_file, stop, &|_| {});
+        if run.cancelled {
+            return None;
+        }
+        let payload = run.lines.iter().filter(|l| is_bad(l)).count() as u64 + run.flood;
+        let demux: Vec<&str> = head
+            .iter()
+            .copied()
+            .chain(["-map", "0", "-c", "copy", "-f", "null", "-"])
+            .collect();
+        let run = run_monitored(&demux, err_file, stop, &|_| {});
+        if run.cancelled {
+            return None;
+        }
+        let container: Vec<&String> = run.lines.iter().filter(|l| is_bad(l)).collect();
+        let stamps: Vec<&String> = run.lines.iter().filter(|l| is_timestamp_fault(l)).collect();
+        f.container_sample.extend(
+            container
+                .iter()
+                .take(20 - f.container_sample.len().min(20))
+                .map(|l| (*l).clone()),
+        );
+        f.timestamp_sample.extend(
+            stamps
+                .iter()
+                .take(10 - f.timestamp_sample.len().min(10))
+                .map(|l| (*l).clone()),
+        );
+        f.windows.push(Window {
+            at_secs: at,
+            payload_errors: payload,
+            container_errors: container.len() as u64,
+            timestamp_errors: stamps.len() as u64,
+        });
+    }
+    let hit = |g: fn(&Window) -> u64| f.windows.iter().any(|w| g(w) > 0);
+    for (bucket, found) in [
+        ("container_framing", hit(|w| w.container_errors)),
+        ("payload_bitstream", hit(|w| w.payload_errors)),
+        ("timestamp", hit(|w| w.timestamp_errors)),
+    ] {
+        if found {
+            f.buckets.push(bucket.into());
+        }
+    }
+    if f.buckets.is_empty() {
+        f.buckets.push("inconclusive".into());
+    }
+    let bad = f.windows.iter().filter(|w| w.payload_errors > 0).count();
+    f.pct_windows_corrupt = (100 * bad / f.windows.len().max(1)) as u32;
+    Some(f)
 }
 
 fn signal_name(sig: i32) -> String {
@@ -302,6 +423,8 @@ fn watch(
     (err_file, stderr_cap): (&Path, u64),
     stop: &dyn Fn() -> bool,
 ) {
+    // Polled quickly at first, so the short sampling runs do not each wait out a full nap.
+    let mut nap = Duration::from_millis(10);
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
@@ -323,7 +446,8 @@ fn watch(
         } else if stop() {
             run.cancelled = true;
         } else {
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(nap);
+            nap = (nap * 2).min(Duration::from_millis(500));
             continue;
         }
         let _ = child.kill();
@@ -368,8 +492,36 @@ fn read_stderr(path: &Path, run: &mut Run) {
 /// The full audit of one MKV: demux every stream, then decode base video and audio.
 /// `None` when stopped early. `progress` hears the stage (`reading`, `decoding`) and how
 /// many seconds of the movie it has reached. A failure while the file or library is
-/// unreachable is the share, not the file.
+/// unreachable is the share, not the file. A damaged file of known `duration` is then
+/// sampled for [`forensic`]; a stop there keeps the verdict without it.
 pub fn full_decode(
+    ffmpeg: &Path,
+    mkv: &Path,
+    library: &Path,
+    duration: Option<f64>,
+    err_file: &Path,
+    stop: &dyn Fn() -> bool,
+    progress: &(dyn Fn(&'static str, f64) + Sync),
+) -> Option<Verdict> {
+    let reached = std::sync::Mutex::new(0f64);
+    let heard = |stage: &'static str, t: f64| {
+        let mut r = reached.lock().unwrap_or_else(|e| e.into_inner());
+        *r = r.max(t);
+        progress(stage, t);
+    };
+    let mut v = decode_stages(ffmpeg, mkv, library, err_file, stop, &heard)?;
+    let secs = *reached.lock().unwrap_or_else(|e| e.into_inner());
+    v.reached_secs = (secs > 0.0).then_some(secs);
+    if v.completed
+        && !v.clean
+        && let Some(d) = duration.filter(|d| *d > 0.0)
+    {
+        v.forensic = forensic(ffmpeg, mkv, d, err_file, stop);
+    }
+    Some(v)
+}
+
+fn decode_stages(
     ffmpeg: &Path,
     mkv: &Path,
     library: &Path,
@@ -644,7 +796,7 @@ mod tests {
         std::fs::write(&mkv, b"x").unwrap();
         let err = t.path().join("err");
         let (bin, log) = fake_ffmpeg(t.path(), "", 0);
-        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        let v = full_decode(&bin, &mkv, t.path(), None, &err, &|| false, &|_, _| {}).unwrap();
         assert!(v.clean && v.completed, "{v:?}");
         let calls = std::fs::read_to_string(&log).unwrap();
         let calls: Vec<&str> = calls.lines().collect();
@@ -654,14 +806,65 @@ mod tests {
 
         std::fs::remove_file(&log).unwrap();
         let (bin, log) = fake_ffmpeg(t.path(), "error while decoding", 1);
-        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        let v = full_decode(&bin, &mkv, t.path(), None, &err, &|| false, &|_, _| {}).unwrap();
         assert_eq!(
             (v.stage.as_str(), v.reason.as_str()),
             ("demux", "demux_errors")
         );
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
 
-        assert!(full_decode(&bin, &mkv, t.path(), &err, &|| true, &|_, _| {}).is_none());
+        assert!(full_decode(&bin, &mkv, t.path(), None, &err, &|| true, &|_, _| {}).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_damaged_file_is_sampled_for_where_and_how_it_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        let mkv = t.path().join("A.mkv");
+        std::fs::write(&mkv, b"x").unwrap();
+        let (bin, log) = (t.path().join("ffmpeg"), t.path().join("calls.log"));
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n\
+             *-progress*'-map 0:v:0'*) echo 'error while decoding MB 1 1' >&2; echo out_time_us=3000000000;;\n\
+             *'-ss 750 '*'-map 0:v:0'*) echo 'error while decoding MB 3 3' >&2;;\n\
+             *'-ss 1050 '*'-c copy'*) echo 'non monotonically increasing dts to muxer' >&2;;\n\
+             esac\nexit 0\n",
+            log.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = t.path().join("err");
+        let v = full_decode(
+            &bin,
+            &mkv,
+            t.path(),
+            Some(3600.0),
+            &err,
+            &|| false,
+            &|_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (v.reason.as_str(), v.reached_secs),
+            ("decode_errors", Some(3000.0))
+        );
+        let f = v.forensic.unwrap();
+        assert_eq!(f.windows.len(), 12);
+        assert_eq!(f.windows[2].at_secs, 750);
+        assert_eq!(f.windows[2].payload_errors, 1);
+        assert_eq!(f.windows[3].timestamp_errors, 1);
+        assert_eq!(f.buckets, ["payload_bitstream", "timestamp"]);
+        assert_eq!(f.pct_windows_corrupt, 8);
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().lines().count(),
+            2 + 24
+        );
+        // A stop while sampling keeps the verdict, without the sampling.
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        let stop = || n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 3;
+        let v = full_decode(&bin, &mkv, t.path(), Some(3600.0), &err, &stop, &|_, _| {});
+        assert!(v.is_none_or(|v| v.forensic.is_none()));
     }
 
     #[cfg(unix)]
@@ -672,10 +875,10 @@ mod tests {
         let (bin, _) = fake_ffmpeg(t.path(), "", 1);
         let mkv = t.path().join("A.mkv");
         std::fs::write(&mkv, b"x").unwrap();
-        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        let v = full_decode(&bin, &mkv, t.path(), None, &err, &|| false, &|_, _| {}).unwrap();
         assert_eq!((v.completed, v.reason.as_str()), (true, "nonzero_exit"));
         std::fs::remove_file(&mkv).unwrap();
-        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        let v = full_decode(&bin, &mkv, t.path(), None, &err, &|| false, &|_, _| {}).unwrap();
         assert_eq!(
             (v.completed, v.reason.as_str()),
             (false, "media_unavailable")
@@ -683,7 +886,7 @@ mod tests {
         assert_eq!(v.errors, 0);
         std::fs::write(&mkv, b"x").unwrap();
         let gone = t.path().join("no-library");
-        let v = full_decode(&bin, &mkv, &gone, &err, &|| false, &|_, _| {}).unwrap();
+        let v = full_decode(&bin, &mkv, &gone, None, &err, &|| false, &|_, _| {}).unwrap();
         assert!(!v.completed);
     }
 }

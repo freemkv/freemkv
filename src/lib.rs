@@ -73,6 +73,8 @@ pub mod ui;
 pub mod win_layout;
 // The Windows menu bar and accelerator table as data, ungated for the same reason.
 pub mod win_menu;
+// qa's GUI gate checks, which both desktop shells run in a debug build; ungated likewise.
+pub mod gui_gate;
 // The GTK shell's toolkit-free glue, ungated for the same reason.
 pub mod linux_glue;
 

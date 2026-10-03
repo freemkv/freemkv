@@ -1628,6 +1628,10 @@ def verdict(env):
     if env.get('PLAN_RESULT') != 'success':
         return False, lines + ['', 'plan-media failed: the candidate could not be pinned or a classification '
                                    'guard fired (see its log). qa is red.']
+    # The GUI gate (tests/gui_gate.py) runs on every candidate, reused media evidence or not.
+    gui = env.get('GUI', '')
+    if gui != 'success':
+        return False, lines + ['', f'the GUI gate is {gui or "not run"}: qa is red']
     if status == 'reuse':
         return True, lines + ['', f'full-disc not needed: evidence {env.get("EVIDENCE_URL", "")}']
     if status == 'run':

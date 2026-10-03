@@ -39,6 +39,9 @@ pub struct Row {
     /// base 0xC0|n, "disabled and mirrors the base" (mpg-output-design v5 §3).
     /// `None` for every other row.
     pub mirrors: Option<u16>,
+    /// The title's size in bytes, for the tree's Size column. `Some` only on a
+    /// disc's Title rows; a stream source reports no size, and no other row has one.
+    pub size_bytes: Option<u64>,
 }
 
 /// What the shell needs after a scan. Pure data — no engine types.
@@ -60,6 +63,14 @@ pub struct Scanned {
     /// UI say "MP4 cannot hold MPEG-2" BEFORE a rip instead of surfacing a
     /// bare E9048 after one.
     pub video_codecs: Vec<String>,
+    /// Each title's size in bytes as the disc's own tables give it, indexed by
+    /// canonical title index (the shape `video_codecs` uses); `0` where the
+    /// scan does not know it. Empty for a container source, whose size is its
+    /// file's.
+    pub title_sizes: Vec<u64>,
+    /// The disc's capacity in bytes; `0` for a container source or when the
+    /// scan does not know it.
+    pub capacity_bytes: u64,
     /// The `freemkv info -v` detail block (format, capacity, region, MKB
     /// version, disc hash, VID, key state, title list) — shown in the log on
     /// open so the desktop app surfaces the same disc facts the CLI does.
@@ -115,6 +126,21 @@ impl KeySnapshot {
 fn fmt_dur(secs: f64) -> String {
     let s = secs.max(0.0) as u64;
     format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// A disc title's Description cell: `"1. 00800.mpls (19 chapters)"`.
+///
+/// Numbered 1-based and named after the playlist, exactly as `freemkv info`
+/// lists them, so a title here and `-t N` on the CLI refer to the same thing.
+/// Running time and size are the row's Length and Size cells, not part of this
+/// text. `name` must already be sanitised for display.
+pub(crate) fn title_desc(index: usize, name: &str, chapters: usize) -> String {
+    let unit = if chapters == 1 { "chapter" } else { "chapters" };
+    if name.is_empty() {
+        format!("{}. ({chapters} {unit})", index + 1)
+    } else {
+        format!("{}. {name} ({chapters} {unit})", index + 1)
+    }
 }
 
 fn fmt_gb(bytes: u64) -> String {
@@ -256,6 +282,7 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                 lang,
                 forced,
                 mirrors,
+                size_bytes: None,
             }
         })
         .collect()
@@ -305,14 +332,12 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         lang: String::new(),
         forced: false,
         mirrors: None,
+        size_bytes: None,
     }];
     rows.push(Row {
         type_s: "Title".into(),
-        desc: format!(
-            "{} track(s) , {}",
-            t.streams.len(),
-            fmt_dur(t.duration_secs)
-        ),
+        // The running time is the row's Length cell, not part of this text.
+        desc: format!("{} track(s)", t.streams.len()),
         depth: 1,
         checkable: true,
         title: 0,
@@ -327,6 +352,7 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         lang: String::new(),
         forced: false,
         mirrors: None,
+        size_bytes: None,
     });
     rows.extend(stream_rows(t, 0));
 
@@ -354,6 +380,8 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
                 .map(|v| v.codec.to_string())
                 .unwrap_or_default(),
         ],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         // A container is ONE title and it is the file itself; there is no
         // number to carry across a re-scan, but the shape stays the same as
         // the disc scan's so the request never has to special-case it.
@@ -547,29 +575,15 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         lang: String::new(),
         forced: false,
         mirrors: None,
+        size_bytes: None,
     });
 
     for (ti, t) in disc.titles.iter().enumerate() {
         rows.push(Row {
             type_s: "Title".into(),
-            // Numbered 1-based and named after the playlist, exactly as
-            // `freemkv info` lists them, so a title here and `-t N` on the
-            // CLI refer to the same thing.
-            desc: format!(
-                "{}.  {}{} chapter(s) , {} , {}",
-                ti + 1,
-                if t.playlist.is_empty() {
-                    String::new()
-                } else {
-                    // The playlist name is a filename read off the disc, so it
-                    // is untrusted display bytes like the volume id and the
-                    // stream labels.
-                    format!("{}   ", sanitize_display(&t.playlist))
-                },
-                t.chapters.len(),
-                fmt_dur(t.duration_secs),
-                fmt_gb(t.size_bytes)
-            ),
+            // The playlist name is a filename read off the disc, so it is
+            // untrusted display bytes like the volume id and the stream labels.
+            desc: title_desc(ti, &sanitize_display(&t.playlist), t.chapters.len()),
             depth: 1,
             checkable: true,
             title: ti,
@@ -586,6 +600,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
             lang: String::new(),
             forced: false,
             mirrors: None,
+            size_bytes: Some(t.size_bytes),
         });
         rows.extend(stream_rows(t, ti));
     }
@@ -606,6 +621,8 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
                     .unwrap_or_default()
             })
             .collect(),
+        title_sizes: disc.titles.iter().map(|t| t.size_bytes).collect(),
+        capacity_bytes: disc.capacity_bytes,
         title_ids: disc.titles.iter().map(TitleIdentity::of).collect(),
         rows,
         details,
@@ -657,6 +674,30 @@ pub fn is_disc_source(source: &str) -> bool {
 fn disc_device(source: &str) -> Option<String> {
     let dev = source.strip_prefix("disc://").unwrap_or("");
     (!dev.is_empty()).then(|| dev.to_string())
+}
+
+/// Whether the disc behind a `disc://` source is still in a drive, `None` when a drive
+/// gives no clear answer. Bare `disc://` asks every drive, as its autodetect would.
+/// Media presence only (IOKit registry on macOS, TEST UNIT READY elsewhere): no
+/// exclusive open, so it never takes the drive from a later open.
+#[cfg_attr(test, allow(dead_code))] // unit tests swap in a fake that touches no drive
+pub fn disc_present(source: &str) -> Option<bool> {
+    let paths = match disc_device(source) {
+        Some(p) => vec![p],
+        None => libfreemkv::list_drives()
+            .into_iter()
+            .map(|d| d.path)
+            .collect(),
+    };
+    let mut unknown = false;
+    for p in paths {
+        match libfreemkv::drive_has_disc(std::path::Path::new(&p)) {
+            Ok(true) => return Some(true),
+            Ok(false) => {}
+            Err(_) => unknown = true,
+        }
+    }
+    (!unknown).then_some(false)
 }
 
 /// `DeviceTarget` for a `disc://` source: an explicit path, or autodetect.
@@ -963,6 +1004,108 @@ pub struct Prog {
     /// None until the engine's estimate converges.
     pub eta_secs: Option<u64>,
     pub sectors_bad: u64,
+    /// The top bar: the current title's percent, or the current pass's outside a title.
+    pub title_pct: f64,
+    /// When the top bar's title, or the run's read, began.
+    pub title_started: Option<std::time::Instant>,
+    /// The bottom bar: the run's bytes done over its planned bytes, never decreasing.
+    /// `None` when the run planned no titles; `Some(0.0)` while a planned size is unknown.
+    pub batch_pct: Option<f64>,
+}
+
+/// The two bars' bookkeeping, updated in the worker's event order so the UI never
+/// samples a title boundary half-way.
+#[derive(Default)]
+struct Bars {
+    /// `(title index, size_bytes)` of each title the run muxes; empty when unplanned.
+    sizes: Vec<(usize, u64)>,
+    /// The read that precedes the titles, when the run has one.
+    read: Option<ReadPass>,
+    /// Sizes of the titles the run has moved past, whatever their outcome.
+    passed: u64,
+    /// The title being muxed: index, size, and its fraction done (never decreasing).
+    current: Option<(usize, u64, f64)>,
+}
+
+/// The pre-title read, measured by its first pass; later passes leave it complete.
+#[derive(Default)]
+struct ReadPass {
+    pass: Option<String>,
+    done: u64,
+    total: u64,
+    over: bool,
+}
+
+impl Bars {
+    fn size_of(&self, idx: usize) -> u64 {
+        self.sizes
+            .iter()
+            .find(|&&(i, _)| i == idx)
+            .map_or(0, |&(_, s)| s)
+    }
+
+    fn tick(&mut self, p: &fe::Progress) {
+        if let Some((_, _, frac)) = &mut self.current {
+            if p.bytes_total > 0 {
+                let f = (p.bytes_done as f64 / p.bytes_total as f64).min(1.0);
+                *frac = frac.max(f);
+            }
+            return;
+        }
+        let Some(r) = self.read.as_mut().filter(|r| !r.over) else {
+            return;
+        };
+        match &r.pass {
+            None => {
+                r.pass = Some(p.pass.to_string());
+                r.total = p.bytes_total;
+                r.done = p.bytes_done.min(r.total);
+            }
+            Some(k) if **k == *p.pass => {
+                if r.total == 0 {
+                    r.total = p.bytes_total;
+                }
+                r.done = r.done.max(p.bytes_done.min(r.total));
+            }
+            Some(_) => r.done = r.total,
+        }
+    }
+
+    fn end_read(&mut self) {
+        if let Some(r) = &mut self.read {
+            r.done = r.total;
+            r.over = true;
+        }
+    }
+
+    // The bottom bar's percent: `None` unplanned, `Some(0.0)` while a size is unknown.
+    fn batch_pct(&self) -> Option<f64> {
+        if self.sizes.is_empty() {
+            return None;
+        }
+        if self.sizes.iter().any(|&(_, s)| s == 0) {
+            return Some(0.0);
+        }
+        let (read_done, read_total) = self.read.as_ref().map_or((0, 0), |r| (r.done, r.total));
+        let total = read_total + self.sizes.iter().map(|&(_, s)| s).sum::<u64>();
+        let current = self.current.map_or(0.0, |(_, size, f)| size as f64 * f);
+        let done = (read_done + self.passed) as f64 + current;
+        Some((done / total as f64 * 100.0).min(100.0))
+    }
+
+    fn publish(&self, prog: &mut Prog) {
+        prog.title_pct = match self.current {
+            Some((_, _, f)) => f * 100.0,
+            None if prog.bytes_total > 0 => {
+                (prog.bytes_done as f64 / prog.bytes_total as f64 * 100.0).min(100.0)
+            }
+            None => 0.0,
+        };
+        prog.batch_pct = match (self.batch_pct(), prog.batch_pct) {
+            (Some(now), Some(was)) => Some(now.max(was)),
+            (now, _) => now,
+        };
+    }
 }
 
 /// What a finished run actually was.
@@ -1000,9 +1143,77 @@ pub struct RunState {
     /// The run refused E7034: only the disc's Volume ID can finish the key (KU §4.2), so
     /// the shell's next Start is the insert-the-disc Retry.
     pub needs_disc: AtomicBool,
+    /// Lock order: `bars`, then `prog`.
+    bars: Mutex<Bars>,
 }
 
 impl RunState {
+    // Applies `f` to the bars and republishes them into `prog`, in one critical section.
+    fn with_bars(&self, f: impl FnOnce(&mut Bars, &mut Prog)) {
+        let mut bars = self.bars.lock().unwrap_or_else(|e| e.into_inner());
+        let mut prog = self.prog.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut bars, &mut prog);
+        bars.publish(&mut prog);
+    }
+
+    /// Plans the bottom bar over the titles the run muxes, as `(index, size_bytes)` from
+    /// the engine's scan. The first plan of a run stands.
+    pub fn plan_titles(&self, sizes: Vec<(usize, u64)>) {
+        self.with_bars(|b, _| {
+            if b.sizes.is_empty() {
+                b.sizes = sizes;
+            }
+        });
+    }
+
+    /// The run reads the planned titles in one pass set before muxing them: the
+    /// bottom bar counts that read's bytes too.
+    pub fn begin_read(&self) {
+        self.with_bars(|b, p| {
+            b.read = Some(ReadPass::default());
+            p.title_started = Some(std::time::Instant::now());
+        });
+    }
+
+    /// Title `idx` starts: the top bar restarts at 0 for it.
+    pub fn title_start(&self, idx: usize) {
+        self.with_bars(|b, p| {
+            if b.current.is_some_and(|(i, _, _)| i == idx) {
+                return;
+            }
+            b.end_read();
+            b.current = Some((idx, b.size_of(idx), 0.0));
+            p.bytes_done = 0;
+            p.bytes_total = 0;
+            p.eta_secs = None;
+            p.title_started = Some(std::time::Instant::now());
+        });
+    }
+
+    /// Title `idx` is over, whatever its outcome: the bottom bar counts all of it.
+    pub fn title_end(&self, idx: usize) {
+        self.with_bars(|b, _| {
+            if let Some((i, size, _)) = b.current
+                && i == idx
+            {
+                b.passed += size;
+                b.current = None;
+            }
+        });
+    }
+
+    /// One engine progress tick, as the run's sink receives it.
+    pub fn progress(&self, p: &fe::Progress) {
+        self.with_bars(|b, prog| {
+            prog.bytes_done = p.bytes_done;
+            prog.bytes_total = p.bytes_total;
+            prog.speed_bps = p.speed_bps;
+            prog.eta_secs = p.eta_secs;
+            prog.sectors_bad = p.sectors_bad;
+            b.tick(p);
+        });
+    }
+
     /// The run's verdict, recovering from a poisoned lock rather than
     /// defaulting.
     ///
@@ -1060,6 +1271,30 @@ pub fn await_worker_exit(run: &RunState, grace: std::time::Duration) -> bool {
 
 struct UiSink(Arc<RunState>);
 
+/// `(index, size_bytes)` of each of `indices` on `disc`, for [`RunState::plan_titles`].
+fn title_sizes(disc: &libfreemkv::Disc, indices: &[usize]) -> Vec<(usize, u64)> {
+    indices
+        .iter()
+        .map(|&i| (i, disc.titles.get(i).map_or(0, |t| t.size_bytes)))
+        .collect()
+}
+
+/// One title of a front-end title loop, for the bars: started on creation, over on drop.
+struct TitleBars<'a>(&'a RunState, usize);
+
+impl<'a> TitleBars<'a> {
+    fn start(state: &'a RunState, idx: usize) -> Self {
+        state.title_start(idx);
+        Self(state, idx)
+    }
+}
+
+impl Drop for TitleBars<'_> {
+    fn drop(&mut self) {
+        self.0.title_end(self.1);
+    }
+}
+
 // The GUI core's ONLY `Sink`; both methods recover a poisoned lock rather than skip the write —
 // a poisoned `lines` mutex means a worker panicked, exactly when the log matters most.
 impl fe::Sink for UiSink {
@@ -1071,26 +1306,25 @@ impl fe::Sink for UiSink {
             .push(msg.to_string());
     }
     fn progress(&self, p: &fe::Progress) {
-        *self.0.prog.lock().unwrap_or_else(|e| e.into_inner()) = Prog {
-            bytes_done: p.bytes_done,
-            bytes_total: p.bytes_total,
-            speed_bps: p.speed_bps,
-            eta_secs: p.eta_secs,
-            sectors_bad: p.sectors_bad,
-        };
+        self.0.progress(p);
     }
     fn should_cancel(&self) -> bool {
         self.0.cancel.load(Ordering::Relaxed)
     }
     // G4/D4: the pre-mux note at the output opening, the hook the CLI prints it from.
     fn event(&self, e: &fe::Event<'_>) {
-        if let fe::Event::OutputOpened { dest, title } = e {
-            let note = crate::lossy::excluded_lines(dest, title);
-            self.0
-                .lines
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(note);
+        match e {
+            fe::Event::OutputOpened { dest, title } => {
+                let note = crate::lossy::excluded_lines(dest, title);
+                self.0
+                    .lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(note);
+            }
+            fe::Event::TitleStart { idx, .. } => self.0.title_start(*idx),
+            fe::Event::TitleDone { idx, .. } => self.0.title_end(*idx),
+            _ => {}
         }
     }
 }
@@ -2117,9 +2351,11 @@ fn mux_selected_titles(
 
     // The engine owns the per-title loop (skip/abort policy); we only supply
     // "mux one title".
+    state.plan_titles(title_sizes(disc, indices));
     let written = std::cell::Cell::new(0usize);
     let partial = std::cell::Cell::new(0usize);
     let outcome = fe::run_titles(indices, !req.titles.is_empty(), sink, |idx| {
+        let _bars = TitleBars::start(state, idx);
         // Destination per output kind: a per-title file for the container /
         // metadata / index sinks, or a demux directory (its own per-track
         // naming) for separate track files.
@@ -2876,6 +3112,10 @@ fn run_disc_scanning(
                 .map_err(|e| failed_with("recovery failed", &e))?
         };
         let lock = hold_iso_lock(std::path::Path::new(&iso_path), state)?;
+        if !want_iso {
+            state.plan_titles(title_sizes(&disc, &indices));
+            state.begin_read();
+        }
         let mut halted = false;
         let res = (|| -> Result<String, String> {
             // The engine's recovery over the held drive, into the image the app holds the
@@ -2976,6 +3216,7 @@ fn run_disc_scanning(
     // drive is released. Each title below re-scans, so the index alone doesn't
     // prove the mux is about to read the title picked. See `verify_title_identity`.
     let picked_ids = scanned_ids;
+    state.plan_titles(title_sizes(&disc, &indices));
     drop(session);
 
     // The engine owns the per-title loop (skip/abort policy); we only supply
@@ -2984,6 +3225,7 @@ fn run_disc_scanning(
     let written = std::cell::Cell::new(0usize);
     let partial = std::cell::Cell::new(0usize);
     let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
+        let _bars = TitleBars::start(state, idx);
         let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
         let before = output_stamp(&target);
 
@@ -3421,6 +3663,42 @@ mod run_state_poison_tests {
             "the sink stopped publishing progress, so the bar freezes with no \
              explanation for the rest of the run"
         );
+    }
+
+    // The staged mux reports its titles only as engine events; they must move the bars.
+    #[test]
+    fn engine_title_events_restart_the_top_bar_and_advance_the_bottom_one() {
+        use super::{RunState, UiSink};
+        use freemkv_engine as fe;
+        use freemkv_engine::Sink as _;
+        use std::sync::Arc;
+
+        let st = Arc::new(RunState::default());
+        st.plan_titles(vec![(0, 100), (1, 100)]);
+        let sink = UiSink(Arc::clone(&st));
+        let failed = std::io::Error::other("title failed");
+        sink.event(&fe::Event::TitleStart {
+            idx: 0,
+            dest: "mkv://a",
+        });
+        sink.progress(&fe::Progress {
+            bytes_done: 40,
+            bytes_total: 100,
+            ..Default::default()
+        });
+        let p = *st.prog.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!((p.title_pct, p.batch_pct), (40.0, Some(20.0)));
+        sink.event(&fe::Event::TitleDone {
+            idx: 0,
+            dest: "mkv://a",
+            result: Err(&failed),
+        });
+        sink.event(&fe::Event::TitleStart {
+            idx: 1,
+            dest: "mkv://b",
+        });
+        let p = *st.prog.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!((p.title_pct, p.batch_pct), (0.0, Some(50.0)));
     }
 
     // Makes outcome_now's doc claim true instead of merely written down: every `lines` lock in
@@ -4125,6 +4403,22 @@ mod disc_details_tests {
         assert!(!lines.iter().any(|l| l.starts_with("MKB")), "{lines:?}");
     }
 
+    /// The scan carries each title's size and the disc's capacity as numbers,
+    /// in canonical title order, for the Information panel's Source size row.
+    #[test]
+    fn a_disc_scan_carries_title_sizes_and_capacity() {
+        let mut d = disc(false);
+        d.capacity_bytes = 8_500_000_000;
+        for size in [4_000_000_000, 0] {
+            let mut t = libfreemkv::DiscTitle::empty();
+            t.size_bytes = size;
+            d.titles.push(t);
+        }
+        let sc = super::scanned_from_disc(&d, "unencrypted".into());
+        assert_eq!(sc.title_sizes, vec![4_000_000_000, 0]);
+        assert_eq!(sc.capacity_bytes, 8_500_000_000);
+    }
+
     #[test]
     fn zero_capacity_omits_the_capacity_line() {
         let mut d = disc(false);
@@ -4739,6 +5033,7 @@ mod routing_tests {
             lang: String::new(),
             forced: false,
             mirrors: None,
+            size_bytes: None,
         };
         let mut rows = vec![Row {
             depth: 0,
@@ -4762,6 +5057,8 @@ mod routing_tests {
             key_summary: String::new(),
             title_count: 2,
             video_codecs: vec!["H.264".into(); 2],
+            title_sizes: Vec::new(),
+            capacity_bytes: 0,
             title_ids: Vec::new(),
             details: vec![],
             keys: None,
@@ -6043,6 +6340,50 @@ mod display_sanitisation_tests {
                 h.info
             );
         }
+    }
+
+    /// The Length and Size columns read typed fields: a title row carries its
+    /// running time and size as data, and neither as Description text.
+    #[test]
+    fn a_title_row_carries_its_size_as_data_not_description_text() {
+        let mut disc = benign_disc();
+        let t = &mut disc.titles[0];
+        t.playlist = "VTS_01_2.VOB".into();
+        t.duration_secs = 8600.0;
+        t.size_bytes = 6_800_000_000;
+        t.chapters = (0..19)
+            .map(|i| libfreemkv::disc::Chapter {
+                time_secs: f64::from(i) * 400.0,
+                name: (i + 1).to_string(),
+            })
+            .collect();
+        let rows = scanned_from_disc(&disc, "none".into()).rows;
+        let disc_row = &rows[0];
+        assert_eq!(
+            disc_row.desc, BENIGN,
+            "the disc row shows only the volume name"
+        );
+        assert_eq!(disc_row.size_bytes, None);
+        let title = &rows[1];
+        assert_eq!(title.desc, "1. VTS_01_2.VOB (19 chapters)");
+        assert_eq!(title.duration_secs, 8600.0);
+        assert_eq!(title.size_bytes, Some(6_800_000_000));
+        for r in rows.iter().filter(|r| r.depth == 2) {
+            assert_eq!(r.size_bytes, None, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn a_title_description_counts_chapters_in_the_right_number() {
+        assert_eq!(
+            super::title_desc(0, "00800.mpls", 1),
+            "1. 00800.mpls (1 chapter)"
+        );
+        assert_eq!(
+            super::title_desc(4, "00800.mpls", 0),
+            "5. 00800.mpls (0 chapters)"
+        );
+        assert_eq!(super::title_desc(1, "", 12), "2. (12 chapters)");
     }
 
     /// The payload has to be able to fail the assertion — a filter that

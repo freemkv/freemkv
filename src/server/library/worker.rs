@@ -845,7 +845,7 @@ fn deep_one(
     let _ = std::fs::create_dir_all(&lib.log_dir);
     let err_file = lib.log_dir.join("deep-audit.stderr");
     let progress = |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
-    match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
+    match super::deep::full_decode(&ffmpeg, path, library, duration, &err_file, stop, &progress) {
         Some(v) => lib.audits.record_deep(path, sig, v, now()),
         None if !lib.audits.cancelled_deep() => lib.audits.requeue_front(path.to_path_buf()),
         None => {}

@@ -90,9 +90,13 @@ fn every_title_row_has_a_duration_and_size() {
     };
     let sc = engine::scan(&iso).unwrap();
     for r in sc.rows.iter().filter(|r| r.depth == 1) {
-        assert!(r.desc.contains("chapter(s)"), "got {}", r.desc);
-        assert!(r.desc.contains(" GB"), "got {}", r.desc);
-        assert!(r.desc.contains(':'), "duration missing in {}", r.desc);
+        assert!(r.desc.contains(" chapter"), "got {}", r.desc);
+        assert!(r.duration_secs > 0.0, "duration missing on {}", r.desc);
+        assert!(
+            r.size_bytes.is_some_and(|b| b > 0),
+            "size missing on {}",
+            r.desc
+        );
     }
 }
 

@@ -119,6 +119,23 @@ class StructureTests(unittest.TestCase):
                 self.assertIn('media_gate.py restore', text)
                 self.assertIn('plan-media', self.jobs[name]['needs'])
 
+    def test_the_gui_gate_runs_on_every_candidate_and_holds_the_verdict(self):
+        gate = self.jobs['gui-gate']
+        self.assertNotIn('if', gate, 'the GUI gate must not wait for a media run')
+        self.assertEqual(gate['needs'], ['plan-media'])
+        oses = [i['os'] for i in gate['strategy']['matrix']['include']]
+        self.assertEqual(oses, ['linux', 'windows'])
+        text = steps_text(gate)
+        self.assertIn('tests/gui_gate.py', text)
+        self.assertIn('xvfb-run', text)
+        self.assertIn('media_gate.py checkout', text)
+        verdict = self.jobs['media-verdict']
+        self.assertIn('gui-gate', verdict['needs'])
+        step = next(s for s in verdict['steps'] if s.get('name') == 'Media verdict')
+        self.assertEqual(step['env']['GUI'], '${{ needs.gui-gate.result }}')
+        for upload in (s for s in gate['steps'] if 'upload-artifact' in s.get('uses', '')):
+            self.assertTrue(upload['with'].get('overwrite'))
+
     def test_media_jobs_gate_on_the_plan(self):
         for name in ('launch', 'cli-matrix', 'compare-cli-matrix', 'record-media-evidence'):
             with self.subTest(job=name):
@@ -855,7 +872,7 @@ class LegAndRecordTests(unittest.TestCase):
 
 class VerdictTests(unittest.TestCase):
     def test_i1(self):
-        ok = {'PLAN_RESULT': 'success'}
+        ok = {'PLAN_RESULT': 'success', 'GUI': 'success'}
         cases = [
             (dict(ok, STATUS='reuse', EVIDENCE_URL='u'), True),
             (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success'), True),
@@ -868,6 +885,10 @@ class VerdictTests(unittest.TestCase):
             ({'PLAN_RESULT': 'failure', 'STATUS': 'canary-failed'}, False),
             ({'PLAN_RESULT': 'failure', 'STATUS': 'reuse'}, False),
             ({'PLAN_RESULT': 'success', 'STATUS': ''}, False),
+            (dict(ok, STATUS='reuse', EVIDENCE_URL='u', GUI='failure'), False),
+            (dict(ok, STATUS='reuse', EVIDENCE_URL='u', GUI='skipped'), False),
+            (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success', GUI='cancelled'), False),
+            ({'PLAN_RESULT': 'success', 'STATUS': 'reuse', 'EVIDENCE_URL': 'u'}, False),
         ]
         for env, green in cases:
             with self.subTest(env=env):
@@ -886,7 +907,8 @@ class VerdictTests(unittest.TestCase):
         self.assertNotIn('::stop-commands::', body)
 
     def test_reuse_says_why(self):
-        green, lines = mg.verdict({'PLAN_RESULT': 'success', 'STATUS': 'reuse', 'EVIDENCE_URL': 'https://x/1',
+        green, lines = mg.verdict({'PLAN_RESULT': 'success', 'GUI': 'success', 'STATUS': 'reuse',
+                                   'EVIDENCE_URL': 'https://x/1',
                                    'REASON': 'full-disc not needed: …'})
         self.assertTrue(green)
         self.assertTrue(any('https://x/1' in line for line in lines))

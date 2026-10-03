@@ -24,6 +24,11 @@
 - Linux: the `.deb` is split into `freemkv` (app, `freemkv-amd64.deb`) and `freemkv-cli` (`freemkv-cli-amd64.deb`, no dependencies); each replaces the other. The Flatpak download is now `freemkv-x86_64-linux.flatpak`. (CLI, app only: Linux packaging)
 - Homebrew: the cask is now `freemkv` (was `freemkv-app`) and also links the `freemkv` command; the CLI formula is now `freemkv-cli` (was `freemkv`). Existing installs follow the rename. (CLI, app only: Homebrew packaging)
 - Versioned duplicate assets are no longer published; every asset has a stable name and a `.sha256`. (CLI, app only: release assets)
+- The app's title list shows each title's running time and size in their own right-aligned **Length** and **Size** columns; a title's Description reads `1. 00800.mpls (19 chapters)`. On Windows, whose tree has a single column, they follow the Description in the row's label. (app only: the title list; `freemkv info` and the server's JSON are unchanged)
+- The macOS app's Settings save a text field when you press Enter or leave it, without closing the window, as the Linux app's do. Labels too long for their column wrap, dropdowns widen to their longest choice, and a long default destination or keydb path wraps onto more lines beneath its label instead of being cut off. Settings reopened after Cancel show the saved values, not the abandoned edits. (app only: the Settings window)
+- The macOS app's progress page for a single-title rip no longer cuts off the top of the Information panel, and its title list keeps the Size column in view. (app only: the macOS window layout)
+- The app's title list shows each title's running time and size in their own right-aligned **Length** and **Size** columns; a title's Description reads `1. 00800.mpls (19 chapters)`. On Windows they sit under a column header over the tree, can be resized by dragging its dividers, and read from the right under a right-to-left interface language. (app only: the title list; `freemkv info` and the server's JSON are unchanged)
+- The app's Settings keep a text field's edit when you press Enter or leave the field, on Windows as on Linux; a Windows dropdown widens to show its longest choice and its open list shows every choice in full, and the default destination and keydb paths have a full-width field under their label. (app only: the Settings window)
 
 ### Added
 
@@ -34,6 +39,7 @@
 - **Keys come from the source picked in settings.** AACS Key Source = online asks only the online key service; local uses only the local KEYDB. An autorip `settings.json` loads unchanged, and a stored `http://` Keyserver URL is warned about at startup. (server only: the server's key-source setting)
 - The multi-pass recovery (sweep, retry passes, end-of-recovery promotion) runs the engine's passes, the same implementation as the app's and the CLI's; the server keeps its own drive recovery (re-open after a USB bridge crash, a spin-cycle before each retry pass), its device-log lines and its loss gate. (server only: the server's pass loop moved into the engine)
 - A staged disc image (a multi-pass rip, a resumed rip, a deferred mux) is muxed through the same image path as the CLI and the app. A mux that fails removes its partial MKV from staging; the ISO and mapfile stay for the retry. (server only: brings the server onto the CLI's and app's image path)
+- **The Library's details dialog shows what is in each movie again**, as the retired mkv-audit did: resolution tier and frame size, frame rate, codec and bit depth; HDR (SDR, HDR10, HDR10+, HLG) and Dolby Vision with its profile (e.g. `DV P8 + HDR10`) and light levels; every audio track with its format, channels, lossless or lossy and Atmos, the best track and a warning when a player would start with a worse one, and a flag on a track whose title claims lossless audio its stream does not carry; every subtitle with its format, default and forced flags; an upgrade radar of what a better release of the tier would have (lossless, DV, Atmos, 7.1, UHD); the declared length against the real last frame; and the full header report on demand. Anything the file does not settle reads as unknown, never guessed. A deep audit that finds damage now samples the movie to say where it fails, in which layer, and what to do; a clean one says what it verified. Audits already stored keep their verdicts and deep results: the detail is filled in a few files a minute by a quick read, only while no other audit waits, and the dialog says "Details pending" until then. The Library pages are English only, as before. (server only: the Library is the server's web UI)
 
 ## [1.7.7] — 2026-09-26
 
@@ -43,6 +49,7 @@
 - Preserve PGS clear-event timestamps when remuxing, addressing the reproduced issue in #52. A fresh rip is needed to confirm the fix on affected discs.
 - Improve audio frame handling and preserve opening audio and MKV timing metadata.
 - Keep the Linux desktop interface responsive while opening and scanning sources.
+- The app's preferred audio, subtitle and forced-subtitle language pickers name each language in the interface language (e.g. "Deutsch, Englisch" under German), as do their summaries; the stored ISO codes are unchanged. The interface-language dropdown's Auto entry, the keydb status line, the keydb-update and update-check messages, and the progress caption's chapter and track words are translated too. (app only)
 
 ### Linux packages
 

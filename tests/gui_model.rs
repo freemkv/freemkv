@@ -28,6 +28,7 @@ fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> Sc
         lang: String::new(),
         forced: false,
         mirrors: None,
+        size_bytes: None,
     }
 }
 
@@ -64,6 +65,8 @@ fn video_only_disc() -> Scanned {
         // list is exactly what a caller with no scan behind it promises.
         title_ids: vec![],
         video_codecs: vec!["H.264".into()],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         details: vec![],
         keys: None,
         needs_disc: false,
@@ -85,6 +88,8 @@ fn disc(titles: &[(f64, usize)]) -> Scanned {
         title_count: titles.len(),
         title_ids: vec![],
         video_codecs: vec!["H.264".into(); titles.len()],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         details: vec![],
         keys: None,
         needs_disc: false,
@@ -125,6 +130,8 @@ fn mp2_extension_disc() -> Scanned {
         title_count: 1,
         title_ids: vec![],
         video_codecs: vec!["MPEG-2".into()],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         details: vec![],
         keys: None,
         needs_disc: false,
@@ -564,6 +571,36 @@ fn a_stream_hangs_off_its_own_title_not_the_previous_one() {
 }
 
 #[test]
+fn only_title_rows_fill_the_length_and_size_columns() {
+    // Every shell draws these two cells straight from the view; the disc row
+    // and the stream rows under a title leave both blank.
+    let mut sc = two_title_disc();
+    for r in sc.rows.iter_mut().filter(|r| r.depth == 1) {
+        r.size_bytes = Some(6_800_000_000);
+    }
+    let mut app = App::new();
+    app.tree = tree(&sc, "All titles", 0.0);
+    app.page = Page::Titles;
+    let rows = app.view().title_rows;
+    let cells = |type_s: &str| -> Vec<(String, String)> {
+        rows.iter()
+            .filter(|r| r.type_s == type_s)
+            .map(|r| (r.length.clone(), r.size.clone()))
+            .collect()
+    };
+    assert_eq!(
+        cells("Title"),
+        vec![
+            ("1:30:00".to_string(), "6.8 GB".to_string()),
+            ("10:00".to_string(), "6.8 GB".to_string()),
+        ]
+    );
+    for r in rows.iter().filter(|r| r.type_s != "Title") {
+        assert!(r.length.is_empty() && r.size.is_empty(), "{r:?}");
+    }
+}
+
+#[test]
 fn row_parents_never_drops_a_row() {
     // A row the core decided to show must always be reachable. A malformed
     // list (a stream before any title) must put the orphan at the top level,
@@ -573,6 +610,8 @@ fn row_parents_never_drops_a_row() {
         depth,
         type_s: "Audio".into(),
         desc: "stray".into(),
+        length: String::new(),
+        size: String::new(),
         check: Some(Check::Off),
         check_enabled: true,
     };
@@ -1063,7 +1102,7 @@ fn a_source_with_no_stem_still_produces_a_usable_name() {
 fn the_information_panel_has_a_label_for_every_value() {
     // The shells zip labels against values positionally; a mismatch shifts
     // every row's meaning by one.
-    let rows = InfoRows::starting("/media/Disc.iso", "/out/Disc_t1.mkv");
+    let rows = InfoRows::starting("/media/Disc.iso", "/out/Disc_t1.mkv", None);
     assert_eq!(InfoRows::labels().len(), rows.as_array().len());
 }
 
@@ -1071,12 +1110,20 @@ fn the_information_panel_has_a_label_for_every_value() {
 fn no_information_row_is_ever_blank() {
     // A blank field reads as a broken panel (reported). An unknown value is an
     // em dash, which reads as "not known yet".
-    let rows = InfoRows::starting("/no/such/file.iso", "/out/file_t1.mkv");
+    let rows = InfoRows::starting("/no/such/file.iso", "/out/file_t1.mkv", None);
     for (label, value) in InfoRows::labels().iter().zip(rows.as_array()) {
         assert!(!value.is_empty(), "the {label:?} row is blank");
     }
     // Specifically: a source that does not exist has no size, and says so.
     assert_eq!(rows.source_size, "—");
+}
+
+#[test]
+fn a_drive_source_has_no_source_file_name() {
+    let drive = InfoRows::starting("disc:///dev/sr0", "/out/x.mkv", None);
+    assert_eq!(drive.source_file, "—");
+    let iso = InfoRows::starting("/no/such/Disc.iso", "/out/x.mkv", None);
+    assert_eq!(iso.source_file, "Disc.iso");
 }
 
 // ══ settings dropdowns ═════════════════════════════════════════════════════
@@ -1768,6 +1815,8 @@ fn tagged_disc(streams: &[(&str, &str, bool)]) -> Scanned {
         title_count: 1,
         title_ids: vec![],
         video_codecs: vec!["H.264".into()],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         details: vec![],
         keys: None,
         needs_disc: false,
