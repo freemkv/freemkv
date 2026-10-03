@@ -122,7 +122,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -151,7 +151,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -181,7 +181,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -211,7 +211,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -239,7 +239,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -268,7 +268,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -294,7 +294,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -343,7 +343,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -377,7 +377,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -425,7 +425,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -448,7 +448,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -514,7 +514,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -530,7 +530,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
-      - uses: taiki-e/install-action@6db3a280da9eee4283c045c7431ab5116f1a0089 # cargo-llvm-cov
+      - uses: taiki-e/install-action@3ce020901a1c1292716d3268bf506c1ae55a84cd # cargo-llvm-cov
       - run: cargo llvm-cov --workspace --features gui --ignore-run-fail --lcov --output-path lcov.info
         working-directory: freemkv
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

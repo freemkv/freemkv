@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
