@@ -384,21 +384,21 @@ fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<Strin
         let hours = total_secs / 3600;
         let mins = (total_secs % 3600) / 60;
         let gb = title.size_bytes as f64 / 1_000_000_000.0; // decimal GB, matches disc-marketed capacity
-        let clip_word = if title.clips.len() != 1 {
-            strings::get("disc.clips")
-        } else {
-            strings::get("disc.clip")
+        // Only a Blu-ray title is made of clips; a DVD or HD DVD title would read "0 clips".
+        let clips = match title.clips.len() {
+            0 => String::new(),
+            1 => format!("  1 {}", strings::get("disc.clip")),
+            n => format!("  {n} {}", strings::get("disc.clips")),
         };
 
         lines.push(format!(
-            "  {:2}. {:14}  {:2}h {:02}m  {:>5.1} GB  {} {}",
+            "  {:2}. {:14}  {:2}h {:02}m  {:>5.1} GB{}",
             idx + 1,
             sanitize(&title.playlist),
             hours,
             mins,
             gb,
-            title.clips.len(),
-            clip_word
+            clips
         ));
 
         if basic {
@@ -1068,6 +1068,27 @@ mod tests {
         let bidi = "abc\u{202E}gnp\u{200B}\u{FEFF}xyz";
         let cleaned = sanitize(bidi);
         assert_eq!(cleaned, "abcgnpxyz", "bidi/zero-width/BOM stripped");
+    }
+
+    #[test]
+    fn title_lines_count_clips_only_for_titles_made_of_them() {
+        let mut disc = synthetic_disc();
+        let row = |d: &Disc| title_lines(d, false, false, true)[2].clone();
+        assert!(
+            !row(&disc).contains(&strings::get("disc.clips")),
+            "{}",
+            row(&disc)
+        );
+        let clip = libfreemkv::Clip {
+            clip_id: "00001".into(),
+            in_time: 0,
+            out_time: 0,
+            duration_secs: 0.0,
+            source_packets: 0,
+            feed_span: None,
+        };
+        disc.titles[0].clips = vec![clip; 3];
+        assert!(row(&disc).ends_with(&format!("3 {}", strings::get("disc.clips"))));
     }
 
     #[test]
