@@ -9,6 +9,7 @@
 #[cfg(debug_assertions)]
 mod gate;
 mod main_view;
+mod pick_bar;
 mod prefs;
 mod tree;
 

@@ -157,6 +157,7 @@ pub fn rows_sig(rows: &[Row]) -> u64 {
     rows.len().hash(&mut h);
     for r in rows {
         (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
+        (&r.item, &r.lang, &r.format, &r.notes).hash(&mut h);
     }
     h.finish()
 }
