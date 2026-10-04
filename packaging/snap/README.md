@@ -8,8 +8,7 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
 | Trigger | Build + install + smoke test | GitHub release asset | Snap Store |
 |---------|------------------------------|----------------------|------------|
 | PR or manual run | yes | — | never |
-| `dev` push | yes | — | `edge`, only if the repo variable `SNAP_PUBLISH_EDGE` is `true` |
-| `qa` push | yes | — | `beta`, after `CI` and `qa` are green on the same commit |
+| `dev` or `qa` push | yes | — | never |
 | `v*` release tag | yes | `freemkv-amd64.snap` + `.sha256` | `stable` |
 
 - The version is `Cargo.toml`'s, plus `+git.<sha>` (dev and PRs) or
@@ -108,14 +107,7 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
    review, and only the direct download (`--dangerous`, connected by hand, see
    [INSTALL.md](../../INSTALL.md)) is usable.
 
-5. Optional: set the repository variable `SNAP_PUBLISH_EDGE` to `true` to
-   publish every `dev` push to `edge`:
-
-   ```bash
-   gh variable set SNAP_PUBLISH_EDGE -R freemkv/freemkv --body true
-   ```
-
-6. Optional, arm64: log in to Launchpad once with
+5. Optional, arm64: log in to Launchpad once with
    `snapcraft remote-build` on a machine, then store the
    `launchpad-credentials` file it saves in its data directory
    (`$XDG_DATA_HOME/snapcraft/`) as the secret `LAUNCHPAD_CREDENTIALS`.
