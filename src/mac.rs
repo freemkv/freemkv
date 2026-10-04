@@ -680,9 +680,9 @@ struct Ivars {
     backdrop: RefCell<Option<Retained<NSBox>>>,
     tree_scroll: RefCell<Option<Retained<NSScrollView>>>,
     grp_out: RefCell<Option<Retained<NSBox>>>,
-    // The free-space line under the output row, and the folder it was measured for.
+    // The free-space line under the output row, and the text it last showed.
     out_hint: RefCell<Option<Retained<NSTextField>>>,
-    hint_dir: RefCell<String>,
+    hint_shown: RefCell<String>,
     on_prog: RefCell<bool>,
     win_prefs: RefCell<Option<Retained<NSWindow>>>,
     win_about: RefCell<Option<Retained<NSWindow>>>,
@@ -1793,14 +1793,12 @@ impl Controller {
             {
                 f.setStringValue(&NSString::from_str(&v.output_dir));
             }
-            // Measured once per folder, not every tick: it is a filesystem query.
-            if *iv.hint_dir.borrow() != v.output_dir
+            // Set only when the line changes; the core measures it off this thread.
+            if *iv.hint_shown.borrow() != v.free_space_line
                 && let Some(h) = iv.out_hint.borrow().as_ref()
             {
-                h.setStringValue(&NSString::from_str(&crate::ui::free_space_line(
-                    &v.output_dir,
-                )));
-                *iv.hint_dir.borrow_mut() = v.output_dir.clone();
+                h.setStringValue(&NSString::from_str(&v.free_space_line));
+                *iv.hint_shown.borrow_mut() = v.free_space_line.clone();
             }
             if let Some(b) = iv.run_btn.borrow().as_ref() {
                 b.setEnabled(v.can_run);

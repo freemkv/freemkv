@@ -20,8 +20,8 @@ use std::rc::Rc;
 pub(super) struct Memo {
     rows: Option<u64>,
     formats: String,
-    /// The folder the free-space line was measured for.
-    hint_dir: Option<String>,
+    /// The free-space line last shown.
+    hint_shown: Option<String>,
     log: LogMemo,
 }
 
@@ -384,11 +384,10 @@ impl MainView {
         if self.out_entry.text() != v.output_dir {
             self.out_entry.set_text(&v.output_dir);
         }
-        // Measured once per folder, not every tick: it is a filesystem query.
-        if memo.hint_dir.as_deref() != Some(v.output_dir.as_str()) {
-            self.out_hint
-                .set_text(&crate::ui::free_space_line(&v.output_dir));
-            memo.hint_dir = Some(v.output_dir.clone());
+        // Set only when the line changes; the core measures it off this thread.
+        if memo.hint_shown.as_deref() != Some(v.free_space_line.as_str()) {
+            self.out_hint.set_text(&v.free_space_line);
+            memo.hint_shown = Some(v.free_space_line.clone());
         }
         self.run_btn.set_sensitive(v.can_run);
         self.eject_btn.set_visible(v.eject_visible);

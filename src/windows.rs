@@ -542,8 +542,8 @@ struct Memo {
     menu_running: Option<bool>,
     /// The selection bar as last filled in; the menus are built from it.
     pick: Option<crate::ui::PickView>,
-    /// The folder the free-space line was last measured for.
-    free_dir: Option<String>,
+    /// The free-space line last shown.
+    free_line: Option<String>,
 }
 
 // One row signature: the core's, so every shell redraws on the same changes.
@@ -1838,11 +1838,10 @@ impl Shell {
             let _ = self.edit_out.set_text(&v.output_dir);
         }
         self.btn_run.hwnd().EnableWindow(v.can_run);
-        // Measured once per folder, not every tick: it is a filesystem query.
-        if self.memo.borrow().free_dir.as_deref() != Some(v.output_dir.as_str()) {
-            let line = crate::ui::free_space_line(&v.output_dir);
-            let _ = self.lbl_free.hwnd().SetWindowText(&line);
-            self.memo.borrow_mut().free_dir = Some(v.output_dir.clone());
+        // Set only when the line changes; the core measures it off this thread.
+        if self.memo.borrow().free_line.as_deref() != Some(v.free_space_line.as_str()) {
+            let _ = self.lbl_free.hwnd().SetWindowText(&v.free_space_line);
+            self.memo.borrow_mut().free_line = Some(v.free_space_line.clone());
         }
 
         // ── progress ──
@@ -4165,7 +4164,7 @@ impl Shell {
         self.memo.borrow_mut().formats.clear();
         self.memo.borrow_mut().rows = None;
         self.memo.borrow_mut().pick = None;
-        self.memo.borrow_mut().free_dir = None;
+        self.memo.borrow_mut().free_line = None;
         // The rebuilt menu bar starts all-enabled.
         self.memo.borrow_mut().menu_running = None;
         self.prefs.relocalize(&self.settings.borrow());

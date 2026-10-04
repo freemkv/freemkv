@@ -1377,7 +1377,8 @@ impl InfoRows {
             read_rate: "—".into(),
             output_file: dest.to_string(),
             output_size: "0 B".into(),
-            free_space: free_space(dest),
+            // Never measured here, on the UI thread: the caller fills in its cached answer.
+            free_space: "—".into(),
         }
     }
 
@@ -2052,6 +2053,8 @@ pub struct App {
     pub log_first: u64,
     pub source: String,
     pub output_dir: String,
+    /// Free space at `output_dir`, measured off this thread.
+    pub free: FreeSpace,
     pub format: String,
     pub log_hidden: bool,
     pub run: Option<Arc<RunState>>,
@@ -2300,6 +2303,7 @@ impl App {
             log_first: 0,
             source: String::new(),
             output_dir,
+            free: FreeSpace::default(),
             format,
             log_hidden: false,
             run: None,
@@ -3216,7 +3220,11 @@ impl App {
             &self.title_sizes,
             self.capacity_bytes,
         );
-        self.info = Some(InfoRows::starting(&self.source, &out_file, scanned));
+        let mut info = InfoRows::starting(&self.source, &out_file, scanned);
+        info.free_space = self.free.get(&self.output_dir);
+        // The rip uses that space up: the next ask measures it afresh.
+        self.free.forget();
+        self.info = Some(info);
         self.page = Page::Progress;
         self.say(
             LogKind::Result,
@@ -3574,6 +3582,7 @@ impl App {
                 },
             ),
             output_dir: self.output_dir.clone(),
+            free_space_line: free_space_line(&self.free.get(&self.output_dir)),
             format: self.effective_format(),
             formats: self.offered_formats(),
             can_run: !self.running() && !self.opening() && !self.source.is_empty(),
@@ -3893,13 +3902,72 @@ impl PickView {
     }
 }
 
-/// The line under the output row: free space at the chosen folder.
-pub fn free_space_line(dir: &str) -> String {
-    format!(
-        "{} {}",
-        crate::strings::get("gui.info.free_space"),
-        free_space(dir)
-    )
+/// Free space at a folder, measured off the UI thread: a statvfs on a stale network folder can
+/// hang for minutes. One measurement runs at a time; the latest folder asked for meanwhile is
+/// measured next. Until a folder's answer is in it reads as unknown ("—").
+#[derive(Clone, Default)]
+pub struct FreeSpace(Arc<Mutex<FreeState>>);
+
+#[derive(Default)]
+struct FreeState {
+    /// The last folder measured, and its answer.
+    known: Option<(String, String)>,
+    busy: bool,
+    next: Option<String>,
+}
+
+impl FreeSpace {
+    /// The free space at `dir` as text, without blocking.
+    pub fn get(&self, dir: &str) -> String {
+        self.get_with(dir, free_space)
+    }
+
+    fn get_with(&self, dir: &str, measure: fn(&str) -> String) -> String {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((d, text)) = &s.known
+            && d == dir
+        {
+            return text.clone();
+        }
+        if s.busy {
+            s.next = Some(dir.to_string());
+        } else {
+            s.busy = true;
+            let state = self.0.clone();
+            let first = dir.to_string();
+            let spawned = std::thread::Builder::new()
+                .name("free-space".into())
+                .spawn(move || measure_until_current(&state, first, measure));
+            s.busy = spawned.is_ok();
+        }
+        "—".into()
+    }
+
+    /// Drop the answer, so the next ask measures afresh (a rip changes it).
+    pub fn forget(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).known = None;
+    }
+}
+
+// Measure `dir`, then whatever folder was asked for meanwhile, until none is waiting.
+fn measure_until_current(state: &Mutex<FreeState>, mut dir: String, measure: fn(&str) -> String) {
+    loop {
+        let text = measure(&dir);
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+        s.known = Some((dir.clone(), text));
+        match s.next.take() {
+            Some(n) if n != dir => dir = n,
+            _ => {
+                s.busy = false;
+                return;
+            }
+        }
+    }
+}
+
+/// The line under the output row: `free` is the free space at the chosen folder.
+pub fn free_space_line(free: &str) -> String {
+    format!("{} {free}", crate::strings::get("gui.info.free_space"))
 }
 
 /// One rendered tree row — already decided, nothing left to compute.
@@ -3986,6 +4054,8 @@ pub struct View {
     pub saving_overall: String,
     pub show_overall_bar: bool,
     pub output_dir: String,
+    /// The line under the output row (free space there); "—" until measured.
+    pub free_space_line: String,
     pub format: String,
     pub formats: Vec<Vec<&'static str>>,
     pub can_run: bool,
@@ -4007,6 +4077,41 @@ pub struct View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_space_is_measured_off_the_caller_for_the_latest_folder() {
+        use std::sync::atomic::AtomicUsize;
+        static GATE: Mutex<()> = Mutex::new(());
+        static MEASURED: AtomicUsize = AtomicUsize::new(0);
+        fn slow(dir: &str) -> String {
+            let _g = GATE.lock().unwrap_or_else(|e| e.into_inner());
+            MEASURED.fetch_add(1, Ordering::SeqCst);
+            format!("free at {dir}")
+        }
+        let free = FreeSpace::default();
+        let held = GATE.lock().unwrap();
+        // A hung filesystem never holds the caller: each ask answers at once.
+        for dir in ["/a", "/b", "/c"] {
+            assert_eq!(free.get_with(dir, slow), "—");
+        }
+        drop(held);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while free.get_with("/c", slow) != "free at /c" {
+            assert!(std::time::Instant::now() < until, "never measured");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            MEASURED.load(Ordering::SeqCst),
+            2,
+            "/b was passed over for /c"
+        );
+        free.forget();
+        assert_eq!(
+            free.get_with("/c", slow),
+            "—",
+            "measured afresh after forget"
+        );
+    }
 
     #[test]
     fn titles_are_numbered_as_dash_t_numbers_them() {
