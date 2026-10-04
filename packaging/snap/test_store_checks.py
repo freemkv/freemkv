@@ -262,3 +262,52 @@ class UploadMain(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UploadTransient(unittest.TestCase):
+    # The qa upload of 2026-10-04, verbatim.
+    DROPPED = (
+        START
+        + "Uploading... (--->)\nUploading... (<---)\n"
+        + "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))\n"
+        + "Full execution log: '/home/runner/.local/state/snapcraft/log/x.log'\n"
+    )
+
+    def test_a_dropped_connection_is_transient(self):
+        self.assertEqual(sc.classify_upload(1, self.DROPPED, "stable"), "transient")
+        timeout = START + "Uploading...\nHTTPSConnectionPool(host='x'): Read timed out. (read timeout=60)\n"
+        self.assertEqual(sc.classify_upload(1, timeout, "stable"), "transient")
+
+    def test_anything_else_beside_it_is_a_failure(self):
+        self.assertEqual(sc.classify_upload(1, self.DROPPED + "Status: processing\n", "stable"), "failed")
+        self.assertEqual(sc.classify_upload(1, self.DROPPED + "Error: denied\n", "stable"), "failed")
+        self.assertEqual(sc.classify_upload(1, START + "Error: denied\n", "stable"), "failed")
+
+    def test_a_zero_exit_is_never_transient(self):
+        self.assertNotEqual(sc.classify_upload(0, self.DROPPED, "stable"), "transient")
+
+
+class Login(unittest.TestCase):
+    from datetime import datetime, timezone
+    NOW = datetime(2026, 10, 4, tzinfo=timezone.utc)
+    WHOAMI = (
+        "email: dev@example.com\nusername: freemkv\nid: abc\n"
+        "permissions: package_access, package_manage, package_metrics, package_push, "
+        "package_register, package_release, package_update, package_upload\n"
+        "channels: no restrictions\nexpires: 2027-03-01T00:00:00.000Z\n"
+    )
+
+    def test_good_credentials_pass(self):
+        self.assertEqual(sc.check_login(self.WHOAMI, 30, self.NOW), [])
+
+    def test_expiring_soon_fails(self):
+        soon = self.WHOAMI.replace("2027-03-01", "2026-10-20")
+        self.assertEqual(len(sc.check_login(soon, 30, self.NOW)), 1)
+
+    def test_missing_permission_fails(self):
+        no_release = self.WHOAMI.replace(" package_release,", "")
+        self.assertEqual(sc.check_login(no_release, 30, self.NOW), ["store credentials lack package_release"])
+
+    def test_no_expiry_fails(self):
+        no_expiry = "\n".join(l for l in self.WHOAMI.splitlines() if not l.startswith("expires"))
+        self.assertEqual(len(sc.check_login(no_expiry, 30, self.NOW)), 1)

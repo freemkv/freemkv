@@ -48,6 +48,27 @@ jobs:
           echo "store=$([ -n "$STORE" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "launchpad=$([ -n "$LAUNCHPAD" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
+  # The release tag is the only upload, so the credentials it needs are proven
+  # on qa first: still valid for a month, and allowed to upload and release.
+  store-login:
+    needs: secrets
+    if: >-
+      needs.secrets.outputs.store == 'true' &&
+      (github.ref_name == 'qa' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Check the store credentials
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          set -uo pipefail
+          sudo snap install snapcraft --classic --channel="$SNAPCRAFT_CHANNEL"
+          snapcraft whoami > whoami.txt 2>&1 || { cat whoami.txt; echo "::error::the store rejected the credentials"; exit 1; }
+          grep -v '^email:' whoami.txt
+          python3 packaging/snap/store_checks.py login whoami.txt 30
+
   build:
     needs: packaging-tests
     runs-on: ubuntu-24.04
@@ -352,9 +373,10 @@ jobs:
   # apart from a real failure: until the store grants optical-write and the
   # dbus slot, uploads wait for review, which warns instead of failing.
   publish:
-    needs: [secrets, build, smoke, review, remote-build-arm64]
+    needs: [secrets, store-login, build, smoke, review, remote-build-arm64]
     if: >-
       always() && needs.smoke.result == 'success' && needs.review.result == 'success' &&
+      needs.store-login.result == 'success' &&
       needs.secrets.outputs.store == 'true' && github.event_name == 'push' &&
       github.ref_type == 'tag'
     runs-on: ubuntu-24.04
@@ -379,10 +401,18 @@ jobs:
           rc=0
           for f in snap-package/freemkv-*.snap; do
             name=$(basename "$f")
-            code=0
-            snapcraft upload --verbosity=verbose --release="$CHANNEL" "$f" > upload.log 2>&1 || code=$?
-            cat upload.log
-            case "$(python3 src/packaging/snap/store_checks.py upload "$code" "$CHANNEL" upload.log)" in
+            # A connection the store dropped before reporting any status is
+            # retried; anything the store answered is a verdict.
+            for attempt in 1 2 3; do
+              code=0
+              snapcraft upload --verbosity=verbose --release="$CHANNEL" "$f" > upload.log 2>&1 || code=$?
+              cat upload.log
+              verdict=$(python3 src/packaging/snap/store_checks.py upload "$code" "$CHANNEL" upload.log)
+              [ "$verdict" = transient ] && [ "$attempt" -lt 3 ] || break
+              echo "::warning::store dropped the upload of $name (attempt $attempt); retrying"
+              sleep $((attempt * 60))
+            done
+            case "$verdict" in
               released)
                 echo "- \`$name\` released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY" ;;
               held)
