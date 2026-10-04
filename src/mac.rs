@@ -649,15 +649,30 @@ impl TitlesSource {
                         Retained::cast_unchecked(NSNumber::new_usize(root));
                     ov.expandItem_expandChildren(Some(&obj), true);
                 }
+                collapse_closed_groups(ov, rows);
                 // `reloadData` keeps the old scroll offset: start at the top, then scroll only as
-                // far as the core's chosen row needs (all rows are expanded, so display row ==
-                // flat index). AppKit keeps a row clear of the header itself.
+                // far as the core's chosen row needs. AppKit keeps a row clear of the header itself.
                 if let Some(at) = crate::ui::first_visible_row(rows) {
+                    let obj: Retained<AnyObject> =
+                        Retained::cast_unchecked(NSNumber::new_usize(at));
                     ov.scrollRowToVisible(0);
-                    ov.scrollRowToVisible(at as isize);
+                    ov.scrollRowToVisible(ov.rowForItem(Some(&obj)));
                 }
             }
         }
+    }
+}
+
+/// Close the groups the core starts closed ([`crate::ui::starts_collapsed`]) after the
+/// whole tree has been expanded.
+unsafe fn collapse_closed_groups(ov: &NSOutlineView, rows: &[crate::ui::Row]) {
+    for (i, _) in rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| crate::ui::starts_collapsed(r))
+    {
+        let obj: Retained<AnyObject> = unsafe { Retained::cast_unchecked(NSNumber::new_usize(i)) };
+        unsafe { ov.collapseItem(Some(&obj)) };
     }
 }
 
@@ -2922,6 +2937,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             let obj: Retained<AnyObject> = Retained::cast_unchecked(item);
             ov.expandItem_expandChildren(Some(&obj), true);
         }
+        collapse_closed_groups(&ov, &src.ivars().rows.borrow());
         ov.reloadData();
     }
     mask(

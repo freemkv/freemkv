@@ -404,6 +404,7 @@ impl Tree {
         let mut arena: Vec<Node> = Vec::new();
         let mut roots = Vec::new();
         let mut last_title: Option<usize> = None;
+        let mut last_group: Option<usize> = None;
         let mut skip_title = false;
         for r in &sc.rows {
             match r.depth {
@@ -448,7 +449,13 @@ impl Tree {
                     }
                     last_title = Some(idx);
                 }
+                3.. => {
+                    if let Some(g) = last_group {
+                        arena[g].children.push(idx);
+                    }
+                }
                 _ => {
+                    last_group = Some(idx);
                     if let Some(t) = last_title {
                         // A mirror row names its base by PID; the base is a sibling
                         // declared before it (libfreemkv places the extension after it).
@@ -1684,7 +1691,7 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
 /// and empty on every other row. Size is [`fmt_title_size`] of the row's
 /// `size_bytes`, empty where the scan reports none.
 pub fn title_cells(r: &crate::engine::Row) -> (String, String) {
-    let length = if r.depth == 1 {
+    let length = if r.depth == 1 || r.type_s == "Chapter" {
         fmt_hms(r.duration_secs.max(0.0) as u64)
     } else {
         String::new()
@@ -1775,7 +1782,7 @@ mod title_cell_tests {
 /// A row that arrives before its parent has no parent to hang from. It becomes a root rather
 /// than being dropped — a row the core decided to show must always be reachable.
 pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
-    let (mut last_root, mut last_title) = (None, None);
+    let (mut last_root, mut last_title, mut last_group) = (None, None, None);
     let mut out = Vec::with_capacity(rows.len());
     for (i, r) in rows.iter().enumerate() {
         match r.depth {
@@ -1786,12 +1793,23 @@ pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
             }
             1 => {
                 last_title = Some(i);
+                last_group = None;
                 out.push(last_root);
             }
-            _ => out.push(last_title),
+            2 => {
+                last_group = Some(i);
+                out.push(last_title);
+            }
+            _ => out.push(last_group.or(last_title)),
         }
     }
     out
+}
+
+/// Whether a row's group starts closed: a title's chapter list is there to look at on demand,
+/// not to push the streams of the next title off the screen.
+pub fn starts_collapsed(r: &Row) -> bool {
+    r.type_s == "Chapters"
 }
 
 /// Which row a freshly-rebuilt tree should leave sitting at the top.
@@ -3584,6 +3602,8 @@ impl App {
                 0
             } else if n.type_s == "Title" {
                 1
+            } else if n.type_s == "Chapter" {
+                3
             } else {
                 2
             };
@@ -4105,6 +4125,52 @@ mod tests {
             size_bytes: None,
             role: None,
         }
+    }
+
+    #[test]
+    fn a_chapter_hangs_off_its_titles_chapter_list_which_starts_closed() {
+        let row = |depth: u8, type_s: &str| Row {
+            index: 0,
+            depth,
+            type_s: type_s.into(),
+            desc: String::new(),
+            length: String::new(),
+            size: String::new(),
+            lang: String::new(),
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
+            check: None,
+            check_enabled: false,
+        };
+        let rows = [
+            row(0, "Disc"),
+            row(1, "Title"),
+            row(2, "Video"),
+            row(2, "Chapters"),
+            row(3, "Chapter"),
+            row(3, "Chapter"),
+            row(1, "Title"),
+            row(2, "Audio"),
+        ];
+        assert_eq!(
+            row_parents(&rows),
+            [
+                None,
+                Some(0),
+                Some(1),
+                Some(1),
+                Some(3),
+                Some(3),
+                Some(0),
+                Some(6)
+            ]
+        );
+        let closed: Vec<bool> = rows.iter().map(starts_collapsed).collect();
+        assert_eq!(
+            closed,
+            [false, false, false, true, false, false, false, false]
+        );
     }
 
     // A disc like Kung Fu's: English and German play-alls, and each episode in both languages.

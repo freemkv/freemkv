@@ -342,6 +342,51 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
         .collect()
 }
 
+// A title's chapters under one collapsed "Chapters" row, view only: each one's length, and its
+// name only where the disc carries one. A bare ordinal ("1", "2", what a Blu-ray gives) is no name.
+fn chapter_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
+    if t.chapters.len() < 2 {
+        return Vec::new();
+    }
+    let row = |type_s: &str, item: String, notes: String, depth, duration_secs| Row {
+        role: None,
+        type_s: type_s.into(),
+        item,
+        desc: notes.clone(),
+        format: String::new(),
+        notes,
+        depth,
+        checkable: false,
+        title: ti,
+        info: String::new(),
+        pid: None,
+        duration_secs,
+        lang: String::new(),
+        forced: false,
+        mirrors: None,
+        size_bytes: None,
+    };
+    let group = crate::strings::get_or("gui.item.chapter_list", "Chapters");
+    let mut rows = vec![row("Chapters", group, String::new(), 2, 0.0)];
+    for (i, c) in t.chapters.iter().enumerate() {
+        let end = t
+            .chapters
+            .get(i + 1)
+            .map_or(t.duration_secs, |n| n.time_secs);
+        let name = c.name.trim();
+        let notes = if name != (i + 1).to_string() {
+            name.to_string()
+        } else {
+            String::new()
+        };
+        let item = crate::strings::get_or("gui.item.chapter_n", "Chapter {n}")
+            .replace("{n}", &(i + 1).to_string());
+        let length = end.round() - c.time_secs.round();
+        rows.push(row("Chapter", item, notes, 3, length.max(0.0)));
+    }
+    rows
+}
+
 // The detail text of a stream row.
 fn stream_info(st: &libfreemkv::Stream) -> String {
     match st {
@@ -699,6 +744,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
             size_bytes: Some(t.size_bytes),
         });
         rows.extend(stream_rows(t, ti));
+        rows.extend(chapter_rows(t, ti));
     }
 
     let details = disc_details(disc, &summary);
@@ -6494,6 +6540,49 @@ mod display_sanitisation_tests {
         );
         // A DVD's made-up playlist name is never shown.
         assert_eq!(super::title_notes(&t, false, None), "12 chapters");
+    }
+
+    #[test]
+    fn chapter_rows_name_only_what_the_disc_names_and_time_each_chapter() {
+        let ch = |time_secs: f64, name: &str| libfreemkv::disc::Chapter {
+            time_secs,
+            name: name.into(),
+        };
+        let mut t = libfreemkv::DiscTitle::empty();
+        t.duration_secs = 300.0;
+        t.chapters = vec![ch(0.0, "eps1_1"), ch(174.67, "2"), ch(264.66, "1_show")];
+        let rows = super::chapter_rows(&t, 4);
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.type_s.as_str(),
+                    r.depth,
+                    r.item.as_str(),
+                    r.notes.as_str(),
+                    r.duration_secs,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Chapters", 2, "Chapters", "", 0.0),
+                ("Chapter", 3, "Chapter 1", "eps1_1", 175.0),
+                // A bare ordinal (a Blu-ray's, or a DVD without text data) is no name.
+                ("Chapter", 3, "Chapter 2", "", 90.0),
+                ("Chapter", 3, "Chapter 3", "1_show", 35.0),
+            ]
+        );
+        assert!(
+            rows.iter()
+                .all(|r| !r.checkable && r.pid.is_none() && r.title == 4)
+        );
+        t.chapters.truncate(1);
+        assert!(
+            super::chapter_rows(&t, 0).is_empty(),
+            "one chapter is no list"
+        );
     }
 
     /// The payload has to be able to fail the assertion — a filter that

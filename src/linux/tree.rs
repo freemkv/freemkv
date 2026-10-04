@@ -203,7 +203,7 @@ impl TitleTree {
         };
         let root = store(&roots);
         let kids = self.kids.clone();
-        let model = gtk::TreeListModel::new(root, false, true, move |item| {
+        let model = gtk::TreeListModel::new(root, false, false, move |item| {
             let idx = *item
                 .downcast_ref::<glib::BoxedAnyObject>()?
                 .borrow::<usize>();
@@ -212,13 +212,36 @@ impl TitleTree {
             Some(store(ch).upcast())
         });
         self.selection.set_model(Some(&model));
+        // Open every row but the groups the core starts closed (`ui::starts_collapsed`).
+        // Expanding inserts a row's children right after it, so one forward pass reaches all.
+        let shown = |pos: u32| {
+            let tlr = model.row(pos)?;
+            let idx = *tlr
+                .item()?
+                .downcast_ref::<glib::BoxedAnyObject>()?
+                .borrow::<usize>();
+            Some((tlr, idx))
+        };
+        let mut pos = 0;
+        while pos < model.n_items() {
+            if let Some((tlr, idx)) = shown(pos) {
+                tlr.set_expanded(
+                    rows.get(idx)
+                        .is_some_and(|r| !crate::ui::starts_collapsed(r)),
+                );
+            }
+            pos += 1;
+        }
 
-        // Start at the top, then scroll only as far as the core's chosen row needs. All rows
-        // are expanded, so display position == flat index; GTK 4.10 has no `scroll_to`, and
-        // rows are uniform, so the adjustment is exact enough.
-        let at = crate::ui::first_visible_row(rows).unwrap_or(0);
+        // Start at the top, then scroll only as far as the core's chosen row needs. GTK 4.10
+        // has no `scroll_to`, and rows are uniform, so the adjustment is exact enough.
+        let first = crate::ui::first_visible_row(rows).unwrap_or(0);
+        let n = model.n_items();
+        let at = (0..n)
+            .find(|&p| shown(p).is_some_and(|(_, i)| i == first))
+            .unwrap_or(0) as usize;
         self.widget.vadjustment().set_value(0.0);
-        self.scroll_to.set((at > 0).then_some((at, rows.len())));
+        self.scroll_to.set((at > 0).then_some((at, n as usize)));
         let pending = self.scroll_to.clone();
         // `upper` is only right once the new model is laid out: wait for the
         // next frame's after-paint, then read the latest pending target.
