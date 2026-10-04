@@ -6472,6 +6472,73 @@ mod display_sanitisation_tests {
         assert!(bad.is_empty(), "unsanitised painted cells: {bad:?}");
     }
 
+    /// A scanned disc's chapters as the shells get them: under each shown title's closed
+    /// Chapters row, at depth 3, timed, and gone with a title too short to show.
+    #[test]
+    fn chapters_hang_under_their_titles_in_the_built_tree() {
+        let mut disc = benign_disc();
+        let mut short = disc.titles[0].clone();
+        short.duration_secs = 10.0;
+        let mut long = disc.titles[0].clone();
+        long.duration_secs = 120.0;
+        long.chapters[1].time_secs = 45.0;
+        disc.titles.extend([short, long]);
+        let sc = scanned_from_disc(&disc, "none".into());
+        let mut app = crate::ui::App::new();
+        app.tree =
+            crate::ui::Tree::from_scan(&sc, "All titles", 30.0, &crate::ui::LangPrefs::default());
+
+        let arena = &app.tree.arena;
+        let parent = |i: usize| arena.iter().position(|n| n.children.contains(&i));
+        let chapters: Vec<usize> = (0..arena.len())
+            .filter(|&i| arena[i].type_s == "Chapter")
+            .collect();
+        assert_eq!(chapters.len(), 4, "two shown titles, two chapters each");
+        for &c in &chapters {
+            let group = parent(c).expect("a chapter is attached");
+            assert_eq!(arena[group].type_s, "Chapters");
+            let title = parent(group).expect("a chapter list is attached");
+            assert_eq!(arena[title].type_s, "Title");
+            assert_eq!(arena[c].title_idx, arena[title].title_idx);
+        }
+
+        let rows = app.view().title_rows;
+        let titles: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.type_s == "Title")
+            .map(|r| r.item.as_str())
+            .collect();
+        assert_eq!(titles, ["Title 1", "Title 3"], "the short title is hidden");
+        let shown: Vec<(u8, &str, bool, bool)> = rows
+            .iter()
+            .filter(|r| r.type_s.starts_with("Chapter"))
+            .map(|r| {
+                let closed = crate::ui::starts_collapsed(r);
+                (r.depth, r.length.as_str(), closed, r.check.is_none())
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (2, "", true, true),
+                (3, "0:30", false, true),
+                (3, "0:30", false, true),
+                (2, "", true, true),
+                (3, "0:45", false, true),
+                (3, "1:15", false, true),
+            ]
+        );
+        let parents = crate::ui::row_parents(&rows);
+        for (i, r) in rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.type_s == "Chapter")
+        {
+            let group = parents[i].expect("a chapter row has a parent");
+            assert_eq!(rows[group].type_s, "Chapters", "row {i}: {r:?}");
+        }
+    }
+
     /// The stream rows on their own, so a regression in `stream_rows` cannot
     /// hide behind a passing disc-level assertion.
     #[test]
