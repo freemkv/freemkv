@@ -424,9 +424,11 @@ impl Tree {
             }
             let idx = arena.len();
             let (length, size) = title_cells(r);
+            // Every painted cell passes one sanitizer: disc bytes never reorder, hide or forge text.
+            let cell = crate::strings::sanitize_display;
             arena.push(Node {
                 type_s: r.type_s.clone(),
-                desc: r.desc.clone(),
+                desc: cell(&r.desc),
                 checkable: r.checkable,
                 checked: RefCell::new(r.depth == 1 && selected.contains(&r.title)),
                 children: vec![],
@@ -437,9 +439,9 @@ impl Tree {
                 length,
                 size,
                 lang: stream_language(&r.lang),
-                item: r.item.clone(),
-                format: r.format.clone(),
-                notes: r.notes.clone(),
+                item: cell(&r.item),
+                format: cell(&r.format),
+                notes: cell(&r.notes),
             });
             match r.depth {
                 0 => roots.push(idx),
@@ -874,7 +876,7 @@ pub fn stream_language(tag: &str) -> String {
     match canonical_lang_code(tag) {
         Some(c) if c != "und" => c,
         Some(_) => String::new(),
-        None => tag.chars().filter(|c| !c.is_control()).collect(),
+        None => crate::strings::sanitize_display(tag),
     }
 }
 

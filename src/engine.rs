@@ -373,9 +373,9 @@ fn chapter_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
             .chapters
             .get(i + 1)
             .map_or(t.duration_secs, |n| n.time_secs);
-        let name = c.name.trim();
+        let name = sanitize_display(c.name.trim());
         let notes = if name != (i + 1).to_string() {
-            name.to_string()
+            name
         } else {
             String::new()
         };
@@ -6364,7 +6364,12 @@ mod display_sanitisation_tests {
                 size_bytes: 1 << 30,
                 clips: Vec::new(),
                 streams: vec![video, audio, subtitle],
-                chapters: Vec::new(),
+                chapters: [0.0, 30.0]
+                    .map(|time_secs| libfreemkv::disc::Chapter {
+                        time_secs,
+                        name: HOSTILE.to_string(),
+                    })
+                    .to_vec(),
                 extents: Vec::new(),
                 content_format: ContentFormat::BdTs,
                 codec_privates: Vec::new(),
@@ -6397,6 +6402,9 @@ mod display_sanitisation_tests {
                     Stream::Subtitle(s) => s.language = BENIGN.to_string(),
                 }
             }
+            for c in &mut t.chapters {
+                c.name = BENIGN.to_string();
+            }
         }
         d
     }
@@ -6404,7 +6412,7 @@ mod display_sanitisation_tests {
     fn offenders(rows: &[Row]) -> Vec<String> {
         let mut bad: Vec<String> = Vec::new();
         for r in rows {
-            for s in [&r.desc, &r.type_s] {
+            for s in [&r.desc, &r.type_s, &r.item, &r.format, &r.notes] {
                 if s.chars().any(is_unsafe_display_char) {
                     bad.push(s.clone());
                 }
@@ -6427,6 +6435,41 @@ mod display_sanitisation_tests {
         let scanned = scanned_from_disc(&disc, "none".into());
         let bad = offenders(&scanned.rows);
         assert!(bad.is_empty(), "unsanitised row text: {bad:?}");
+    }
+
+    /// Every cell the shells paint, chapter rows included, as the core hands them over.
+    #[test]
+    fn no_painted_cell_carries_an_unsafe_display_char() {
+        let scanned = scanned_from_disc(&hostile_disc(), "none".into());
+        assert!(scanned.rows.iter().any(|r| r.type_s == "Chapter"));
+        let mut app = crate::ui::App::new();
+        app.tree = crate::ui::Tree::from_scan(
+            &scanned,
+            "All titles",
+            0.0,
+            &crate::ui::LangPrefs::default(),
+        );
+        let rows = app.view().title_rows;
+        assert!(
+            rows.iter().any(|r| r.type_s == "Chapter"),
+            "chapters painted"
+        );
+        assert!(
+            rows.iter().any(|r| !r.lang.is_empty()),
+            "a Language cell painted"
+        );
+        let mut bad = Vec::new();
+        for r in &rows {
+            let cells = [
+                &r.type_s, &r.desc, &r.length, &r.size, &r.lang, &r.item, &r.format, &r.notes,
+            ];
+            bad.extend(
+                cells
+                    .into_iter()
+                    .filter(|s| s.chars().any(is_unsafe_display_char)),
+            );
+        }
+        assert!(bad.is_empty(), "unsanitised painted cells: {bad:?}");
     }
 
     /// The stream rows on their own, so a regression in `stream_rows` cannot
