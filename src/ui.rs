@@ -4325,23 +4325,203 @@ mod tests {
         assert_eq!(ticked("Episodes", &langs(&["jpn"])), vec![2, 3, 4, 5]);
     }
 
+    // `episode_disc` with, on every title, a regular French subtitle (0x40+) and a forced
+    // English one (0x60+), so the subtitle choices have both kinds to keep or drop.
+    fn pick_disc() -> Scanned {
+        let mut sc = episode_disc();
+        let mut rows = Vec::new();
+        for r in sc.rows.drain(..) {
+            let ti = r.title;
+            let last_of_title = r.type_s == "Subtitles";
+            rows.push(r);
+            if last_of_title {
+                for (pid, lang, forced) in [(0x40, "fra", false), (0x60, "eng", true)] {
+                    let mut s = row("Subtitles", pid + ti as u16, lang, forced);
+                    s.title = ti;
+                    rows.push(s);
+                }
+            }
+        }
+        sc.rows = rows;
+        sc
+    }
+
+    // The stream PIDs ticked under title `ti`.
+    fn ticked_pids(tree: &Tree, ti: usize) -> Vec<u16> {
+        tree.arena
+            .iter()
+            .filter(|n| n.title_idx == ti && *n.checked.borrow())
+            .filter_map(|n| n.pid)
+            .collect()
+    }
+
     #[test]
     fn subtitles_none_and_forced_only_untick_regular_subtitles() {
-        let sc = episode_disc();
-        let none = LangPrefs {
-            no_subtitles: true,
-            no_forced: true,
-            ..Default::default()
+        let sc = pick_disc();
+        let pids = |no_subtitles, no_forced| {
+            let p = LangPrefs {
+                no_subtitles,
+                no_forced,
+                ..Default::default()
+            };
+            ticked_pids(&Tree::from_scan(&sc, "Main film only", 0.0, &p), 0)
         };
-        let tree = Tree::from_scan(&sc, "Main film only", 0.0, &none);
-        let sub = tree
-            .arena
+        // Audio 0x80, regular 0x20 and 0x40, forced 0x60.
+        assert_eq!(pids(false, false), vec![0x80, 0x20, 0x40, 0x60], "All");
+        assert_eq!(pids(true, true), vec![0x80], "None");
+        assert_eq!(pids(true, false), vec![0x80, 0x60], "Forced only");
+    }
+
+    // An App with `sc` open in the selection bar, as a finished scan leaves it.
+    fn picking(sc: Scanned) -> App {
+        let mut app = App::new();
+        app.pick_mode = "Main film only".into();
+        app.pick_scan = Some(sc);
+        app.repick();
+        app
+    }
+
+    #[test]
+    fn the_subtitle_choices_step_through_their_states() {
+        let mut app = picking(pick_disc());
+        let pick = |app: &App| app.view().pick.expect("a source is open");
+        let flags = |app: &App| {
+            let p = &app.pick_prefs;
+            (p.no_subtitles, p.no_forced)
+        };
+        let v = pick(&app);
+        assert!(v.subs_all && !v.subs_none && !v.subs_forced);
+        assert_eq!(v.subs_summary, "All");
+        assert_eq!(
+            v.subtitles,
+            vec![("eng".into(), false), ("fra".into(), false)]
+        );
+
+        app.pick_subtitles(SubPick::None);
+        assert_eq!(flags(&app), (true, true));
+        let v = pick(&app);
+        assert!(v.subs_none && !v.subs_all && !v.subs_forced);
+        assert_eq!(v.subs_summary, "None");
+        assert_eq!(ticked_pids(&app.tree, 0), vec![0x80]);
+
+        app.pick_subtitles(SubPick::Forced);
+        assert_eq!(flags(&app), (true, false));
+        let v = pick(&app);
+        assert!(v.subs_forced && !v.subs_none && !v.subs_all);
+        assert_eq!(v.subs_summary, "Forced only");
+        assert_eq!(ticked_pids(&app.tree, 0), vec![0x80, 0x60]);
+
+        // A language from Forced only starts a fresh list; it keeps that language's forced
+        // subtitles too.
+        app.pick_subtitles(SubPick::Lang("fra".into()));
+        assert_eq!(flags(&app), (false, false));
+        assert_eq!(app.pick_prefs.subtitles, vec!["fra".to_string()]);
+        assert_eq!(app.pick_prefs.forced, app.pick_prefs.subtitles);
+        let v = pick(&app);
+        assert!(!v.subs_all && !v.subs_none && !v.subs_forced);
+        assert_eq!(v.subs_summary, "fra");
+        assert_eq!(
+            v.subtitles,
+            vec![("eng".into(), false), ("fra".into(), true)]
+        );
+        assert_eq!(ticked_pids(&app.tree, 0), vec![0x80, 0x40]);
+
+        app.pick_subtitles(SubPick::Lang("eng".into()));
+        assert_eq!(pick(&app).subs_summary, "eng, fra");
+        assert_eq!(ticked_pids(&app.tree, 0), vec![0x80, 0x20, 0x40, 0x60]);
+
+        // Untoggling the last language leaves None, not All.
+        app.pick_subtitles(SubPick::Lang("eng".into()));
+        app.pick_subtitles(SubPick::Lang("fra".into()));
+        assert_eq!(flags(&app), (true, true));
+        assert!(pick(&app).subs_none);
+
+        app.pick_subtitles(SubPick::All);
+        assert_eq!(flags(&app), (false, false));
+        assert!(app.pick_prefs.subtitles.is_empty() && app.pick_prefs.forced.is_empty());
+        assert!(pick(&app).subs_all);
+    }
+
+    #[test]
+    fn the_audio_choice_toggles_languages_and_all_clears_them() {
+        let mut app = picking(pick_disc());
+        app.pick_titles("Episodes");
+        let v = app.view().pick.unwrap();
+        assert!(v.audio_all);
+        assert_eq!(v.audio_summary, "All");
+        assert_eq!(v.audio, vec![("eng".into(), false), ("deu".into(), false)]);
+        assert_eq!(app.tree.ticked_titles(), vec![2, 3, 4, 5]);
+
+        app.pick_audio(Some("deu"));
+        let v = app.view().pick.unwrap();
+        assert!(!v.audio_all);
+        assert_eq!(v.audio_summary, "deu");
+        assert_eq!(v.audio, vec![("eng".into(), false), ("deu".into(), true)]);
+        assert_eq!(app.tree.ticked_titles(), vec![3, 5]);
+
+        app.pick_audio(Some("eng"));
+        assert_eq!(app.view().pick.unwrap().audio_summary, "eng, deu");
+        app.pick_audio(None);
+        assert!(app.pick_prefs.audio.is_empty());
+        assert!(app.view().pick.unwrap().audio_all);
+    }
+
+    #[test]
+    fn every_menu_entry_maps_back_to_its_own_choice() {
+        let app = picking(pick_disc());
+        let v = app.view().pick.unwrap();
+        let subs: Vec<_> = v
+            .subs_menu()
             .iter()
-            .position(|n| n.type_s == "Subtitles")
-            .unwrap();
-        assert!(!*tree.arena[sub].checked.borrow());
-        let audio = tree.arena.iter().position(|n| n.type_s == "Audio").unwrap();
-        assert!(*tree.arena[audio].checked.borrow());
+            .map(|e| (v.subs_choice(e.tag), e.separator_before))
+            .collect();
+        assert_eq!(
+            subs,
+            vec![
+                (Some(SubPick::All), false),
+                (Some(SubPick::None), false),
+                (Some(SubPick::Forced), false),
+                (Some(SubPick::Lang("eng".into())), true),
+                (Some(SubPick::Lang("fra".into())), false),
+            ]
+        );
+        let audio: Vec<_> = v
+            .audio_menu()
+            .iter()
+            .map(|e| v.audio_choice(e.tag))
+            .collect();
+        assert_eq!(
+            audio,
+            vec![
+                Some(None),
+                Some(Some("eng".into())),
+                Some(Some("deu".into()))
+            ]
+        );
+        // A tag past the languages, or none at all, means nothing.
+        for tag in [0, LANG_TAG + 5, -1] {
+            assert_eq!(v.subs_choice(tag), None, "{tag}");
+            assert_eq!(v.audio_choice(tag), None, "{tag}");
+        }
+    }
+
+    #[test]
+    fn the_title_choices_offer_episodes_only_on_a_disc_that_proves_them() {
+        let mut app = picking(pick_disc());
+        let v = app.view().pick.unwrap();
+        let modes: Vec<_> = v.titles.iter().map(|t| t.0).collect();
+        assert_eq!(modes, PICK_TITLES.to_vec());
+        let at = modes.iter().position(|m| *m == "Episodes").unwrap();
+        assert_eq!(v.title_choice(at), Some("Episodes"));
+        assert_eq!(v.title_choice(modes.len()), None);
+        app.pick_titles("Episodes");
+        let v = app.view().pick.unwrap();
+        assert_eq!((v.title.as_str(), v.title_index()), ("Episodes", at));
+
+        let plain = picking(probe_scan());
+        let v = plain.view().pick.unwrap();
+        assert!(v.titles.iter().all(|t| t.0 != "Episodes"));
+        assert_eq!(v.titles.len(), PICK_TITLES.len() - 1);
     }
 
     // A forced-subtitle preference that matches nothing must keep NOTHING — unlike audio, a
