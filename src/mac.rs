@@ -2870,16 +2870,14 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     }
     // The columns are the core's; the flexible one takes the tree's spare width.
     let columns = crate::ui::tree_columns();
-    let fixed: f64 = columns.iter().filter(|c| !c.flex).map(|c| c.width).sum();
+    let widths: Vec<f64> = columns.iter().map(|c| c.width).collect();
+    let fitted = crate::ui::fit_column_widths(&columns, &widths, tree_w - 72.0 - 24.0);
     let cols: Vec<Retained<NSTableColumn>> = columns
         .iter()
-        .map(|c| {
-            let w = if c.flex {
-                (tree_w - 72.0 - fixed - 24.0).max(c.width)
-            } else {
-                c.width
-            };
+        .zip(fitted)
+        .map(|(c, w)| {
             let col = mk_col(c.id, &c.title, w);
+            col.setMinWidth(c.min);
             if c.numeric {
                 col.headerCell().setAlignment(NSTextAlignment::Right);
             }

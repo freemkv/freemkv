@@ -3655,28 +3655,33 @@ pub struct Column {
     pub numeric: bool,
     /// Takes up any change in the tree's width; the others keep theirs.
     pub flex: bool,
+    /// The narrowest it may be squeezed to when the tree is short of width.
+    pub min: f64,
 }
 
 /// The title tree's columns, the same on every shell.
 pub fn tree_columns() -> Vec<Column> {
-    let col = |id, title: String, width, numeric, flex| Column {
+    let col = |id, title: String, width, min, numeric, flex| Column {
         id,
         title,
         width,
         numeric,
         flex,
+        min,
     };
     vec![
         col(
             "item",
             crate::strings::get_or("gui.col.item", "Item"),
             190.0,
+            110.0,
             false,
             false,
         ),
         col(
             "lang",
             crate::strings::get_or("gui.col.lang", "Language"),
+            76.0,
             76.0,
             false,
             false,
@@ -3685,6 +3690,7 @@ pub fn tree_columns() -> Vec<Column> {
             "format",
             crate::strings::get("disc.format"),
             260.0,
+            150.0,
             false,
             false,
         ),
@@ -3692,12 +3698,14 @@ pub fn tree_columns() -> Vec<Column> {
             "notes",
             crate::strings::get_or("gui.col.notes", "Notes"),
             240.0,
+            120.0,
             false,
             true,
         ),
         col(
             "length",
             crate::strings::get_or("gui.col.duration", "Length"),
+            66.0,
             66.0,
             true,
             false,
@@ -3706,10 +3714,40 @@ pub fn tree_columns() -> Vec<Column> {
             "size",
             crate::strings::get_or("gui.col.size", "Size"),
             66.0,
+            66.0,
             true,
             false,
         ),
     ]
+}
+
+/// Fit the columns into `avail` points, each starting at its width in `widths`: the flexible
+/// one takes what the others leave and, short of room, the text columns give way together, in
+/// proportion, down to their minimums. Lengths and sizes have no give, so they always read.
+pub fn fit_column_widths(cols: &[Column], widths: &[f64], avail: f64) -> Vec<f64> {
+    let mut w: Vec<f64> = cols
+        .iter()
+        .zip(widths)
+        .map(|(c, &v)| v.max(c.min))
+        .collect();
+    if let Some(f) = cols.iter().position(|c| c.flex) {
+        let others: f64 = w
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != f)
+            .map(|(_, v)| v)
+            .sum();
+        w[f] = (avail - others).max(cols[f].min);
+    }
+    let over = w.iter().sum::<f64>() - avail;
+    let give: f64 = cols.iter().zip(&w).map(|(c, v)| v - c.min).sum();
+    if over > 0.0 && give > 0.0 {
+        let k = (over / give).min(1.0);
+        for (c, v) in cols.iter().zip(w.iter_mut()) {
+            *v -= (*v - c.min) * k;
+        }
+    }
+    w
 }
 
 impl Row {

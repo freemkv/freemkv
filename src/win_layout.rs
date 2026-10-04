@@ -533,30 +533,30 @@ pub struct TreeColumns {
     pub cols: Vec<Span>,
 }
 
-/// Lay the columns out across a client `client_w` wide: the tick column first,
-/// then each core column at its width (`widths`, at the 96-DPI baseline), the
-/// `flex` one taking whatever the others leave, never below [`COL_MIN_W`].
+/// Lay the columns out across a client `client_w` wide: the tick column first, then each core
+/// column at its width (`widths`, at the 96-DPI baseline), fitted by the core's
+/// [`crate::ui::fit_column_widths`]: the `flex` one takes what the others leave and, short of
+/// room, the text columns give way while lengths and sizes keep theirs.
 #[must_use]
 pub fn tree_columns(dpi: u32, client_w: i32, widths: &[i32], flex: usize) -> TreeColumns {
     let s = Scale::new(dpi);
-    let min = s.px(COL_MIN_W);
     let tick = s.px(COL_TICK_W);
-    let mut w: Vec<i32> = widths.iter().map(|&v| s.px(v).max(min)).collect();
-    let fixed: i32 = w
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != flex)
-        .map(|(_, v)| v)
-        .sum();
-    if let Some(f) = w.get_mut(flex) {
-        *f = (client_w - tick - fixed).max(min);
+    let mut cols = crate::ui::tree_columns();
+    for (i, c) in cols.iter_mut().enumerate() {
+        c.flex = i == flex;
+        c.min = f64::from(s.px((c.min.round() as i32).max(COL_MIN_W)));
     }
+    let base: Vec<f64> = widths.iter().map(|&v| f64::from(s.px(v))).collect();
+    let fitted = crate::ui::fit_column_widths(&cols, &base, f64::from(client_w - tick));
     let mut x = tick;
-    let cols = w
+    let cols = fitted
         .into_iter()
         .map(|w| {
-            let span = Span { x, w };
-            x += w;
+            let span = Span {
+                x,
+                w: w.floor() as i32,
+            };
+            x += span.w;
             span
         })
         .collect();
@@ -599,8 +599,13 @@ pub fn drag_column(dpi: u32, cols: &TreeColumns, flex: usize, item: usize, new_w
             w[j + 1] -= delta;
         }
     }
-    let min = s.px(COL_MIN_W);
-    w.into_iter().map(|v| s.unpx(v.max(min))).collect()
+    let mins = crate::ui::tree_columns()
+        .into_iter()
+        .map(|c| s.px((c.min.round() as i32).max(COL_MIN_W)));
+    w.into_iter()
+        .zip(mins)
+        .map(|(v, min)| s.unpx(v.max(min)))
+        .collect()
 }
 
 /// Whether a locale tag (`"ar"`, `"he-IL"`, `"fa_IR"`) is written right to
@@ -1257,10 +1262,18 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_tree_keeps_the_flexible_column_at_its_minimum() {
-        let c = tree_columns(96, 300, &WIDTHS, FLEX);
-        assert_eq!(c.cols[FLEX].w, COL_MIN_W);
-        assert_eq!(c.cols[0].w, 190, "the fixed columns keep their widths");
+    fn a_narrow_tree_squeezes_the_text_columns_and_never_the_numbers() {
+        let c = tree_columns(96, 800, &WIDTHS, FLEX);
+        assert_eq!(
+            (c.cols[4].w, c.cols[5].w),
+            (66, 66),
+            "Length and Size keep theirs"
+        );
+        assert!(c.cols[0].w < 190 && c.cols[FLEX].w >= 120, "{:?}", c.cols);
+        let last = c.cols[5];
+        assert!(last.x + last.w <= 800, "Size still ends inside the tree");
+        let crushed = tree_columns(96, 300, &WIDTHS, FLEX);
+        assert_eq!(crushed.cols[FLEX].w, 120, "no narrower than its minimum");
     }
 
     #[test]
@@ -1280,18 +1293,18 @@ mod tests {
         let w = drag_column(96, &c, FLEX, 1, 210);
         assert_eq!(w[0], 210);
         assert_eq!(tree_columns(96, 1140, &w, FLEX).cols[FLEX].w, 378);
-        // Notes' edge 10 px right: Length shrinks by the same, Size stays put.
-        let w = drag_column(96, &c, FLEX, 4, 408);
-        assert_eq!((w[4], w[5]), (56, 66));
+        // Notes' edge 10 px left: Length grows by the same, Size stays put.
+        let w = drag_column(96, &c, FLEX, 4, 388);
+        assert_eq!((w[4], w[5]), (76, 66));
         let laid = tree_columns(96, 1140, &w, FLEX);
-        assert_eq!(laid.cols[4].x, 1018);
+        assert_eq!(laid.cols[4].x, 998);
         assert_eq!(laid.cols[5].x, 1074);
         // The tick column and the last edge are pinned.
         let same: Vec<i32> = c.cols.iter().map(|s| s.w).collect();
         assert_eq!(drag_column(96, &c, FLEX, 0, 300), same);
         assert_eq!(drag_column(96, &c, FLEX, 6, 300), same);
-        // Never under the minimum.
-        assert_eq!(drag_column(96, &c, FLEX, 2, 5)[1], COL_MIN_W);
+        // Never under the column's minimum.
+        assert_eq!(drag_column(96, &c, FLEX, 2, 5)[1], 76);
     }
 
     #[test]
