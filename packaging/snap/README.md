@@ -16,7 +16,7 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
   and build as `stable`.
 - The GitHub release asset is attached whether or not the store is set up.
 - On `qa` (and the tag), `store-login` checks the store credentials with
-  `snapcraft whoami`: they must allow `package_upload` and `package_release`
+  `snapcraft whoami`: they must allow `package_push` and `package_release`
   and not expire within 30 days, so the release's upload is not the first
   test of them. A connection the store drops before reporting any status is
   retried twice; anything the store answered is final.

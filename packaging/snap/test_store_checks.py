@@ -292,8 +292,8 @@ class Login(unittest.TestCase):
     NOW = datetime(2026, 10, 4, tzinfo=timezone.utc)
     WHOAMI = (
         "email: dev@example.com\nusername: freemkv\nid: abc\n"
-        "permissions: package_access, package_manage, package_metrics, package_push, "
-        "package_register, package_release, package_update, package_upload\n"
+        # What the project's credentials report.
+        "permissions: package_access, package_push, package_update, package_release\n"
         "channels: no restrictions\nexpires: 2027-03-01T00:00:00.000Z\n"
     )
 
@@ -305,7 +305,7 @@ class Login(unittest.TestCase):
         self.assertEqual(len(sc.check_login(soon, 30, self.NOW)), 1)
 
     def test_missing_permission_fails(self):
-        no_release = self.WHOAMI.replace(" package_release,", "")
+        no_release = self.WHOAMI.replace(", package_release", "")
         self.assertEqual(sc.check_login(no_release, 30, self.NOW), ["store credentials lack package_release"])
 
     def test_no_expiry_fails(self):

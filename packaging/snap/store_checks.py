@@ -57,7 +57,7 @@ TRANSIENT = re.compile(
     r"|.*(?:Max retries exceeded|Read timed out|Connection reset by peer).*"
 )
 # What the release tag's upload needs the credentials to allow.
-NEEDED_PERMISSIONS = ("package_upload", "package_release")
+NEEDED_PERMISSIONS = ("package_push", "package_release")
 
 def expected_review_exit(report):
     """snap-review's exit code for a report: 2 with errors, else 3 with warnings, else 0."""
