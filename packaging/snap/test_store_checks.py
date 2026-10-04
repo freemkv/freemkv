@@ -270,7 +270,7 @@ class UploadTransient(unittest.TestCase):
         START
         + "Uploading... (--->)\nUploading... (<---)\n"
         + "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))\n"
-        + "Full execution log: '/home/runner/.local/state/snapcraft/log/x.log'\n"
+        + "Full execution log: 'snapcraft.log'\n"
     )
 
     def test_a_dropped_connection_is_transient(self):
