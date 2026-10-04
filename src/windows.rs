@@ -2152,7 +2152,10 @@ impl Shell {
         let me = self.clone();
         self.wnd.on().wm_timer(TIMER_LAUNCH_PROBE, move || {
             let _ = me.wnd.hwnd().KillTimer(TIMER_LAUNCH_PROBE);
-            me.open_disc(false);
+            match crate::app_entry::launch_source() {
+                Some(src) => me.perform(me.app_mut(|a| a.open(src))),
+                None => me.open_disc(false),
+            }
             Ok(())
         });
 

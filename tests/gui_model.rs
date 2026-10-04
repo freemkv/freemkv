@@ -18,6 +18,10 @@ use freemkv::ui::*;
 fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> ScanRow {
     ScanRow {
         type_s: type_s.into(),
+        item: type_s.into(),
+        format: String::new(),
+        notes: String::new(),
+        role: None,
         desc: desc.into(),
         depth,
         checkable,
@@ -612,6 +616,10 @@ fn row_parents_never_drops_a_row() {
         desc: "stray".into(),
         length: String::new(),
         size: String::new(),
+        lang: String::new(),
+        item: String::new(),
+        format: String::new(),
+        notes: String::new(),
         check: Some(Check::Off),
         check_enabled: true,
     };

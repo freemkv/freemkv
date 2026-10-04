@@ -8,8 +8,18 @@ use std::sync::{Arc, Mutex};
 /// One row of the title tree, already formatted for display.
 #[derive(Debug, Clone)]
 pub struct Row {
+    /// The row's kind ("Title", "Video", "Audio", "Subtitles", …): matched on, never shown.
     pub type_s: String,
+    /// The Item cell in the active locale ("Title 3", "Audio").
+    pub item: String,
+    /// The Format cell: what the track is ("HEVC 2160p 23.976fps HDR10", "Dolby Digital 5.1").
+    pub format: String,
+    /// The Notes cell: what sets the row apart (chapters, purpose, forced, playlist).
+    pub notes: String,
+    /// Format and notes as one line, for a shell without the separate columns.
     pub desc: String,
+    /// A title row's proven role (play-all / episode); `None` where the disc proves none.
+    pub role: Option<freemkv_engine::TitleRole>,
     pub depth: u8,
     pub checkable: bool,
     /// Index of the owning title, for selection bookkeeping.
@@ -128,18 +138,16 @@ fn fmt_dur(secs: f64) -> String {
     format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
 }
 
-/// A disc title's Description cell: `"1. 00800.mpls (19 chapters)"`.
-///
-/// Numbered 1-based and named after the playlist, exactly as `freemkv info`
-/// lists them, so a title here and `-t N` on the CLI refer to the same thing.
-/// Running time and size are the row's Length and Size cells, not part of this
-/// text. `name` must already be sanitised for display.
-pub(crate) fn title_desc(index: usize, name: &str, chapters: usize) -> String {
-    let unit = if chapters == 1 { "chapter" } else { "chapters" };
-    if name.is_empty() {
-        format!("{}. ({chapters} {unit})", index + 1)
-    } else {
-        format!("{}. {name} ({chapters} {unit})", index + 1)
+/// The disc's format as people name it ("DVD", "Blu-ray", …), shared by the CLI and every GUI.
+pub fn format_name(f: &libfreemkv::DiscFormat) -> String {
+    use libfreemkv::DiscFormat as F;
+    match f {
+        F::Uhd => "4K UHD".into(),
+        F::Fmts => "4K UHD (AACS 2.1 FMTS)".into(),
+        F::BluRay => "Blu-ray".into(),
+        F::HdDvd => "HD-DVD".into(),
+        F::Dvd => "DVD".into(),
+        F::Unknown => crate::strings::get("disc.format_unknown"),
     }
 }
 
@@ -147,116 +155,158 @@ fn fmt_gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
 }
 
-/// Human label for an audio track's purpose, matching the CLI's vocabulary.
-fn purpose_label(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
-    match p {
-        libfreemkv::LabelPurpose::Commentary => Some("Commentary"),
-        libfreemkv::LabelPurpose::Descriptive => Some("Descriptive"),
-        libfreemkv::LabelPurpose::Score => Some("Score"),
-        libfreemkv::LabelPurpose::Ime => Some("IME"),
-        libfreemkv::LabelPurpose::Normal => None,
+/// The Item cell of a title row: "Title 3", numbered as `-t` numbers it.
+pub fn title_item(index: usize) -> String {
+    crate::strings::get_or("gui.item.title", "Title {num}")
+        .replace("{num}", &(index + 1).to_string())
+}
+
+fn chapters_note(n: usize) -> String {
+    match n {
+        1 => crate::strings::get_or("gui.item.chapter", "1 chapter"),
+        n => crate::strings::get_or("gui.item.chapters", "{n} chapters")
+            .replace("{n}", &n.to_string()),
+    }
+}
+
+fn clips_note(n: usize) -> String {
+    let word = if n == 1 { "disc.clip" } else { "disc.clips" };
+    format!("{n} {}", crate::strings::get(word))
+}
+
+/// The Notes cell of a title row: its proven role, real playlist name, clip count and chapters.
+fn title_notes(
+    t: &libfreemkv::DiscTitle,
+    show_playlist: bool,
+    role: Option<freemkv_engine::TitleRole>,
+) -> String {
+    let play_all = crate::strings::get_or("gui.item.play_all", "Play all");
+    let episode = crate::strings::get_or("gui.item.episode", "Episode");
+    let mut parts = Vec::new();
+    match role {
+        Some(freemkv_engine::TitleRole::PlayAll) => parts.push(play_all),
+        Some(freemkv_engine::TitleRole::Episode) => parts.push(episode),
+        None => {}
+    }
+    if show_playlist && !t.playlist.is_empty() {
+        parts.push(sanitize_display(&t.playlist));
+    }
+    if !t.clips.is_empty() {
+        parts.push(clips_note(t.clips.len()));
+    }
+    parts.push(chapters_note(t.chapters.len()));
+    parts.join(" · ")
+}
+
+/// An audio track's purpose in the active locale.
+fn purpose_label(p: libfreemkv::LabelPurpose) -> Option<String> {
+    use libfreemkv::LabelPurpose as P;
+    let key = match p {
+        P::Commentary => "stream.purpose.commentary",
+        P::Descriptive => "stream.purpose.descriptive",
+        P::Score => "stream.purpose.score",
+        P::Ime => "stream.purpose.ime",
+        P::Normal => return None,
+    };
+    Some(crate::strings::get(key))
+}
+
+// Join the parts that say something; a cell with nothing to say stays empty.
+fn cell(parts: Vec<String>, sep: &str) -> String {
+    parts
+        .into_iter()
+        .filter(|p| !p.trim().is_empty() && !p.eq_ignore_ascii_case("unknown"))
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+/// The Format and Notes cells of a stream row: what the track is, said once, and what sets
+/// it apart from its neighbours. The language is the row's own column.
+fn stream_cells(st: &libfreemkv::Stream) -> (String, String) {
+    use libfreemkv::Stream;
+    let secondary_word = crate::strings::get("stream.secondary");
+    let secondary = || secondary_word.clone();
+    match st {
+        Stream::Video(v) => {
+            let aspect = v.display_aspect.map(|(w, h)| format!("{w}:{h}"));
+            let hdr = (v.hdr != libfreemkv::HdrFormat::Sdr).then(|| v.hdr.to_string());
+            let format = cell(
+                [
+                    Some(v.codec.to_string()),
+                    Some(v.resolution.to_string()),
+                    // The library names a rate by its number ("25", "23.976"); the unit is ours.
+                    Some(v.frame_rate.to_string())
+                        .filter(|r| r.parse::<f64>().is_ok())
+                        .map(|r| format!("{r}fps")),
+                    hdr,
+                    aspect,
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+                " ",
+            );
+            // A video label is the library's own restatement of this format: never shown.
+            let notes = cell(v.secondary.then(secondary).into_iter().collect(), " · ");
+            (format, notes)
+        }
+        Stream::Audio(a) => {
+            // The label is "(variant) friendly codec name", either part optional: the name is the
+            // Format, the variant (a disc's own tag such as "csp") sets the track apart.
+            let label = sanitize_display(a.label.trim());
+            let (variant, name) = match label.strip_prefix('(').and_then(|r| r.split_once(')')) {
+                Some((v, rest)) => (Some(v.trim().to_string()), rest.trim().to_string()),
+                None => (None, label),
+            };
+            let format = if name.is_empty() {
+                libfreemkv::labels::audio_codec_label(&a.codec, &a.channels)
+            } else {
+                name
+            };
+            let notes = cell(
+                [
+                    purpose_label(a.purpose),
+                    a.secondary.then(secondary),
+                    variant,
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+                " · ",
+            );
+            (format, notes)
+        }
+        Stream::Subtitle(s) => {
+            use libfreemkv::LabelQualifier as Q;
+            let qualifier = match s.qualifier {
+                Q::Sdh => Some(crate::strings::get("stream.qualifier.sdh")),
+                Q::DescriptiveService => {
+                    Some(crate::strings::get("stream.qualifier.descriptive_service"))
+                }
+                Q::Forced | Q::None => None,
+            };
+            let forced_word = crate::strings::get_or("gui.item.forced", "Forced");
+            let forced = s.forced.then_some(forced_word);
+            let notes = cell([forced, qualifier].into_iter().flatten().collect(), " · ");
+            (s.codec.to_string(), notes)
+        }
     }
 }
 
 // Rows for one title's streams, shared by the disc and stream-source paths
-// so an MKV shows the same track detail a disc title does. Uses the
-// `Display` impls, and carries label/purpose/secondary like the CLI.
+// so an MKV shows the same track detail a disc title does.
 fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
     t.streams
         .iter()
         .map(|st| {
-            let (ty, pid, desc, info) = match st {
-                libfreemkv::Stream::Video(v) => {
-                    // Stream labels are disc bytes, same as the volume id.
-                    let label = if v.label.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  —  {}", sanitize_display(&v.label))
-                    };
-                    (
-                        "Video",
-                        None,
-                        format!("{}  {}{}", v.codec, v.resolution, label),
-                        format!(
-                            "Video track\n\nCodec: {}\nResolution: {}\nFrame rate: {}\nHDR: {}\nColour: {}{}",
-                            v.codec,
-                            v.resolution,
-                            v.frame_rate,
-                            v.hdr,
-                            v.color_space,
-                            if v.label.is_empty() {
-                                String::new()
-                            } else {
-                                format!("\nLabel: {}", sanitize_display(&v.label))
-                            }
-                        ),
-                    )
-                }
-                libfreemkv::Stream::Audio(a) => {
-                    // The language code is disc bytes too — an MPLS/IFO field,
-                    // not a validated ISO 639-2 code — so it gets the same
-                    // treatment as the label two lines below it.
-                    let language = sanitize_display(&a.language);
-                    let mut tags: Vec<String> = Vec::new();
-                    if let Some(p) = purpose_label(a.purpose) {
-                        tags.push(p.to_string());
-                    }
-                    if a.secondary {
-                        tags.push("Secondary".into());
-                    }
-                    if !a.label.is_empty() {
-                        tags.push(sanitize_display(&a.label));
-                    }
-                    let suffix = if tags.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  —  {}", tags.join(", "))
-                    };
-                    (
-                        "Audio",
-                        Some(a.pid),
-                        format!("{}  {}  {}{}", a.codec, a.channels, language, suffix),
-                        format!(
-                            "Audio track\n\nCodec: {}\nChannels: {}\nLanguage: {}\nSample rate: {}{}{}",
-                            a.codec,
-                            a.channels,
-                            language,
-                            a.sample_rate,
-                            if a.secondary { "\nSecondary: yes" } else { "" },
-                            if tags.is_empty() {
-                                String::new()
-                            } else {
-                                format!("\nLabel: {}", tags.join(", "))
-                            }
-                        ),
-                    )
-                }
-                libfreemkv::Stream::Subtitle(s) => {
-                    // Disc bytes, same as the audio language above.
-                    let language = sanitize_display(&s.language);
-                    let mut tags: Vec<String> = Vec::new();
-                    if s.forced {
-                        tags.push("Forced".into());
-                    }
-                    let suffix = if tags.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  —  {}", tags.join(", "))
-                    };
-                    (
-                        "Subtitles",
-                        Some(s.pid),
-                        format!("{}  {}{}", s.codec, language, suffix),
-                        format!(
-                            "Subtitle track\n\nCodec: {}\nLanguage: {}\nForced: {}",
-                            s.codec, language, s.forced
-                        ),
-                    )
-                }
+            let (ty, item_key, pid) = match st {
+                libfreemkv::Stream::Video(_) => ("Video", "disc.video", None),
+                libfreemkv::Stream::Audio(a) => ("Audio", "disc.audio", Some(a.pid)),
+                libfreemkv::Stream::Subtitle(s) => ("Subtitles", "disc.subtitle", Some(s.pid)),
             };
-            // Language / forcedness as DATA, from the same stream `desc` was
-            // formatted from — the matcher needs the disc's own tags, not a
-            // re-parse of `desc`.
+            let (format, notes) = stream_cells(st);
+            let info = stream_info(st);
+            // Language / forcedness as DATA: the matcher needs the disc's own tags.
             let (lang, forced) = match st {
                 libfreemkv::Stream::Video(_) => (String::new(), false),
                 libfreemkv::Stream::Audio(a) => (a.language.clone(), false),
@@ -271,8 +321,12 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                 _ => None,
             };
             Row {
+                role: None,
                 type_s: ty.into(),
-                desc,
+                item: crate::strings::get(item_key),
+                desc: cell(vec![format.clone(), notes.clone()], "  —  "),
+                format,
+                notes,
                 depth: 2,
                 checkable: ty != "Video" && mirrors.is_none(),
                 title: ti,
@@ -286,6 +340,29 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
             }
         })
         .collect()
+}
+
+// The detail text of a stream row.
+fn stream_info(st: &libfreemkv::Stream) -> String {
+    match st {
+        libfreemkv::Stream::Video(v) => format!(
+            "Video track\n\nCodec: {}\nResolution: {}\nFrame rate: {}\nHDR: {}\nColour: {}",
+            v.codec, v.resolution, v.frame_rate, v.hdr, v.color_space
+        ),
+        libfreemkv::Stream::Audio(a) => format!(
+            "Audio track\n\nCodec: {}\nChannels: {}\nLanguage: {}\nSample rate: {}",
+            a.codec,
+            a.channels,
+            sanitize_display(&a.language),
+            a.sample_rate
+        ),
+        libfreemkv::Stream::Subtitle(s) => format!(
+            "Subtitle track\n\nCodec: {}\nLanguage: {}\nForced: {}",
+            s.codec,
+            sanitize_display(&s.language),
+            s.forced
+        ),
+    }
 }
 
 /// Scan a stream source (`.mkv`, `.mp4`, `.m2ts`) — a single title, but its
@@ -316,7 +393,12 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         .to_string();
 
     let mut rows = vec![Row {
+        role: None,
         type_s: "File".into(),
+        item: name.clone(),
+        format: scheme.to_uppercase(),
+        notes: crate::strings::get_or("gui.item.tracks", "{n} tracks")
+            .replace("{n}", &t.streams.len().to_string()),
         desc: name.clone(),
         depth: 0,
         checkable: false,
@@ -335,7 +417,11 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         size_bytes: None,
     }];
     rows.push(Row {
+        role: None,
         type_s: "Title".into(),
+        item: title_item(0),
+        format: String::new(),
+        notes: chapters_note(t.chapters.len()),
         // The running time is the row's Length cell, not part of this text.
         desc: format!("{} track(s)", t.streams.len()),
         depth: 1,
@@ -505,7 +591,7 @@ fn scanned_with_keys(
 /// state, title list), as log lines the desktop app shows on open.
 fn disc_details(disc: &libfreemkv::Disc, key_summary: &str) -> Vec<String> {
     let mut d = Vec::new();
-    d.push(format!("Type: {:?}", disc.format));
+    d.push(format!("Type: {}", format_name(&disc.format)));
     if disc.capacity_bytes > 0 {
         let gb = disc.capacity_bytes as f64 / 1_000_000_000.0;
         d.push(format!("Capacity: {gb:.1} GB, {} layer(s)", disc.layers));
@@ -558,14 +644,18 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
     };
 
     rows.push(Row {
-        type_s: format!("{:?} disc", disc.format),
+        role: None,
+        type_s: "Disc".into(),
+        item: label.clone(),
+        format: format_name(&disc.format),
+        notes: summary.clone(),
         desc: label.clone(),
         depth: 0,
         checkable: false,
         title: usize::MAX,
         info: format!(
-            "Disc information\n\nType: {:?}\nLabel: {}\nProtection: {}\nTitles: {}",
-            disc.format,
+            "Disc information\n\nType: {}\nLabel: {}\nProtection: {}\nTitles: {}",
+            format_name(&disc.format),
             label,
             summary,
             disc.titles.len()
@@ -578,12 +668,18 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         size_bytes: None,
     });
 
+    let roles = freemkv_engine::title_roles(&disc.titles);
     for (ti, t) in disc.titles.iter().enumerate() {
+        // A DVD title's "playlist" is a name the scan makes up (VTS_xx_y.VOB), naming no file
+        // on the disc, so only a real playlist name (untrusted disc bytes, sanitized) is shown.
+        let notes = title_notes(t, disc.format != libfreemkv::DiscFormat::Dvd, roles[ti]);
         rows.push(Row {
+            role: roles[ti],
             type_s: "Title".into(),
-            // The playlist name is a filename read off the disc, so it is
-            // untrusted display bytes like the volume id and the stream labels.
-            desc: title_desc(ti, &sanitize_display(&t.playlist), t.chapters.len()),
+            item: title_item(ti),
+            format: String::new(),
+            desc: format!("{}  —  {notes}", title_item(ti)),
+            notes,
             depth: 1,
             checkable: true,
             title: ti,
@@ -4386,7 +4482,7 @@ mod disc_details_tests {
     fn a_plain_unencrypted_disc_shows_type_capacity_region_and_titles() {
         let d = disc(false);
         let lines = disc_details(&d, "unencrypted");
-        assert!(lines.contains(&"Type: BluRay".to_string()), "{lines:?}");
+        assert!(lines.contains(&"Type: Blu-ray".to_string()), "{lines:?}");
         assert!(
             lines
                 .iter()
@@ -5022,7 +5118,11 @@ mod routing_tests {
     fn shared_pid_disc() -> crate::engine::Scanned {
         use crate::engine::{Row, Scanned};
         let mk = |ty: &str, ti: usize, pid: Option<u16>| Row {
+            role: None,
             type_s: ty.into(),
+            item: ty.into(),
+            format: String::new(),
+            notes: String::new(),
             desc: format!("{ty} of title {ti}"),
             depth: if ty == "Title" { 1 } else { 2 },
             checkable: ty != "Video",
@@ -6365,7 +6465,8 @@ mod display_sanitisation_tests {
         );
         assert_eq!(disc_row.size_bytes, None);
         let title = &rows[1];
-        assert_eq!(title.desc, "1. VTS_01_2.VOB (19 chapters)");
+        assert_eq!(title.item, "Title 1");
+        assert!(title.notes.ends_with("19 chapters"), "{}", title.notes);
         assert_eq!(title.duration_secs, 8600.0);
         assert_eq!(title.size_bytes, Some(6_800_000_000));
         for r in rows.iter().filter(|r| r.depth == 2) {
@@ -6374,16 +6475,25 @@ mod display_sanitisation_tests {
     }
 
     #[test]
-    fn a_title_description_counts_chapters_in_the_right_number() {
+    fn a_title_row_names_its_number_and_counts_chapters_in_the_right_number() {
+        assert_eq!(super::title_item(0), "Title 1");
+        assert_eq!(super::chapters_note(1), "1 chapter");
+        assert_eq!(super::chapters_note(0), "0 chapters");
+        let mut t = libfreemkv::DiscTitle::empty();
+        t.playlist = "00800.mpls".into();
+        t.chapters = vec![
+            libfreemkv::disc::Chapter {
+                time_secs: 0.0,
+                name: "1".into()
+            };
+            12
+        ];
         assert_eq!(
-            super::title_desc(0, "00800.mpls", 1),
-            "1. 00800.mpls (1 chapter)"
+            super::title_notes(&t, true, None),
+            "00800.mpls · 12 chapters"
         );
-        assert_eq!(
-            super::title_desc(4, "00800.mpls", 0),
-            "5. 00800.mpls (0 chapters)"
-        );
-        assert_eq!(super::title_desc(1, "", 12), "2. (12 chapters)");
+        // A DVD's made-up playlist name is never shown.
+        assert_eq!(super::title_notes(&t, false, None), "12 chapters");
     }
 
     /// The payload has to be able to fail the assertion — a filter that
@@ -6558,13 +6668,23 @@ mod pure_helper_tests {
     #[test]
     fn purpose_label_names_each_purpose_and_omits_normal() {
         use libfreemkv::LabelPurpose;
-        assert_eq!(purpose_label(LabelPurpose::Commentary), Some("Commentary"));
+        let p = |x| purpose_label(x).unwrap_or_default();
         assert_eq!(
-            purpose_label(LabelPurpose::Descriptive),
-            Some("Descriptive")
+            p(LabelPurpose::Commentary),
+            crate::strings::get("stream.purpose.commentary")
         );
-        assert_eq!(purpose_label(LabelPurpose::Score), Some("Score"));
-        assert_eq!(purpose_label(LabelPurpose::Ime), Some("IME"));
+        assert_eq!(
+            p(LabelPurpose::Descriptive),
+            crate::strings::get("stream.purpose.descriptive")
+        );
+        assert_eq!(
+            p(LabelPurpose::Score),
+            crate::strings::get("stream.purpose.score")
+        );
+        assert_eq!(
+            p(LabelPurpose::Ime),
+            crate::strings::get("stream.purpose.ime")
+        );
         assert_eq!(purpose_label(LabelPurpose::Normal), None);
     }
 }

@@ -383,6 +383,10 @@ mod tests {
             desc: format!("d{i}"),
             length: String::new(),
             size: String::new(),
+            lang: String::new(),
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
             check: Some(Check::Off),
             check_enabled: true,
         }

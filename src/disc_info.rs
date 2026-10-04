@@ -239,15 +239,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
 
     // Format and capacity. An unclassified disc must NOT masquerade as Blu-ray
     // — report it distinctly so data/future/unknown discs aren't misread.
-    let unknown = strings::get("disc.format_unknown");
-    let format = match disc.format {
-        DiscFormat::Uhd => "4K UHD",
-        DiscFormat::Fmts => "4K UHD (AACS 2.1 FMTS)",
-        DiscFormat::BluRay => "Blu-ray",
-        DiscFormat::HdDvd => "HD-DVD",
-        DiscFormat::Dvd => "DVD",
-        DiscFormat::Unknown => &unknown,
-    };
+    let format = freemkv::engine::format_name(&disc.format);
     let gb = disc.capacity_bytes as f64 / 1_000_000_000.0; // decimal GB, matches disc-marketed capacity
     out.raw(
         Normal,
