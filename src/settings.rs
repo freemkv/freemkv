@@ -1125,17 +1125,18 @@ mod update_check_tests {
     }
 
     // FT9a (stop design v5 §2.7, T25): "(a) body trickle past 10 s total (scaled) → a
-    // result". Scaled: idle (and the old 10 s total) 400 ms; a byte every 200 ms.
+    // result". Scaled: idle (and the old total) 1 s; a byte every 250 ms, so the body runs
+    // 5 s while a busy CI runner still has 750 ms of slack per byte.
     #[test]
     fn update_check_slow_body_ok() {
         use std::io::Write as _;
         const BODY: &[u8] = br#"{"tag_name":"v9.9.9"}"#;
-        let idle = Duration::from_millis(400);
+        let idle = Duration::from_secs(1);
         let (url, server) = release_stub(
             b"HTTP/1.1 200 OK\r\nContent-Length: 21\r\n\r\n",
             move |sock| {
                 for b in BODY {
-                    std::thread::sleep(idle / 2);
+                    std::thread::sleep(idle / 4);
                     if sock.write_all(&[*b]).and_then(|()| sock.flush()).is_err() {
                         return;
                     }

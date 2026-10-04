@@ -73,13 +73,21 @@ fn publishing_is_gated_on_the_store_secret() {
     assert!(publish.contains("needs.secrets.outputs.store == 'true'"));
     assert!(publish.contains("needs.smoke.result == 'success'"));
     assert!(publish.contains("needs.review.result == 'success'"));
-    for channel in ["c=stable", "c=beta", "c=edge"] {
-        assert!(publish.contains(channel), "{channel}");
-    }
+    assert!(publish.contains("needs.store-login.result == 'success'"));
     assert!(
-        publish.contains("for wf in ci.yml qa.yml"),
-        "beta waits for green CI and qa"
+        publish.contains("github.ref_type == 'tag'\n") && publish.contains("CHANNEL: stable"),
+        "only a release tag publishes, and only to stable"
     );
+    assert!(!publish.contains("c=beta") && !publish.contains("c=edge"));
+}
+
+#[test]
+fn qa_proves_the_store_login_the_release_will_use() {
+    let wf = read(".github/workflows/snap.yml");
+    let job = &wf[wf.find("\n  store-login:").expect("store-login job")..];
+    let job = &job[..job[1..].find("\n  build:").unwrap()];
+    assert!(job.contains("github.ref_name == 'qa'"));
+    assert!(job.contains("store_checks.py login whoami.txt 30"));
 }
 
 #[test]
@@ -126,8 +134,8 @@ fn publish_runs_only_on_push_and_reports_honestly() {
     let publish = &wf[wf.find("\n  publish:").expect("publish job")..];
     assert!(publish.contains("github.event_name == 'push'"));
     assert!(
-        publish.contains("API error, retrying"),
-        "a transient API error must retry"
+        publish.contains(r#"[ "$verdict" = transient ] && [ "$attempt" -lt 3 ] || break"#),
+        "a dropped upload must retry"
     );
     assert!(publish.contains("store_checks.py upload \"$code\" \"$CHANNEL\" upload.log"));
     assert!(publish.contains("held for store manual review, NOT released"));

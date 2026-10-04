@@ -8,14 +8,18 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
 | Trigger | Build + install + smoke test | GitHub release asset | Snap Store |
 |---------|------------------------------|----------------------|------------|
 | PR or manual run | yes | — | never |
-| `dev` push | yes | — | `edge`, only if the repo variable `SNAP_PUBLISH_EDGE` is `true` |
-| `qa` push | yes | — | `beta`, after `CI` and `qa` are green on the same commit |
+| `dev` or `qa` push | yes | — | never |
 | `v*` release tag | yes | `freemkv-amd64.snap` + `.sha256` | `stable` |
 
 - The version is `Cargo.toml`'s, plus `+git.<sha>` (dev and PRs) or
   `+qa.<sha>` (qa). A suffix makes the grade `devel`; release tags have none
   and build as `stable`.
 - The GitHub release asset is attached whether or not the store is set up.
+- On `qa` (and the tag), `store-login` checks the store credentials with
+  `snapcraft whoami`: they must allow `package_push` and `package_release`
+  and not expire within 30 days, so the release's upload is not the first
+  test of them. A connection the store drops before reporting any status is
+  retried twice; anything the store answered is final.
 - The store upload is skipped while `SNAPCRAFT_STORE_CREDENTIALS` is unset.
   With it set, [`store_checks.py`](store_checks.py) judges each upload
   against the exact lines snapcraft 9 prints at `--verbosity=verbose`, as an
@@ -108,14 +112,7 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
    review, and only the direct download (`--dangerous`, connected by hand, see
    [INSTALL.md](../../INSTALL.md)) is usable.
 
-5. Optional: set the repository variable `SNAP_PUBLISH_EDGE` to `true` to
-   publish every `dev` push to `edge`:
-
-   ```bash
-   gh variable set SNAP_PUBLISH_EDGE -R freemkv/freemkv --body true
-   ```
-
-6. Optional, arm64: log in to Launchpad once with
+5. Optional, arm64: log in to Launchpad once with
    `snapcraft remote-build` on a machine, then store the
    `launchpad-credentials` file it saves in its data directory
    (`$XDG_DATA_HOME/snapcraft/`) as the secret `LAUNCHPAD_CREDENTIALS`.

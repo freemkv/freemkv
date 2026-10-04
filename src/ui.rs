@@ -32,6 +32,12 @@ pub struct Node {
     /// The Length and Size cells, empty where the row has none ([`title_cells`]).
     pub length: String,
     pub size: String,
+    /// The Language cell, empty but on audio and subtitle rows.
+    pub lang: String,
+    /// The Item, Format and Notes cells ([`crate::engine::Row`]).
+    pub item: String,
+    pub format: String,
+    pub notes: String,
 }
 
 impl Node {
@@ -73,6 +79,10 @@ pub struct LangPrefs {
     pub subtitles: Vec<String>,
     /// Independent of `subtitles`, never a narrowing of it.
     pub forced: Vec<String>,
+    /// Keep no regular subtitles at all (the selection bar's "None" and "Forced only").
+    pub no_subtitles: bool,
+    /// Keep no forced subtitles either (the selection bar's "None").
+    pub no_forced: bool,
 }
 
 impl LangPrefs {
@@ -88,6 +98,8 @@ impl LangPrefs {
             audio: split_langs(audio),
             subtitles: split_langs(subtitles),
             forced: split_langs(forced),
+            no_subtitles: false,
+            no_forced: false,
         }
     }
 
@@ -98,7 +110,53 @@ impl LangPrefs {
 
     /// No preference expressed at all — the tree is built exactly as before.
     pub fn is_empty(&self) -> bool {
-        self.audio.is_empty() && self.subtitles.is_empty() && self.forced.is_empty()
+        self.audio.is_empty()
+            && self.subtitles.is_empty()
+            && self.forced.is_empty()
+            && !self.no_subtitles
+            && !self.no_forced
+    }
+}
+
+/// The selection bar's subtitle choices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubPick {
+    All,
+    None,
+    /// Forced subtitles only, whatever their language.
+    Forced,
+    /// Toggle one language (regular and forced subtitles in it).
+    Lang(String),
+}
+
+/// The selection bar's title choices, as stored modes. "Episodes" is offered only when the
+/// disc proves episodes ([`freemkv_engine::TitleRole`]).
+pub const PICK_TITLES: &[&str] = &[
+    "Main film only",
+    "Episodes",
+    "Longest title",
+    "All titles",
+    "No titles",
+];
+
+// A title choice's label in the active locale.
+fn pick_title_label(mode: &str) -> String {
+    match mode {
+        "Episodes" => crate::strings::get_or("gui.pick.episodes", "Episodes"),
+        "Longest title" => crate::strings::get("gui.set.sel_longest"),
+        "All titles" => crate::strings::get("gui.set.sel_all"),
+        "No titles" => crate::strings::get_or("gui.pick.none", "None"),
+        _ => crate::strings::get("gui.set.sel_main"),
+    }
+}
+
+// Add `code` to `list`, or take it out if it is there (matched as a language, not as text).
+fn toggle_code(list: &mut Vec<String>, code: &str) {
+    match list.iter().position(|c| same_language(c, code)) {
+        Some(i) => {
+            list.remove(i);
+        }
+        None => list.push(code.to_string()),
     }
 }
 
@@ -197,10 +255,12 @@ fn preferred_pids(
         &StreamFilter::None,
         &SubtitleFilter::split(lang_filter(&prefs.subtitles), StreamFilter::None),
     );
-    out.extend(match normal {
-        Ok(sel) => class_or_fallback(sel.subtitle, &all_normal),
-        Err(_) => all_normal.clone(),
-    });
+    if !prefs.no_subtitles {
+        out.extend(match normal {
+            Ok(sel) => class_or_fallback(sel.subtitle, &all_normal),
+            Err(_) => all_normal.clone(),
+        });
+    }
 
     // Forced subtitles have no fallback, unlike audio/normal subs: missing them
     // is normal, but wrong-language ones auto-display during playback, worse
@@ -210,6 +270,9 @@ fn preferred_pids(
         &StreamFilter::None,
         &SubtitleFilter::split(StreamFilter::None, lang_filter(&prefs.forced)),
     );
+    if prefs.no_forced {
+        return out;
+    }
     out.extend(match forced {
         Ok(sel) => match sel.subtitle {
             // No preference expressed — keep the class, as before.
@@ -269,19 +332,53 @@ impl Tree {
         } else {
             0.0
         };
-        // Which title indices start checked, chosen only from titles `title_visible`
-        // shows. Old code named title 0 outright for "Main film only", so a hidden
-        // title 0 opened unselected; `>= min_eff` also failed UNKNOWN-length titles.
-        let visible = || titles.iter().filter(|(_, d)| title_visible(*d, min_eff));
+        // Titles start checked only from those `title_visible` shows. With audio languages
+        // chosen, a title carrying none of them is another language's version: Main film,
+        // Longest and Episodes look among the titles that do, when any do.
+        let speaks = |ti: usize| {
+            sc.rows.iter().any(|r| {
+                r.title == ti
+                    && r.type_s == "Audio"
+                    && prefs.audio.iter().any(|a| same_language(a, &r.lang))
+            })
+        };
+        let all_visible: Vec<(usize, f64)> = titles
+            .iter()
+            .copied()
+            .filter(|(_, d)| title_visible(*d, min_eff))
+            .collect();
+        let in_language: Vec<(usize, f64)> = all_visible
+            .iter()
+            .copied()
+            .filter(|(i, _)| speaks(*i))
+            .collect();
+        let pool = if prefs.audio.is_empty() || in_language.is_empty() {
+            all_visible.clone()
+        } else {
+            in_language
+        };
+        let role_of = |ti: usize| {
+            sc.rows
+                .iter()
+                .find(|r| r.depth == 1 && r.title == ti)
+                .and_then(|r| r.role)
+        };
         let selected: std::collections::HashSet<usize> = match sel_mode {
-            "All titles" => visible().map(|(i, _)| *i).collect(),
-            "Longest title" => visible()
+            "All titles" => all_visible.iter().map(|(i, _)| *i).collect(),
+            "No titles" => Default::default(),
+            "Episodes" => pool
+                .iter()
+                .map(|(i, _)| *i)
+                .filter(|&i| role_of(i) == Some(freemkv_engine::TitleRole::Episode))
+                .collect(),
+            "Longest title" => pool
+                .iter()
                 .max_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| *i)
                 .into_iter()
                 .collect(),
             // "Main film only" (default): the first title on screen.
-            _ => visible().map(|(i, _)| *i).take(1).collect(),
+            _ => pool.iter().map(|(i, _)| *i).take(1).collect(),
         };
 
         // Which stream PIDs the language preferences keep, per canonical title index.
@@ -307,6 +404,7 @@ impl Tree {
         let mut arena: Vec<Node> = Vec::new();
         let mut roots = Vec::new();
         let mut last_title: Option<usize> = None;
+        let mut last_group: Option<usize> = None;
         let mut skip_title = false;
         for r in &sc.rows {
             match r.depth {
@@ -326,9 +424,11 @@ impl Tree {
             }
             let idx = arena.len();
             let (length, size) = title_cells(r);
+            // Every painted cell passes one sanitizer: disc bytes never reorder, hide or forge text.
+            let cell = crate::strings::sanitize_display;
             arena.push(Node {
                 type_s: r.type_s.clone(),
-                desc: r.desc.clone(),
+                desc: cell(&r.desc),
                 checkable: r.checkable,
                 checked: RefCell::new(r.depth == 1 && selected.contains(&r.title)),
                 children: vec![],
@@ -338,6 +438,10 @@ impl Tree {
                 mirror: None,
                 length,
                 size,
+                lang: stream_language(&r.lang),
+                item: cell(&r.item),
+                format: cell(&r.format),
+                notes: cell(&r.notes),
             });
             match r.depth {
                 0 => roots.push(idx),
@@ -347,7 +451,13 @@ impl Tree {
                     }
                     last_title = Some(idx);
                 }
+                3.. => {
+                    if let Some(g) = last_group {
+                        arena[g].children.push(idx);
+                    }
+                }
                 _ => {
+                    last_group = Some(idx);
                     if let Some(t) = last_title {
                         // A mirror row names its base by PID; the base is a sibling
                         // declared before it (libfreemkv places the extension after it).
@@ -758,6 +868,24 @@ pub fn lang_display_name(code: &str) -> String {
     isolang::Language::from_639_3(&code.to_ascii_lowercase())
         .map(|l| l.to_name().to_string())
         .unwrap_or_else(|| code.to_string())
+}
+
+/// The Language cell for a stream's on-disc tag: its ISO 639 code, one spelling per language
+/// (`ger` shows as `deu`), blank when the disc names no language ("und", or nothing).
+pub fn stream_language(tag: &str) -> String {
+    match canonical_lang_code(tag) {
+        Some(c) if c != "und" => c,
+        Some(_) => String::new(),
+        None => crate::strings::sanitize_display(tag),
+    }
+}
+
+// Whether two language tags (a code in any ISO 639 form, or a name) name the same language.
+fn same_language(a: &str, b: &str) -> bool {
+    match (canonical_lang_code(a), canonical_lang_code(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a.eq_ignore_ascii_case(b),
+    }
 }
 
 /// Toggle one code in a stored preference and return the new stored string.
@@ -1249,7 +1377,8 @@ impl InfoRows {
             read_rate: "—".into(),
             output_file: dest.to_string(),
             output_size: "0 B".into(),
-            free_space: free_space(dest),
+            // Never measured here, on the UI thread: the caller fills in its cached answer.
+            free_space: "—".into(),
         }
     }
 
@@ -1565,7 +1694,7 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
 /// and empty on every other row. Size is [`fmt_title_size`] of the row's
 /// `size_bytes`, empty where the scan reports none.
 pub fn title_cells(r: &crate::engine::Row) -> (String, String) {
-    let length = if r.depth == 1 {
+    let length = if r.depth == 1 || r.type_s == "Chapter" {
         fmt_hms(r.duration_secs.max(0.0) as u64)
     } else {
         String::new()
@@ -1590,6 +1719,10 @@ mod title_cell_tests {
 
     fn row(depth: u8, duration_secs: f64, size_bytes: Option<u64>) -> Row {
         Row {
+            role: None,
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
             type_s: String::new(),
             desc: String::new(),
             depth,
@@ -1652,7 +1785,7 @@ mod title_cell_tests {
 /// A row that arrives before its parent has no parent to hang from. It becomes a root rather
 /// than being dropped — a row the core decided to show must always be reachable.
 pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
-    let (mut last_root, mut last_title) = (None, None);
+    let (mut last_root, mut last_title, mut last_group) = (None, None, None);
     let mut out = Vec::with_capacity(rows.len());
     for (i, r) in rows.iter().enumerate() {
         match r.depth {
@@ -1663,12 +1796,23 @@ pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
             }
             1 => {
                 last_title = Some(i);
+                last_group = None;
                 out.push(last_root);
             }
-            _ => out.push(last_title),
+            2 => {
+                last_group = Some(i);
+                out.push(last_title);
+            }
+            _ => out.push(last_group.or(last_title)),
         }
     }
     out
+}
+
+/// Whether a row's group starts closed: a title's chapter list is there to look at on demand,
+/// not to push the streams of the next title off the screen.
+pub fn starts_collapsed(r: &Row) -> bool {
+    r.type_s == "Chapters"
 }
 
 /// Which row a freshly-rebuilt tree should leave sitting at the top.
@@ -1909,6 +2053,8 @@ pub struct App {
     pub log_first: u64,
     pub source: String,
     pub output_dir: String,
+    /// Free space at `output_dir`, measured off this thread.
+    pub free: FreeSpace,
     pub format: String,
     pub log_hidden: bool,
     pub run: Option<Arc<RunState>>,
@@ -1949,6 +2095,13 @@ pub struct App {
     /// can name the file that will actually appear. It goes nowhere near a
     /// path without `sanitize_label`, which `title_basename` applies.
     pub disc_label: String,
+    /// The selection bar: the title choice and the language lists that decide what starts
+    /// ticked. From Settings at open; the bar changes them and re-ticks the tree.
+    pub pick_mode: String,
+    pub pick_prefs: LangPrefs,
+    // The scan the tree was built from, and its minimum title length, so a change re-ticks.
+    pick_scan: Option<Scanned>,
+    pick_min_secs: f64,
     /// The key set Open resolved: the rip's seed (KU §2.5). Memory only.
     seed: Option<crate::engine::KeySet>,
     /// Open or the last run refused E7034: the next Start is the insert-the-disc Retry.
@@ -2150,6 +2303,7 @@ impl App {
             log_first: 0,
             source: String::new(),
             output_dir,
+            free: FreeSpace::default(),
             format,
             log_hidden: false,
             run: None,
@@ -2164,6 +2318,10 @@ impl App {
             capacity_bytes: 0,
             title_ids: Vec::new(),
             disc_label: String::new(),
+            pick_mode: String::new(),
+            pick_prefs: LangPrefs::default(),
+            pick_scan: None,
+            pick_min_secs: 0.0,
             seed: None,
             vid_retry: false,
             open_refusal: None,
@@ -2705,6 +2863,63 @@ impl App {
         self.opening.is_some() || self.pending.is_some()
     }
 
+    /// The selection bar's title choice: one of [`PICK_TITLES`]' modes.
+    pub fn pick_titles(&mut self, mode: &str) -> Vec<Effect> {
+        self.pick_mode = mode.to_string();
+        self.repick()
+    }
+
+    /// Toggle one audio language in the selection bar; `None` is "All" (no narrowing).
+    pub fn pick_audio(&mut self, code: Option<&str>) -> Vec<Effect> {
+        match code {
+            None => self.pick_prefs.audio.clear(),
+            Some(c) => toggle_code(&mut self.pick_prefs.audio, c),
+        }
+        self.repick()
+    }
+
+    /// The selection bar's subtitle choice.
+    pub fn pick_subtitles(&mut self, choice: SubPick) -> Vec<Effect> {
+        let p = &mut self.pick_prefs;
+        match choice {
+            SubPick::All => {
+                (p.subtitles, p.forced) = (Vec::new(), Vec::new());
+                (p.no_subtitles, p.no_forced) = (false, false);
+            }
+            SubPick::None => {
+                (p.subtitles, p.forced) = (Vec::new(), Vec::new());
+                (p.no_subtitles, p.no_forced) = (true, true);
+            }
+            SubPick::Forced => {
+                (p.subtitles, p.forced) = (Vec::new(), Vec::new());
+                (p.no_subtitles, p.no_forced) = (true, false);
+            }
+            SubPick::Lang(c) => {
+                if p.no_subtitles {
+                    (p.subtitles, p.forced) = (Vec::new(), Vec::new());
+                }
+                (p.no_subtitles, p.no_forced) = (false, false);
+                toggle_code(&mut p.subtitles, &c);
+                p.forced = p.subtitles.clone();
+                if p.subtitles.is_empty() {
+                    (p.no_subtitles, p.no_forced) = (true, true);
+                }
+            }
+        }
+        self.repick()
+    }
+
+    // Re-tick the tree from the scan it was built from, under the bar's current choices.
+    fn repick(&mut self) -> Vec<Effect> {
+        if self.running() {
+            return vec![];
+        }
+        if let Some(sc) = &self.pick_scan {
+            self.tree = Tree::from_scan(sc, &self.pick_mode, self.pick_min_secs, &self.pick_prefs);
+        }
+        vec![Effect::Redraw]
+    }
+
     /// Open something NOBODY asked to open, leaving no trace if it is not
     /// there. Used by the launch probe: a disc already in the drive should
     /// just appear, an empty tray should look like before the probe existed.
@@ -2817,12 +3032,11 @@ impl App {
                     .trim()
                     .parse::<f64>()
                     .unwrap_or(0.0);
-                self.tree = Tree::from_scan(
-                    &sc,
-                    &self.settings.selection,
-                    min_secs,
-                    &LangPrefs::from_settings(&self.settings),
-                );
+                self.pick_mode = self.settings.selection.clone();
+                self.pick_prefs = LangPrefs::from_settings(&self.settings);
+                self.pick_min_secs = min_secs;
+                self.tree = Tree::from_scan(&sc, &self.pick_mode, min_secs, &self.pick_prefs);
+                self.pick_scan = Some(sc.clone());
                 self.source = path.to_string();
                 self.page = Page::Titles;
                 self.selected_row = None;
@@ -3006,7 +3220,11 @@ impl App {
             &self.title_sizes,
             self.capacity_bytes,
         );
-        self.info = Some(InfoRows::starting(&self.source, &out_file, scanned));
+        let mut info = InfoRows::starting(&self.source, &out_file, scanned);
+        info.free_space = self.free.get(&self.output_dir);
+        // The rip uses that space up: the next ask measures it afresh.
+        self.free.forget();
+        self.info = Some(info);
         self.page = Page::Progress;
         self.say(
             LogKind::Result,
@@ -3237,6 +3455,83 @@ impl App {
     }
 
     /// Everything a shell needs to draw the current state.
+    fn pick_view(&self) -> Option<PickView> {
+        let sc = self.pick_scan.as_ref()?;
+        let langs = |kind: &str| {
+            let mut out: Vec<String> = Vec::new();
+            for r in sc.rows.iter().filter(|r| r.type_s == kind) {
+                let code = stream_language(&r.lang);
+                if !code.is_empty() && !out.contains(&code) {
+                    out.push(code);
+                }
+            }
+            out
+        };
+        let p = &self.pick_prefs;
+        let ticked = |list: &[String], code: &str| list.iter().any(|c| same_language(c, code));
+        let audio: Vec<(String, bool)> = langs("Audio")
+            .into_iter()
+            .map(|c| {
+                let on = ticked(&p.audio, &c);
+                (c, on)
+            })
+            .collect();
+        let subtitles: Vec<(String, bool)> = langs("Subtitles")
+            .into_iter()
+            .map(|c| {
+                let on = !p.no_subtitles && ticked(&p.subtitles, &c);
+                (c, on)
+            })
+            .collect();
+        let has_episodes = sc
+            .rows
+            .iter()
+            .any(|r| r.role == Some(freemkv_engine::TitleRole::Episode));
+        let titles = PICK_TITLES
+            .iter()
+            .filter(|mode| **mode != "Episodes" || has_episodes)
+            .map(|mode| (*mode, pick_title_label(mode)))
+            .collect();
+        let all = crate::strings::get_or("gui.pick.all", "All");
+        let none = crate::strings::get_or("gui.pick.none", "None");
+        let forced = crate::strings::get_or("gui.pick.forced", "Forced only");
+        let audio_all = p.audio.is_empty();
+        let subs_none = p.no_subtitles && p.no_forced;
+        let subs_forced = p.no_subtitles && !p.no_forced;
+        let subs_all = !p.no_subtitles && p.subtitles.is_empty() && !p.no_forced;
+        let picked = |v: &[(String, bool)]| {
+            v.iter()
+                .filter(|(_, on)| *on)
+                .map(|(c, _)| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Some(PickView {
+            titles,
+            title: self.pick_mode.clone(),
+            audio_summary: if audio_all {
+                all.clone()
+            } else {
+                picked(&audio)
+            },
+            subs_summary: if subs_none {
+                none
+            } else if subs_forced {
+                forced
+            } else if subs_all {
+                all
+            } else {
+                picked(&subtitles)
+            },
+            audio,
+            subtitles,
+            audio_all,
+            subs_all,
+            subs_none,
+            subs_forced,
+        })
+    }
+
     pub fn view(&self) -> View {
         let p = self
             .run
@@ -3260,6 +3555,7 @@ impl App {
         View {
             page: self.page,
             title_rows: self.rows(),
+            pick: self.pick_view(),
             info: self
                 .info
                 .as_ref()
@@ -3286,6 +3582,7 @@ impl App {
                 },
             ),
             output_dir: self.output_dir.clone(),
+            free_space_line: free_space_line(&self.free.get(&self.output_dir)),
             format: self.effective_format(),
             formats: self.offered_formats(),
             can_run: !self.running() && !self.opening() && !self.source.is_empty(),
@@ -3316,6 +3613,8 @@ impl App {
                 0
             } else if n.type_s == "Title" {
                 1
+            } else if n.type_s == "Chapter" {
+                3
             } else {
                 2
             };
@@ -3326,6 +3625,10 @@ impl App {
                 desc: n.desc.clone(),
                 length: n.length.clone(),
                 size: n.size.clone(),
+                lang: n.lang.clone(),
+                item: n.item.clone(),
+                format: n.format.clone(),
+                notes: n.notes.clone(),
                 check: if n.checkable() {
                     Some(self.tree.check_state(i))
                 } else {
@@ -3351,6 +3654,322 @@ impl Default for App {
     }
 }
 
+/// The selection bar as the shells draw it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PickView {
+    /// The title choices this disc offers, (mode, label), and the chosen mode.
+    pub titles: Vec<(&'static str, String)>,
+    pub title: String,
+    /// Every audio / subtitle language on the disc as (code, ticked), in disc order.
+    pub audio: Vec<(String, bool)>,
+    pub subtitles: Vec<(String, bool)>,
+    /// Whether "All" is in force: no audio narrowing / every subtitle kept.
+    pub audio_all: bool,
+    pub subs_all: bool,
+    pub subs_none: bool,
+    pub subs_forced: bool,
+    /// What each dropdown shows closed: "eng, deu", "All", "None".
+    pub audio_summary: String,
+    pub subs_summary: String,
+}
+
+/// One column of the title tree, after the shell's own tick column.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Column {
+    /// What [`Row::cell`] takes.
+    pub id: &'static str,
+    /// The header, in the active locale.
+    pub title: String,
+    /// Starting width in points.
+    pub width: f64,
+    /// Right-aligned (lengths and sizes).
+    pub numeric: bool,
+    /// Takes up any change in the tree's width; the others keep theirs.
+    pub flex: bool,
+    /// The narrowest it may be squeezed to when the tree is short of width.
+    pub min: f64,
+}
+
+/// The title tree's columns, the same on every shell.
+pub fn tree_columns() -> Vec<Column> {
+    let col = |id, title: String, width, min, numeric, flex| Column {
+        id,
+        title,
+        width,
+        numeric,
+        flex,
+        min,
+    };
+    vec![
+        col(
+            "item",
+            crate::strings::get_or("gui.col.item", "Item"),
+            190.0,
+            110.0,
+            false,
+            false,
+        ),
+        col(
+            "lang",
+            crate::strings::get_or("gui.col.lang", "Language"),
+            76.0,
+            76.0,
+            false,
+            false,
+        ),
+        col(
+            "format",
+            crate::strings::get("disc.format"),
+            260.0,
+            150.0,
+            false,
+            false,
+        ),
+        col(
+            "notes",
+            crate::strings::get_or("gui.col.notes", "Notes"),
+            240.0,
+            120.0,
+            false,
+            true,
+        ),
+        col(
+            "length",
+            crate::strings::get_or("gui.col.duration", "Length"),
+            66.0,
+            66.0,
+            true,
+            false,
+        ),
+        col(
+            "size",
+            crate::strings::get_or("gui.col.size", "Size"),
+            66.0,
+            66.0,
+            true,
+            false,
+        ),
+    ]
+}
+
+/// Fit the columns into `avail` points, each starting at its width in `widths`: the flexible
+/// one takes what the others leave and, short of room, the text columns give way together, in
+/// proportion, down to their minimums. Lengths and sizes have no give, so they always read.
+pub fn fit_column_widths(cols: &[Column], widths: &[f64], avail: f64) -> Vec<f64> {
+    let mut w: Vec<f64> = cols
+        .iter()
+        .zip(widths)
+        .map(|(c, &v)| v.max(c.min))
+        .collect();
+    if let Some(f) = cols.iter().position(|c| c.flex) {
+        let others: f64 = w
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != f)
+            .map(|(_, v)| v)
+            .sum();
+        w[f] = (avail - others).max(cols[f].min);
+    }
+    let over = w.iter().sum::<f64>() - avail;
+    let give: f64 = cols.iter().zip(&w).map(|(c, v)| v - c.min).sum();
+    if over > 0.0 && give > 0.0 {
+        let k = (over / give).min(1.0);
+        for (c, v) in cols.iter().zip(w.iter_mut()) {
+            *v -= (*v - c.min) * k;
+        }
+    }
+    w
+}
+
+impl Row {
+    /// The text of this row's cell in column `id` ([`tree_columns`]).
+    pub fn cell(&self, id: &str) -> &str {
+        match id {
+            "item" => &self.item,
+            "lang" => &self.lang,
+            "format" => &self.format,
+            "length" => &self.length,
+            "size" => &self.size,
+            _ => &self.notes,
+        }
+    }
+}
+
+/// One entry of a selection-bar menu: a fixed choice or a language, ticked or not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PickEntry {
+    pub label: String,
+    /// What [`PickView::audio_choice`] / [`PickView::subs_choice`] take back.
+    pub tag: isize,
+    pub on: bool,
+    /// Draw a separator above it (the first language after the fixed choices).
+    pub separator_before: bool,
+}
+
+// Menu tags: the fixed choices, then each language at LANG_TAG + its index.
+const ALL_TAG: isize = 1;
+const NONE_TAG: isize = 2;
+const FORCED_TAG: isize = 3;
+const LANG_TAG: isize = 100;
+
+/// The selection bar's three labels: Titles, Audio, Subtitles.
+pub fn pick_labels() -> [String; 3] {
+    [
+        crate::strings::get_or("gui.pick.titles", "Titles"),
+        crate::strings::get_or("gui.pick.audio", "Audio"),
+        crate::strings::get_or("gui.pick.subtitles", "Subtitles"),
+    ]
+}
+
+impl PickView {
+    fn menu(fixed: Vec<(String, isize, bool)>, langs: &[(String, bool)]) -> Vec<PickEntry> {
+        let mut out: Vec<PickEntry> = fixed
+            .into_iter()
+            .map(|(label, tag, on)| PickEntry {
+                label,
+                tag,
+                on,
+                separator_before: false,
+            })
+            .collect();
+        for (k, (code, on)) in langs.iter().enumerate() {
+            out.push(PickEntry {
+                label: code.clone(),
+                tag: LANG_TAG + k as isize,
+                on: *on,
+                separator_before: k == 0,
+            });
+        }
+        out
+    }
+
+    /// The Audio menu: All, then each language on the disc.
+    pub fn audio_menu(&self) -> Vec<PickEntry> {
+        let all = crate::strings::get_or("gui.pick.all", "All");
+        Self::menu(vec![(all, ALL_TAG, self.audio_all)], &self.audio)
+    }
+
+    /// The Subtitles menu: All, None, Forced only, then each language on the disc.
+    pub fn subs_menu(&self) -> Vec<PickEntry> {
+        let all = crate::strings::get_or("gui.pick.all", "All");
+        let none = crate::strings::get_or("gui.pick.none", "None");
+        let forced = crate::strings::get_or("gui.pick.forced", "Forced only");
+        Self::menu(
+            vec![
+                (all, ALL_TAG, self.subs_all),
+                (none, NONE_TAG, self.subs_none),
+                (forced, FORCED_TAG, self.subs_forced),
+            ],
+            &self.subtitles,
+        )
+    }
+
+    /// What a picked Audio entry means for [`App::pick_audio`]: `Some(None)` is All.
+    pub fn audio_choice(&self, tag: isize) -> Option<Option<String>> {
+        match tag {
+            ALL_TAG => Some(None),
+            t => usize::try_from(t - LANG_TAG)
+                .ok()
+                .and_then(|k| self.audio.get(k))
+                .map(|(c, _)| Some(c.clone())),
+        }
+    }
+
+    /// What a picked Subtitles entry means for [`App::pick_subtitles`].
+    pub fn subs_choice(&self, tag: isize) -> Option<SubPick> {
+        match tag {
+            ALL_TAG => Some(SubPick::All),
+            NONE_TAG => Some(SubPick::None),
+            FORCED_TAG => Some(SubPick::Forced),
+            t => usize::try_from(t - LANG_TAG)
+                .ok()
+                .and_then(|k| self.subtitles.get(k))
+                .map(|(c, _)| SubPick::Lang(c.clone())),
+        }
+    }
+
+    /// The mode of the Titles entry at `index` (its position in [`PickView::titles`]).
+    pub fn title_choice(&self, index: usize) -> Option<&'static str> {
+        self.titles.get(index).map(|t| t.0)
+    }
+
+    /// The Titles entry to show as chosen.
+    pub fn title_index(&self) -> usize {
+        self.titles
+            .iter()
+            .position(|t| t.0 == self.title)
+            .unwrap_or(0)
+    }
+}
+
+/// Free space at a folder, measured off the UI thread: a statvfs on a stale network folder can
+/// hang for minutes. One measurement runs at a time; the latest folder asked for meanwhile is
+/// measured next. Until a folder's answer is in it reads as unknown ("—").
+#[derive(Clone, Default)]
+pub struct FreeSpace(Arc<Mutex<FreeState>>);
+
+#[derive(Default)]
+struct FreeState {
+    /// The last folder measured, and its answer.
+    known: Option<(String, String)>,
+    busy: bool,
+    next: Option<String>,
+}
+
+impl FreeSpace {
+    /// The free space at `dir` as text, without blocking.
+    pub fn get(&self, dir: &str) -> String {
+        self.get_with(dir, free_space)
+    }
+
+    fn get_with(&self, dir: &str, measure: fn(&str) -> String) -> String {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((d, text)) = &s.known
+            && d == dir
+        {
+            return text.clone();
+        }
+        if s.busy {
+            s.next = Some(dir.to_string());
+        } else {
+            s.busy = true;
+            let state = self.0.clone();
+            let first = dir.to_string();
+            let spawned = std::thread::Builder::new()
+                .name("free-space".into())
+                .spawn(move || measure_until_current(&state, first, measure));
+            s.busy = spawned.is_ok();
+        }
+        "—".into()
+    }
+
+    /// Drop the answer, so the next ask measures afresh (a rip changes it).
+    pub fn forget(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).known = None;
+    }
+}
+
+// Measure `dir`, then whatever folder was asked for meanwhile, until none is waiting.
+fn measure_until_current(state: &Mutex<FreeState>, mut dir: String, measure: fn(&str) -> String) {
+    loop {
+        let text = measure(&dir);
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+        s.known = Some((dir.clone(), text));
+        match s.next.take() {
+            Some(n) if n != dir => dir = n,
+            _ => {
+                s.busy = false;
+                return;
+            }
+        }
+    }
+}
+
+/// The line under the output row: `free` is the free space at the chosen folder.
+pub fn free_space_line(free: &str) -> String {
+    format!("{} {free}", crate::strings::get("gui.info.free_space"))
+}
+
 /// One rendered tree row — already decided, nothing left to compute.
 #[derive(Clone, Debug)]
 pub struct Row {
@@ -3362,11 +3981,47 @@ pub struct Row {
     pub length: String,
     /// The Size cell (`"6.8 GB"`); empty where the scan reports no size.
     pub size: String,
+    /// The Language cell (`"deu"`); empty but on audio and subtitle rows.
+    pub lang: String,
+    /// The Item, Format and Notes cells ("Title 2", "MPEG-2 576i 25fps 16:9", "19 chapters").
+    pub item: String,
+    pub format: String,
+    pub notes: String,
     /// `None` means the row carries no checkbox at all.
     pub check: Option<Check>,
     /// Whether a click on the box does anything. `false` for a mirror row
     /// ([`Node::mirrors`]): the box shows its base's tick and is drawn disabled.
     pub check_enabled: bool,
+}
+
+/// A row list's identity, excluding tick state (applied without a rebuild): every painted
+/// cell, the shape and the count. Equal signatures let a shell skip reloading its tree.
+/// Hashed in place, so a tick-only redraw allocates nothing.
+pub fn rows_sig(rows: &[Row]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    rows.len().hash(&mut h);
+    for r in rows {
+        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
+        (&r.item, &r.lang, &r.format, &r.notes).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Self-test: each Title row's Item names its 1-based `-t` number, the numbers ascend (a hidden
+/// short title leaves a gap), and its description leads with that name.
+pub fn titles_numbered(rows: &[Row]) -> bool {
+    let mut last = 0;
+    rows.iter().filter(|r| r.type_s == "Title").all(|r| {
+        let digits: String = r.item.chars().filter(char::is_ascii_digit).collect();
+        let Ok(n) = digits.parse::<usize>() else {
+            return false;
+        };
+        let ok =
+            n > last && r.item == crate::engine::title_item(n - 1) && r.desc.starts_with(&r.item);
+        last = n;
+        ok
+    })
 }
 
 /// The Result page heading for a verdict, matched on the TYPED outcome.
@@ -3385,6 +4040,8 @@ pub(crate) fn result_heading(outcome: crate::engine::RunOutcome) -> String {
 pub struct View {
     pub page: Page,
     pub title_rows: Vec<Row>,
+    /// The selection bar, while a source is open.
+    pub pick: Option<PickView>,
     pub info: Option<[String; 7]>,
     pub bar_current: f64,
     pub bar_overall: f64,
@@ -3397,6 +4054,8 @@ pub struct View {
     pub saving_overall: String,
     pub show_overall_bar: bool,
     pub output_dir: String,
+    /// The line under the output row (free space there); "—" until measured.
+    pub free_space_line: String,
     pub format: String,
     pub formats: Vec<Vec<&'static str>>,
     pub can_run: bool,
@@ -3418,6 +4077,112 @@ pub struct View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_space_is_measured_off_the_caller_for_the_latest_folder() {
+        use std::sync::atomic::AtomicUsize;
+        static GATE: Mutex<()> = Mutex::new(());
+        static MEASURED: AtomicUsize = AtomicUsize::new(0);
+        fn slow(dir: &str) -> String {
+            let _g = GATE.lock().unwrap_or_else(|e| e.into_inner());
+            MEASURED.fetch_add(1, Ordering::SeqCst);
+            format!("free at {dir}")
+        }
+        let free = FreeSpace::default();
+        let held = GATE.lock().unwrap();
+        // A hung filesystem never holds the caller: each ask answers at once.
+        for dir in ["/a", "/b", "/c"] {
+            assert_eq!(free.get_with(dir, slow), "—");
+        }
+        drop(held);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while free.get_with("/c", slow) != "free at /c" {
+            assert!(std::time::Instant::now() < until, "never measured");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            MEASURED.load(Ordering::SeqCst),
+            2,
+            "/b was passed over for /c"
+        );
+        free.forget();
+        assert_eq!(
+            free.get_with("/c", slow),
+            "—",
+            "measured afresh after forget"
+        );
+    }
+
+    #[test]
+    fn titles_are_numbered_as_dash_t_numbers_them() {
+        let title = |ti: usize| Row {
+            index: ti,
+            depth: 1,
+            type_s: "Title".into(),
+            desc: format!("{}  —  19 chapters", crate::engine::title_item(ti)),
+            length: String::new(),
+            size: String::new(),
+            lang: String::new(),
+            item: crate::engine::title_item(ti),
+            format: String::new(),
+            notes: String::new(),
+            check: Some(Check::Off),
+            check_enabled: true,
+        };
+        assert!(titles_numbered(&[title(0), title(1), title(2)]));
+        assert!(
+            titles_numbered(&[title(0), title(3)]),
+            "a hidden title leaves a gap"
+        );
+        assert!(titles_numbered(&[]));
+        assert!(!titles_numbered(&[title(1), title(0)]), "out of order");
+        assert!(!titles_numbered(&[title(0), title(0)]), "a repeated number");
+        let mut old = title(0);
+        old.item = "1. 00800.mpls".into();
+        assert!(!titles_numbered(&[old]), "the removed playlist naming");
+        let mut desc = title(0);
+        desc.desc = "00800.mpls".into();
+        assert!(!titles_numbered(&[desc]));
+    }
+
+    #[test]
+    fn the_row_signature_sees_every_painted_cell_but_not_ticks() {
+        let base = vec![Row {
+            index: 1,
+            depth: 1,
+            type_s: "Title".into(),
+            desc: "Title 1".into(),
+            length: "1:30:00".into(),
+            size: "6.8 GB".into(),
+            lang: "eng".into(),
+            item: "Title 1".into(),
+            format: "MPEG-2".into(),
+            notes: "19 chapters".into(),
+            check: Some(Check::Off),
+            check_enabled: true,
+        }];
+        let mut ticked = base.clone();
+        ticked[0].check = Some(Check::On);
+        assert_eq!(rows_sig(&base), rows_sig(&ticked));
+        let changes: [fn(&mut Row); 10] = [
+            |r| r.index = 2,
+            |r| r.depth = 2,
+            |r| r.type_s = "Audio".into(),
+            |r| r.desc = "x".into(),
+            |r| r.length = "1:29:59".into(),
+            |r| r.size = "6.9 GB".into(),
+            |r| r.lang = "deu".into(),
+            |r| r.item = "Title 2".into(),
+            |r| r.format = "H.264".into(),
+            |r| r.notes = "20 chapters".into(),
+        ];
+        for (i, change) in changes.iter().enumerate() {
+            let mut b = base.clone();
+            change(&mut b[0]);
+            assert_ne!(rows_sig(&base), rows_sig(&b), "change #{i} went unnoticed");
+        }
+        assert_ne!(rows_sig(&base), rows_sig(&[]));
+    }
 
     // G5 (design §6): one table maps container extensions to schemes; every derived list
     // agrees with it, and mpg/mpeg/vob read as mpg://.
@@ -3551,6 +4316,9 @@ mod tests {
     /// Build one stream row for the preference tests.
     fn row(type_s: &str, pid: u16, lang: &str, forced: bool) -> crate::engine::Row {
         crate::engine::Row {
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
             type_s: type_s.to_string(),
             desc: String::new(),
             depth: 2,
@@ -3563,7 +4331,302 @@ mod tests {
             forced,
             mirrors: None,
             size_bytes: None,
+            role: None,
         }
+    }
+
+    #[test]
+    fn a_chapter_hangs_off_its_titles_chapter_list_which_starts_closed() {
+        let row = |depth: u8, type_s: &str| Row {
+            index: 0,
+            depth,
+            type_s: type_s.into(),
+            desc: String::new(),
+            length: String::new(),
+            size: String::new(),
+            lang: String::new(),
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
+            check: None,
+            check_enabled: false,
+        };
+        let rows = [
+            row(0, "Disc"),
+            row(1, "Title"),
+            row(2, "Video"),
+            row(2, "Chapters"),
+            row(3, "Chapter"),
+            row(3, "Chapter"),
+            row(1, "Title"),
+            row(2, "Audio"),
+        ];
+        assert_eq!(
+            row_parents(&rows),
+            [
+                None,
+                Some(0),
+                Some(1),
+                Some(1),
+                Some(3),
+                Some(3),
+                Some(0),
+                Some(6)
+            ]
+        );
+        let closed: Vec<bool> = rows.iter().map(starts_collapsed).collect();
+        assert_eq!(
+            closed,
+            [false, false, false, true, false, false, false, false]
+        );
+    }
+
+    // A disc like Kung Fu's: English and German play-alls, and each episode in both languages.
+    fn episode_disc() -> Scanned {
+        use freemkv_engine::TitleRole::{Episode, PlayAll};
+        let mut sc = probe_scan();
+        sc.rows.clear();
+        let titles = [
+            (PlayAll, "eng"),
+            (PlayAll, "deu"),
+            (Episode, "eng"),
+            (Episode, "deu"),
+            (Episode, "eng"),
+            (Episode, "deu"),
+        ];
+        for (ti, (role, lang)) in titles.into_iter().enumerate() {
+            let mut t = row("Title", 0, "", false);
+            (t.depth, t.pid, t.title, t.duration_secs) = (1, None, ti, 2600.0);
+            t.role = Some(role);
+            sc.rows.push(t);
+            let mut a = row("Audio", 0x80 + ti as u16, lang, false);
+            a.title = ti;
+            sc.rows.push(a);
+            let mut sub = row("Subtitles", 0x20 + ti as u16, "eng", false);
+            sub.title = ti;
+            sc.rows.push(sub);
+        }
+        sc
+    }
+
+    // The bar's audio choice picks which language's version of a title counts.
+    #[test]
+    fn the_selection_bar_picks_episodes_and_the_film_in_the_chosen_languages() {
+        let sc = episode_disc();
+        let langs = |a: &[&str]| LangPrefs {
+            audio: a.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let ticked = |mode: &str, p: &LangPrefs| Tree::from_scan(&sc, mode, 0.0, p).ticked_titles();
+        assert_eq!(ticked("Episodes", &langs(&["deu"])), vec![3, 5]);
+        assert_eq!(
+            ticked("Episodes", &langs(&["eng", "deu"])),
+            vec![2, 3, 4, 5]
+        );
+        assert_eq!(ticked("Main film only", &langs(&["deu"])), vec![1]);
+        assert_eq!(ticked("Main film only", &langs(&[])), vec![0]);
+        assert_eq!(ticked("No titles", &langs(&[])), Vec::<usize>::new());
+        // A language no title carries does not empty the choice.
+        assert_eq!(ticked("Episodes", &langs(&["jpn"])), vec![2, 3, 4, 5]);
+    }
+
+    // `episode_disc` with, on every title, a regular French subtitle (0x40+) and a forced
+    // English one (0x60+), so the subtitle choices have both kinds to keep or drop.
+    fn pick_disc() -> Scanned {
+        let mut sc = episode_disc();
+        let mut rows = Vec::new();
+        for r in sc.rows.drain(..) {
+            let ti = r.title;
+            let last_of_title = r.type_s == "Subtitles";
+            rows.push(r);
+            if last_of_title {
+                for (pid, lang, forced) in [(0x40, "fra", false), (0x60, "eng", true)] {
+                    let mut s = row("Subtitles", pid + ti as u16, lang, forced);
+                    s.title = ti;
+                    rows.push(s);
+                }
+            }
+        }
+        sc.rows = rows;
+        sc
+    }
+
+    // The stream PIDs ticked under title `ti`.
+    fn ticked_pids(tree: &Tree, ti: usize) -> Vec<u16> {
+        tree.arena
+            .iter()
+            .filter(|n| n.title_idx == ti && *n.checked.borrow())
+            .filter_map(|n| n.pid)
+            .collect()
+    }
+
+    #[test]
+    fn subtitles_none_and_forced_only_untick_regular_subtitles() {
+        let sc = pick_disc();
+        let pids = |no_subtitles, no_forced| {
+            let p = LangPrefs {
+                no_subtitles,
+                no_forced,
+                ..Default::default()
+            };
+            ticked_pids(&Tree::from_scan(&sc, "Main film only", 0.0, &p), 0)
+        };
+        // Audio 0x80, regular 0x20 and 0x40, forced 0x60.
+        assert_eq!(pids(false, false), vec![0x80, 0x20, 0x40, 0x60], "All");
+        assert_eq!(pids(true, true), vec![0x80], "None");
+        assert_eq!(pids(true, false), vec![0x80, 0x60], "Forced only");
+    }
+
+    // An App with `sc` open in the selection bar, as a finished scan leaves it.
+    fn picking(sc: Scanned) -> App {
+        let mut app = App::new();
+        app.pick_mode = "Main film only".into();
+        app.pick_scan = Some(sc);
+        app.repick();
+        app
+    }
+
+    #[test]
+    fn the_subtitle_choices_step_through_their_states() {
+        let mut app = picking(pick_disc());
+        let pick = |app: &App| app.view().pick.expect("a source is open");
+        let flags = |app: &App| {
+            let p = &app.pick_prefs;
+            (p.no_subtitles, p.no_forced)
+        };
+        let v = pick(&app);
+        assert!(v.subs_all && !v.subs_none && !v.subs_forced);
+        assert_eq!(v.subs_summary, "All");
+        assert_eq!(
+            v.subtitles,
+            vec![("eng".into(), false), ("fra".into(), false)]
+        );
+
+        app.pick_subtitles(SubPick::None);
+        assert_eq!(flags(&app), (true, true));
+        let v = pick(&app);
+        assert!(v.subs_none && !v.subs_all && !v.subs_forced);
+        assert_eq!(v.subs_summary, "None");
+        assert_eq!(ticked_pids(&app.tree, 0), vec![0x80]);
+
+        app.pick_subtitles(SubPick::Forced);
+        assert_eq!(flags(&app), (true, false));
+        let v = pick(&app);
+        assert!(v.subs_forced && !v.subs_none && !v.subs_all);
+        assert_eq!(v.subs_summary, "Forced only");
+        assert_eq!(ticked_pids(&app.tree, 0), vec![0x80, 0x60]);
+
+        // A language from Forced only starts a fresh list; it keeps that language's forced
+        // subtitles too.
+        app.pick_subtitles(SubPick::Lang("fra".into()));
+        assert_eq!(flags(&app), (false, false));
+        assert_eq!(app.pick_prefs.subtitles, vec!["fra".to_string()]);
+        assert_eq!(app.pick_prefs.forced, app.pick_prefs.subtitles);
+        let v = pick(&app);
+        assert!(!v.subs_all && !v.subs_none && !v.subs_forced);
+        assert_eq!(v.subs_summary, "fra");
+        assert_eq!(
+            v.subtitles,
+            vec![("eng".into(), false), ("fra".into(), true)]
+        );
+        assert_eq!(ticked_pids(&app.tree, 0), vec![0x80, 0x40]);
+
+        app.pick_subtitles(SubPick::Lang("eng".into()));
+        assert_eq!(pick(&app).subs_summary, "eng, fra");
+        assert_eq!(ticked_pids(&app.tree, 0), vec![0x80, 0x20, 0x40, 0x60]);
+
+        // Untoggling the last language leaves None, not All.
+        app.pick_subtitles(SubPick::Lang("eng".into()));
+        app.pick_subtitles(SubPick::Lang("fra".into()));
+        assert_eq!(flags(&app), (true, true));
+        assert!(pick(&app).subs_none);
+
+        app.pick_subtitles(SubPick::All);
+        assert_eq!(flags(&app), (false, false));
+        assert!(app.pick_prefs.subtitles.is_empty() && app.pick_prefs.forced.is_empty());
+        assert!(pick(&app).subs_all);
+    }
+
+    #[test]
+    fn the_audio_choice_toggles_languages_and_all_clears_them() {
+        let mut app = picking(pick_disc());
+        app.pick_titles("Episodes");
+        let v = app.view().pick.unwrap();
+        assert!(v.audio_all);
+        assert_eq!(v.audio_summary, "All");
+        assert_eq!(v.audio, vec![("eng".into(), false), ("deu".into(), false)]);
+        assert_eq!(app.tree.ticked_titles(), vec![2, 3, 4, 5]);
+
+        app.pick_audio(Some("deu"));
+        let v = app.view().pick.unwrap();
+        assert!(!v.audio_all);
+        assert_eq!(v.audio_summary, "deu");
+        assert_eq!(v.audio, vec![("eng".into(), false), ("deu".into(), true)]);
+        assert_eq!(app.tree.ticked_titles(), vec![3, 5]);
+
+        app.pick_audio(Some("eng"));
+        assert_eq!(app.view().pick.unwrap().audio_summary, "eng, deu");
+        app.pick_audio(None);
+        assert!(app.pick_prefs.audio.is_empty());
+        assert!(app.view().pick.unwrap().audio_all);
+    }
+
+    #[test]
+    fn every_menu_entry_maps_back_to_its_own_choice() {
+        let app = picking(pick_disc());
+        let v = app.view().pick.unwrap();
+        let subs: Vec<_> = v
+            .subs_menu()
+            .iter()
+            .map(|e| (v.subs_choice(e.tag), e.separator_before))
+            .collect();
+        assert_eq!(
+            subs,
+            vec![
+                (Some(SubPick::All), false),
+                (Some(SubPick::None), false),
+                (Some(SubPick::Forced), false),
+                (Some(SubPick::Lang("eng".into())), true),
+                (Some(SubPick::Lang("fra".into())), false),
+            ]
+        );
+        let audio: Vec<_> = v
+            .audio_menu()
+            .iter()
+            .map(|e| v.audio_choice(e.tag))
+            .collect();
+        assert_eq!(
+            audio,
+            vec![
+                Some(None),
+                Some(Some("eng".into())),
+                Some(Some("deu".into()))
+            ]
+        );
+        // A tag past the languages, or none at all, means nothing.
+        for tag in [0, LANG_TAG + 5, -1] {
+            assert_eq!(v.subs_choice(tag), None, "{tag}");
+            assert_eq!(v.audio_choice(tag), None, "{tag}");
+        }
+    }
+
+    #[test]
+    fn the_title_choices_offer_episodes_only_on_a_disc_that_proves_them() {
+        let mut app = picking(pick_disc());
+        let v = app.view().pick.unwrap();
+        let modes: Vec<_> = v.titles.iter().map(|t| t.0).collect();
+        assert_eq!(modes, PICK_TITLES.to_vec());
+        let at = modes.iter().position(|m| *m == "Episodes").unwrap();
+        assert_eq!(v.title_choice(at), Some("Episodes"));
+        assert_eq!(v.title_choice(modes.len()), None);
+        app.pick_titles("Episodes");
+        let v = app.view().pick.unwrap();
+        assert_eq!((v.title.as_str(), v.title_index()), ("Episodes", at));
+
+        let plain = picking(probe_scan());
+        let v = plain.view().pick.unwrap();
+        assert!(v.titles.iter().all(|t| t.0 != "Episodes"));
+        assert_eq!(v.titles.len(), PICK_TITLES.len() - 1);
     }
 
     // A forced-subtitle preference that matches nothing must keep NOTHING — unlike audio, a
@@ -4570,6 +5633,10 @@ mod tests {
             mirror: None,
             length: String::new(),
             size: String::new(),
+            lang: String::new(),
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
         }
     }
 
@@ -4605,6 +5672,9 @@ mod tests {
             label: "PROBE_DISC".to_string(),
             volume_id: "PROBE_DISC".to_string(),
             rows: vec![crate::engine::Row {
+                item: String::new(),
+                format: String::new(),
+                notes: String::new(),
                 type_s: "Title".to_string(),
                 desc: "1. (0 chapters)".to_string(),
                 depth: 1,
@@ -4617,6 +5687,7 @@ mod tests {
                 forced: false,
                 mirrors: None,
                 size_bytes: None,
+                role: None,
             }],
             key_summary: "none".to_string(),
             title_count: 1,

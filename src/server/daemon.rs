@@ -569,9 +569,15 @@ pub(crate) fn mount_nfs(share: &NfsShare) -> bool {
     }
 }
 
-/// Drop a mount whose handles went stale and mount the share afresh.
+/// Mount the share afresh: drop the current mount first when `mounted` (its handles went
+/// stale), else just mount it (an earlier mount failed or timed out). A share cannot be
+/// mounted over itself first, so writers are held meanwhile by the health checks, which
+/// read the mount table live and report a share that is not there as unhealthy.
 #[cfg(unix)]
-pub(crate) fn remount_nfs(share: &NfsShare) -> bool {
+pub(crate) fn remount_nfs(share: &NfsShare, mounted: bool) -> bool {
+    if !mounted {
+        return mount_nfs(share);
+    }
     // Lazy: a stale mount may still have open files, which a plain umount refuses over.
     let gone = std::process::Command::new("/bin/umount")
         .arg("-l")
@@ -775,15 +781,49 @@ fn wait_bounded(
 }
 
 fn is_mountpoint(path: &str) -> bool {
-    // Normalize trailing slashes: an operator-set NFS_MOUNTPOINT of "/mnt/nfs/"
-    // must still match "/mnt/nfs" in /proc/mounts, else mount.nfs4 runs
-    // against an already-mounted dir (can hang on a hard mount).
+    listed_in(&mount_table().unwrap_or_default(), path)
+}
+
+/// This process's mount table (the `/proc/mounts` format); `None` where there is none to read.
+pub(crate) fn mount_table() -> Option<String> {
+    std::fs::read_to_string("/proc/self/mounts").ok()
+}
+
+/// Whether `table` lists a mount at `path`. Trailing slashes are ignored, so an
+/// NFS_MOUNTPOINT of "/mnt/nfs/" still matches "/mnt/nfs" (else mount.nfs4 runs
+/// against an already-mounted dir, which can hang on a hard mount).
+pub(crate) fn listed_in(table: &str, path: &str) -> bool {
     let want = normalize_mount_path(path);
-    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
-    mounts
+    table
         .lines()
         .filter_map(|l| l.split_whitespace().nth(1))
-        .any(|mp| normalize_mount_path(mp) == want)
+        .any(|mp| normalize_mount_path(&unescape_mount_path(mp)) == want)
+}
+
+// The kernel writes space, tab, newline and backslash in a mount path as \ooo octal.
+fn unescape_mount_path(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let code = b
+            .get(i + 1..i + 4)
+            .filter(|d| d.iter().all(|c| (b'0'..=b'7').contains(c)));
+        match code {
+            Some(d) if b[i] == b'\\' => {
+                out.push(
+                    d.iter()
+                        .fold(0u8, |n, c| n.wrapping_mul(8).wrapping_add(c - b'0')),
+                );
+                i += 4;
+            }
+            _ => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // One log-maintenance pass: the mtime-based prune, then a re-check of the live system log

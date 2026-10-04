@@ -21,11 +21,13 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// No dispatcher and no argument parsing: this image has exactly one job.
+/// No dispatcher and no CLI parsing: this image has exactly one job.
 /// Anything a user could pass on a command line belongs to `freemkv.com`, the
 /// CLI, which is what `freemkv` resolves to first (PATHEXT).
 #[cfg(target_os = "windows")]
 fn main() {
+    // The one argument it takes: a source handed on by `freemkv gui <file-or-url>`.
+    freemkv::app_entry::set_launch_source(std::env::args().nth(1));
     freemkv::win_app::run();
 }
 

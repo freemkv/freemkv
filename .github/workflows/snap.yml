@@ -1,10 +1,8 @@
 name: Snap
 
-# Every push builds, installs and smoke-tests the snap. Publishing needs the
-# SNAPCRAFT_STORE_CREDENTIALS secret and is skipped without it:
-#   release tag -> stable   (the .snap is also attached to the GitHub release)
-#   qa          -> beta     (only after CI and qa are green on the same commit)
-#   dev         -> edge     (only when the repo variable SNAP_PUBLISH_EDGE is 'true')
+# Every push builds, installs and smoke-tests the snap. Only a release tag publishes,
+# to stable (the .snap is also attached to the GitHub release), and only with the
+# SNAPCRAFT_STORE_CREDENTIALS secret set.
 # arm64 builds on Launchpad via `snapcraft remote-build`, only when the
 # LAUNCHPAD_CREDENTIALS secret exists. See packaging/snap/README.md.
 on:
@@ -49,6 +47,27 @@ jobs:
         run: |
           echo "store=$([ -n "$STORE" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "launchpad=$([ -n "$LAUNCHPAD" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  # The release tag is the only upload, so the credentials it needs are proven
+  # on qa first: still valid for a month, and allowed to upload and release.
+  store-login:
+    needs: secrets
+    if: >-
+      needs.secrets.outputs.store == 'true' &&
+      (github.ref_name == 'qa' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Check the store credentials
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          set -uo pipefail
+          sudo snap install snapcraft --classic --channel="$SNAPCRAFT_CHANNEL"
+          snapcraft whoami > whoami.txt 2>&1 || { cat whoami.txt; echo "::error::the store rejected the credentials"; exit 1; }
+          grep -v '^email:' whoami.txt
+          python3 packaging/snap/store_checks.py login whoami.txt 30
 
   build:
     needs: packaging-tests
@@ -354,57 +373,16 @@ jobs:
   # apart from a real failure: until the store grants optical-write and the
   # dbus slot, uploads wait for review, which warns instead of failing.
   publish:
-    needs: [secrets, build, smoke, review, remote-build-arm64]
+    needs: [secrets, store-login, build, smoke, review, remote-build-arm64]
     if: >-
       always() && needs.smoke.result == 'success' && needs.review.result == 'success' &&
+      needs.store-login.result == 'success' &&
       needs.secrets.outputs.store == 'true' && github.event_name == 'push' &&
-      (github.ref_type == 'tag' || github.ref_name == 'qa' ||
-       (github.ref_name == 'dev' && vars.SNAP_PUBLISH_EDGE == 'true'))
+      github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      actions: read
     steps:
-      - name: Pick the channel
-        id: channel
-        env:
-          REF_NAME: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
-        run: |
-          if [ "$REF_TYPE" = tag ]; then c=stable
-          elif [ "$REF_NAME" = qa ]; then c=beta
-          else c=edge; fi
-          echo "channel=$c" >> "$GITHUB_OUTPUT"
-      # qa publishes only a candidate the release gate would accept: CI and qa
-      # both green on this exact commit.
-      - name: Wait for CI and qa to pass on this commit
-        if: github.ref_name == 'qa'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -uo pipefail
-          for _ in $(seq 1 120); do
-            pending=0
-            for wf in ci.yml qa.yml; do
-              # A transient API error is a pending poll, not a verdict.
-              if ! run=$(gh api "repos/$GH_REPO/actions/workflows/$wf/runs?head_sha=$SHA&event=push&per_page=1" \
-                    --jq '.workflow_runs[0] | "\(.status // "missing") \(.conclusion // "none")"'); then
-                echo "$wf: API error, retrying"; pending=1; continue
-              fi
-              status=${run%% *} conclusion=${run#* }
-              echo "$wf: $status $conclusion"
-              if [ "$status" != completed ]; then pending=1
-              elif [ "$conclusion" != success ]; then
-                echo "::error::$wf is $conclusion on $SHA; not publishing to beta"; exit 1
-              fi
-            done
-            [ "$pending" = 0 ] && exit 0
-            sleep 60
-          done
-          echo "::error::CI/qa did not finish within 2h; not publishing to beta"
-          exit 1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: snap-amd64, path: snap-package }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -415,7 +393,7 @@ jobs:
       - name: Upload and release to the store
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-          CHANNEL: ${{ steps.channel.outputs.channel }}
+          CHANNEL: stable
           ARM64_BUILD: ${{ needs.remote-build-arm64.result }}
         run: |
           set -uo pipefail
@@ -423,10 +401,18 @@ jobs:
           rc=0
           for f in snap-package/freemkv-*.snap; do
             name=$(basename "$f")
-            code=0
-            snapcraft upload --verbosity=verbose --release="$CHANNEL" "$f" > upload.log 2>&1 || code=$?
-            cat upload.log
-            case "$(python3 src/packaging/snap/store_checks.py upload "$code" "$CHANNEL" upload.log)" in
+            # A connection the store dropped before reporting any status is
+            # retried; anything the store answered is a verdict.
+            for attempt in 1 2 3; do
+              code=0
+              snapcraft upload --verbosity=verbose --release="$CHANNEL" "$f" > upload.log 2>&1 || code=$?
+              cat upload.log
+              verdict=$(python3 src/packaging/snap/store_checks.py upload "$code" "$CHANNEL" upload.log)
+              [ "$verdict" = transient ] && [ "$attempt" -lt 3 ] || break
+              echo "::warning::store dropped the upload of $name (attempt $attempt); retrying"
+              sleep $((attempt * 60))
+            done
+            case "$verdict" in
               released)
                 echo "- \`$name\` released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY" ;;
               held)

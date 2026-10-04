@@ -20,7 +20,7 @@ use crate::ui::{App, Check, Cmd, Effect, LogKind, LogLine, Page, Row, View};
 
 // Window geometry: rects come from `win_layout` (DPI-aware, PerMonitorV2);
 // never position from a bare constant or it'll be wrong at non-100% scaling.
-// Proportions mirror the macOS shell (tree 46.4% wide, etc.).
+// Proportions mirror the macOS shell (selection bar, full-width tree, output row).
 
 use crate::win_layout as lay;
 
@@ -45,7 +45,6 @@ const IDI_APP: u16 = 1;
 
 const ID_TREE: u16 = 1000;
 const ID_LOG: u16 = 1001;
-const ID_DETAIL: u16 = 1002;
 const ID_FORMAT: u16 = 1003;
 const ID_OUTDIR: u16 = 1004;
 const ID_BROWSE: u16 = 1005;
@@ -61,6 +60,9 @@ const ID_BAR_CUR: u16 = 1011;
 const ID_BAR_ALL: u16 = 1012;
 const ID_EJECT: u16 = 1013;
 const ID_TREE_HEAD: u16 = 1015;
+const ID_PICK_TITLES: u16 = 1016;
+const ID_PICK_AUDIO: u16 = 1017;
+const ID_PICK_SUBS: u16 = 1018;
 
 // Menu command ids. `cmd_for` maps these to core commands, so the enable/
 // disable rule lives in `ui::blocked_while_running` and cannot disagree with
@@ -538,19 +540,14 @@ struct Memo {
     log: Option<LogShown>,
     /// The `running` the menu enable states were last applied for.
     menu_running: Option<bool>,
+    /// The selection bar as last filled in; the menus are built from it.
+    pick: Option<crate::ui::PickView>,
+    /// The free-space line last shown.
+    free_line: Option<String>,
 }
 
-/// One row signature: the identity of the row, not its tick state (tick state
-/// is applied separately, without a rebuild). Hashed in place, no allocation.
-fn rows_sig(rows: &[Row]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    rows.len().hash(&mut h);
-    for r in rows {
-        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
-    }
-    h.finish()
-}
+// One row signature: the core's, so every shell redraws on the same changes.
+use crate::ui::rows_sig;
 
 /// How the log pane must change to show `log`, given what it last showed.
 #[derive(Debug, PartialEq, Eq)]
@@ -579,32 +576,49 @@ fn log_plan(shown: Option<LogShown>, first: u64, len: usize) -> LogPlan {
     }
 }
 
-// A tree row's label: the macOS outline's Type and Description, joined (Length and
-// Size have columns of their own, `TreeCols`). The disc root's type is not repeated.
-fn row_text(r: &Row) -> String {
-    if r.depth == 0 || r.type_s.is_empty() {
-        r.desc.clone()
-    } else {
-        format!("{}   {}", r.type_s, r.desc)
-    }
+// A row's cells in the core's column order (`ui::tree_columns`): what the tree
+// paints into each column.
+fn row_cells(r: &Row, columns: &[crate::ui::Column]) -> Vec<String> {
+    columns.iter().map(|c| r.cell(c.id).to_string()).collect()
 }
 
-/// The title tree's Length and Size columns. `SysTreeView32` has no columns, so
-/// a header sits above it and each row's two cells are painted into the row at
-/// the header's positions (`NM_CUSTOMDRAW`).
-#[derive(Default)]
+/// The title tree's columns. `SysTreeView32` has none, so a header sits above
+/// it: the tick column (the tree's own expanders and tick boxes), then the
+/// core's columns, whose cells are painted into each row (`NM_CUSTOMDRAW`).
 struct TreeCols {
-    /// The user's widths (header drags), at the 96-DPI baseline.
-    widths: lay::ColWidths,
+    /// The core's columns: ids, titles, alignment and the flexible one.
+    columns: Vec<crate::ui::Column>,
+    /// The user's widths (header drags), one per column, at the 96-DPI baseline.
+    widths: Vec<i32>,
     /// Where the columns were last laid out, in the tree's client coordinates.
     laid: Option<lay::TreeColumns>,
     /// The tree's border width: where its client area starts under the header.
     inset: i32,
-    /// Each row's `(length, size)`, by `Row::index` — the data a tree item carries.
-    cells: std::collections::HashMap<usize, (String, String)>,
+    /// Each row's cells, by `Row::index` — the data a tree item carries.
+    cells: std::collections::HashMap<usize, Vec<String>>,
     /// Set while the shell itself resizes the header items, whose change
     /// notifications are then not a user's drag.
     syncing: bool,
+}
+
+impl TreeCols {
+    fn new() -> Self {
+        let columns = crate::ui::tree_columns();
+        let widths = columns.iter().map(|c| c.width.round() as i32).collect();
+        Self {
+            columns,
+            widths,
+            laid: None,
+            inset: 0,
+            cells: std::collections::HashMap::new(),
+            syncing: false,
+        }
+    }
+
+    /// The flexible column's position.
+    fn flex(&self) -> usize {
+        self.columns.iter().position(|c| c.flex).unwrap_or(0)
+    }
 }
 
 // ── the shell ─────────────────────────────────────────────────────────────
@@ -633,14 +647,19 @@ struct Shell {
     /// The titles last applied to `tree_head`, so a render re-applies only a change.
     tree_head_text: Rc<RefCell<Vec<String>>>,
     cols: Rc<RefCell<TreeCols>>,
-    grp_out: gui::Button,
+    /// The selection bar: Titles, Audio and Subtitles labels, then the choosers.
+    lbl_pick: Vec<gui::Label>,
+    cmb_pick_titles: gui::ComboBox,
+    btn_pick_audio: gui::Button,
+    btn_pick_subs: gui::Button,
+    lbl_out: gui::Label,
     cmb_format: gui::ComboBox,
     edit_out: gui::Edit,
     btn_browse: gui::Button,
     btn_run: gui::Button,
     btn_eject: gui::Button,
-    grp_info: gui::Button,
-    detail: gui::Edit,
+    /// Free space at the output folder, under the output row.
+    lbl_free: gui::Label,
 
     // progress page
     grp_prog: gui::Button,
@@ -754,6 +773,46 @@ impl Shell {
         );
 
         // ── titles page ──
+        // The selection bar's labels; their texts are the core's.
+        let lbl_pick: Vec<gui::Label> = crate::ui::pick_labels()
+            .iter()
+            .map(|t| {
+                gui::Label::new(
+                    &wnd,
+                    gui::LabelOpts {
+                        text: &format!("{t}:"),
+                        size: (s.px(80), s.px(16)),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let cmb_pick_titles = gui::ComboBox::new(
+            &wnd,
+            gui::ComboBoxOpts {
+                width: s.px(lay::PICK_TITLES_W),
+                ctrl_id: ID_PICK_TITLES,
+                ..Default::default()
+            },
+        );
+        // Audio and Subtitles are multi-select: a split button showing the choice,
+        // with a checkable menu behind it (Win32 has no checked-list combo box).
+        let mk_pick_btn = |id: u16| {
+            gui::Button::new(
+                &wnd,
+                gui::ButtonOpts {
+                    text: "",
+                    width: s.px(lay::PICK_MENU_W),
+                    height: s.px(24),
+                    // BS_SPLITBUTTON, which winsafe does not name: the native drop arrow.
+                    control_style: unsafe { co::BS::from_raw(0x0000_000c) } | co::BS::LEFT,
+                    ctrl_id: id,
+                    ..Default::default()
+                },
+            )
+        };
+        let btn_pick_audio = mk_pick_btn(ID_PICK_AUDIO);
+        let btn_pick_subs = mk_pick_btn(ID_PICK_SUBS);
         let tree = gui::TreeView::new(
             &wnd,
             gui::TreeViewOpts {
@@ -771,7 +830,15 @@ impl Shell {
                 ..Default::default()
             },
         );
-        // Texts are set once the window exists (`sync_tree_head`).
+        // Texts are set once the window exists (`sync_tree_head`); one item for
+        // the tick column, then one per core column.
+        let head_items: Vec<(&str, i32)> = std::iter::once(("", s.px(lay::COL_TICK_W)))
+            .chain(
+                crate::ui::tree_columns()
+                    .iter()
+                    .map(|c| ("", s.px(c.width.round() as i32))),
+            )
+            .collect();
         let tree_head = gui::Header::new(
             &wnd,
             gui::HeaderOpts {
@@ -780,29 +847,22 @@ impl Shell {
                 control_style: co::HDS::HORZ | co::HDS::FULLDRAG,
                 window_style: co::WS::CHILD | co::WS::VISIBLE,
                 ctrl_id: ID_TREE_HEAD,
-                items: &[
-                    ("", s.px(228)),
-                    ("", s.px(lay::COL_LENGTH_W)),
-                    ("", s.px(lay::COL_SIZE_W)),
-                ],
+                items: &head_items,
                 ..Default::default()
             },
         );
-        let grp_out = gui::Button::new(
+        let lbl_out = gui::Label::new(
             &wnd,
-            gui::ButtonOpts {
+            gui::LabelOpts {
                 text: &crate::strings::get("gui.group.output"),
-                width: s.px(300),
-                height: s.px(lay::OUT_H),
-                control_style: co::BS::GROUPBOX,
-                window_style: co::WS::CHILD | co::WS::VISIBLE,
+                size: (s.px(300), s.px(16)),
                 ..Default::default()
             },
         );
         let cmb_format = gui::ComboBox::new(
             &wnd,
             gui::ComboBoxOpts {
-                width: s.px(280),
+                width: s.px(lay::FORMAT_W),
                 ctrl_id: ID_FORMAT,
                 ..Default::default()
             },
@@ -831,7 +891,7 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.run_now"),
-                width: s.px(110),
+                width: s.px(lay::RUN_W),
                 height: s.px(28),
                 control_style: co::BS::DEFPUSHBUTTON,
                 ctrl_id: ID_RUN,
@@ -848,28 +908,12 @@ impl Shell {
                 ..Default::default()
             },
         );
-        let grp_info = gui::Button::new(
+        let lbl_free = gui::Label::new(
             &wnd,
-            gui::ButtonOpts {
-                text: &crate::strings::get("gui.group.info"),
-                width: s.px(300),
-                height: s.px(200),
-                control_style: co::BS::GROUPBOX,
-                window_style: co::WS::CHILD | co::WS::VISIBLE,
-                ..Default::default()
-            },
-        );
-        let detail = gui::Edit::new(
-            &wnd,
-            gui::EditOpts {
-                text: &crate::strings::get("gui.page.detail_default"),
-                width: s.px(280),
-                height: s.px(160),
-                // Read-only but selectable: the detail block is something users
-                // paste into bug reports.
-                control_style: co::ES::MULTILINE | co::ES::READONLY | co::ES::AUTOVSCROLL,
-                window_style: co::WS::CHILD | co::WS::VISIBLE | co::WS::TABSTOP | co::WS::VSCROLL,
-                ctrl_id: ID_DETAIL,
+            gui::LabelOpts {
+                text: "",
+                size: (s.px(300), s.px(16)),
+                control_style: co::SS::LEFT | co::SS::ENDELLIPSIS,
                 ..Default::default()
             },
         );
@@ -1021,15 +1065,18 @@ impl Shell {
             tree,
             tree_head,
             tree_head_text: Rc::new(RefCell::new(Vec::new())),
-            cols: Rc::new(RefCell::new(TreeCols::default())),
-            grp_out,
+            cols: Rc::new(RefCell::new(TreeCols::new())),
+            lbl_pick,
+            cmb_pick_titles,
+            btn_pick_audio,
+            btn_pick_subs,
+            lbl_out,
             cmb_format,
             edit_out,
             btn_browse,
             btn_run,
             btn_eject,
-            grp_info,
-            detail,
+            lbl_free,
             grp_prog,
             lbl_keys,
             lbl_vals,
@@ -1198,6 +1245,12 @@ impl Shell {
         let v = self.app.borrow().view();
         let hidden = v.log_hidden;
         let dpi = window_dpi(self.wnd.hwnd());
+        let label_w = |i: usize| {
+            self.lbl_pick.get(i).map_or(0, |l| {
+                let text = l.hwnd().GetWindowText().unwrap_or_default();
+                text_width(l.hwnd(), &text)
+            })
+        };
         let l = lay::main_layout(
             dpi,
             cw,
@@ -1207,6 +1260,7 @@ impl Shell {
                 two_bars: v.show_overall_bar,
                 log_hidden: hidden,
                 info_rows: self.lbl_keys.len(),
+                pick_labels: [label_w(0), label_w(1), label_w(2)],
             },
         );
 
@@ -1220,18 +1274,27 @@ impl Shell {
         put(&self.btn_open, l.btn_open);
 
         // ── titles page ──
+        for (lbl, r) in
+            self.lbl_pick
+                .iter()
+                .zip([l.pick_titles_lbl, l.pick_audio_lbl, l.pick_subs_lbl])
+        {
+            put(lbl, r);
+        }
+        put(&self.cmb_pick_titles, l.pick_titles);
+        put(&self.btn_pick_audio, l.pick_audio);
+        put(&self.btn_pick_subs, l.pick_subs);
+        put(&self.btn_eject, l.btn_eject);
         let (head, tree) = lay::split_tree_header(l.tree, dpi);
         put(&self.tree_head, head);
         put(&self.tree, tree);
         self.layout_tree_cols(dpi);
-        put(&self.grp_out, l.grp_out);
+        put(&self.lbl_out, l.lbl_out);
         put(&self.edit_out, l.edit_out);
         put(&self.btn_browse, l.btn_browse);
         put(&self.cmb_format, l.cmb_format);
         put(&self.btn_run, l.btn_run);
-        put(&self.btn_eject, l.btn_eject);
-        put(&self.grp_info, l.grp_info);
-        put(&self.detail, l.detail);
+        put(&self.lbl_free, l.lbl_free);
 
         // ── progress page ──
         put(&self.grp_prog, l.grp_prog);
@@ -1266,12 +1329,22 @@ impl Shell {
         self.apply_dpi_at(window_dpi(self.wnd.hwnd()));
     }
 
-    /// The two things besides the rectangles that scale: the type, and the
-    /// tri-state tick glyphs in the tree's state image list. Called from
-    /// `WM_CREATE` and again from every `WM_DPICHANGED`.
+    /// The things besides the rectangles that scale: the type, the tri-state
+    /// tick glyphs in the tree's state image list, and the tree's row height and
+    /// indent. Called from `WM_CREATE` and again from every `WM_DPICHANGED`.
     fn apply_dpi_at(&self, dpi: u32) {
         apply_ui_font(self.wnd.hwnd(), dpi);
         let _ = build_check_images(&self.tree, dpi);
+        // After the font: a new font puts the tree back on its own row height.
+        let s = lay::Scale::new(dpi);
+        unsafe {
+            self.tree.hwnd().SendMessage(msg::TvmSetItemHeight {
+                height: Some(s.px(lay::TREE_ROW_H) as u32),
+            });
+            self.tree.hwnd().SendMessage(msg::TvmSetIndent {
+                width: s.px(lay::TREE_INDENT) as u32,
+            });
+        }
     }
 }
 
@@ -1304,10 +1377,13 @@ impl Shell {
     /// Rebuild the tree from the core's rows. Only called when the row set
     /// actually changed — see `Memo`.
     fn rebuild_tree(&self, rows: &[Row]) {
-        self.cols.borrow_mut().cells = rows
-            .iter()
-            .map(|r| (r.index, (r.length.clone(), r.size.clone())))
-            .collect();
+        {
+            let mut cols = self.cols.borrow_mut();
+            cols.cells = rows
+                .iter()
+                .map(|r| (r.index, row_cells(r, &cols.columns)))
+                .collect();
+        }
         // TreeView has no `set_redraw` wrapper (only ListView does), so the
         // message goes direct. Without it, rebuilding a large tree flickers.
         self.set_tree_redraw(false);
@@ -1319,7 +1395,9 @@ impl Shell {
         let parents = crate::ui::row_parents(rows);
         let mut handles: Vec<Option<w::HTREEITEM>> = Vec::with_capacity(rows.len());
         for (i, r) in rows.iter().enumerate() {
-            let text = row_text(r);
+            // The item's own text is the Item cell, for a screen reader; what shows
+            // is painted over it, column by column (`paint_tree_cells`).
+            let text = &r.item;
             // A row whose parent is missing is added at the top level rather
             // than dropped: a row the core decided to show must be reachable.
             let parent = parents[i].and_then(|p| handles[p].as_ref());
@@ -1327,14 +1405,14 @@ impl Shell {
                 None => self
                     .tree
                     .items()
-                    .add_root(&text, None, r.index)
+                    .add_root(text, None, r.index)
                     .ok()
                     .map(|it| unsafe { it.htreeitem().raw_copy() }),
                 Some(p) => self
                     .tree
                     .items()
                     .get(p)
-                    .add_child(&text, None, r.index)
+                    .add_child(text, None, r.index)
                     .ok()
                     .map(|it| unsafe { it.htreeitem().raw_copy() }),
             };
@@ -1352,15 +1430,21 @@ impl Shell {
             }
         }
         self.set_tree_redraw(true);
-        // Expanding above leaves the view parked on the LAST title, so scroll the
-        // core's nominated row (first ticked) back to top. `ensure_visible` won't
-        // do — it scrolls the minimum distance, landing at the bottom edge.
+        // Expanding above leaves the view parked on the LAST title: start at the
+        // top, then scroll only as far as the core's chosen row (first ticked) needs.
         if let Some(h) = crate::ui::first_visible_row(rows).and_then(|i| handles[i].as_ref()) {
+            if let Some(top) = handles.iter().flatten().next() {
+                let _ = unsafe {
+                    self.tree.hwnd().SendMessage(msg::TvmSelectItem {
+                        action: co::TVGN::FIRSTVISIBLE,
+                        hitem: top,
+                    })
+                };
+            }
             let _ = unsafe {
-                self.tree.hwnd().SendMessage(msg::TvmSelectItem {
-                    action: co::TVGN::FIRSTVISIBLE,
-                    hitem: h,
-                })
+                self.tree
+                    .hwnd()
+                    .SendMessage(msg::TvmEnsureVisible { hitem: h })
             };
         }
         let _ = self.tree.hwnd().InvalidateRect(None, true);
@@ -1421,9 +1505,9 @@ impl Shell {
 // ── the tree's columns ────────────────────────────────────────────────────
 
 impl Shell {
-    /// Lay the Length and Size columns out for the tree's current client width,
-    /// sizing the header items to match. A no-op when nothing moved, since
-    /// `render` re-runs the layout on every tick.
+    /// Lay the columns out for the tree's current client width, sizing the
+    /// header items to match. A no-op when nothing moved, since `render` re-runs
+    /// the layout on every tick.
     fn layout_tree_cols(&self, dpi: u32) {
         let Ok(client) = self.tree.hwnd().GetClientRect() else {
             return;
@@ -1433,9 +1517,11 @@ impl Shell {
             Ok(()) => info.cxWindowBorders as i32,
             Err(_) => 0,
         };
-        let widths = self.cols.borrow().widths;
-        let laid = lay::tree_columns(dpi, client.right, widths);
-        if self.cols.borrow().laid == Some(laid) {
+        let laid = {
+            let c = self.cols.borrow();
+            lay::tree_columns(dpi, client.right, &c.widths, c.flex())
+        };
+        if self.cols.borrow().laid.as_ref() == Some(&laid) {
             return;
         }
         let head_w = self
@@ -1444,32 +1530,28 @@ impl Shell {
             .GetClientRect()
             .map(|r| r.right)
             .unwrap_or(0);
+        let widths = lay::header_widths(&laid, head_w, inset);
         {
             let mut c = self.cols.borrow_mut();
             c.laid = Some(laid);
             c.inset = inset;
             c.syncing = true;
         }
-        for (i, wd) in lay::header_widths(&laid, head_w, inset)
-            .into_iter()
-            .enumerate()
-        {
+        for (i, wd) in widths.into_iter().enumerate() {
             self.tree_head.items().get(i as u32).set_width(wd);
         }
         self.cols.borrow_mut().syncing = false;
         let _ = self.tree.hwnd().InvalidateRect(None, true);
     }
 
-    /// The header's texts, in the current language: the tree column carries
-    /// Type and Description (one label, as `row_text` joins them), the other
-    /// two are right-aligned like their cells.
+    /// The header's texts, in the current language: nothing over the tick
+    /// column, then the core's column titles, numeric ones right-aligned like
+    /// their cells.
     fn sync_tree_head(&self) {
-        let g = crate::strings::get;
-        let texts = vec![
-            format!("{} / {}", g("gui.col.type"), g("gui.col.desc")),
-            crate::strings::get_or("gui.col.duration", "Length"),
-            crate::strings::get_or("gui.col.size", "Size"),
-        ];
+        let columns = crate::ui::tree_columns();
+        let texts: Vec<String> = std::iter::once(String::new())
+            .chain(columns.iter().map(|c| c.title.clone()))
+            .collect();
         if *self.tree_head_text.borrow() == texts {
             return;
         }
@@ -1490,8 +1572,15 @@ impl Shell {
             }
         };
         set(0, &texts[0], co::HDF::LEFT);
-        set(1, &texts[1], co::HDF::RIGHT);
-        set(2, &texts[2], co::HDF::RIGHT);
+        for (i, c) in columns.iter().enumerate() {
+            let align = if c.numeric {
+                co::HDF::RIGHT
+            } else {
+                co::HDF::LEFT
+            };
+            set(i as u32 + 1, &c.title, align);
+        }
+        self.cols.borrow_mut().columns = columns;
         *self.tree_head_text.borrow_mut() = texts;
     }
 
@@ -1513,12 +1602,13 @@ impl Shell {
         }
     }
 
-    /// Paint one row's Length and Size cells, over whatever of its label ran
-    /// under them. The tree has already drawn the row; with a mirrored tree the
-    /// DC is mirrored too, so the same client coordinates land mirrored.
+    /// Paint one row's cells, one per column, over the label the tree drew. The
+    /// tree has drawn its expander and tick box left of the label, which stay;
+    /// with a mirrored tree the DC is mirrored too, so the same client
+    /// coordinates land mirrored.
     fn paint_tree_cells(&self, cd: &w::NMCUSTOMDRAW) {
         let cols = self.cols.borrow();
-        let Some(laid) = cols.laid else {
+        let Some(laid) = cols.laid.as_ref() else {
             return;
         };
         // An item mid-insertion has no data yet, and `data()` would panic.
@@ -1527,18 +1617,30 @@ impl Shell {
         }
         let hitem = unsafe { w::HTREEITEM::from_ptr(cd.dwItemSpec as _) };
         let idx = *self.tree.items().get(&hitem).data().borrow();
+        let Some(label) = self.item_rect(&hitem, true) else {
+            return;
+        };
         let hdc = &cd.hdc;
         let (top, bottom) = (cd.rc.top, cd.rc.bottom);
+        let right = laid.cols.last().map_or(cd.rc.right, |c| c.x + c.w);
         let area = w::RECT {
-            left: laid.length.x,
+            left: label.left,
             top,
-            right: laid.size.x + laid.size.w,
+            right: right.max(cd.rc.right),
             bottom,
         };
-        if let Ok(brush) = w::HBRUSH::GetSysColorBrush(co::COLOR::WINDOW) {
+        // The row's own selection highlight, carried across every column.
+        let selected = cd.uItemState.has(co::CDIS::SELECTED);
+        let focused = w::HWND::GetFocus().is_some_and(|f| f == *self.tree.hwnd());
+        let (bg, fg) = match (selected, focused) {
+            (true, true) => (co::COLOR::HIGHLIGHT, co::COLOR::HIGHLIGHTTEXT),
+            (true, false) => (co::COLOR::BTNFACE, co::COLOR::WINDOWTEXT),
+            _ => (co::COLOR::WINDOW, co::COLOR::WINDOWTEXT),
+        };
+        if let Ok(brush) = w::HBRUSH::GetSysColorBrush(bg) {
             let _ = hdc.FillRect(area, &brush);
         }
-        let Some((length, size)) = cols.cells.get(&idx) else {
+        let Some(cells) = cols.cells.get(&idx) else {
             return;
         };
         // The tree's own font: the DC is not guaranteed to still hold it after
@@ -1546,28 +1648,54 @@ impl Shell {
         let font = unsafe { self.tree.hwnd().SendMessage(msg::WmGetFont {}) };
         let _font = font.as_ref().and_then(|f| hdc.SelectObject(f).ok());
         let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
-        let _ = hdc.SetTextColor(w::GetSysColor(co::COLOR::WINDOWTEXT));
+        let _ = hdc.SetTextColor(w::GetSysColor(fg));
         let pad = lay::Scale::new(window_dpi(self.wnd.hwnd())).px(6);
-        for (span, text) in [(laid.length, length), (laid.size, size)] {
+        for ((span, text), col) in laid.cols.iter().zip(cells).zip(&cols.columns) {
             if text.is_empty() {
                 continue;
             }
+            // A row indented past its column's start begins after its tick box.
             let mut rc = w::RECT {
-                left: span.x + pad,
+                left: span.x.max(label.left) + pad,
                 top,
                 right: span.x + span.w - pad,
                 bottom,
             };
+            let align = if col.numeric {
+                co::DT::RIGHT
+            } else {
+                co::DT::LEFT
+            };
             let _ = hdc.DrawText(
                 text,
                 &mut rc,
-                co::DT::RIGHT
+                align
                     | co::DT::VCENTER
                     | co::DT::SINGLELINE
                     | co::DT::NOPREFIX
                     | co::DT::END_ELLIPSIS,
             );
         }
+    }
+
+    /// A tree item's rectangle in the tree's client coordinates; `text_only`
+    /// gives its label alone, without the indent, expander and tick box.
+    fn item_rect(&self, h: &w::HTREEITEM, text_only: bool) -> Option<w::RECT> {
+        let mut rc = w::RECT::default();
+        // TVM_GETITEMRECT takes the item in the rectangle it fills.
+        unsafe {
+            (&mut rc as *mut w::RECT)
+                .cast::<isize>()
+                .write_unaligned(h.ptr() as isize)
+        };
+        unsafe {
+            self.tree.hwnd().SendMessage(msg::TvmGetItemRect {
+                text_only,
+                rect: &mut rc,
+            })
+        }
+        .ok()?;
+        Some(rc)
     }
 }
 
@@ -1642,12 +1770,20 @@ impl Shell {
         if p == Page::Titles {
             self.sync_tree_head();
         }
-        for c in [&self.grp_out, &self.grp_info] {
+        // The selection bar hides with no source open.
+        let picking = p == Page::Titles && v.pick.is_some();
+        for c in &self.lbl_pick {
+            show(c, picking);
+        }
+        show(&self.cmb_pick_titles, picking);
+        for c in [&self.btn_pick_audio, &self.btn_pick_subs] {
+            show(c, picking);
+        }
+        for c in [&self.lbl_out, &self.lbl_free] {
             show(c, p == Page::Titles);
         }
         show(&self.cmb_format, p == Page::Titles);
         show(&self.edit_out, p == Page::Titles);
-        show(&self.detail, p == Page::Titles);
         for c in [&self.btn_browse, &self.btn_run] {
             show(c, p == Page::Titles);
         }
@@ -1690,13 +1826,23 @@ impl Shell {
             // A hidden tree needs no ticks; the next Titles render syncs them.
             self.sync_tree_states(&v.title_rows);
         }
-        let _ = self.detail.set_text(&crlf(&v.detail));
+
+        // ── selection bar: refilled only when its choices or the disc's languages change ──
+        if self.memo.borrow().pick != v.pick {
+            self.fill_pick_bar(v.pick.as_ref());
+            self.memo.borrow_mut().pick = v.pick.clone();
+        }
 
         // ── output row ──
         if self.edit_out.text().unwrap_or_default() != v.output_dir {
             let _ = self.edit_out.set_text(&v.output_dir);
         }
         self.btn_run.hwnd().EnableWindow(v.can_run);
+        // Set only when the line changes; the core measures it off this thread.
+        if self.memo.borrow().free_line.as_deref() != Some(v.free_space_line.as_str()) {
+            let _ = self.lbl_free.hwnd().SetWindowText(&v.free_space_line);
+            self.memo.borrow_mut().free_line = Some(v.free_space_line.clone());
+        }
 
         // ── progress ──
         if let Some(info) = &v.info {
@@ -1760,6 +1906,92 @@ impl Shell {
         self.relayout_now();
     }
 
+    // Fill the selection bar's choosers from the view: the Titles list, and the
+    // closed text of Audio and Subtitles (their menus are built when opened).
+    fn fill_pick_bar(&self, pick: Option<&crate::ui::PickView>) {
+        let Some(v) = pick else { return };
+        let labels: Vec<String> = v.titles.iter().map(|(_, l)| l.clone()).collect();
+        // Only a new list is rebuilt: rebuilding would dismiss the list mid-pick.
+        if combo_items(&self.cmb_pick_titles) != labels {
+            self.cmb_pick_titles.items().delete_all();
+            let _ = self.cmb_pick_titles.items().add(&labels);
+            let box_w = self
+                .cmb_pick_titles
+                .hwnd()
+                .GetWindowRect()
+                .map_or(0, |r| r.right - r.left);
+            let text_w = combo_text_width(&self.cmb_pick_titles, &labels);
+            let dpi = window_dpi(self.wnd.hwnd());
+            set_dropped_width(
+                &self.cmb_pick_titles,
+                lay::combo_widths(dpi, box_w, text_w, box_w).1,
+            );
+        }
+        self.cmb_pick_titles
+            .items()
+            .select(Some(v.title_index() as u32));
+        let _ = self.btn_pick_audio.hwnd().SetWindowText(&v.audio_summary);
+        let _ = self.btn_pick_subs.hwnd().SetWindowText(&v.subs_summary);
+    }
+
+    // A Titles entry was chosen: the core re-ticks the tree for it.
+    fn on_pick_titles(&self) {
+        let at = self.cmb_pick_titles.items().selected_index();
+        let mode = self
+            .memo
+            .borrow()
+            .pick
+            .as_ref()
+            .zip(at)
+            .and_then(|(v, i)| v.title_choice(i as usize));
+        if let Some(mode) = mode {
+            let fx = self.app_mut(|a| a.pick_titles(mode));
+            self.perform(fx);
+        }
+    }
+
+    // Open the Audio menu under its button and apply the entry chosen.
+    fn on_pick_audio(&self) {
+        let entries = match self.memo.borrow().pick.as_ref() {
+            Some(v) => v.audio_menu(),
+            None => return,
+        };
+        let Some(tag) = track_pick_menu(self.wnd.hwnd(), &self.btn_pick_audio, &entries) else {
+            return;
+        };
+        let choice = self
+            .memo
+            .borrow()
+            .pick
+            .as_ref()
+            .and_then(|v| v.audio_choice(tag));
+        if let Some(code) = choice {
+            let fx = self.app_mut(|a| a.pick_audio(code.as_deref()));
+            self.perform(fx);
+        }
+    }
+
+    // Open the Subtitles menu under its button and apply the entry chosen.
+    fn on_pick_subs(&self) {
+        let entries = match self.memo.borrow().pick.as_ref() {
+            Some(v) => v.subs_menu(),
+            None => return,
+        };
+        let Some(tag) = track_pick_menu(self.wnd.hwnd(), &self.btn_pick_subs, &entries) else {
+            return;
+        };
+        let choice = self
+            .memo
+            .borrow()
+            .pick
+            .as_ref()
+            .and_then(|v| v.subs_choice(tag));
+        if let Some(choice) = choice {
+            let fx = self.app_mut(|a| a.pick_subtitles(choice));
+            self.perform(fx);
+        }
+    }
+
     // Grey out everything unavailable while a rip is in flight. The RULE comes
     // from the core (`ui::blocked_while_running`), consulted per id — never a
     // second hardcoded list. Cancel is deliberately never blocked.
@@ -1817,9 +2049,49 @@ impl Shell {
     }
 }
 
-/// Win32 EDIT controls need CRLF; a bare LF renders as one run-on line.
-fn crlf(s: &str) -> String {
-    s.replace("\r\n", "\n").replace('\n', "\r\n")
+// The entries a dropdown holds, in order.
+fn combo_items(c: &gui::ComboBox) -> Vec<String> {
+    c.items()
+        .iter()
+        .map(|it| it.filter_map(|t| t.ok()).collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+// Show a selection-bar menu under its button and return the tag of the entry
+// chosen; `None` means dismissed. The entries, ticks and separators are the core's.
+fn track_pick_menu(
+    owner: &w::HWND,
+    btn: &gui::Button,
+    entries: &[crate::ui::PickEntry],
+) -> Option<isize> {
+    let anchor = btn.hwnd().GetWindowRect().ok()?;
+    let mut menu = w::HMENU::CreatePopupMenu().ok()?;
+    for e in entries {
+        if e.separator_before {
+            let _ = menu.AppendMenu(co::MF::SEPARATOR, w::IdMenu::None, w::BmpPtrStr::None);
+        }
+        let flags = if e.on {
+            co::MF::STRING | co::MF::CHECKED
+        } else {
+            co::MF::STRING
+        };
+        // The core's tags are small and positive; one that is not cannot be an id.
+        let Ok(id) = u16::try_from(e.tag) else {
+            continue;
+        };
+        let _ = menu.AppendMenu(flags, w::IdMenu::Id(id), w::BmpPtrStr::from_str(&e.label));
+    }
+    // RETURNCMD hands the chosen id back rather than posting WM_COMMAND, so these
+    // tags cannot collide with the main window's menu ids (see `LangPicker`).
+    owner.SetForegroundWindow();
+    let picked = menu.TrackPopupMenu(
+        co::TPM::LEFTBUTTON | co::TPM::RETURNCMD,
+        w::POINT::with(anchor.left, anchor.bottom),
+        owner,
+    );
+    let _ = unsafe { owner.PostMessage(msg::WmNull {}) };
+    let _ = menu.DestroyMenu();
+    picked.ok()?.map(|id| id as isize)
 }
 
 // The exact text the log pane shows. A plain EDIT control can't colour lines
@@ -2152,7 +2424,10 @@ impl Shell {
         let me = self.clone();
         self.wnd.on().wm_timer(TIMER_LAUNCH_PROBE, move || {
             let _ = me.wnd.hwnd().KillTimer(TIMER_LAUNCH_PROBE);
-            me.open_disc(false);
+            match crate::app_entry::launch_source() {
+                Some(src) => me.perform(me.app_mut(|a| a.open(src))),
+                None => me.open_disc(false),
+            }
             Ok(())
         });
 
@@ -2347,6 +2622,34 @@ impl Shell {
             Ok(())
         });
 
+        // The selection bar: each choice goes to the core, which re-ticks the tree.
+        let me = self.clone();
+        self.cmb_pick_titles.on().cbn_sel_change(move || {
+            me.on_pick_titles();
+            Ok(())
+        });
+        // A split button's face and its arrow both open the menu.
+        let me = self.clone();
+        self.btn_pick_audio.on().bn_clicked(move || {
+            me.on_pick_audio();
+            Ok(())
+        });
+        let me = self.clone();
+        self.btn_pick_audio.on().bcn_drop_down(move |_| {
+            me.on_pick_audio();
+            Ok(())
+        });
+        let me = self.clone();
+        self.btn_pick_subs.on().bn_clicked(move || {
+            me.on_pick_subs();
+            Ok(())
+        });
+        let me = self.clone();
+        self.btn_pick_subs.on().bcn_drop_down(move |_| {
+            me.on_pick_subs();
+            Ok(())
+        });
+
         // Without an action the dropdown is decoration: it shows a choice the
         // model never hears about, so the rip silently uses the old format.
         let me = self.clone();
@@ -2379,7 +2682,7 @@ impl Shell {
             Ok(0)
         });
 
-        // Selecting a row updates the detail pane.
+        // The selected row is the core's, as on macOS.
         let me = self.clone();
         self.tree.on().tvn_sel_changed(move |p| {
             let h = unsafe { p.itemNew.hItem.raw_copy() };
@@ -2390,7 +2693,7 @@ impl Shell {
             Ok(())
         });
 
-        // Length and Size, painted into each row after the tree drew it.
+        // The columns' cells, painted into each row after the tree drew it.
         let me = self.clone();
         self.tree.on().nm_custom_draw(move |cd| {
             Ok(match cd.nmcd.dwDrawStage {
@@ -2418,13 +2721,13 @@ impl Shell {
             let new_w = item.cxy;
             {
                 let mut c = me.cols.borrow_mut();
-                let Some(laid) = c.laid else {
+                let Some(laid) = c.laid.take() else {
                     return Ok(());
                 };
-                // Item 0 spans the tree's border as well as its label.
+                // Item 0 spans the tree's border as well as the tick column.
                 let new_w = if p.iItem == 0 { new_w - c.inset } else { new_w };
-                c.widths = lay::drag_column(dpi, &laid, p.iItem as usize, new_w);
-                c.laid = None;
+                let flex = c.flex();
+                c.widths = lay::drag_column(dpi, &laid, flex, p.iItem as usize, new_w);
             }
             me.layout_tree_cols(dpi);
             Ok(())
@@ -3832,8 +4135,10 @@ impl Shell {
             .hwnd()
             .SetWindowText(&g("gui.btn.open_disc"));
         let _ = self.btn_open.hwnd().SetWindowText(&g("gui.btn.open_file"));
-        let _ = self.grp_out.hwnd().SetWindowText(&g("gui.group.output"));
-        let _ = self.grp_info.hwnd().SetWindowText(&g("gui.group.info"));
+        let _ = self.lbl_out.hwnd().SetWindowText(&g("gui.group.output"));
+        for (l, text) in self.lbl_pick.iter().zip(crate::ui::pick_labels()) {
+            let _ = l.hwnd().SetWindowText(&format!("{text}:"));
+        }
         let _ = self
             .grp_prog
             .hwnd()
@@ -3854,9 +4159,12 @@ impl Shell {
         }
         self.sync_tree_head();
         self.apply_tree_direction();
-        // Force the format dropdown and the tree to repaint in the new language.
+        // Force the format dropdown, the tree, the selection bar and the free-space
+        // line to repaint in the new language.
         self.memo.borrow_mut().formats.clear();
         self.memo.borrow_mut().rows = None;
+        self.memo.borrow_mut().pick = None;
+        self.memo.borrow_mut().free_line = None;
         // The rebuilt menu bar starts all-enabled.
         self.memo.borrow_mut().menu_running = None;
         self.prefs.relocalize(&self.settings.borrow());
@@ -4081,11 +4389,7 @@ impl Shell {
     }
 
     fn combo_titles(&self) -> Vec<String> {
-        self.cmb_format
-            .items()
-            .iter()
-            .map(|it| it.filter_map(|t| t.ok()).collect::<Vec<_>>())
-            .unwrap_or_default()
+        combo_items(&self.cmb_format)
     }
 
     fn drive_open(&self, path: &str) {
@@ -4126,22 +4430,24 @@ impl Shell {
             ),
         );
 
-        // ── the tree's header carries the columns the macOS outline shows ──
+        // ── the tree's header: the tick column, then the core's columns ──
         let heads: Vec<String> = self
             .tree_head
             .items()
             .iter()
             .map(|it| it.map(|h| h.text()).collect())
             .unwrap_or_default();
+        let columns = crate::ui::tree_columns();
+        let want: Vec<String> = std::iter::once(String::new())
+            .chain(columns.iter().map(|c| c.title.clone()))
+            .collect();
         check(
             "widget-tree-header-columns",
-            heads.len() == 3
-                && heads[1] == crate::strings::get_or("gui.col.duration", "Length")
-                && heads[2] == crate::strings::get_or("gui.col.size", "Size"),
+            heads == want,
             format!(
                 "header items {heads:?}, syncs {}, formats {:?}",
                 TREE_HEAD_SYNCS.load(std::sync::atomic::Ordering::Relaxed),
-                (0..3u32)
+                (0..heads.len() as u32)
                     .map(|i| self.tree_head.items().get(i).format().raw())
                     .collect::<Vec<_>>()
             ),
@@ -4149,12 +4455,38 @@ impl Shell {
         let cells = &self.cols.borrow().cells;
         check(
             "widget-tree-cells-match-the-core",
-            v.title_rows.iter().all(|r| {
-                cells.get(&r.index).map(|(l, s)| (l.as_str(), s.as_str()))
-                    == Some((r.length.as_str(), r.size.as_str()))
-            }),
+            v.title_rows
+                .iter()
+                .all(|r| cells.get(&r.index) == Some(&row_cells(r, &columns))),
             format!("{} rows carry cells", cells.len()),
         );
+
+        // ── the selection bar shows the core's choices ──
+        if let Some(pick) = &v.pick {
+            let want: Vec<String> = pick.titles.iter().map(|(_, l)| l.clone()).collect();
+            let got = combo_items(&self.cmb_pick_titles);
+            let at = self.cmb_pick_titles.items().selected_index();
+            check(
+                "widget-pick-titles-match-the-core",
+                got == want && at == Some(pick.title_index() as u32),
+                format!("combo shows {got:?} at {at:?}, core offers {want:?}"),
+            );
+            let audio = self
+                .btn_pick_audio
+                .hwnd()
+                .GetWindowText()
+                .unwrap_or_default();
+            let subs = self
+                .btn_pick_subs
+                .hwnd()
+                .GetWindowText()
+                .unwrap_or_default();
+            check(
+                "widget-pick-menus-show-the-core-summary",
+                audio == pick.audio_summary && subs == pick.subs_summary,
+                format!("audio {audio:?}, subtitles {subs:?}"),
+            );
+        }
 
         // Every row's state image matches the core's tick, checked against the
         // whole `state_for` mapping: a row with no checkbox must show none, and
@@ -4325,11 +4657,7 @@ impl Shell {
         );
         check(
             "titles-numbered",
-            v.title_rows
-                .iter()
-                .filter(|x| x.type_s == "Title")
-                .enumerate()
-                .all(|(i, x)| x.desc.starts_with(&format!("{}.", i + 1))),
+            crate::ui::titles_numbered(&v.title_rows),
             "1-based, matches -t N",
         );
         check(
@@ -4921,21 +5249,19 @@ impl Shell {
             .iter()
             .map(|it| it.map(|h| h.text()).collect())
             .unwrap_or_default();
-        let want = [
-            format!(
-                "{} / {}",
-                crate::strings::get("gui.col.type"),
-                crate::strings::get("gui.col.desc")
-            ),
-            crate::strings::get_or("gui.col.duration", "Length"),
-            crate::strings::get_or("gui.col.size", "Size"),
-        ];
+        let columns = crate::ui::tree_columns();
+        let want: Vec<String> = std::iter::once(String::new())
+            .chain(columns.iter().map(|c| c.title.clone()))
+            .collect();
         g.check("header-texts", heads == want, format!("{heads:?}"));
-        let laid = self.cols.borrow().laid;
+        let laid = self.cols.borrow().laid.clone();
         g.check("columns-laid-out", laid.is_some(), format!("{laid:?}"));
-        if let Some(laid) = laid {
+        // The numeric columns (Length, Size) must read whole; the text columns
+        // end in an ellipsis when a cell outruns them, as on macOS.
+        let length = columns.iter().position(|c| c.id == "length");
+        if let Some(laid) = &laid {
             let head_w = self.tree_head.hwnd().GetClientRect().map_or(0, |r| r.right);
-            let widths = lay::header_widths(&laid, head_w, self.cols.borrow().inset);
+            let widths = lay::header_widths(laid, head_w, self.cols.borrow().inset);
             for (i, text) in want.iter().enumerate().skip(1) {
                 let tw = text_width(self.tree_head.hwnd(), text);
                 g.check(
@@ -4945,7 +5271,8 @@ impl Shell {
                 );
             }
             for r in &titles {
-                for (span, text) in [(laid.length, &r.length), (laid.size, &r.size)] {
+                for (span, c) in laid.cols.iter().zip(&columns).filter(|(_, c)| c.numeric) {
+                    let text = r.cell(c.id);
                     let tw = text_width(self.tree.hwnd(), text);
                     g.check(
                         "cell-fits-its-column",
@@ -4972,28 +5299,16 @@ impl Shell {
                     has_ink(&px, cx, cy, true, region(head)),
                     format!("{:?}", region(head)),
                 );
+                let span = laid.as_ref().zip(length).and_then(|(l, i)| l.cols.get(i));
                 let cell = titles
                     .first()
                     .and_then(|r| self.tree_item(r.index))
-                    .zip(laid)
-                    .and_then(|(h, laid)| {
-                        let mut rc = w::RECT::default();
-                        // TVM_GETITEMRECT takes the item in the rectangle it fills.
-                        unsafe {
-                            (&mut rc as *mut w::RECT)
-                                .cast::<isize>()
-                                .write_unaligned(h.ptr() as isize)
-                        };
-                        unsafe {
-                            self.tree.hwnd().SendMessage(msg::TvmGetItemRect {
-                                text_only: false,
-                                rect: &mut rc,
-                            })
-                        }
-                        .ok()?;
+                    .zip(span)
+                    .and_then(|(h, span)| {
+                        let rc = self.item_rect(&h, false)?;
                         let rc = w::RECT {
-                            left: laid.length.x,
-                            right: laid.length.x + laid.length.w,
+                            left: span.x,
+                            right: span.x + span.w,
                             ..rc
                         };
                         self.tree.hwnd().ClientToScreenRc(rc).ok()
@@ -5132,7 +5447,6 @@ impl Shell {
 }
 
 // How wide `text` draws in a control's own font, in pixels.
-#[cfg(debug_assertions)]
 fn text_width(hwnd: &w::HWND, text: &str) -> i32 {
     let Ok(dc) = hwnd.GetDC() else {
         return 0;
@@ -5161,6 +5475,10 @@ mod tests {
         fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> ScanRow {
             ScanRow {
                 type_s: type_s.into(),
+                item: type_s.into(),
+                format: desc.into(),
+                notes: String::new(),
+                role: None,
                 desc: desc.into(),
                 depth,
                 checkable,
@@ -5335,6 +5653,10 @@ mod tests {
             desc: String::new(),
             length: String::new(),
             size: String::new(),
+            lang: String::new(),
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
             check,
             check_enabled,
         };
@@ -5541,49 +5863,46 @@ mod tests {
         );
     }
 
-    // ── row text ──────────────────────────────────────────────────────────
+    // ── row cells ─────────────────────────────────────────────────────────
 
     #[test]
-    fn a_row_label_carries_both_columns_the_mac_outline_shows() {
-        // `SysTreeView32` has one column, so the Type and Description the macOS
-        // outline shows side by side are joined here. Both must survive the
-        // join or this shell shows strictly less than the other one.
+    fn a_row_paints_the_cores_cells_in_column_order() {
+        // The tree paints each column's cell at the header's positions, so the
+        // cells must come in `ui::tree_columns` order, one per column.
+        let columns = crate::ui::tree_columns();
         let rows = view_rows();
         let title = rows.iter().find(|r| r.type_s == "Title").unwrap();
-        let text = row_text(title);
-        assert!(text.contains(&title.type_s), "type dropped from {text:?}");
-        assert!(
-            text.contains(&title.desc),
-            "description dropped from {text:?}"
-        );
+        let cells = row_cells(title, &columns);
+        assert_eq!(cells.len(), columns.len());
+        for (c, cell) in columns.iter().zip(&cells) {
+            assert_eq!(cell, title.cell(c.id), "column {}", c.id);
+        }
+        let at = |id: &str| columns.iter().position(|c| c.id == id).unwrap();
         assert_eq!(
-            text,
-            format!("Title   {}", title.desc),
-            "Length and Size have columns of their own, not the label"
-        );
-        assert_eq!(
-            (title.length.as_str(), title.size.as_str()),
+            (cells[at("length")].as_str(), cells[at("size")].as_str()),
             ("1:30:00", "6.8 GB")
         );
+        assert_eq!(cells[at("item")], title.item);
     }
 
     #[test]
-    fn a_stream_row_label_is_its_type_and_description() {
+    fn the_row_signature_notices_a_changed_cell() {
         let rows = view_rows();
-        let audio = rows.iter().find(|r| r.type_s == "Audio").unwrap();
-        assert_eq!(row_text(audio), format!("Audio   {}", audio.desc));
-    }
-
-    #[test]
-    fn the_disc_row_does_not_repeat_its_type_in_the_label() {
-        // Root's Description is the volume label, Type is the disc format; macOS
-        // has a Type column for that, this shell doesn't, and prefixing "Bluray
-        // disc  " to the label reads as noise — deliberate shell rule.
-        let rows = view_rows();
-        let root = &rows[0];
-        assert_eq!(root.depth, 0);
-        assert!(!root.type_s.is_empty(), "fixture root must carry a type");
-        assert_eq!(row_text(root), root.desc);
+        let base = rows_sig(&rows);
+        let mut renoted = rows.clone();
+        renoted[1].notes.push_str(" (play all)");
+        assert_ne!(
+            base,
+            rows_sig(&renoted),
+            "a changed Notes cell went unnoticed"
+        );
+        let mut relang = rows.clone();
+        relang[3].lang = "deu".into();
+        assert_ne!(
+            base,
+            rows_sig(&relang),
+            "a changed Language cell went unnoticed"
+        );
     }
 
     // ── the log pane ──────────────────────────────────────────────────────
@@ -5633,17 +5952,6 @@ mod tests {
             },
         ];
         assert_eq!(log_text(&log), "one\r\ntwo");
-    }
-
-    #[test]
-    fn crlf_normalizes_every_newline_exactly_once() {
-        assert_eq!(crlf("a\nb"), "a\r\nb");
-        // Already-CRLF text must not become CRCRLF — the detail pane is
-        // re-rendered on every tick, so a doubling bug compounds.
-        assert_eq!(crlf("a\r\nb"), "a\r\nb");
-        assert_eq!(crlf(&crlf("a\nb")), "a\r\nb");
-        assert_eq!(crlf("a\n\nb"), "a\r\n\r\nb");
-        assert_eq!(crlf("no breaks"), "no breaks");
     }
 
     // ── settings dropdowns ────────────────────────────────────────────────

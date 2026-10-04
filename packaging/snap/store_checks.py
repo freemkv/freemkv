@@ -8,6 +8,7 @@ does not recognise, is a failure.
 import json
 import re
 import sys
+from datetime import datetime, timezone
 
 # review-tools check ids for the two grants.
 KNOWN_GRANTS = (
@@ -48,6 +49,15 @@ TRAILER = re.compile(
     r"Full execution log: '[^'\n]+'|For more information, check out: https://\S+"
 )
 READY_STATUS = "Status: ready to release!"
+# The store or the network dropping the connection mid-upload (requests' and
+# urllib3's own wording). Only this, among recognised lines, makes an upload
+# "transient": worth one more try rather than a verdict.
+TRANSIENT = re.compile(
+    r"\('Connection aborted\.', [A-Za-z]+\(.*\)\)"
+    r"|.*(?:Max retries exceeded|Read timed out|Connection reset by peer).*"
+)
+# What the release tag's upload needs the credentials to allow.
+NEEDED_PERMISSIONS = ("package_push", "package_release")
 
 def expected_review_exit(report):
     """snap-review's exit code for a report: 2 with errors, else 3 with warnings, else 0."""
@@ -142,12 +152,25 @@ def _held_by_known_grants(lines):
     return "held" if issues else "failed"
 
 
+def _dropped_connection(lines):
+    """The upload never got a status: only snapcraft's own preamble and
+    trailers, and one dropped-connection line. Once the store reports a status
+    it has the snap, and another upload would be a second revision."""
+    if _last_status(lines):
+        return False
+    other = [l for l in lines if l.strip() and not _preamble_line(l) and not TRAILER.fullmatch(l)]
+    return len(other) == 1 and TRANSIENT.fullmatch(other[0]) is not None
+
+
 def classify_upload(exit_code, log, channel):
     """'released', 'held' (the known store grants), 'held-unreported' (held,
-    no reason given) or 'failed'."""
+    no reason given), 'transient' (the connection dropped before any status;
+    retry) or 'failed'."""
     if channel not in CHANNELS:
         return "failed"
     lines = log.splitlines()
+    if exit_code != 0 and _dropped_connection(lines):
+        return "transient"
     if exit_code == 0:
         if ISSUES_HEADER in log:
             return "failed"
@@ -155,6 +178,31 @@ def classify_upload(exit_code, log, channel):
     if exit_code == 1:
         return _held_by_known_grants(lines)
     return "failed"
+
+
+def check_login(whoami, min_days, now=None):
+    """Problems with `snapcraft whoami`'s report for the store credentials:
+    expiring within `min_days`, or missing a permission the release needs."""
+    fields = {}
+    for line in whoami.splitlines():
+        key, sep, value = line.partition(":")
+        if sep:
+            fields[key.strip()] = value.strip()
+    problems = []
+    try:
+        expires = datetime.fromisoformat(fields["expires"].replace("Z", "+00:00"))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+    except (KeyError, ValueError):
+        return ["no readable 'expires:' in snapcraft whoami"]
+    left = (expires - (now or datetime.now(timezone.utc))).days
+    if left < min_days:
+        problems.append(f"store credentials expire {fields['expires']} ({left} days); renew them")
+    granted = {p.strip() for p in fields.get("permissions", "").split(",")}
+    for need in NEEDED_PERMISSIONS:
+        if need not in granted:
+            problems.append(f"store credentials lack {need}")
+    return problems
 
 
 def main(argv):
@@ -187,7 +235,21 @@ def main(argv):
             return 2
         print(classify_upload(code, log, argv[3]))
         return 0
-    print(f"usage: {argv[0]} review EXIT_CODE REPORT.json | upload EXIT_CODE CHANNEL LOG", file=sys.stderr)
+    if len(argv) == 4 and argv[1] == "login":
+        try:
+            with open(argv[2], encoding="utf-8") as f:
+                problems = check_login(f.read(), int(argv[3]))
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            print(f"::error::cannot check the store login: {e}")
+            return 2
+        for p in problems:
+            print(f"::error::{p}")
+        return 1 if problems else 0
+    print(
+        f"usage: {argv[0]} review EXIT_CODE REPORT.json | upload EXIT_CODE CHANNEL LOG"
+        " | login WHOAMI.txt MIN_DAYS",
+        file=sys.stderr,
+    )
     return 2
 
 

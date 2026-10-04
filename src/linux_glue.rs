@@ -149,17 +149,8 @@ pub fn tree_shape(rows: &[Row]) -> (Vec<usize>, Vec<Vec<usize>>) {
     (roots, kids)
 }
 
-/// Row identity, excluding tick state — hashed in place like the Windows
-/// shell's, so a tick-only redraw allocates nothing.
-pub fn rows_sig(rows: &[Row]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    rows.len().hash(&mut h);
-    for r in rows {
-        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
-    }
-    h.finish()
-}
+/// Row identity, excluding tick state: the core's, shared by every shell.
+pub use crate::ui::rows_sig;
 
 /// An explicit Open Disc, given the drives a worker enumerated off the UI
 /// thread: the log line and the URL to scan (`None` = no drive, stop). The
@@ -383,6 +374,10 @@ mod tests {
             desc: format!("d{i}"),
             length: String::new(),
             size: String::new(),
+            lang: String::new(),
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
             check: Some(Check::Off),
             check_enabled: true,
         }

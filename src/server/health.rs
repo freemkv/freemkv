@@ -45,6 +45,9 @@ pub enum Fault {
     Missing,
     /// No answer in time, or ETIMEDOUT and the network errors.
     Unresponsive,
+    /// It lies under the configured network share, and the share is not mounted: a write
+    /// there would land on the container's own disk.
+    Unmounted,
     /// EACCES / EPERM, or no write access.
     Denied,
     Other,
@@ -127,6 +130,9 @@ impl Fault {
             Fault::Unresponsive => format!(
                 "The {role} folder is not responding — the network share may be down or hung."
             ),
+            Fault::Unmounted => format!(
+                "The {role} folder's network share is not mounted — nothing is written there until it is."
+            ),
             Fault::Denied => format!(
                 "freemkv is not allowed to use the {role} folder — check its owner and permissions."
             ),
@@ -139,6 +145,9 @@ impl Fault {
         match self {
             Fault::Stale | Fault::Unresponsive | Fault::Missing | Fault::Io => {
                 "Remount the share on the host (or bring the NAS back); waiting work resumes on its own."
+            }
+            Fault::Unmounted => {
+                "freemkv retries the mount on its own; check that the NAS is up. Waiting work resumes on its own."
             }
             Fault::ReadOnly => {
                 "Remount the share read-write on the host; waiting work resumes on its own."
@@ -358,10 +367,49 @@ fn writable(p: &Path) -> std::io::Result<()> {
     }
 }
 
+// Whether `path` lies under the share at `mountpoint` while `table` (the mount table, `None`
+// where unreadable) lists no mount there: the folder is then a bare local directory.
+fn bare_share(path: &Path, mountpoint: Option<&str>, table: Option<&str>) -> bool {
+    let (Some(mp), Some(table)) = (mountpoint, table) else {
+        return false;
+    };
+    path.starts_with(mp) && !crate::server::daemon::listed_in(table, mp)
+}
+
+// The configured share's mountpoint, when there is one.
+fn share_mountpoint() -> Option<String> {
+    #[cfg(unix)]
+    {
+        crate::server::daemon::nfs_share().map(|s| s.mountpoint)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Whether `path` lies under the configured network share while it is not mounted, so a
+/// write there would land on the container's own disk. Reads the mount table, never the share.
+pub(crate) fn share_unmounted(path: &Path) -> bool {
+    let Some(mp) = share_mountpoint() else {
+        return false;
+    };
+    bare_share(
+        path,
+        Some(&mp),
+        crate::server::daemon::mount_table().as_deref(),
+    )
+}
+
+const UNMOUNTED: &str = "the network share is not mounted";
+
 /// Check one folder now, on the calling thread (it may block on a dead mount).
 pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
     let started = Instant::now();
     let m = Mount::blank(role, path);
+    if share_unmounted(path) {
+        return m.failed(Fault::Unmounted, UNMOUNTED.into());
+    }
     match std::fs::read_dir(path) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -653,21 +701,25 @@ where
 {
     let started = Instant::now();
     let owned = dir.to_path_buf();
-    let result = match bounded(dir, limit, move || probe(&owned)) {
-        Bounded::Done(Ok(())) => Ok(()),
-        Bounded::Done(Err(e)) => Err(Problem::new(role, dir, Fault::of(&e), e.to_string())),
-        Bounded::TimedOut => Err(Problem::new(
-            role,
-            dir,
-            Fault::Unresponsive,
-            format!("no answer within {}s", limit.as_secs().max(1)),
-        )),
-        Bounded::Busy => Err(Problem::new(
-            role,
-            dir,
-            Fault::Unresponsive,
-            "an earlier check of this folder never came back".into(),
-        )),
+    let result = if share_unmounted(dir) {
+        Err(Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into()))
+    } else {
+        match bounded(dir, limit, move || probe(&owned)) {
+            Bounded::Done(Ok(())) => Ok(()),
+            Bounded::Done(Err(e)) => Err(Problem::new(role, dir, Fault::of(&e), e.to_string())),
+            Bounded::TimedOut => Err(Problem::new(
+                role,
+                dir,
+                Fault::Unresponsive,
+                format!("no answer within {}s", limit.as_secs().max(1)),
+            )),
+            Bounded::Busy => Err(Problem::new(
+                role,
+                dir,
+                Fault::Unresponsive,
+                "an earlier check of this folder never came back".into(),
+            )),
+        }
     };
     let mount = match &result {
         Ok(()) => {
@@ -692,32 +744,42 @@ where
 /// The least time between two remounts of the network share.
 const REMOUNT_GAP: Duration = Duration::from_secs(60);
 
-// Whether a folder under `mountpoint` reports a stale handle and the last remount is old enough.
-fn wants_remount(mounts: &[Mount], mountpoint: &Path, last: Option<Instant>, now: Instant) -> bool {
+// Whether the share wants mounting afresh: it is not mounted, or a folder under it reports a
+// stale handle; and the last attempt is old enough.
+fn wants_remount(
+    mounts: &[Mount],
+    mountpoint: &Path,
+    mounted: bool,
+    last: Option<Instant>,
+    now: Instant,
+) -> bool {
     let stale = mounts
         .iter()
         .any(|m| m.fault == Some(Fault::Stale) && m.path.starts_with(mountpoint));
-    stale && last.is_none_or(|t| now.duration_since(t) >= REMOUNT_GAP)
+    (stale || !mounted) && last.is_none_or(|t| now.duration_since(t) >= REMOUNT_GAP)
 }
 
-// A stale handle on the container's own NFS mount only clears by mounting it afresh, so do that.
+// A stale handle on the container's own NFS mount only clears by mounting it afresh, and a
+// failed mount is retried, so do that.
 #[cfg(unix)]
 fn heal(cfg: &Config) {
     static LAST_REMOUNT: Mutex<Option<Instant>> = Mutex::new(None);
     let Some(share) = crate::server::daemon::nfs_share() else {
         return;
     };
+    // An unreadable table proves nothing: only a stale handle then triggers a remount.
+    let mounted = crate::server::daemon::mount_table()
+        .is_none_or(|t| crate::server::daemon::listed_in(&t, &share.mountpoint));
     let now = Instant::now();
     {
         let mut last = LAST_REMOUNT.lock().unwrap_or_else(|e| e.into_inner());
-        if !wants_remount(&mounts(), Path::new(&share.mountpoint), *last, now) {
+        if !wants_remount(&mounts(), Path::new(&share.mountpoint), mounted, *last, now) {
             return;
         }
         *last = Some(now);
     }
-    if crate::server::daemon::remount_nfs(&share) {
-        refresh(cfg);
-    }
+    crate::server::daemon::remount_nfs(&share, mounted);
+    refresh(cfg);
 }
 
 /// Start the health thread.
@@ -757,14 +819,75 @@ pub(crate) mod tests {
             Fault::Stale,
         )];
         let t0 = Instant::now();
-        assert!(wants_remount(&stale, mp, None, t0));
+        assert!(wants_remount(&stale, mp, true, None, t0));
         assert!(!wants_remount(
             &stale,
             mp,
+            true,
             Some(t0),
             t0 + Duration::from_secs(5)
         ));
-        assert!(wants_remount(&stale, mp, Some(t0), t0 + REMOUNT_GAP));
+        assert!(wants_remount(&stale, mp, true, Some(t0), t0 + REMOUNT_GAP));
+    }
+
+    #[test]
+    fn a_share_left_unmounted_is_retried_once_per_gap() {
+        let mp = Path::new("/mnt/nfs");
+        let table = "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\n";
+        let mounted = crate::server::daemon::listed_in(table, "/mnt/nfs");
+        assert!(!mounted);
+        // After a failed mount the folders read as healthy local dirs, or as missing.
+        let bare = vec![
+            ok_mount("Output", Path::new("/mnt/nfs")),
+            bad_mount("Library", Path::new("/mnt/nfs/movies"), Fault::Missing),
+        ];
+        let t0 = Instant::now();
+        assert!(wants_remount(&bare, mp, mounted, None, t0));
+        assert!(!wants_remount(
+            &bare,
+            mp,
+            mounted,
+            Some(t0),
+            t0 + Duration::from_secs(30)
+        ));
+        assert!(wants_remount(
+            &bare,
+            mp,
+            mounted,
+            Some(t0),
+            t0 + REMOUNT_GAP
+        ));
+        assert!(!wants_remount(&bare, mp, true, None, t0));
+    }
+
+    #[test]
+    fn a_folder_under_an_unmounted_share_is_bare() {
+        let mounted = "srv:/export /mnt/nfs nfs4 rw,vers=4.1 0 0\n/dev/sda1 / ext4 rw 0 0\n";
+        let unmounted = "/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/nfs2 ext4 rw 0 0\n";
+        let movies = Path::new("/mnt/nfs/movies");
+        assert!(bare_share(movies, Some("/mnt/nfs"), Some(unmounted)));
+        assert!(bare_share(
+            Path::new("/mnt/nfs"),
+            Some("/mnt/nfs/"),
+            Some(unmounted)
+        ));
+        assert!(!bare_share(movies, Some("/mnt/nfs"), Some(mounted)));
+        assert!(!bare_share(movies, Some("/mnt/nfs/"), Some(mounted)));
+        // Outside the share, no share configured, or no table to read: nothing is proven.
+        assert!(!bare_share(
+            Path::new("/data/stage"),
+            Some("/mnt/nfs"),
+            Some(unmounted)
+        ));
+        assert!(!bare_share(movies, None, Some(unmounted)));
+        assert!(!bare_share(movies, Some("/mnt/nfs"), None));
+        // The kernel escapes a space in a mount path as \040.
+        let spaced = "srv:/e /mnt/my\\040share nfs4 rw 0 0\n";
+        assert!(!bare_share(
+            Path::new("/mnt/my share/tv"),
+            Some("/mnt/my share"),
+            Some(spaced)
+        ));
     }
 
     #[test]
@@ -778,9 +901,9 @@ pub(crate) mod tests {
             Fault::Io,
         )];
         let healthy = vec![ok_mount("Library", Path::new("/mnt/nfs/movies"))];
-        assert!(!wants_remount(&elsewhere, mp, None, t0));
-        assert!(!wants_remount(&other_fault, mp, None, t0));
-        assert!(!wants_remount(&healthy, mp, None, t0));
+        assert!(!wants_remount(&elsewhere, mp, true, None, t0));
+        assert!(!wants_remount(&other_fault, mp, true, None, t0));
+        assert!(!wants_remount(&healthy, mp, true, None, t0));
     }
 
     /// Put `mounts` in place as if a check had just published them.

@@ -103,6 +103,7 @@ fn main() {
     if freemkv::app_entry::wants_gui(&args, display_available()) {
         // `freemkv --lang de gui`: the flag picks this run's language, as it does for the CLI.
         let lang = freemkv::app_entry::set_launch_language(&args);
+        freemkv::app_entry::set_launch_source(freemkv::app_entry::gui_source(&args));
         run_gui(lang);
         return;
     }
@@ -157,7 +158,11 @@ fn run_gui(launch_language: bool) {
         .into_iter()
         .find(|p| p.is_file());
     match windowed {
-        Some(p) if std::process::Command::new(&p).spawn().is_ok() => {}
+        Some(p)
+            if std::process::Command::new(&p)
+                .args(freemkv::app_entry::launch_source())
+                .spawn()
+                .is_ok() => {}
         _ => freemkv::win_app::run(),
     }
 }

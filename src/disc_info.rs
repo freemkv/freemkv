@@ -239,15 +239,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
 
     // Format and capacity. An unclassified disc must NOT masquerade as Blu-ray
     // — report it distinctly so data/future/unknown discs aren't misread.
-    let unknown = strings::get("disc.format_unknown");
-    let format = match disc.format {
-        DiscFormat::Uhd => "4K UHD",
-        DiscFormat::Fmts => "4K UHD (AACS 2.1 FMTS)",
-        DiscFormat::BluRay => "Blu-ray",
-        DiscFormat::HdDvd => "HD-DVD",
-        DiscFormat::Dvd => "DVD",
-        DiscFormat::Unknown => &unknown,
-    };
+    let format = freemkv::engine::format_name(&disc.format);
     let gb = disc.capacity_bytes as f64 / 1_000_000_000.0; // decimal GB, matches disc-marketed capacity
     out.raw(
         Normal,
@@ -384,21 +376,21 @@ fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<Strin
         let hours = total_secs / 3600;
         let mins = (total_secs % 3600) / 60;
         let gb = title.size_bytes as f64 / 1_000_000_000.0; // decimal GB, matches disc-marketed capacity
-        let clip_word = if title.clips.len() != 1 {
-            strings::get("disc.clips")
-        } else {
-            strings::get("disc.clip")
+        // Only a Blu-ray title is made of clips; a DVD or HD DVD title would read "0 clips".
+        let clips = match title.clips.len() {
+            0 => String::new(),
+            1 => format!("  1 {}", strings::get("disc.clip")),
+            n => format!("  {n} {}", strings::get("disc.clips")),
         };
 
         lines.push(format!(
-            "  {:2}. {:14}  {:2}h {:02}m  {:>5.1} GB  {} {}",
+            "  {:2}. {:14}  {:2}h {:02}m  {:>5.1} GB{}",
             idx + 1,
             sanitize(&title.playlist),
             hours,
             mins,
             gb,
-            title.clips.len(),
-            clip_word
+            clips
         ));
 
         if basic {
@@ -643,7 +635,8 @@ fn encryption_label(disc: &Disc) -> Option<EncLabel> {
 }
 
 /// Human-readable region: "Region-free", the Blu-ray region letters (e.g.
-/// "A/B/C"), or the DVD region numbers (e.g. "1, 2").
+/// "A/B/C"), the DVD region numbers (e.g. "1, 2"; "None" when every region is
+/// prohibited), or "Unknown" when the disc records none a scan can read.
 fn region_name(region: &DiscRegion) -> String {
     match region {
         DiscRegion::Free => "Region-free".to_string(),
@@ -663,7 +656,7 @@ fn region_name(region: &DiscRegion) -> String {
         }
         DiscRegion::Dvd(rs) => {
             if rs.is_empty() {
-                "Region-free".to_string()
+                "None".to_string()
             } else {
                 rs.iter()
                     .map(|r| r.to_string())
@@ -671,6 +664,7 @@ fn region_name(region: &DiscRegion) -> String {
                     .join(", ")
             }
         }
+        DiscRegion::Unknown => "Unknown".to_string(),
     }
 }
 
@@ -1071,6 +1065,27 @@ mod tests {
     }
 
     #[test]
+    fn title_lines_count_clips_only_for_titles_made_of_them() {
+        let mut disc = synthetic_disc();
+        let row = |d: &Disc| title_lines(d, false, false, true)[2].clone();
+        assert!(
+            !row(&disc).contains(&strings::get("disc.clips")),
+            "{}",
+            row(&disc)
+        );
+        let clip = libfreemkv::Clip {
+            clip_id: "00001".into(),
+            in_time: 0,
+            out_time: 0,
+            duration_secs: 0.0,
+            source_packets: 0,
+            feed_span: None,
+        };
+        disc.titles[0].clips = vec![clip; 3];
+        assert!(row(&disc).ends_with(&format!("3 {}", strings::get("disc.clips"))));
+    }
+
+    #[test]
     fn title_lines_lists_encrypted_disc_without_key() {
         // The bug: `info iso://<encrypted>` returned E7022 and listed no titles
         // because it went through the key-gated `input()`. The keyless title
@@ -1325,9 +1340,11 @@ mod tests {
     #[test]
     fn region_name_covers_free_bluray_and_dvd() {
         assert_eq!(region_name(&DiscRegion::Free), "Region-free");
-        // Empty region lists on either carrier read as region-free, not "".
+        // An empty BD list reads as region-free; an empty DVD list is a mask
+        // prohibiting every region.
         assert_eq!(region_name(&DiscRegion::BluRay(vec![])), "Region-free");
-        assert_eq!(region_name(&DiscRegion::Dvd(vec![])), "Region-free");
+        assert_eq!(region_name(&DiscRegion::Dvd(vec![])), "None");
+        assert_eq!(region_name(&DiscRegion::Unknown), "Unknown");
         assert_eq!(
             region_name(&DiscRegion::BluRay(vec![
                 BdRegion::A,

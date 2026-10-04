@@ -9,6 +9,7 @@
 #[cfg(debug_assertions)]
 mod gate;
 mod main_view;
+mod pick_bar;
 mod prefs;
 mod tree;
 
@@ -143,7 +144,10 @@ fn build_ui(gapp: &adw::Application) {
     if launch_probe_enabled() {
         let me = shell.clone();
         glib::timeout_add_local_once(Duration::from_millis(LAUNCH_PROBE_MS), move || {
-            me.open_disc(false);
+            match crate::app_entry::launch_source() {
+                Some(src) => me.open_path(src),
+                None => me.open_disc(false),
+            }
         });
     }
 }

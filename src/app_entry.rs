@@ -21,6 +21,30 @@ pub fn wants_gui(args: &[String], display: bool) -> bool {
     }
 }
 
+/// The source a `freemkv gui <file-or-url>` launch opens in place of the drive probe: the first
+/// non-flag argument after `gui`.
+pub fn gui_source(args: &[String]) -> Option<String> {
+    let rest = command_args(args);
+    (rest.first().map(String::as_str) == Some("gui"))
+        .then(|| rest.get(1).filter(|a| !is_flag_token(a)).cloned())
+        .flatten()
+}
+
+static LAUNCH_SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the source this launch opens; the first call wins.
+pub fn set_launch_source(source: Option<String>) {
+    if let Some(s) = source.filter(|s| !s.is_empty()) {
+        let _ = LAUNCH_SOURCE.set(s);
+    }
+}
+
+/// The source given on the command line, if any. Each shell opens it at startup instead of
+/// probing the drive.
+pub fn launch_source() -> Option<&'static str> {
+    LAUNCH_SOURCE.get().map(String::as_str)
+}
+
 /// A LaunchServices process-serial argument (`-psn_0_<n>`), passed on the first Finder launch of
 /// a quarantined app. Not a flag of this CLI on any platform, so it is ignored everywhere.
 pub fn is_process_serial(arg: &str) -> bool {
@@ -220,11 +244,28 @@ pub fn init_gui_logging(log_level: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        GUI_LOG_CAP_BYTES, chosen_language, display_present, launch_language, resolved_locale,
-        trim_oversized_log, wants_gui, windowed_candidates,
+        GUI_LOG_CAP_BYTES, chosen_language, display_present, gui_source, launch_language,
+        resolved_locale, trim_oversized_log, wants_gui, windowed_candidates,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_gui_launch_names_the_source_it_opens() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let src = |v: &[&str]| gui_source(&a(v));
+        assert_eq!(
+            src(&["freemkv", "gui", "/m/Disc.iso"]).as_deref(),
+            Some("/m/Disc.iso")
+        );
+        assert_eq!(
+            src(&["freemkv", "--lang", "de", "gui", "iso://D.iso"]).as_deref(),
+            Some("iso://D.iso")
+        );
+        assert_eq!(src(&["freemkv", "gui"]), None);
+        assert_eq!(src(&["freemkv", "gui", "--verbose"]), None);
+        assert_eq!(src(&["freemkv", "info", "iso://D.iso"]), None);
+    }
 
     #[test]
     fn auto_resolves_to_the_system_locale_and_a_pick_to_its_code() {

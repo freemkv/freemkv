@@ -47,6 +47,15 @@ const LOG_H: f64 = 244.0; // 34% of client height, scaled
 /// Top margin where the toolbar strip used to be.
 const TB_H: f64 = 10.0;
 const PAD: f64 = 8.0;
+// The output bar under the title tree: its "Output" label over the control row, over a line for
+// the free-space hint, with a gap above the label.
+const BAR_H: f64 = 76.0;
+const BAR_ROW_Y: f64 = 20.0;
+const BAR_LABEL_Y: f64 = 50.0;
+// The selection bar over the title tree: Titles, Audio and Subtitles choosers on one row.
+const PICK_H: f64 = 30.0;
+// Title-tree row height: room above and below the text, so the rows do not read as cramped.
+const ROW_H: f64 = 22.0;
 /// Rip page is shorter than the tree page; the log takes the slack
 /// (reference: log ~64% of the window while ripping vs ~34% on the tree).
 const PROG_H: f64 = 292.0;
@@ -118,16 +127,8 @@ fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 // ── tree redraw identity ──────────────────────────────────────────────────
 
 // Row-list identity (excludes tick state) so render() can detect a real tree change vs. a
-// tick-only update.
-fn rows_sig(rows: &[crate::ui::Row]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    rows.len().hash(&mut h);
-    for r in rows {
-        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
-    }
-    h.finish()
-}
+// tick-only update. The core's, so every shell redraws on the same changes.
+use crate::ui::rows_sig;
 
 /// True when `new` shows exactly the ticks `cur` already paints.
 fn ticks_match(cur: &[crate::ui::Row], new: &[crate::ui::Row]) -> bool {
@@ -536,13 +537,19 @@ impl TitlesSource {
             return Some(unsafe { Retained::cast_unchecked(b) });
         }
 
-        let (txt, numeric) = match ident.as_str() {
-            "type" => (&row.type_s, false),
-            "length" => (&row.length, true),
-            "size" => (&row.size, true),
-            _ => (&row.desc, false),
+        let txt = row.cell(&ident);
+        let numeric = crate::ui::tree_columns()
+            .iter()
+            .any(|c| c.id == ident && c.numeric);
+        // A label draws its text at its top, so it sits centred in a row-high box, level with
+        // the row's checkbox and disclosure triangle.
+        let boxv = { NSView::initWithFrame(NSView::alloc(mtm), r(0.0, 0.0, 200.0, ROW_H)) };
+        let tf = {
+            NSTextField::initWithFrame(
+                NSTextField::alloc(mtm),
+                r(0.0, (ROW_H - 17.0) / 2.0, 200.0, 17.0),
+            )
         };
-        let tf = { NSTextField::initWithFrame(NSTextField::alloc(mtm), r(0.0, 0.0, 200.0, 17.0)) };
         {
             tf.setStringValue(&NSString::from_str(txt));
             if numeric {
@@ -557,8 +564,13 @@ impl TitlesSource {
             // word; hovering shows it whole.
             tf.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
             tf.setAllowsExpansionToolTips(true);
+            mask(
+                &tf,
+                objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable,
+            );
+            boxv.addSubview(&tf);
         }
-        Some(unsafe { Retained::cast_unchecked(tf) })
+        Some(boxv)
     }
 
     // Repaint the tick boxes in place, leaving the rows — and therefore the user's expansion,
@@ -629,15 +641,30 @@ impl TitlesSource {
                         Retained::cast_unchecked(NSNumber::new_usize(root));
                     ov.expandItem_expandChildren(Some(&obj), true);
                 }
-                // `reloadData` keeps the OLD scroll offset; the core (shared
-                // with Windows) picks the row to show. All rows are expanded
-                // above, so display row == flat index.
+                collapse_closed_groups(ov, rows);
+                // `reloadData` keeps the old scroll offset: start at the top, then scroll only as
+                // far as the core's chosen row needs. AppKit keeps a row clear of the header itself.
                 if let Some(at) = crate::ui::first_visible_row(rows) {
-                    let origin = ov.rectOfRow(at as isize).origin;
-                    ov.scrollPoint(origin);
+                    let obj: Retained<AnyObject> =
+                        Retained::cast_unchecked(NSNumber::new_usize(at));
+                    ov.scrollRowToVisible(0);
+                    ov.scrollRowToVisible(ov.rowForItem(Some(&obj)));
                 }
             }
         }
+    }
+}
+
+/// Close the groups the core starts closed ([`crate::ui::starts_collapsed`]) after the
+/// whole tree has been expanded.
+unsafe fn collapse_closed_groups(ov: &NSOutlineView, rows: &[crate::ui::Row]) {
+    for (i, _) in rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| crate::ui::starts_collapsed(r))
+    {
+        let obj: Retained<AnyObject> = unsafe { Retained::cast_unchecked(NSNumber::new_usize(i)) };
+        unsafe { ov.collapseItem(Some(&obj)) };
     }
 }
 
@@ -653,7 +680,9 @@ struct Ivars {
     backdrop: RefCell<Option<Retained<NSBox>>>,
     tree_scroll: RefCell<Option<Retained<NSScrollView>>>,
     grp_out: RefCell<Option<Retained<NSBox>>>,
-    grp_info: RefCell<Option<Retained<NSBox>>>,
+    // The free-space line under the output row, and the text it last showed.
+    out_hint: RefCell<Option<Retained<NSTextField>>>,
+    hint_shown: RefCell<String>,
     on_prog: RefCell<bool>,
     win_prefs: RefCell<Option<Retained<NSWindow>>>,
     win_about: RefCell<Option<Retained<NSWindow>>>,
@@ -719,6 +748,12 @@ struct Ivars {
     /// this stays empty; `View::eject_visible` is still read through it.
     eject_btn: RefCell<Option<Retained<NSButton>>>,
     fmt_popup: RefCell<Option<Retained<NSPopUpButton>>>,
+    // The selection bar's three choosers, and the view they were last filled from.
+    pick_titles: RefCell<Option<Retained<NSPopUpButton>>>,
+    pick_audio: RefCell<Option<Retained<NSPopUpButton>>>,
+    pick_subs: RefCell<Option<Retained<NSPopUpButton>>>,
+    pick_shown: RefCell<Option<crate::ui::PickView>>,
+    pick_row: RefCell<Option<Retained<NSView>>>,
     tabs: RefCell<Option<Retained<objc2_app_kit::NSTabView>>>,
     page_main: RefCell<Option<Retained<NSView>>>,
     page_prog: RefCell<Option<Retained<NSView>>>,
@@ -940,7 +975,10 @@ define_class!(
         /// is on screen. See `Controller::open_disc`.
         #[unsafe(method(onLaunchProbe:))]
         fn on_launch_probe(&self, _s: Option<&AnyObject>) {
-            self.open_disc(false);
+            match freemkv::app_entry::launch_source() {
+                Some(src) => self.step(|a| a.open(src)),
+                None => self.open_disc(false),
+            }
         }
 
         #[unsafe(method(onNoop:))]
@@ -1230,6 +1268,36 @@ define_class!(
             // and selection works in every locale.
             if let Some(f) = crate::ui::format_from_label(&t.to_string(), disc, fit) {
                 self.act(crate::ui::Cmd::SetFormat(f));
+            }
+        }
+
+        #[unsafe(method(onPickTitles:))]
+        fn on_pick_titles(&self, _s: Option<&AnyObject>) {
+            let Some(p) = self.ivars().pick_titles.borrow().clone() else {
+                return;
+            };
+            let at = usize::try_from(p.indexOfSelectedItem()).ok();
+            let mode = self.ivars().pick_shown.borrow().as_ref().and_then(|v| at.and_then(|i| v.title_choice(i)));
+            if let Some(mode) = mode {
+                self.step(|a| a.pick_titles(mode));
+            }
+        }
+
+        #[unsafe(method(onPickAudio:))]
+        fn on_pick_audio(&self, _s: Option<&AnyObject>) {
+            let tag = picked_tag(&self.ivars().pick_audio);
+            let choice = self.ivars().pick_shown.borrow().as_ref().zip(tag).and_then(|(v, t)| v.audio_choice(t));
+            if let Some(code) = choice {
+                self.step(|a| a.pick_audio(code.as_deref()));
+            }
+        }
+
+        #[unsafe(method(onPickSubs:))]
+        fn on_pick_subs(&self, _s: Option<&AnyObject>) {
+            let tag = picked_tag(&self.ivars().pick_subs);
+            let choice = self.ivars().pick_shown.borrow().as_ref().zip(tag).and_then(|(v, t)| v.subs_choice(t));
+            if let Some(choice) = choice {
+                self.step(|a| a.pick_subtitles(choice));
             }
         }
 
@@ -1712,12 +1780,25 @@ impl Controller {
             }
         }
 
+        // selection bar: refilled only when its choices or the disc's languages change
+        if iv.pick_shown.borrow().as_ref() != v.pick.as_ref() {
+            self.fill_pick_bar(v.pick.as_ref());
+            *iv.pick_shown.borrow_mut() = v.pick.clone();
+        }
+
         // output row
         {
             if let Some(f) = iv.out_field.borrow().as_ref()
                 && f.stringValue().to_string() != v.output_dir
             {
                 f.setStringValue(&NSString::from_str(&v.output_dir));
+            }
+            // Set only when the line changes; the core measures it off this thread.
+            if *iv.hint_shown.borrow() != v.free_space_line
+                && let Some(h) = iv.out_hint.borrow().as_ref()
+            {
+                h.setStringValue(&NSString::from_str(&v.free_space_line));
+                *iv.hint_shown.borrow_mut() = v.free_space_line.clone();
             }
             if let Some(b) = iv.run_btn.borrow().as_ref() {
                 b.setEnabled(v.can_run);
@@ -1870,7 +1951,7 @@ impl Controller {
             let ty = h - TB_H;
             // log takes a fixed share of the height; more while ripping
             let hidden = *iv.log_hidden.borrow();
-            let share = if prog { 0.62 } else { 0.32 };
+            let share = if prog { 0.62 } else { 0.24 };
             let log_h = if hidden {
                 0.0
             } else if *iv.on_result.borrow() {
@@ -1921,10 +2002,14 @@ impl Controller {
             if let Some(v) = iv.page_result.borrow().as_ref() {
                 v.setFrame(r(0.0, ty - RESULT_H - 2.0, w, RESULT_H));
             }
-            // main page internals
-            let tree_w = (w - PAD * 2.0) * 0.464;
+            // main page internals: the tree over the full width, the output bar under it
             if let Some(sv) = iv.tree_scroll.borrow().as_ref() {
-                sv.setFrame(r(PAD, 0.0, tree_w, ph));
+                sv.setFrame(r(
+                    PAD,
+                    BAR_H + PAD,
+                    w - PAD * 2.0,
+                    (ph - BAR_H - PAD - PICK_H).max(40.0),
+                ));
                 // Fit the columns to the new width (Description takes up the
                 // change), so Size stays in view.
                 if let Some(doc) = sv.documentView()
@@ -1933,14 +2018,35 @@ impl Controller {
                     ov.sizeToFit();
                 }
             }
-            let rx = PAD + tree_w + PAD;
-            let rw = w - rx - PAD;
             if let Some(g) = iv.grp_out.borrow().as_ref() {
-                g.setFrame(r(rx, ph - 110.0, rw, 110.0));
+                g.setFrame(r(PAD, 0.0, w - PAD * 2.0, BAR_H));
             }
-            if let Some(g) = iv.grp_info.borrow().as_ref() {
-                g.setFrame(r(rx, 0.0, rw, ph - 110.0 - PAD));
+            if let Some(row) = iv.pick_row.borrow().as_ref() {
+                row.setFrame(r(PAD, ph - PICK_H, w - PAD * 2.0, PICK_H));
             }
+        }
+    }
+
+    // Fill the selection bar's three choosers from the view; hidden with no source open.
+    fn fill_pick_bar(&self, pick: Option<&crate::ui::PickView>) {
+        let mtm = MainThreadMarker::new().unwrap();
+        let iv = self.ivars();
+        if let Some(row) = iv.pick_row.borrow().as_ref() {
+            row.setHidden(pick.is_none());
+        }
+        let Some(v) = pick else { return };
+        if let Some(p) = iv.pick_titles.borrow().as_ref() {
+            p.removeAllItems();
+            for (_, label) in &v.titles {
+                p.addItemWithTitle(&NSString::from_str(label));
+            }
+            p.selectItemAtIndex(v.title_index() as isize);
+        }
+        if let Some(p) = iv.pick_audio.borrow().as_ref() {
+            fill_pick_menu(mtm, p, &v.audio_summary, &v.audio_menu());
+        }
+        if let Some(p) = iv.pick_subs.borrow().as_ref() {
+            fill_pick_menu(mtm, p, &v.subs_summary, &v.subs_menu());
         }
     }
 
@@ -2287,6 +2393,44 @@ fn popup_fmt_for(mtm: MainThreadMarker, fr: NSRect, disc: bool) -> Retained<NSPo
     p
 }
 
+// The tag of the item just chosen in a selection-bar menu.
+fn picked_tag(p: &RefCell<Option<Retained<NSPopUpButton>>>) -> Option<isize> {
+    let p = p.borrow().clone()?;
+    let item = p.selectedItem()?;
+    Some(item.tag())
+}
+
+// Fill a pull-down selection-bar menu: its closed title, then the core's entries.
+fn fill_pick_menu(
+    mtm: MainThreadMarker,
+    p: &NSPopUpButton,
+    closed: &str,
+    entries: &[crate::ui::PickEntry],
+) {
+    let menu = NSMenu::new(mtm);
+    let add = |title: &str, tag: isize, on: bool| {
+        let mi = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        mi.setTag(tag);
+        mi.setState(if on { 1 } else { 0 });
+        menu.addItem(&mi);
+    };
+    add(closed, 0, false);
+    for e in entries {
+        if e.separator_before {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        add(&e.label, e.tag, e.on);
+    }
+    p.setMenu(Some(&menu));
+}
+
 fn group(mtm: MainThreadMarker, title: &str, fr: NSRect) -> Retained<NSBox> {
     let b = { NSBox::initWithFrame(NSBox::alloc(mtm), fr) };
     {
@@ -2497,7 +2641,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     let ty = H - TB_H;
     let top_y = LOG_H + PAD * 2.0;
     let top_h = ty - top_y - 2.0;
-    let tree_w = (W - PAD * 2.0) * 0.464; // reference ratio 891/1920
+    let tree_w = W - PAD * 2.0;
 
     // both pages occupy the same rect; only one is visible at a time
     let page_main = { NSView::initWithFrame(NSView::alloc(mtm), r(0.0, top_y, W, top_h)) };
@@ -2649,8 +2793,63 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     let top_y = 0.0;
 
     // ── title tree ─────────────────────────────────────────────────────
-    let scroll =
-        { NSScrollView::initWithFrame(NSScrollView::alloc(mtm), r(PAD, top_y, tree_w, top_h)) };
+    // ── selection bar: Titles / Audio / Subtitles over the tree ────────
+    let pick_row = {
+        NSView::initWithFrame(
+            NSView::alloc(mtm),
+            r(PAD, top_y + top_h - PICK_H, tree_w, PICK_H),
+        )
+    };
+    {
+        let mut x = 0.0;
+        let mut chooser = |label: String, pulls_down: bool, w: f64, action: Sel| {
+            let lw = 8.0 + 7.0 * label.chars().count() as f64;
+            let l = text(mtm, &format!("{label}:"), r(x, 6.0, lw, 17.0), false, false);
+            pick_row.addSubview(&l);
+            x += lw + 4.0;
+            let p = {
+                NSPopUpButton::initWithFrame_pullsDown(
+                    NSPopUpButton::alloc(mtm),
+                    r(x, 2.0, w, 26.0),
+                    pulls_down,
+                )
+            };
+            unsafe {
+                p.setTarget(Some(c));
+                p.setAction(Some(action));
+            }
+            pick_row.addSubview(&p);
+            x += w + 18.0;
+            p
+        };
+        let [titles, audio, subs] = crate::ui::pick_labels();
+        let t = chooser(titles, false, 190.0, sel!(onPickTitles:));
+        let a = chooser(audio, true, 170.0, sel!(onPickAudio:));
+        let sb = chooser(subs, true, 170.0, sel!(onPickSubs:));
+        *c.ivars().pick_titles.borrow_mut() = Some(t);
+        *c.ivars().pick_audio.borrow_mut() = Some(a);
+        *c.ivars().pick_subs.borrow_mut() = Some(sb);
+        *c.ivars().pick_shown.borrow_mut() = None;
+    }
+    mask(
+        &pick_row,
+        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+            | objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin,
+    );
+    add(&pick_row);
+    *c.ivars().pick_row.borrow_mut() = Some(pick_row.clone());
+
+    let scroll = {
+        NSScrollView::initWithFrame(
+            NSScrollView::alloc(mtm),
+            r(
+                PAD,
+                top_y + BAR_H + PAD,
+                tree_w,
+                top_h - BAR_H - PAD - PICK_H,
+            ),
+        )
+    };
     let ov =
         { NSOutlineView::initWithFrame(NSOutlineView::alloc(mtm), r(0.0, 0.0, tree_w, top_h)) };
 
@@ -2674,37 +2873,37 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         cell.setTitle(Some(&NSString::from_str("")));
         c_check.setDataCell(&cell);
     }
-    let c_type = mk_col("type", &crate::strings::get("gui.col.type"), 96.0);
-    let c_desc = mk_col("desc", &crate::strings::get("gui.col.desc"), tree_w - 336.0);
-    let c_length = mk_col(
-        "length",
-        &crate::strings::get_or("gui.col.duration", "Length"),
-        66.0,
-    );
-    let c_size = mk_col(
-        "size",
-        &crate::strings::get_or("gui.col.size", "Size"),
-        66.0,
-    );
-    for c in [&c_length, &c_size] {
-        c.headerCell().setAlignment(NSTextAlignment::Right);
-    }
-    // Description alone takes up a change in width; the rest keep theirs.
-    for c in [&c_check, &c_type, &c_length, &c_size] {
-        c.setResizingMask(objc2_app_kit::NSTableColumnResizingOptions::UserResizingMask);
-    }
+    // The columns are the core's; the flexible one takes the tree's spare width.
+    let columns = crate::ui::tree_columns();
+    let widths: Vec<f64> = columns.iter().map(|c| c.width).collect();
+    let fitted = crate::ui::fit_column_widths(&columns, &widths, tree_w - 72.0 - 24.0);
+    let cols: Vec<Retained<NSTableColumn>> = columns
+        .iter()
+        .zip(fitted)
+        .map(|(c, w)| {
+            let col = mk_col(c.id, &c.title, w);
+            col.setMinWidth(c.min);
+            if c.numeric {
+                col.headerCell().setAlignment(NSTextAlignment::Right);
+            }
+            if !c.flex {
+                col.setResizingMask(objc2_app_kit::NSTableColumnResizingOptions::UserResizingMask);
+            }
+            col
+        })
+        .collect();
+    c_check.setResizingMask(objc2_app_kit::NSTableColumnResizingOptions::UserResizingMask);
     unsafe {
         ov.addTableColumn(&c_check);
-        ov.addTableColumn(&c_type);
-        ov.addTableColumn(&c_desc);
-        ov.addTableColumn(&c_length);
-        ov.addTableColumn(&c_size);
+        for col in &cols {
+            ov.addTableColumn(col);
+        }
         ov.setOutlineTableColumn(Some(&c_check));
         ov.setAutoresizesOutlineColumn(false);
         ov.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::Regular);
         ov.setUsesAlternatingRowBackgroundColors(false);
         ov.setIndentationPerLevel(14.0);
-        ov.setRowHeight(18.0);
+        ov.setRowHeight(ROW_H);
         ov.setColumnAutoresizingStyle(
             objc2_app_kit::NSTableViewColumnAutoresizingStyle::UniformColumnAutoresizingStyle,
         );
@@ -2728,6 +2927,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             let obj: Retained<AnyObject> = Retained::cast_unchecked(item);
             ov.expandItem_expandChildren(Some(&obj), true);
         }
+        collapse_closed_groups(&ov, &src.ivars().rows.borrow());
         ov.reloadData();
     }
     mask(
@@ -2737,45 +2937,45 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     );
     add(&scroll);
 
-    // ── right column ───────────────────────────────────────────────────
-    let rx = PAD + tree_w + PAD;
-    let rw = W - rx - PAD;
-
-    // Output folder group
-    let of = group(
-        mtm,
-        &crate::strings::get("gui.group.output"),
-        r(rx, top_h + top_y - 110.0, rw, 110.0),
-    );
+    // ── output bar: folder, browse, format, Run on one row, free space under it ──
+    let bw = W - PAD * 2.0;
+    let of = { NSBox::initWithFrame(NSBox::alloc(mtm), r(PAD, top_y, bw, BAR_H)) };
+    {
+        of.setBoxType(NSBoxType::Custom);
+        of.setTransparent(true);
+        of.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+        of.setContentViewMargins(NSSize::new(0.0, 0.0));
+    }
     let ofv = { of.contentView() }.unwrap();
-    let inner_w = rw;
-    let fmt = popup_fmt(mtm, r(10.0, 14.0, 260.0, 24.0));
-    ofv.addSubview(&fmt);
     let run = btn(
         mtm,
         &crate::strings::get("gui.btn.run_now"),
-        r(inner_w - 130.0, 12.0, 108.0, 28.0),
+        r(bw - 108.0, BAR_ROW_Y - 3.0, 108.0, 30.0),
         c,
         sel!(onRip:),
     );
-    {
-        run.setKeyEquivalent(&NSString::from_str("\r"));
-        ofv.addSubview(&run);
-    }
-    mask(
-        &run,
-        objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin,
+    let fmt = popup_fmt(mtm, r(bw - 108.0 - 8.0 - 220.0, BAR_ROW_Y, 220.0, 24.0));
+    let browse = btn(
+        mtm,
+        &crate::strings::get("gui.btn.browse"),
+        r(
+            bw - 108.0 - 8.0 - 220.0 - 8.0 - 36.0,
+            BAR_ROW_Y - 1.0,
+            36.0,
+            26.0,
+        ),
+        c,
+        sel!(onBrowseOutput:),
     );
-    *c.ivars().run_btn.borrow_mut() = Some(run.clone());
+    run.setKeyEquivalent(&NSString::from_str("\r"));
     // Without a target/action the popup is decoration: it shows a choice the
     // model never hears about, so the rip silently uses the old format.
     unsafe {
         fmt.setTarget(Some(c));
         fmt.setAction(Some(sel!(onFormat:)));
     }
-    *c.ivars().fmt_popup.borrow_mut() = Some(fmt.clone());
     let fld =
-        { NSComboBox::initWithFrame(NSComboBox::alloc(mtm), r(10.0, 52.0, inner_w - 70.0, 24.0)) };
+        { NSComboBox::initWithFrame(NSComboBox::alloc(mtm), r(0.0, BAR_ROW_Y, bw - 380.0, 24.0)) };
     unsafe {
         let saved = c.ivars().settings.borrow().dest_dir.clone();
         fld.setStringValue(&NSString::from_str(&saved));
@@ -2789,75 +2989,33 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         // right back with the model's stale `output_dir`.
         fld.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(c)));
     }
-    ofv.addSubview(&fld);
-    mask(
-        &fld,
-        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable,
-    );
-    let browse = btn(
+    let hint = text(mtm, "", r(2.0, 0.0, bw - 380.0, 16.0), false, true);
+    let heading = text(
         mtm,
-        &crate::strings::get("gui.btn.browse"),
-        r(inner_w - 56.0, 50.0, 34.0, 26.0),
-        c,
-        sel!(onBrowseOutput:),
+        &crate::strings::get("gui.group.output"),
+        r(0.0, BAR_LABEL_Y, bw - 380.0, 17.0),
+        false,
+        false,
     );
-    ofv.addSubview(&browse);
-    mask(
-        &browse,
-        objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin,
-    );
+    for v in [&*fld as &NSView, &hint, &heading] {
+        ofv.addSubview(v);
+        mask(
+            v,
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable,
+        );
+    }
+    for v in [&*browse as &NSView, &fmt, &run] {
+        ofv.addSubview(v);
+        mask(v, objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin);
+    }
     mask(
         &of,
-        objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin
-            | objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin,
+        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable,
     );
     add(&of);
-
-    // Info group
-    let info_h = top_h - 84.0 - PAD;
-    let info = group(
-        mtm,
-        &crate::strings::get("gui.group.info"),
-        r(rx, top_y, rw, info_h),
-    );
-    let iv = { info.contentView() }.unwrap();
-    let iscroll = {
-        NSScrollView::initWithFrame(
-            NSScrollView::alloc(mtm),
-            r(8.0, 8.0, rw - 24.0, info_h - 40.0),
-        )
-    };
-    let itv = {
-        NSTextView::initWithFrame(
-            NSTextView::alloc(mtm),
-            r(0.0, 0.0, rw - 24.0, info_h - 40.0),
-        )
-    };
-    {
-        itv.setEditable(false);
-        itv.setSelectable(true);
-        itv.setDrawsBackground(false);
-        itv.setString(&NSString::from_str(&crate::strings::get(
-            "gui.page.detail_default",
-        )));
-        itv.setFont(Some(&NSFont::systemFontOfSize(11.0)));
-        iscroll.setDocumentView(Some(&itv));
-        iscroll.setDrawsBackground(false);
-        iscroll.setHasVerticalScroller(true);
-        iv.addSubview(&iscroll);
-    }
-    *src.ivars().info.borrow_mut() = Some(itv.clone());
-    mask(
-        &iscroll,
-        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
-            | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
-    );
-    mask(
-        &info,
-        objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin
-            | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
-    );
-    add(&info);
+    *c.ivars().run_btn.borrow_mut() = Some(run.clone());
+    *c.ivars().fmt_popup.borrow_mut() = Some(fmt.clone());
+    *c.ivars().out_hint.borrow_mut() = Some(hint);
 
     // ── progress page (reference: Information group, two bars, cancel) ──
     {
@@ -3064,7 +3222,6 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     *c.ivars().tree_scroll.borrow_mut() = Some(scroll.clone());
     *c.ivars().src.borrow_mut() = Some(src.clone());
     *c.ivars().grp_out.borrow_mut() = Some(of.clone());
-    *c.ivars().grp_info.borrow_mut() = Some(info.clone());
     *c.ivars().log_scroll.borrow_mut() = Some(logscroll.clone());
     src
 }
@@ -4580,11 +4737,7 @@ impl Controller {
         }
         check(
             "titles-numbered",
-            v.title_rows
-                .iter()
-                .filter(|x| x.type_s == "Title")
-                .enumerate()
-                .all(|(i, x)| x.desc.starts_with(&format!("{}.", i + 1))),
+            crate::ui::titles_numbered(&v.title_rows),
             "1-based, matches -t N",
         );
         check(
@@ -5628,6 +5781,10 @@ mod tests {
                 desc: "Disc".into(),
                 length: String::new(),
                 size: String::new(),
+                lang: String::new(),
+                item: String::new(),
+                format: String::new(),
+                notes: String::new(),
                 check: None,
                 check_enabled: false,
             },
@@ -5638,6 +5795,10 @@ mod tests {
                 desc: "Main Feature".into(),
                 length: "1:30:00".into(),
                 size: "6.8 GB".into(),
+                lang: String::new(),
+                item: String::new(),
+                format: String::new(),
+                notes: String::new(),
                 check: Some(crate::ui::Check::Off),
                 check_enabled: true,
             },
@@ -5648,6 +5809,10 @@ mod tests {
                 desc: "English 5.1".into(),
                 length: String::new(),
                 size: String::new(),
+                lang: String::new(),
+                item: String::new(),
+                format: String::new(),
+                notes: String::new(),
                 check: Some(crate::ui::Check::On),
                 check_enabled: true,
             },
@@ -6199,6 +6364,10 @@ mod tests {
             desc: format!("t{i}"),
             length: String::new(),
             size: String::new(),
+            lang: String::new(),
+            item: String::new(),
+            format: String::new(),
+            notes: String::new(),
             check: c,
             check_enabled: c.is_some(),
         };
