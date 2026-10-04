@@ -635,7 +635,8 @@ fn encryption_label(disc: &Disc) -> Option<EncLabel> {
 }
 
 /// Human-readable region: "Region-free", the Blu-ray region letters (e.g.
-/// "A/B/C"), or the DVD region numbers (e.g. "1, 2").
+/// "A/B/C"), the DVD region numbers (e.g. "1, 2"; "None" when every region is
+/// prohibited), or "Unknown" when the disc records none a scan can read.
 fn region_name(region: &DiscRegion) -> String {
     match region {
         DiscRegion::Free => "Region-free".to_string(),
@@ -655,7 +656,7 @@ fn region_name(region: &DiscRegion) -> String {
         }
         DiscRegion::Dvd(rs) => {
             if rs.is_empty() {
-                "Region-free".to_string()
+                "None".to_string()
             } else {
                 rs.iter()
                     .map(|r| r.to_string())
@@ -663,6 +664,7 @@ fn region_name(region: &DiscRegion) -> String {
                     .join(", ")
             }
         }
+        DiscRegion::Unknown => "Unknown".to_string(),
     }
 }
 
@@ -1338,9 +1340,11 @@ mod tests {
     #[test]
     fn region_name_covers_free_bluray_and_dvd() {
         assert_eq!(region_name(&DiscRegion::Free), "Region-free");
-        // Empty region lists on either carrier read as region-free, not "".
+        // An empty BD list reads as region-free; an empty DVD list is a mask
+        // prohibiting every region.
         assert_eq!(region_name(&DiscRegion::BluRay(vec![])), "Region-free");
-        assert_eq!(region_name(&DiscRegion::Dvd(vec![])), "Region-free");
+        assert_eq!(region_name(&DiscRegion::Dvd(vec![])), "None");
+        assert_eq!(region_name(&DiscRegion::Unknown), "Unknown");
         assert_eq!(
             region_name(&DiscRegion::BluRay(vec![
                 BdRegion::A,

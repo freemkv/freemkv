@@ -643,6 +643,7 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str) -> Vec<String> {
     }
     match &disc.region {
         libfreemkv::disc::DiscRegion::Free => d.push("Region: free".to_string()),
+        libfreemkv::disc::DiscRegion::Unknown => d.push("Region: unknown".to_string()),
         libfreemkv::disc::DiscRegion::BluRay(rs) if !rs.is_empty() => {
             let names: Vec<String> = rs.iter().map(|r| format!("{r:?}")).collect();
             d.push(format!("Region: Blu-ray {}", names.join("/")));
@@ -4591,6 +4592,14 @@ mod disc_details_tests {
             disc_details(&dvd, "x").contains(&"Region: DVD 1,2".to_string()),
             "{:?}",
             disc_details(&dvd, "x")
+        );
+
+        let mut unknown = disc(false);
+        unknown.region = libfreemkv::disc::DiscRegion::Unknown;
+        assert!(
+            disc_details(&unknown, "x").contains(&"Region: unknown".to_string()),
+            "{:?}",
+            disc_details(&unknown, "x")
         );
 
         // An empty region list falls through to no region line at all.
