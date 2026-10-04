@@ -14,8 +14,8 @@ use crate::ui::Page;
 pub const BASE_DPI: u32 = 96;
 
 // ── the 96-DPI baseline: same proportions as the macOS shell, so the two ──
-// look like one product — tree 46.4% wide, log 32% of the height on the tree
-// page and more while ripping, Output/Info groups stacked on the right.
+// look like one product — the selection bar, the title tree over the full
+// width, the output area under it, and the log taking a share of the height.
 
 /// Default window client size.
 pub const W: i32 = 1180;
@@ -31,13 +31,23 @@ pub const PROG_H: i32 = 292;
 pub const PROG_H_ONE: i32 = 246;
 /// Result page height — fixed so its contents never drift off-screen.
 pub const RESULT_H: i32 = 200;
-/// Height of the Output group on the right column.
-pub const OUT_H: i32 = 110;
-/// Fraction of the content width the title tree takes. A ratio, not a length:
-/// it is already DPI-independent and must NOT be scaled.
-pub const TREE_FRAC: f64 = 0.464;
-/// Fraction of the window height the log takes on the tree page. Also a ratio.
-pub const LOG_FRAC: f64 = 0.32;
+/// The selection bar over the title tree: Titles, Audio and Subtitles on one row.
+pub const PICK_H: i32 = 30;
+/// The selection bar's chooser widths, and the gap after each.
+pub const PICK_TITLES_W: i32 = 190;
+pub const PICK_MENU_W: i32 = 170;
+pub const PICK_GAP: i32 = 18;
+/// The output area under the tree: the "Output" label, the folder / browse /
+/// format / Run row, and the free-space line under it.
+pub const BAR_H: i32 = 70;
+pub const BAR_ROW_Y: i32 = 22;
+pub const BAR_ROW_H: i32 = 28;
+/// Format dropdown and Run button widths on the output row.
+pub const FORMAT_W: i32 = 220;
+pub const RUN_W: i32 = 110;
+/// Fraction of the window height the log takes on the tree page. A ratio, not
+/// a length: it is already DPI-independent and must NOT be scaled.
+pub const LOG_FRAC: f64 = 0.24;
 
 /// Settings window outer size, and About window outer size.
 pub const PREFS_W: i32 = 680;
@@ -156,15 +166,24 @@ pub struct MainLayout {
     pub btn_open: Rect,
 
     // titles page
+    /// The selection bar: each chooser's label and the chooser itself.
+    pub pick_titles_lbl: Rect,
+    pub pick_titles: Rect,
+    pub pick_audio_lbl: Rect,
+    pub pick_audio: Rect,
+    pub pick_subs_lbl: Rect,
+    pub pick_subs: Rect,
+    /// Eject, at the right end of the selection bar.
+    pub btn_eject: Rect,
+    /// The tree with its header strip, over the full width.
     pub tree: Rect,
-    pub grp_out: Rect,
+    pub lbl_out: Rect,
     pub edit_out: Rect,
     pub btn_browse: Rect,
     pub cmb_format: Rect,
     pub btn_run: Rect,
-    pub btn_eject: Rect,
-    pub grp_info: Rect,
-    pub detail: Rect,
+    /// The free-space line under the output row.
+    pub lbl_free: Rect,
 
     // progress page
     pub grp_prog: Rect,
@@ -195,13 +214,15 @@ pub struct MainState {
     pub log_hidden: bool,
     /// Number of rows in the information group on the progress page.
     pub info_rows: usize,
+    /// How wide the selection bar's three labels draw, in physical pixels.
+    pub pick_labels: [i32; 3],
 }
 
 /// Lay the main window out.
 ///
 /// `cw`/`ch` are the **physical** client size, as `WM_SIZE` reports it, and the
-/// returned rectangles are physical too. The proportional parts (`TREE_FRAC`,
-/// `LOG_FRAC`) are applied to that physical size and so need no scaling; every
+/// returned rectangles are physical too. The proportional part (`LOG_FRAC`) is
+/// applied to that physical size and so needs no scaling; every
 /// fixed length, including the minimum sizes the clamps enforce, goes through
 /// `Scale::px`.
 #[must_use]
@@ -253,25 +274,53 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
     let btn_open = Rect::new(cw / 2 + open_gap / 2, open_y, open_w, open_h);
 
     // ── titles page ──
-    let tree_w = ((cw - pad * 2) as f64 * TREE_FRAC) as i32;
-    let tree = Rect::new(pad, top_y, tree_w, top_h);
-    let rx = pad + tree_w + pad;
-    let rw = cw - rx - pad;
-    let out_h = s.px(OUT_H);
-    let grp_out = Rect::new(rx, top_y, rw, out_h);
-    let edit_out = Rect::new(rx + s.px(12), top_y + s.px(22), rw - s.px(60), s.px(23));
-    let btn_browse = Rect::new(rx + rw - s.px(44), top_y + s.px(21), s.px(34), s.px(25));
-    let cmb_format = Rect::new(rx + s.px(12), top_y + s.px(56), rw - s.px(150), s.px(24));
-    let btn_run = Rect::new(rx + rw - s.px(128), top_y + s.px(54), s.px(116), s.px(28));
-    let btn_eject = Rect::new(rx + s.px(12), top_y + out_h + s.px(4), s.px(110), s.px(26));
-    let info_y = top_y + out_h + pad + s.px(30);
-    let info_h = (top_h - out_h - pad - s.px(30)).max(s.px(60));
-    let grp_info = Rect::new(rx, info_y, rw, info_h);
-    let detail = Rect::new(
-        rx + s.px(10),
-        info_y + s.px(20),
-        rw - s.px(20),
-        (info_h - s.px(32)).max(s.px(20)),
+    // The selection bar: label, chooser, gap, for each of the three.
+    let pick_y = top_y;
+    let mut x = pad;
+    let mut chooser = |label_w: i32, w: i32| {
+        let lbl = Rect::new(x, pick_y + s.px(7), label_w, s.px(16));
+        x += label_w + s.px(4);
+        let c = Rect::new(x, pick_y + s.px(3), s.px(w), s.px(24));
+        x += s.px(w) + s.px(PICK_GAP);
+        (lbl, c)
+    };
+    let (pick_titles_lbl, pick_titles) = chooser(st.pick_labels[0], PICK_TITLES_W);
+    let (pick_audio_lbl, pick_audio) = chooser(st.pick_labels[1], PICK_MENU_W);
+    let (pick_subs_lbl, pick_subs) = chooser(st.pick_labels[2], PICK_MENU_W);
+    let btn_eject = Rect::new(cw - pad - s.px(110), pick_y + s.px(2), s.px(110), s.px(26));
+
+    let bar_h = s.px(BAR_H);
+    let tree_y = top_y + s.px(PICK_H);
+    let tree = Rect::new(
+        pad,
+        tree_y,
+        cw - pad * 2,
+        (top_h - s.px(PICK_H) - pad - bar_h).max(s.px(40)),
+    );
+
+    // The output area: folder (flexible), browse, format and Run on one row.
+    let bar_y = top_y + top_h - bar_h;
+    let row_y = bar_y + s.px(BAR_ROW_Y);
+    let gap = pad;
+    let run_w = s.px(RUN_W);
+    let fmt_w = s.px(FORMAT_W);
+    let browse_w = s.px(34);
+    let btn_run = Rect::new(cw - pad - run_w, row_y, run_w, s.px(BAR_ROW_H));
+    let cmb_format = Rect::new(btn_run.x - gap - fmt_w, row_y + s.px(2), fmt_w, s.px(24));
+    let btn_browse = Rect::new(
+        cmb_format.x - gap - browse_w,
+        row_y + s.px(1),
+        browse_w,
+        s.px(26),
+    );
+    let field_w = (btn_browse.x - gap - pad).max(s.px(60));
+    let edit_out = Rect::new(pad, row_y + s.px(2), field_w, s.px(23));
+    let lbl_out = Rect::new(pad, bar_y + s.px(3), field_w, s.px(16));
+    let lbl_free = Rect::new(
+        pad + s.px(2),
+        row_y + s.px(BAR_ROW_H) + s.px(4),
+        field_w,
+        s.px(16),
     );
 
     // ── progress page ──
@@ -323,15 +372,20 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
         empty_sub,
         btn_open_disc,
         btn_open,
+        pick_titles_lbl,
+        pick_titles,
+        pick_audio_lbl,
+        pick_audio,
+        pick_subs_lbl,
+        pick_subs,
+        btn_eject,
         tree,
-        grp_out,
+        lbl_out,
         edit_out,
         btn_browse,
         cmb_format,
         btn_run,
-        btn_eject,
-        grp_info,
-        detail,
+        lbl_free,
         grp_prog,
         info_rows,
         lbl_saving_cur,
@@ -440,14 +494,15 @@ pub fn menu_column_rows(items: usize, item_h: i32, screen_h: i32) -> usize {
 
 /// Height of the column header strip over the title tree.
 pub const TREE_HEAD_H: i32 = 24;
-/// Default Length and Size column widths; wide enough for "2:23:20" and
-/// "48.1 GB" and the longer translated headers ("Длительность").
-pub const COL_LENGTH_W: i32 = 92;
-pub const COL_SIZE_W: i32 = 80;
-/// Narrowest a Length or Size column may be dragged.
+/// Title-tree row height: room above and below the text, as the macOS outline has.
+pub const TREE_ROW_H: i32 = 22;
+/// How far each tree level is indented.
+pub const TREE_INDENT: i32 = 18;
+/// The tick-and-expander column ahead of the core's columns: room for the
+/// expander and tick box of a stream row two levels down.
+pub const COL_TICK_W: i32 = 84;
+/// Narrowest a column may be dragged.
 pub const COL_MIN_W: i32 = 36;
-/// What the Type and Description column keeps before Length and Size give way.
-pub const TREE_COL_MIN_W: i32 = 120;
 
 /// The header strip and the tree under it, splitting the tree's area.
 #[must_use]
@@ -457,23 +512,6 @@ pub fn split_tree_header(area: Rect, dpi: u32) -> (Rect, Rect) {
         Rect::new(area.x, area.y, area.w, hh),
         Rect::new(area.x, area.y + hh, area.w, area.h - hh),
     )
-}
-
-/// The user's Length and Size widths, at the 96-DPI baseline so a DPI change
-/// rescales them like every other length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ColWidths {
-    pub length: i32,
-    pub size: i32,
-}
-
-impl Default for ColWidths {
-    fn default() -> Self {
-        Self {
-            length: COL_LENGTH_W,
-            size: COL_SIZE_W,
-        }
-    }
 }
 
 /// A horizontal extent, `x .. x + w`.
@@ -487,76 +525,82 @@ pub struct Span {
 /// (logical) coordinates. Under a right-to-left locale the header and tree are
 /// mirrored windows (`WS_EX_LAYOUTRTL`), so this same layout lands mirrored on
 /// screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeColumns {
-    /// Type and Description: the tree's own label.
-    pub label: Span,
-    pub length: Span,
-    pub size: Span,
+    /// The expanders and tick boxes: the tree's own indented part.
+    pub tick: Span,
+    /// One span per core column (`ui::tree_columns`), in order.
+    pub cols: Vec<Span>,
 }
 
-/// Lay the columns out across a client `client_w` wide: Length and Size keep
-/// their widths at the right, the label takes the rest. When the label would
-/// drop under [`TREE_COL_MIN_W`], Length gives way first, then Size, never
-/// below [`COL_MIN_W`].
+/// Lay the columns out across a client `client_w` wide: the tick column first,
+/// then each core column at its width (`widths`, at the 96-DPI baseline), the
+/// `flex` one taking whatever the others leave, never below [`COL_MIN_W`].
 #[must_use]
-pub fn tree_columns(dpi: u32, client_w: i32, widths: ColWidths) -> TreeColumns {
+pub fn tree_columns(dpi: u32, client_w: i32, widths: &[i32], flex: usize) -> TreeColumns {
     let s = Scale::new(dpi);
     let min = s.px(COL_MIN_W);
-    let mut length = s.px(widths.length).max(min);
-    let mut size = s.px(widths.size).max(min);
-    let room = (client_w - s.px(TREE_COL_MIN_W)).max(min * 2);
-    let over = length + size - room;
-    if over > 0 {
-        let take = over.min(length - min);
-        length -= take;
-        size = (size - (over - take)).max(min);
+    let tick = s.px(COL_TICK_W);
+    let mut w: Vec<i32> = widths.iter().map(|&v| s.px(v).max(min)).collect();
+    let fixed: i32 = w
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != flex)
+        .map(|(_, v)| v)
+        .sum();
+    if let Some(f) = w.get_mut(flex) {
+        *f = (client_w - tick - fixed).max(min);
     }
-    let label = (client_w - length - size).max(0);
+    let mut x = tick;
+    let cols = w
+        .into_iter()
+        .map(|w| {
+            let span = Span { x, w };
+            x += w;
+            span
+        })
+        .collect();
     TreeColumns {
-        label: Span { x: 0, w: label },
-        length: Span {
-            x: label,
-            w: length,
-        },
-        size: Span {
-            x: label + length,
-            w: size,
-        },
+        tick: Span { x: 0, w: tick },
+        cols,
     }
 }
 
-/// The header's three item widths for `cols`. The header spans the tree's
-/// whole outer width while the columns are measured in its client area, which
-/// starts `inset` in (the border); the last item runs on over the scroll bar.
+/// The header's item widths for `cols`: the tick column, then one per core
+/// column. The header spans the tree's whole outer width while the columns are
+/// measured in its client area, which starts `inset` in (the border); the last
+/// item runs on over the scroll bar.
 #[must_use]
-pub fn header_widths(cols: &TreeColumns, header_w: i32, inset: i32) -> [i32; 3] {
-    let label = cols.label.w + inset;
-    let length = cols.length.w;
-    [label, length, (header_w - label - length).max(0)]
+pub fn header_widths(cols: &TreeColumns, header_w: i32, inset: i32) -> Vec<i32> {
+    let mut out = vec![cols.tick.w + inset];
+    out.extend(cols.cols.iter().map(|c| c.w));
+    let before: i32 = out[..out.len() - 1].iter().sum();
+    if let Some(last) = out.last_mut() {
+        *last = (header_w - before).max(0);
+    }
+    out
 }
 
-/// The widths a finished header drag leaves, from the item dragged (`item`,
-/// in header order) and its new width. A divider moves between its two
-/// neighbours: dragging the label's edge trades width with Length, dragging
-/// Length's edge trades with Size; the last edge is pinned to the right.
+/// The baseline widths a finished header drag leaves, from the item dragged
+/// (`item`, in header order: 0 is the tick column) and its new width. A column
+/// left of the flexible one just takes its new width, the flexible one giving
+/// way; from the flexible one on, a divider trades width with its right-hand
+/// neighbour. The tick column and the last edge are pinned.
 #[must_use]
-pub fn drag_column(dpi: u32, cols: &TreeColumns, item: usize, new_w: i32) -> ColWidths {
+pub fn drag_column(dpi: u32, cols: &TreeColumns, flex: usize, item: usize, new_w: i32) -> Vec<i32> {
     let s = Scale::new(dpi);
-    let (mut length, mut size) = (cols.length.w, cols.size.w);
-    match item {
-        0 => length -= new_w - cols.label.w,
-        1 => {
-            size -= new_w - length;
-            length = new_w;
+    let mut w: Vec<i32> = cols.cols.iter().map(|c| c.w).collect();
+    if let Some(j) = item.checked_sub(1).filter(|&j| j < w.len()) {
+        let delta = new_w - w[j];
+        if j < flex {
+            w[j] = new_w;
+        } else if j + 1 < w.len() {
+            w[j] = new_w;
+            w[j + 1] -= delta;
         }
-        _ => {}
     }
     let min = s.px(COL_MIN_W);
-    ColWidths {
-        length: s.unpx(length.max(min)),
-        size: s.unpx(size.max(min)),
-    }
+    w.into_iter().map(|v| s.unpx(v.max(min))).collect()
 }
 
 /// Whether a locale tag (`"ar"`, `"he-IL"`, `"fa_IR"`) is written right to
@@ -678,104 +722,74 @@ mod tests {
         assert_eq!(min_size(192), (2040, 1240));
     }
 
+    /// What the selection bar's labels measure in the tests: "Titles",
+    /// "Audio" and "Subtitles" at 9 pt, roughly.
+    const LABELS: [i32; 3] = [40, 40, 60];
+
     fn titles(info_rows: usize) -> MainState {
         MainState {
             page: Page::Titles,
             two_bars: false,
             log_hidden: false,
             info_rows,
+            pick_labels: LABELS,
         }
     }
 
-    /// The default window at 96 DPI — the geometry that shipped, unchanged.
-    /// Every other DPI case is measured against these numbers.
+    /// The default window at 96 DPI. Every other DPI case is measured against
+    /// these numbers.
     #[test]
-    fn titles_page_at_96_dpi_is_the_shipped_geometry() {
+    fn titles_page_at_96_dpi() {
         let l = main_layout(96, 1180, 760, titles(0));
 
-        // ch * 0.32 = 243.2 -> 243; log_y = 760 - 8 - 243 = 509.
-        assert_eq!(l.log, Rect::new(8, 509, 1164, 243));
-        // top_y = TB_H + PAD = 12; top_h = 760 - 243 - 24 - 4 = 489.
-        assert_eq!(l.tree, Rect::new(8, 12, 540, 489)); // 1164 * 0.464 = 540.09
-        // rx = 8 + 540 + 8 = 556; rw = 1180 - 556 - 8 = 616.
-        assert_eq!(l.grp_out, Rect::new(556, 12, 616, 110));
-        assert_eq!(l.edit_out, Rect::new(568, 34, 556, 23));
-        assert_eq!(l.btn_browse, Rect::new(1128, 33, 34, 25));
-        assert_eq!(l.cmb_format, Rect::new(568, 68, 466, 24));
-        assert_eq!(l.btn_run, Rect::new(1044, 66, 116, 28));
-        assert_eq!(l.btn_eject, Rect::new(568, 126, 110, 26));
-        // info_y = 12 + 110 + 8 + 30 = 160; info_h = 489 - 110 - 8 - 30 = 341.
-        assert_eq!(l.grp_info, Rect::new(556, 160, 616, 341));
-        assert_eq!(l.detail, Rect::new(566, 180, 596, 309));
+        // ch * 0.24 = 182.4 -> 182; log_y = 760 - 8 - 182 = 570.
+        assert_eq!(l.log, Rect::new(8, 570, 1164, 182));
+        // top_y = TB_H + PAD = 12; top_h = 760 - 182 - 24 - 4 = 550.
+        // The selection bar: label, 4 px, chooser, 18 px, and so on.
+        assert_eq!(l.pick_titles_lbl, Rect::new(8, 19, 40, 16));
+        assert_eq!(l.pick_titles, Rect::new(52, 15, 190, 24));
+        assert_eq!(l.pick_audio_lbl, Rect::new(260, 19, 40, 16));
+        assert_eq!(l.pick_audio, Rect::new(304, 15, 170, 24));
+        assert_eq!(l.pick_subs_lbl, Rect::new(492, 19, 60, 16));
+        assert_eq!(l.pick_subs, Rect::new(556, 15, 170, 24));
+        assert_eq!(l.btn_eject, Rect::new(1062, 14, 110, 26));
+        // The tree under the bar, over the full width: 550 - 30 - 8 - 70 = 442.
+        assert_eq!(l.tree, Rect::new(8, 42, 1164, 442));
+        // The output area: bar_y = 12 + 550 - 70 = 492, its row at 514.
+        assert_eq!(l.lbl_out, Rect::new(8, 495, 776, 16));
+        assert_eq!(l.btn_run, Rect::new(1062, 514, 110, 28));
+        assert_eq!(l.cmb_format, Rect::new(834, 516, 220, 24));
+        assert_eq!(l.btn_browse, Rect::new(792, 515, 34, 26));
+        assert_eq!(l.edit_out, Rect::new(8, 516, 776, 23));
+        assert_eq!(l.lbl_free, Rect::new(10, 546, 776, 16));
     }
 
-    /// 125% — the single most common Windows laptop setting. Same window in
-    /// physical pixels (1475 × 950), every fixed length 1.25× the baseline.
+    /// The three rows stack without overlapping at every DPI: the selection
+    /// bar, the tree, the output area, then the log.
     #[test]
-    fn titles_page_at_120_dpi() {
-        let l = main_layout(120, 1475, 950, titles(0));
-        let pad = 10; // 8 * 1.25
-
-        // 950 * 0.32 = 304; log_y = 950 - 10 - 304 = 636.
-        assert_eq!(l.log, Rect::new(pad, 636, 1455, 304));
-        // top_y = 5 + 10 = 15; top_h = 950 - 304 - 30 - 5 = 611.
-        assert_eq!(l.tree, Rect::new(pad, 15, 675, 611)); // 1455 * 0.464 = 675.1
-        // rx = 10 + 675 + 10 = 695; rw = 1475 - 695 - 10 = 770.
-        assert_eq!(l.grp_out, Rect::new(695, 15, 770, 138)); // OUT_H 110 -> 138 (137.5)
-        assert_eq!(l.edit_out, Rect::new(710, 43, 695, 29));
-        assert_eq!(l.btn_browse, Rect::new(1410, 41, 43, 31));
-        // 150 * 1.25 = 187.5, which MulDiv rounds up to 188: 770 - 188 = 582.
-        assert_eq!(l.cmb_format, Rect::new(710, 85, 582, 30));
-        assert_eq!(l.btn_run, Rect::new(1305, 83, 145, 35));
-        assert_eq!(l.btn_eject, Rect::new(710, 158, 138, 33));
-        // info_y = 15 + 138 + 10 + 38 = 201; info_h = 611 - 138 - 10 - 38 = 425.
-        assert_eq!(l.grp_info, Rect::new(695, 201, 770, 425));
-        assert_eq!(l.detail, Rect::new(708, 226, 745, 385));
-    }
-
-    /// 150%.
-    #[test]
-    fn titles_page_at_144_dpi() {
-        let l = main_layout(144, 1770, 1140, titles(0));
-        let pad = 12;
-
-        // 1140 * 0.32 = 364.8 -> 364; log_y = 1140 - 12 - 364 = 764.
-        assert_eq!(l.log, Rect::new(pad, 764, 1746, 364));
-        // top_y = 6 + 12 = 18; top_h = 1140 - 364 - 36 - 6 = 734.
-        assert_eq!(l.tree, Rect::new(pad, 18, 810, 734)); // 1746 * 0.464 = 810.1
-        // rx = 12 + 810 + 12 = 834; rw = 1770 - 834 - 12 = 924.
-        assert_eq!(l.grp_out, Rect::new(834, 18, 924, 165));
-        assert_eq!(l.edit_out, Rect::new(852, 51, 834, 35));
-        assert_eq!(l.btn_browse, Rect::new(1692, 50, 51, 38));
-        assert_eq!(l.cmb_format, Rect::new(852, 102, 699, 36));
-        assert_eq!(l.btn_run, Rect::new(1566, 99, 174, 42));
-        assert_eq!(l.btn_eject, Rect::new(852, 189, 165, 39));
-        // info_y = 18 + 165 + 12 + 45 = 240; info_h = 734 - 165 - 12 - 45 = 512.
-        assert_eq!(l.grp_info, Rect::new(834, 240, 924, 512));
-        assert_eq!(l.detail, Rect::new(849, 270, 894, 464));
-    }
-
-    /// 200% — every fixed length exactly doubles, which makes this the case
-    /// where an unscaled constant would be most obvious.
-    #[test]
-    fn titles_page_at_192_dpi() {
-        let l = main_layout(192, 2360, 1520, titles(0));
-        let pad = 16;
-
-        // 1520 * 0.32 = 486.4 -> 486; log_y = 1520 - 16 - 486 = 1018.
-        assert_eq!(l.log, Rect::new(pad, 1018, 2328, 486));
-        // top_y = 8 + 16 = 24; top_h = 1520 - 486 - 48 - 8 = 978.
-        assert_eq!(l.tree, Rect::new(pad, 24, 1080, 978)); // 2328 * 0.464 = 1080.2
-        // rx = 16 + 1080 + 16 = 1112; rw = 2360 - 1112 - 16 = 1232.
-        assert_eq!(l.grp_out, Rect::new(1112, 24, 1232, 220));
-        assert_eq!(l.edit_out, Rect::new(1136, 68, 1112, 46));
-        assert_eq!(l.btn_browse, Rect::new(2256, 66, 68, 50));
-        assert_eq!(l.cmb_format, Rect::new(1136, 136, 932, 48));
-        assert_eq!(l.btn_run, Rect::new(2088, 132, 232, 56));
-        assert_eq!(l.btn_eject, Rect::new(1136, 252, 220, 52));
-        // info_y = 24 + 220 + 16 + 60 = 320; info_h = 978 - 220 - 16 - 60 = 682.
-        assert_eq!(l.grp_info, Rect::new(1112, 320, 1232, 682));
-        assert_eq!(l.detail, Rect::new(1132, 360, 1192, 618));
+    fn the_titles_page_stacks_its_rows_at_every_dpi() {
+        for dpi in DPIS {
+            let s = Scale::new(dpi);
+            let (w, h) = default_size(dpi);
+            let st = MainState {
+                pick_labels: LABELS.map(|v| s.px(v)),
+                ..titles(0)
+            };
+            let l = main_layout(dpi, w, h, st);
+            let bottom = |r: Rect| r.y + r.h;
+            let right = |r: Rect| r.x + r.w;
+            assert!(bottom(l.pick_titles) <= l.tree.y, "dpi {dpi}");
+            assert!(right(l.pick_subs) <= l.btn_eject.x, "dpi {dpi}");
+            assert_eq!(l.tree.w, w - s.px(PAD) * 2, "dpi {dpi}: full width");
+            assert!(bottom(l.tree) < l.lbl_out.y, "dpi {dpi}");
+            assert!(bottom(l.lbl_out) <= l.edit_out.y, "dpi {dpi}");
+            assert!(right(l.edit_out) < l.btn_browse.x, "dpi {dpi}");
+            assert!(right(l.btn_browse) < l.cmb_format.x, "dpi {dpi}");
+            assert!(right(l.cmb_format) < l.btn_run.x, "dpi {dpi}");
+            assert_eq!(right(l.btn_run), w - s.px(PAD), "dpi {dpi}");
+            assert!(bottom(l.edit_out) <= l.lbl_free.y, "dpi {dpi}");
+            assert!(bottom(l.lbl_free) < l.log.y, "dpi {dpi}");
+        }
     }
 
     /// The progress page: two bars, seven information rows.
@@ -786,6 +800,7 @@ mod tests {
             two_bars: true,
             log_hidden: false,
             info_rows: 7,
+            pick_labels: LABELS,
         };
 
         let l = main_layout(96, 1180, 760, st);
@@ -841,6 +856,7 @@ mod tests {
             two_bars: false,
             log_hidden: false,
             info_rows: 7,
+            pick_labels: LABELS,
         };
         let l = main_layout(96, 1180, 760, st);
         assert_eq!(l.result_head, Rect::new(8, 38, 1164, 26));
@@ -874,6 +890,7 @@ mod tests {
                     two_bars: false,
                     log_hidden: false,
                     info_rows: 0,
+                    pick_labels: LABELS,
                 },
             );
             // The headline shares the window's horizontal centre, and the
@@ -902,14 +919,15 @@ mod tests {
                 two_bars: false,
                 log_hidden: false,
                 info_rows: 0,
+                pick_labels: LABELS,
             },
         );
-        // cy = 24 + 978/2 = 513.
-        assert_eq!(l.empty_head, Rect::new(16, 413, 2328, 52));
-        assert_eq!(l.empty_sub, Rect::new(16, 469, 2328, 40));
+        // log_h = 1520 * 0.24 = 364; top_h = 1520 - 364 - 48 - 8 = 1100; cy = 24 + 550.
+        assert_eq!(l.empty_head, Rect::new(16, 474, 2328, 52));
+        assert_eq!(l.empty_sub, Rect::new(16, 530, 2328, 40));
         // cw/2 = 1180, gap = 32 → 1180 - 16 - 360 = 804, and 1180 + 16 = 1196.
-        assert_eq!(l.btn_open_disc, Rect::new(804, 545, 360, 60));
-        assert_eq!(l.btn_open, Rect::new(1196, 545, 360, 60));
+        assert_eq!(l.btn_open_disc, Rect::new(804, 606, 360, 60));
+        assert_eq!(l.btn_open, Rect::new(1196, 606, 360, 60));
     }
 
     #[test]
@@ -925,12 +943,18 @@ mod tests {
                     two_bars: false,
                     log_hidden: true,
                     info_rows: 0,
+                    pick_labels: LABELS,
                 },
             );
             assert_eq!(l.log.h, 0, "dpi {dpi}");
             let s = Scale::new(dpi);
-            // top_h = ch - 0 - pad*3 - tb, and the tree fills it.
-            assert_eq!(l.tree.h, h - s.px(PAD) * 3 - s.px(TB_H), "dpi {dpi}");
+            // top_h = ch - 0 - pad*3 - tb; the tree fills what the two bars leave.
+            let top_h = h - s.px(PAD) * 3 - s.px(TB_H);
+            assert_eq!(
+                l.tree.h,
+                top_h - s.px(PICK_H) - s.px(PAD) - s.px(BAR_H),
+                "dpi {dpi}"
+            );
         }
     }
 
@@ -952,17 +976,17 @@ mod tests {
                             two_bars: true,
                             log_hidden,
                             info_rows: 7,
+                            pick_labels: LABELS.map(|v| Scale::new(dpi).px(v)),
                         },
                     );
                     for (name, r) in [
                         ("log", l.log),
                         ("tree", l.tree),
-                        ("grp_out", l.grp_out),
+                        ("pick_subs", l.pick_subs),
                         ("edit_out", l.edit_out),
                         ("cmb_format", l.cmb_format),
                         ("btn_run", l.btn_run),
-                        ("grp_info", l.grp_info),
-                        ("detail", l.detail),
+                        ("lbl_free", l.lbl_free),
                         ("bar_cur", l.bar_cur),
                         ("bar_all", l.bar_all),
                         ("result_line", l.result_line),
@@ -978,8 +1002,8 @@ mod tests {
                     assert!(l.log.x + l.log.w <= w, "log overruns at dpi {dpi}");
                     assert!(l.btn_run.x + l.btn_run.w <= w, "run overruns at dpi {dpi}");
                     assert!(
-                        l.grp_info.x + l.grp_info.w <= w,
-                        "info overruns at dpi {dpi}"
+                        l.pick_subs.x + l.pick_subs.w <= l.btn_eject.x,
+                        "the selection bar runs into Eject at dpi {dpi}"
                     );
                 }
             }
@@ -993,15 +1017,25 @@ mod tests {
     fn ninety_six_to_one_ninety_two_is_a_clean_doubling() {
         let st = titles(7);
         let a = main_layout(96, 1180, 760, st);
-        let b = main_layout(192, 2360, 1520, st);
+        let b = main_layout(
+            192,
+            2360,
+            1520,
+            MainState {
+                pick_labels: LABELS.map(|v| v * 2),
+                ..st
+            },
+        );
         for (name, x, y) in [
             ("log", a.log, b.log),
-            ("grp_out", a.grp_out, b.grp_out),
+            ("pick_titles", a.pick_titles, b.pick_titles),
+            ("pick_subs", a.pick_subs, b.pick_subs),
+            ("tree", a.tree, b.tree),
+            ("lbl_out", a.lbl_out, b.lbl_out),
             ("edit_out", a.edit_out, b.edit_out),
             ("btn_run", a.btn_run, b.btn_run),
             ("btn_eject", a.btn_eject, b.btn_eject),
-            ("grp_info", a.grp_info, b.grp_info),
-            ("detail", a.detail, b.detail),
+            ("lbl_free", a.lbl_free, b.lbl_free),
         ] {
             assert_eq!(y.x, x.x * 2, "{name}.x");
             assert_eq!(y.y, x.y * 2, "{name}.y");
@@ -1181,96 +1215,92 @@ mod tests {
         assert_eq!(head.h + tree.h, area.h, "nothing lost between the two");
     }
 
+    /// The core's six columns at their widths, Notes (index 3) flexible.
+    const WIDTHS: [i32; 6] = [190, 76, 260, 240, 66, 66];
+    const FLEX: usize = 3;
+
     #[test]
-    fn length_and_size_sit_at_the_right_and_the_label_takes_the_rest() {
-        let c = tree_columns(96, 520, ColWidths::default());
-        assert_eq!(c.size, Span { x: 440, w: 80 });
-        assert_eq!(c.length, Span { x: 348, w: 92 });
-        assert_eq!(c.label, Span { x: 0, w: 348 });
+    fn the_tick_column_comes_first_and_the_flexible_column_takes_the_rest() {
+        let c = tree_columns(96, 1140, &WIDTHS, FLEX);
+        assert_eq!(c.tick, Span { x: 0, w: 84 });
+        // 1140 - 84 - (190 + 76 + 260 + 66 + 66) = 398 for Notes.
+        let spans: Vec<(i32, i32)> = c.cols.iter().map(|s| (s.x, s.w)).collect();
+        assert_eq!(
+            spans,
+            [
+                (84, 190),
+                (274, 76),
+                (350, 260),
+                (610, 398),
+                (1008, 66),
+                (1074, 66)
+            ]
+        );
+        let last = c.cols[5];
+        assert_eq!(last.x + last.w, 1140, "Size ends at the edge");
     }
 
     #[test]
     fn the_columns_scale_with_the_dpi() {
         for dpi in DPIS {
             let s = Scale::new(dpi);
-            let c = tree_columns(dpi, s.px(520), ColWidths::default());
-            assert_eq!(c.length.w, s.px(COL_LENGTH_W), "dpi {dpi}");
-            assert_eq!(c.size.w, s.px(COL_SIZE_W), "dpi {dpi}");
-            assert_eq!(
-                c.size.x + c.size.w,
-                s.px(520),
-                "dpi {dpi}: Size ends at the edge"
-            );
-            assert_eq!(c.length.x, c.label.w, "dpi {dpi}: no gap after the label");
+            let c = tree_columns(dpi, s.px(1140), &WIDTHS, FLEX);
+            assert_eq!(c.tick.w, s.px(COL_TICK_W), "dpi {dpi}");
+            for (i, w) in WIDTHS.iter().enumerate().filter(|(i, _)| *i != FLEX) {
+                assert_eq!(c.cols[i].w, s.px(*w), "dpi {dpi} column {i}");
+            }
+            assert_eq!(c.cols[0].x, c.tick.w, "dpi {dpi}: no gap after the ticks");
+            for pair in c.cols.windows(2) {
+                assert_eq!(pair[0].x + pair[0].w, pair[1].x, "dpi {dpi}: no gaps");
+            }
         }
     }
 
     #[test]
-    fn a_narrow_tree_takes_length_down_first_then_size() {
-        // Room for the label minimum plus 120: Length gives up 52 of its 92.
-        let c = tree_columns(96, 240, ColWidths::default());
-        assert_eq!((c.label.w, c.length.w, c.size.w), (120, 40, 80));
-        // Less still: Length stops at its minimum and Size gives way.
-        let c = tree_columns(96, 220, ColWidths::default());
-        assert_eq!((c.label.w, c.length.w, c.size.w), (120, 36, 64));
-        // Never below the column minimum, even with no room at all.
-        let c = tree_columns(96, 50, ColWidths::default());
-        assert_eq!((c.length.w, c.size.w), (COL_MIN_W, COL_MIN_W));
-        assert_eq!(c.label.w, 0);
+    fn a_narrow_tree_keeps_the_flexible_column_at_its_minimum() {
+        let c = tree_columns(96, 300, &WIDTHS, FLEX);
+        assert_eq!(c.cols[FLEX].w, COL_MIN_W);
+        assert_eq!(c.cols[0].w, 190, "the fixed columns keep their widths");
     }
 
     #[test]
     fn the_header_items_line_up_with_the_client_columns() {
-        let c = tree_columns(96, 500, ColWidths::default());
-        // A 2 px border each side and a 17 px scroll bar: 521 outer.
-        let w = header_widths(&c, 521, 2);
-        assert_eq!(w, [330, 92, 99]);
-        assert_eq!(
-            w[0],
-            c.length.x + 2,
-            "Length's header starts over its cells"
-        );
-        assert_eq!(w.iter().sum::<i32>(), 521, "the header is filled exactly");
+        let c = tree_columns(96, 1140, &WIDTHS, FLEX);
+        // A 2 px border each side and a 17 px scroll bar: 1161 outer.
+        let w = header_widths(&c, 1161, 2);
+        assert_eq!(w, [86, 190, 76, 260, 398, 66, 85]);
+        assert_eq!(w[0], c.cols[0].x + 2, "Item's header starts over its cells");
+        assert_eq!(w.iter().sum::<i32>(), 1161, "the header is filled exactly");
     }
 
     #[test]
-    fn dragging_a_divider_trades_width_with_its_neighbour() {
-        let c = tree_columns(96, 520, ColWidths::default());
-        // The label's edge 20 px left: Length grows by 20, Size keeps its width.
-        assert_eq!(
-            drag_column(96, &c, 0, c.label.w - 20),
-            ColWidths {
-                length: 112,
-                size: 80
-            }
-        );
-        // Length's edge 10 px right: Length grows, Size shrinks by the same.
-        assert_eq!(
-            drag_column(96, &c, 1, c.length.w + 10),
-            ColWidths {
-                length: 102,
-                size: 70
-            }
-        );
-        // The last edge is pinned to the control's edge.
-        assert_eq!(drag_column(96, &c, 2, 300), ColWidths::default());
+    fn dragging_a_divider_moves_only_that_divider() {
+        let c = tree_columns(96, 1140, &WIDTHS, FLEX);
+        // Item's edge 20 px right: Item grows, Notes gives way.
+        let w = drag_column(96, &c, FLEX, 1, 210);
+        assert_eq!(w[0], 210);
+        assert_eq!(tree_columns(96, 1140, &w, FLEX).cols[FLEX].w, 378);
+        // Notes' edge 10 px right: Length shrinks by the same, Size stays put.
+        let w = drag_column(96, &c, FLEX, 4, 408);
+        assert_eq!((w[4], w[5]), (56, 66));
+        let laid = tree_columns(96, 1140, &w, FLEX);
+        assert_eq!(laid.cols[4].x, 1018);
+        assert_eq!(laid.cols[5].x, 1074);
+        // The tick column and the last edge are pinned.
+        let same: Vec<i32> = c.cols.iter().map(|s| s.w).collect();
+        assert_eq!(drag_column(96, &c, FLEX, 0, 300), same);
+        assert_eq!(drag_column(96, &c, FLEX, 6, 300), same);
         // Never under the minimum.
-        assert_eq!(drag_column(96, &c, 1, 5).length, COL_MIN_W);
+        assert_eq!(drag_column(96, &c, FLEX, 2, 5)[1], COL_MIN_W);
     }
 
     #[test]
     fn a_dragged_width_is_kept_at_the_baseline_so_it_survives_a_dpi_change() {
-        let c = tree_columns(144, 780, ColWidths::default());
-        let w = drag_column(144, &c, 1, c.length.w + 30);
-        assert_eq!(
-            w,
-            ColWidths {
-                length: 112,
-                size: 60
-            }
-        );
-        let at_96 = tree_columns(96, 520, w);
-        assert_eq!((at_96.length.w, at_96.size.w), (112, 60));
+        let c = tree_columns(144, 1710, &WIDTHS, FLEX);
+        let w = drag_column(144, &c, FLEX, 2, c.cols[1].w + 30);
+        assert_eq!(w[1], 96);
+        let at_96 = tree_columns(96, 1140, &w, FLEX);
+        assert_eq!(at_96.cols[1].w, 96);
     }
 
     #[test]
