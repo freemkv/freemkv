@@ -218,7 +218,7 @@ impl TitleTree {
         // rows are uniform, so the adjustment is exact enough.
         let at = crate::ui::first_visible_row(rows).unwrap_or(0);
         self.widget.vadjustment().set_value(0.0);
-        self.scroll_to.set((at > 0).then(|| (at, rows.len())));
+        self.scroll_to.set((at > 0).then_some((at, rows.len())));
         let pending = self.scroll_to.clone();
         // `upper` is only right once the new model is laid out: wait for the
         // next frame's after-paint, then read the latest pending target.

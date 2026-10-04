@@ -445,6 +445,7 @@ dependencies = [
 [[package]]
 name = "freemkv-unlock"
 version = "1.7.7"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.7#1d20be4a411b5c15bc3e29d4beeb2537d6cd3ebc"
 dependencies = [
  "aes",
  "base64",
@@ -2470,3 +2471,7 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "freemkv-unlock"
+version = "1.7.7"
