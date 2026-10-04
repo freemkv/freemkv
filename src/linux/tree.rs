@@ -1,7 +1,7 @@
 //! The title tree: a `GtkColumnView` over a `GtkTreeListModel`, with a
-//! tri-state tick box in the expander column and the Type / Description /
-//! Length / Size columns the macOS outline shows. Rows are the core's `View::title_rows`;
-//! a click only reports WHICH row — the cascade and direction are the core's.
+//! tri-state tick box in the expander column and then the core's `tree_columns`.
+//! Rows are the core's `View::title_rows`; a click only reports WHICH row — the
+//! cascade and direction are the core's.
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -14,6 +14,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 type RowFn = Rc<dyn Fn(usize)>;
+
+/// The core's column widths are macOS points; GTK's larger UI font and cell padding need more.
+const WIDTH_SCALE: f64 = 1.2;
 
 /// One tick box currently bound to a row, and the handler that reports it.
 struct Bound {
@@ -28,8 +31,8 @@ pub(super) struct TitleTree {
     rows: Rc<RefCell<Vec<Row>>>,
     kids: Rc<RefCell<Vec<Vec<usize>>>>,
     bound: Rc<RefCell<Vec<Bound>>>,
-    /// Scroll fraction still to apply after the next layout.
-    scroll_to: Rc<Cell<Option<f64>>>,
+    /// The row to bring into view after the next layout, of how many.
+    scroll_to: Rc<Cell<Option<(usize, usize)>>>,
 }
 
 fn row_index(item: Option<glib::Object>) -> Option<usize> {
@@ -44,13 +47,9 @@ fn paint(cb: &gtk::CheckButton, state: Check) {
     cb.set_active(state != Check::Off);
 }
 
-// `xalign` 0.0 for text, 1.0 for the right-aligned numeric cells.
-fn text_column(
-    title: &str,
-    rows: &Rc<RefCell<Vec<Row>>>,
-    pick: fn(&Row) -> &str,
-    xalign: f32,
-) -> gtk::ColumnViewColumn {
+// One of the core's columns: its cell text is `Row::cell(id)`, right-aligned when numeric.
+fn text_column(rows: &Rc<RefCell<Vec<Row>>>, col: &crate::ui::Column) -> gtk::ColumnViewColumn {
+    let (id, xalign) = (col.id, if col.numeric { 1.0 } else { 0.0 });
     let f = gtk::SignalListItemFactory::new();
     f.connect_setup(move |_, li| {
         let Some(li) = li.downcast_ref::<gtk::ListItem>() else {
@@ -58,6 +57,7 @@ fn text_column(
         };
         let l = gtk::Label::new(None);
         l.set_xalign(xalign);
+        l.set_valign(gtk::Align::Center);
         l.set_ellipsize(gtk::pango::EllipsizeMode::End);
         li.set_child(Some(&l));
     });
@@ -73,11 +73,18 @@ fn text_column(
             return;
         };
         let rows = rows.borrow();
-        let text = rows.get(idx).map(pick).unwrap_or("");
+        let text = rows.get(idx).map(|r| r.cell(id)).unwrap_or("");
         l.set_text(text);
         l.set_tooltip_text(Some(text));
     });
-    gtk::ColumnViewColumn::new(Some(title), Some(f))
+    let c = gtk::ColumnViewColumn::new(Some(&col.title), Some(f));
+    // The flexible column takes the spare width; the others keep theirs.
+    if col.flex {
+        c.set_expand(true);
+    } else {
+        c.set_fixed_width((col.width * WIDTH_SCALE).round() as i32);
+    }
+    c
 }
 
 impl TitleTree {
@@ -161,38 +168,9 @@ impl TitleTree {
         let check_col = gtk::ColumnViewColumn::new(None, Some(f));
         check_col.set_fixed_width(96);
         view.append_column(&check_col);
-        let type_col = text_column(
-            &crate::strings::get("gui.col.type"),
-            &rows,
-            |r| &r.type_s,
-            0.0,
-        );
-        type_col.set_fixed_width(110);
-        view.append_column(&type_col);
-        let desc_col = text_column(
-            &crate::strings::get("gui.col.desc"),
-            &rows,
-            |r| &r.desc,
-            0.0,
-        );
-        desc_col.set_expand(true);
-        view.append_column(&desc_col);
-        let length_col = text_column(
-            &crate::strings::get_or("gui.col.duration", "Length"),
-            &rows,
-            |r| &r.length,
-            1.0,
-        );
-        length_col.set_fixed_width(90);
-        view.append_column(&length_col);
-        let size_col = text_column(
-            &crate::strings::get_or("gui.col.size", "Size"),
-            &rows,
-            |r| &r.size,
-            1.0,
-        );
-        size_col.set_fixed_width(90);
-        view.append_column(&size_col);
+        for col in crate::ui::tree_columns() {
+            view.append_column(&text_column(&rows, &col));
+        }
 
         let widget = gtk::ScrolledWindow::builder()
             .child(&view)
@@ -235,12 +213,12 @@ impl TitleTree {
         });
         self.selection.set_model(Some(&model));
 
-        // All rows are expanded, so display position == flat index. GTK 4.10
-        // has no `scroll_to`; rows are uniform, so the adjustment is exact enough.
+        // Start at the top, then scroll only as far as the core's chosen row needs. All rows
+        // are expanded, so display position == flat index; GTK 4.10 has no `scroll_to`, and
+        // rows are uniform, so the adjustment is exact enough.
         let at = crate::ui::first_visible_row(rows).unwrap_or(0);
         self.widget.vadjustment().set_value(0.0);
-        let n = rows.len().max(1) as f64;
-        self.scroll_to.set((at > 0).then(|| at as f64 / n));
+        self.scroll_to.set((at > 0).then(|| (at, rows.len())));
         let pending = self.scroll_to.clone();
         // `upper` is only right once the new model is laid out: wait for the
         // next frame's after-paint, then read the latest pending target.
@@ -249,9 +227,10 @@ impl TitleTree {
             let slot: Rc<Cell<Option<glib::SignalHandlerId>>> = Rc::default();
             let own = slot.clone();
             let id = clock.connect_after_paint(move |c| {
-                if let Some(frac) = pending.take() {
+                if let Some((at, n)) = pending.take() {
                     let adj = w.vadjustment();
-                    adj.set_value(adj.upper() * frac);
+                    let bottom = adj.upper() * (at + 1) as f64 / n as f64;
+                    adj.set_value((bottom - adj.page_size()).max(0.0));
                 }
                 if let Some(id) = own.take() {
                     c.disconnect(id);

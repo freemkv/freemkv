@@ -8,6 +8,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 
 use super::Shell;
+use super::pick_bar::PickBar;
 use super::tree::TitleTree;
 use crate::linux_glue::{self as glue, LogDelta, LogMemo};
 use crate::ui::{Cmd, Effect, LogKind, LogLine, View};
@@ -19,20 +20,22 @@ use std::rc::Rc;
 pub(super) struct Memo {
     rows: Option<u64>,
     formats: String,
-    detail: String,
+    /// The folder the free-space line was measured for.
+    hint_dir: Option<String>,
     log: LogMemo,
 }
 
 pub(super) struct MainView {
     pub root: gtk::Box,
     stack: gtk::Stack,
+    pick_bar: PickBar,
     tree: TitleTree,
     out_entry: gtk::Entry,
+    out_hint: gtk::Label,
     fmt_drop: gtk::DropDown,
     fmt_list: gtk::StringList,
     run_btn: gtk::Button,
     eject_btn: gtk::Button,
-    detail: gtk::TextView,
     info_vals: Vec<gtk::Label>,
     saving_cur: gtk::Label,
     cap_cur: gtk::Label,
@@ -141,7 +144,8 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
         .build();
     stack.add_named(&empty, Some(glue::page_name(crate::ui::Page::Empty)));
 
-    // ── titles page: tree | output + info ──
+    // ── titles page: selection bar, tree, output ──
+    let pick_bar = PickBar::new(shell);
     let me_sel = shell.clone();
     let me_tog = shell.clone();
     let tree = TitleTree::new(
@@ -161,14 +165,13 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
             me.app.borrow_mut().output_dir = t;
         }
     });
-    let browse = gtk::Button::from_icon_name("folder-open-symbolic");
+    let browse = gtk::Button::with_label(&g("gui.btn.browse"));
     browse.set_tooltip_text(Some(&g("gui.panel.output_msg")));
     let me = shell.clone();
     browse.connect_clicked(move |_| me.act(Cmd::SetOutput));
 
     let fmt_list = gtk::StringList::new(&[]);
     let fmt_drop = gtk::DropDown::new(Some(fmt_list.clone()), gtk::Expression::NONE);
-    fmt_drop.set_hexpand(true);
     let me = shell.clone();
     let list = fmt_list.clone();
     fmt_drop.connect_selected_notify(move |d| {
@@ -194,51 +197,28 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     let me = shell.clone();
     run_btn.connect_clicked(move |_| me.act(Cmd::Run));
 
-    let out_grid = gtk::Grid::new();
-    out_grid.set_row_spacing(8);
-    out_grid.set_column_spacing(8);
-    out_grid.set_margin_top(8);
-    out_grid.set_margin_bottom(8);
-    out_grid.set_margin_start(8);
-    out_grid.set_margin_end(8);
-    out_grid.attach(&out_entry, 0, 0, 2, 1);
-    out_grid.attach(&browse, 2, 0, 1, 1);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    actions.append(&eject_btn);
-    actions.append(&run_btn);
-    out_grid.attach(&fmt_drop, 0, 1, 1, 1);
-    out_grid.attach(&actions, 1, 1, 2, 1);
+    let out_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    out_row.append(&out_entry);
+    out_row.append(&browse);
+    out_row.append(&fmt_drop);
+    out_row.append(&eject_btn);
+    out_row.append(&run_btn);
+    let out_head = gtk::Label::new(Some(&g("gui.group.output")));
+    out_head.set_xalign(0.0);
+    out_head.add_css_class("heading");
+    let out_hint = gtk::Label::new(None);
+    out_hint.set_xalign(0.0);
+    out_hint.add_css_class("dim-label");
+    out_hint.add_css_class("caption");
+    let output = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    output.append(&out_head);
+    output.append(&out_row);
+    output.append(&out_hint);
 
-    let detail = gtk::TextView::new();
-    detail.set_editable(false);
-    detail.set_cursor_visible(false);
-    detail.set_wrap_mode(gtk::WrapMode::WordChar);
-    detail.set_left_margin(8);
-    detail.set_right_margin(8);
-    detail.set_top_margin(6);
-    detail.set_bottom_margin(6);
-    let detail_scroll = gtk::ScrolledWindow::builder()
-        .child(&detail)
-        .vexpand(true)
-        .build();
-
-    let right = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    right.set_margin_start(6);
-    right.append(&section(&g("gui.group.output"), &out_grid));
-    right.append(&section(&g("gui.group.info"), &detail_scroll));
-
-    // Cards sit in a gap either side of the divider, not butted against it.
-    tree.widget.set_margin_end(6);
-    let titles = gtk::Paned::new(gtk::Orientation::Horizontal);
-    titles.set_start_child(Some(&tree.widget));
-    titles.set_end_child(Some(&right));
-    titles.set_shrink_start_child(false);
-    titles.set_shrink_end_child(false);
-    // The other shells' 46.4 % tree share of the default width; with both
-    // children resizable GtkPaned keeps that proportion as the window resizes.
-    titles.set_resize_start_child(true);
-    titles.set_resize_end_child(true);
-    titles.set_position(540);
+    let titles = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    titles.append(&pick_bar.widget);
+    titles.append(&tree.widget);
+    titles.append(&output);
     titles.set_vexpand(true);
     stack.add_named(&titles, Some(glue::page_name(crate::ui::Page::Titles)));
 
@@ -351,13 +331,14 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     Rc::new(MainView {
         root,
         stack,
+        pick_bar,
         tree,
         out_entry,
+        out_hint,
         fmt_drop,
         fmt_list,
         run_btn,
         eject_btn,
-        detail,
         info_vals,
         saving_cur,
         cap_cur,
@@ -398,14 +379,16 @@ impl MainView {
         } else {
             self.tree.sync_checks(&v.title_rows);
         }
-        // Read-only buffer: only this writes it, so the memo is the truth.
-        if memo.detail != v.detail {
-            self.detail.buffer().set_text(&v.detail);
-            memo.detail.clone_from(&v.detail);
-        }
+        self.pick_bar.render(v.pick.as_ref());
 
         if self.out_entry.text() != v.output_dir {
             self.out_entry.set_text(&v.output_dir);
+        }
+        // Measured once per folder, not every tick: it is a filesystem query.
+        if memo.hint_dir.as_deref() != Some(v.output_dir.as_str()) {
+            self.out_hint
+                .set_text(&crate::ui::free_space_line(&v.output_dir));
+            memo.hint_dir = Some(v.output_dir.clone());
         }
         self.run_btn.set_sensitive(v.can_run);
         self.eject_btn.set_visible(v.eject_visible);
