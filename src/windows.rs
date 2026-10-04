@@ -546,18 +546,8 @@ struct Memo {
     free_dir: Option<String>,
 }
 
-/// One row signature: the identity of the row, not its tick state (tick state
-/// is applied separately, without a rebuild). Hashed in place, no allocation.
-fn rows_sig(rows: &[Row]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    rows.len().hash(&mut h);
-    for r in rows {
-        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
-        (&r.item, &r.lang, &r.format, &r.notes).hash(&mut h);
-    }
-    h.finish()
-}
+// One row signature: the core's, so every shell redraws on the same changes.
+use crate::ui::rows_sig;
 
 /// How the log pane must change to show `log`, given what it last showed.
 #[derive(Debug, PartialEq, Eq)]
@@ -4668,11 +4658,7 @@ impl Shell {
         );
         check(
             "titles-numbered",
-            v.title_rows
-                .iter()
-                .filter(|x| x.type_s == "Title")
-                .enumerate()
-                .all(|(i, x)| x.desc.starts_with(&format!("{}.", i + 1))),
+            crate::ui::titles_numbered(&v.title_rows),
             "1-based, matches -t N",
         );
         check(

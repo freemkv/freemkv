@@ -127,16 +127,8 @@ fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 // ── tree redraw identity ──────────────────────────────────────────────────
 
 // Row-list identity (excludes tick state) so render() can detect a real tree change vs. a
-// tick-only update.
-fn rows_sig(rows: &[crate::ui::Row]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    rows.len().hash(&mut h);
-    for r in rows {
-        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
-    }
-    h.finish()
-}
+// tick-only update. The core's, so every shell redraws on the same changes.
+use crate::ui::rows_sig;
 
 /// True when `new` shows exactly the ticks `cur` already paints.
 fn ticks_match(cur: &[crate::ui::Row], new: &[crate::ui::Row]) -> bool {
@@ -4747,11 +4739,7 @@ impl Controller {
         }
         check(
             "titles-numbered",
-            v.title_rows
-                .iter()
-                .filter(|x| x.type_s == "Title")
-                .enumerate()
-                .all(|(i, x)| x.desc.starts_with(&format!("{}.", i + 1))),
+            crate::ui::titles_numbered(&v.title_rows),
             "1-based, matches -t N",
         );
         check(

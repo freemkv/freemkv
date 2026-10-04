@@ -3924,6 +3924,36 @@ pub struct Row {
     pub check_enabled: bool,
 }
 
+/// A row list's identity, excluding tick state (applied without a rebuild): every painted
+/// cell, the shape and the count. Equal signatures let a shell skip reloading its tree.
+/// Hashed in place, so a tick-only redraw allocates nothing.
+pub fn rows_sig(rows: &[Row]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    rows.len().hash(&mut h);
+    for r in rows {
+        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
+        (&r.item, &r.lang, &r.format, &r.notes).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Self-test: each Title row's Item names its 1-based `-t` number, the numbers ascend (a hidden
+/// short title leaves a gap), and its description leads with that name.
+pub fn titles_numbered(rows: &[Row]) -> bool {
+    let mut last = 0;
+    rows.iter().filter(|r| r.type_s == "Title").all(|r| {
+        let digits: String = r.item.chars().filter(char::is_ascii_digit).collect();
+        let Ok(n) = digits.parse::<usize>() else {
+            return false;
+        };
+        let ok =
+            n > last && r.item == crate::engine::title_item(n - 1) && r.desc.starts_with(&r.item);
+        last = n;
+        ok
+    })
+}
+
 /// The Result page heading for a verdict, matched on the TYPED outcome.
 pub(crate) fn result_heading(outcome: crate::engine::RunOutcome) -> String {
     match outcome {
@@ -3975,6 +4005,77 @@ pub struct View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles_are_numbered_as_dash_t_numbers_them() {
+        let title = |ti: usize| Row {
+            index: ti,
+            depth: 1,
+            type_s: "Title".into(),
+            desc: format!("{}  —  19 chapters", crate::engine::title_item(ti)),
+            length: String::new(),
+            size: String::new(),
+            lang: String::new(),
+            item: crate::engine::title_item(ti),
+            format: String::new(),
+            notes: String::new(),
+            check: Some(Check::Off),
+            check_enabled: true,
+        };
+        assert!(titles_numbered(&[title(0), title(1), title(2)]));
+        assert!(
+            titles_numbered(&[title(0), title(3)]),
+            "a hidden title leaves a gap"
+        );
+        assert!(titles_numbered(&[]));
+        assert!(!titles_numbered(&[title(1), title(0)]), "out of order");
+        assert!(!titles_numbered(&[title(0), title(0)]), "a repeated number");
+        let mut old = title(0);
+        old.item = "1. 00800.mpls".into();
+        assert!(!titles_numbered(&[old]), "the removed playlist naming");
+        let mut desc = title(0);
+        desc.desc = "00800.mpls".into();
+        assert!(!titles_numbered(&[desc]));
+    }
+
+    #[test]
+    fn the_row_signature_sees_every_painted_cell_but_not_ticks() {
+        let base = vec![Row {
+            index: 1,
+            depth: 1,
+            type_s: "Title".into(),
+            desc: "Title 1".into(),
+            length: "1:30:00".into(),
+            size: "6.8 GB".into(),
+            lang: "eng".into(),
+            item: "Title 1".into(),
+            format: "MPEG-2".into(),
+            notes: "19 chapters".into(),
+            check: Some(Check::Off),
+            check_enabled: true,
+        }];
+        let mut ticked = base.clone();
+        ticked[0].check = Some(Check::On);
+        assert_eq!(rows_sig(&base), rows_sig(&ticked));
+        let changes: [fn(&mut Row); 10] = [
+            |r| r.index = 2,
+            |r| r.depth = 2,
+            |r| r.type_s = "Audio".into(),
+            |r| r.desc = "x".into(),
+            |r| r.length = "1:29:59".into(),
+            |r| r.size = "6.9 GB".into(),
+            |r| r.lang = "deu".into(),
+            |r| r.item = "Title 2".into(),
+            |r| r.format = "H.264".into(),
+            |r| r.notes = "20 chapters".into(),
+        ];
+        for (i, change) in changes.iter().enumerate() {
+            let mut b = base.clone();
+            change(&mut b[0]);
+            assert_ne!(rows_sig(&base), rows_sig(&b), "change #{i} went unnoticed");
+        }
+        assert_ne!(rows_sig(&base), rows_sig(&[]));
+    }
 
     // G5 (design §6): one table maps container extensions to schemes; every derived list
     // agrees with it, and mpg/mpeg/vob read as mpg://.
