@@ -1695,8 +1695,8 @@ fn validate_destination_root(root: &str) -> Result<(), String> {
     }
 }
 
-// The first destination root of `planned` that is stale, failing or not answering. A root that
-// is missing, read-only or refused is left to `validate_destination_root`'s own messages.
+// The first destination root of `planned` that is stale, unmounted, failing or not answering.
+// A root that is missing, read-only or refused is left to `validate_destination_root`'s messages.
 fn unreachable_root(
     cfg: &Config,
     tmdb: &Option<tmdb::TmdbResult>,
@@ -1715,9 +1715,12 @@ fn unreachable_root(
         }
     }
     roots.iter().find_map(|r| {
-        health::preflight("output", Path::new(r))
-            .err()
-            .filter(|p| matches!(p.fault, Fault::Stale | Fault::Io | Fault::Unresponsive))
+        health::preflight("output", Path::new(r)).err().filter(|p| {
+            matches!(
+                p.fault,
+                Fault::Stale | Fault::Io | Fault::Unresponsive | Fault::Unmounted
+            )
+        })
     })
 }
 

@@ -2080,6 +2080,23 @@ mod tests {
         set_mounts(Vec::new());
     }
 
+    #[test]
+    fn an_output_folder_on_an_unmounted_share_holds_the_queue() {
+        use crate::server::health::tests::{LAST_LOCK, bad_mount, set_mounts};
+        let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let arbiter = Arbiter::new();
+        let ok = |_: &Path| Ok(());
+        set_mounts(vec![bad_mount("Library", &dirs.library, Fault::Unmounted)]);
+        assert!(next_job(&lib, &arbiter, &dirs, &ok, 1).is_none());
+        let hold = lib.hold().expect("held");
+        assert!(hold.message.contains("not mounted"), "{}", hold.message);
+        assert_eq!(lib.queue.snapshot().count(JobState::Queued), 1);
+        set_mounts(Vec::new());
+    }
+
     fn running_in(lib: &Library, job: &Job, phase: &str) {
         lib.set_running(|r| {
             *r = Some(Running {

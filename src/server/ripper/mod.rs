@@ -2991,7 +2991,13 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         &display_name,
         &disc_name,
     ));
-    if let Err(e) = std::fs::create_dir_all(&staging) {
+    // Under an unmounted share the dir would be made on the container's own disk.
+    let made = if crate::server::health::share_unmounted(std::path::Path::new(&staging)) {
+        Err(std::io::Error::other("its network share is not mounted"))
+    } else {
+        std::fs::create_dir_all(&staging)
+    };
+    if let Err(e) = made {
         // Bail loudly instead of pressing on: a missing staging dir
         // makes the free-space preflight skip its check and the sweep
         // later dies with a confusing ENOENT/EACCES far from the cause.
