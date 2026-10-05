@@ -9,6 +9,22 @@ on:
       # which would have this workflow build and PUBLISH a GitHub release for
       # every candidate, including the red ones.
       - '!v*-rc*'
+  # Backfill: build ONLY the targets added after a release (the legs marked
+  # `backfill`, plus the multi-arch server image) from that tag's source, with
+  # this workflow's packaging, and add them to its existing GitHub release. The
+  # release's other assets are never rebuilt or replaced. Run from main:
+  #   gh workflow run release.yml --ref main -f tag=v1.8.0
+  # (deb.yml has the same dispatch for the .debs.)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: existing release tag to backfill (e.g. v1.8.0)
+        type: string
+        required: true
+      latest:
+        description: also move the server image's :latest to this tag
+        type: boolean
+        default: true
 
 # Least privilege at the top; only the jobs that create/upload the GitHub
 # release (build, build-windows, cli-binaries) elevate to contents: write. The
@@ -22,9 +38,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+      # A backfill adds to a published release; it never creates one.
+      - name: Backfill target is a published release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::'$TAG' is not a release tag"; exit 1; }
+          gh release view "$TAG" --json tagName,isDraft --jq '"\(.tagName) draft=\(.isDraft)"'
       - name: Verify Cargo.toml version matches tag
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           CARGO_VER="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
           if [ "$CARGO_VER" != "$TAG" ]; then
@@ -36,7 +65,7 @@ jobs:
       # A stale Info.plist ships a build that lies about which release it is.
       - name: Verify Info.plist version matches tag
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           PLIST_VER="v$(sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p' macos/Info.plist)"
           if [ "$PLIST_VER" != "$TAG" ]; then
@@ -56,14 +85,17 @@ jobs:
       packages: write
     uses: ./.github/workflows/server-image.yml
     with:
-      tag: ${{ github.ref_name }}
-      latest: true
+      tag: ${{ inputs.tag || github.ref_name }}
+      latest: ${{ github.event_name == 'push' || inputs.latest }}
+      ref: ${{ inputs.tag }}
+      backfill: ${{ github.event_name == 'workflow_dispatch' }}
 
   # Parallel tripwire, exactly as the CLI does it: fails the run, but `build`
   # does NOT `needs:` it, so packaging starts as soon as `verify` passes. The
   # tag decision was already gated by CI (ci.yml on dev, then a green qa.yml) on the same exact Rust.
   test:
     needs: verify
+    if: github.event_name == 'push'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,6 +112,8 @@ jobs:
   build:
     # NOTE: deliberately does NOT `needs: test` — see the test job above.
     needs: verify
+    # Already shipped for every macOS arch; a backfill never rebuilds it.
+    if: github.event_name == 'push'
     # Uploads assets to the GitHub release.
     permissions:
       contents: write
@@ -243,60 +277,58 @@ jobs:
     uses: ./.github/workflows/windows-app.yml
     with:
       release: true
+      tag: ${{ inputs.tag }}
+      backfill: ${{ github.event_name == 'workflow_dispatch' }}
 
   # ── CLI (no features) ───────────────────────────────────────────────────────
   # Bare binaries, no UI libraries; Linux is static musl. `legacy` re-uploads
   # the same bytes under the pre-split name so old `releases/latest/download/`
   # URLs keep working for one release cycle; arches added after the split
   # (armv7 Linux, ARM64 Windows) never had one.
+  # The CLI legs, one JSON object per line. `backfill: true` marks a leg added
+  # after v1.8.0, which the backfill dispatch builds for an already-published tag.
+  cli-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      legs: ${{ steps.legs.outputs.legs }}
+    steps:
+      - id: legs
+        env:
+          BACKFILL: ${{ github.event_name == 'workflow_dispatch' }}
+          LEGS: |
+            {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-musl", "asset": "freemkv-cli-x86_64-linux", "legacy": "freemkv-x86_64-linux", "ext": ""}
+            {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-musl", "asset": "freemkv-cli-aarch64-linux", "legacy": "freemkv-aarch64-linux", "ext": ""}
+            {"os": "ubuntu-latest", "target": "armv7-unknown-linux-musleabihf", "asset": "freemkv-cli-armv7-linux", "ext": "", "backfill": true}
+            {"os": "macos-latest", "target": "aarch64-apple-darwin", "asset": "freemkv-cli-aarch64-macos", "legacy": "freemkv-aarch64-macos", "ext": ""}
+            {"os": "macos-latest", "target": "x86_64-apple-darwin", "asset": "freemkv-cli-x86_64-macos", "legacy": "freemkv-x86_64-macos", "ext": ""}
+            {"os": "windows-latest", "target": "x86_64-pc-windows-msvc", "asset": "freemkv-cli-x86_64-windows", "legacy": "freemkv-x86_64-windows", "ext": ".exe"}
+            {"os": "windows-11-arm", "target": "aarch64-pc-windows-msvc", "asset": "freemkv-cli-aarch64-windows", "ext": ".exe", "backfill": true}
+        run: echo "legs=$(jq -cs --argjson b "$BACKFILL" 'map(select(($b | not) or .backfill))' <<<"$LEGS")" >> "$GITHUB_OUTPUT"
+
   cli-binaries:
-    needs: verify
+    needs: [verify, cli-plan]
     # Uploads assets to the GitHub release.
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            asset: freemkv-cli-x86_64-linux
-            legacy: freemkv-x86_64-linux
-            ext: ''
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            asset: freemkv-cli-aarch64-linux
-            legacy: freemkv-aarch64-linux
-            ext: ''
-          # Raspberry Pi OS 32-bit and other ARMv7 hard-float Linux.
-          - os: ubuntu-latest
-            target: armv7-unknown-linux-musleabihf
-            asset: freemkv-cli-armv7-linux
-            ext: ''
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            asset: freemkv-cli-aarch64-macos
-            legacy: freemkv-aarch64-macos
-            ext: ''
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            asset: freemkv-cli-x86_64-macos
-            legacy: freemkv-x86_64-macos
-            ext: ''
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            asset: freemkv-cli-x86_64-windows
-            legacy: freemkv-x86_64-windows
-            ext: '.exe'
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            asset: freemkv-cli-aarch64-windows
-            ext: '.exe'
+        # Raspberry Pi OS 32-bit and other ARMv7 hard-float Linux is the armv7 leg.
+        include: ${{ fromJSON(needs.cli-plan.outputs.legs) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: ${{ inputs.tag && 0 || 1 }}
           persist-credentials: false
+      # Backfill: the tag's source with this workflow's toolchain checks.
+      - name: Overlay this workflow's build scripts
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          SHA: ${{ github.sha }}
+        run: git checkout "$SHA" -- .github/scripts/
       # As windows-app.yml: the windows-11-arm image may lack rustup and keep
       # clang (which ring needs on ARM64) off PATH. rustup-init pinned + hash-checked.
       - name: rustup and clang on PATH (Windows ARM64)
@@ -377,7 +409,7 @@ jobs:
       - name: Run the CLI
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           BIN="target/${{ matrix.target }}/release/freemkv${{ matrix.ext }}"
@@ -442,14 +474,24 @@ jobs:
             $SHA "$L$E" > "$L$E.sha256"
           fi
       - name: Upload
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           fail_on_unmatched_files: true
           files: |
             ${{ matrix.asset }}${{ matrix.ext }}
             ${{ matrix.asset }}${{ matrix.ext }}.sha256
+      - name: Add to the existing release (backfill)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          F: ${{ matrix.asset }}${{ matrix.ext }}
+        run: gh release upload "$TAG" "$F" "$F.sha256" --clobber
       - name: Upload the legacy alias
-        if: matrix.legacy
+        if: matrix.legacy && github.event_name == 'push'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           fail_on_unmatched_files: true
@@ -465,6 +507,8 @@ jobs:
     uses: ./.github/workflows/appimage.yml
     with:
       release: true
+      tag: ${{ inputs.tag }}
+      backfill: ${{ github.event_name == 'workflow_dispatch' }}
 
   # ── Homebrew tap ────────────────────────────────────────────────────────
   #
@@ -479,7 +523,7 @@ jobs:
   # published assets, so they all have to exist first.
   update-homebrew-tap:
     needs: [build, build-windows, cli-binaries]
-    if: always() && needs.build.result == 'success' && needs['cli-binaries'].result == 'success'
+    if: always() && github.event_name == 'push' && needs.build.result == 'success' && needs['cli-binaries'].result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Update the tap to this release
@@ -517,7 +561,7 @@ jobs:
     # skip the dispatch, and a failed app leg definitively does.
     # NOTE: bracket form for `build-windows` — a hyphen in a job id is parsed as
     # subtraction in the dot form, so `needs.build-windows.result` is invalid.
-    if: always() && needs.build.result == 'success' && needs['build-windows'].result == 'success'
+    if: always() && github.event_name == 'push' && needs.build.result == 'success' && needs['build-windows'].result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Update org README with new version

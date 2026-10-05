@@ -228,18 +228,38 @@ fn gh_uploads(job: &[&str]) -> Vec<String> {
             cmd.push(' ');
             cmd.push_str(lines.next().unwrap_or_default());
         }
+        // A variable or a mid-name glob (a backfill's "whatever was built") names no stable asset.
         let args = cmd
             .split_whitespace()
             .skip(1)
-            .filter(|a| !a.starts_with('-'));
-        out.extend(args.map(|a| a.trim_matches('"').to_string()));
+            .map(|a| a.trim_matches('"'))
+            .filter(|a| !a.starts_with('-') && !a.contains('$'))
+            .filter(|a| !a.trim_end_matches('*').contains('*'));
+        out.extend(args.map(String::from));
     }
     out
+}
+
+/// Matrix legs a plan job lists as one JSON object per line (`{"asset": "...", ...}`).
+fn json_legs(y: &str) -> Vec<(Vec<String>, String)> {
+    let field = |t: &str, k: &str| {
+        let (_, rest) = t.split_once(&format!("\"{k}\": \""))?;
+        Some(rest.split_once('"')?.0.to_string())
+    };
+    y.lines()
+        .map(str::trim)
+        .filter(|t| t.starts_with('{') && t.contains("\"asset\""))
+        .map(|t| {
+            let names = ["asset", "legacy"].iter().filter_map(|k| field(t, k)).collect();
+            (names, field(t, "ext").unwrap_or_default())
+        })
+        .collect()
 }
 
 fn produced_from(workflows: &[(&str, String)]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for (_, y) in workflows {
+        let planned = json_legs(y);
         for job in jobs(y) {
             let hashes = hashed(&job);
             for arg in gh_uploads(&job) {
@@ -256,6 +276,10 @@ fn produced_from(workflows: &[(&str, String)]) -> BTreeSet<String> {
                 }
             }
             let mut entries: Vec<(Vec<String>, String)> = Vec::new();
+            // A matrix read from a plan job's output has that workflow's JSON legs.
+            if job.iter().any(|l| l.contains("include: ${{ fromJSON(needs.")) {
+                entries.extend(planned.iter().cloned());
+            }
             let mut suffixes = BTreeSet::new();
             let mut in_files = false;
             for line in job {

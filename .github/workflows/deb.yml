@@ -1,7 +1,16 @@
 name: Debian package
 
 on:
+  # With `tag`, a backfill: build ONLY the legs marked `backfill` (added after
+  # that release) from the tag's source, with this workflow's packaging, and add
+  # them to the tag's existing release. Without it, a plain build of the ref.
+  #   gh workflow run deb.yml --ref main -f tag=v1.8.0
   workflow_dispatch:
+    inputs:
+      tag:
+        description: existing release tag to backfill (e.g. v1.8.0); empty = build only
+        type: string
+        default: ''
   push:
     branches: [dev, qa]
     tags: ['v*', '!v*-rc*']
@@ -29,41 +38,54 @@ jobs:
   # 32-bit) is the static CLI only, cross-built with the same pinned `cross`
   # image as the release's armv7 binary. dev builds and installs every leg so a
   # new architecture is proven before qa; only a tag publishes.
+  # The legs, one JSON object per line. `backfill: true` marks one added after
+  # v1.8.0, which a backfill dispatch builds for an already-published tag.
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      legs: ${{ steps.legs.outputs.legs }}
+      apps: ${{ steps.legs.outputs.apps }}
+    steps:
+      - id: legs
+        env:
+          BACKFILL: ${{ inputs.tag && 'true' || 'false' }}
+          LEGS: |
+            {"arch": "amd64", "runner": "ubuntu-24.04", "gnu": "x86_64-unknown-linux-gnu", "cli": "x86_64-unknown-linux-musl", "app": true, "cross": false}
+            {"arch": "arm64", "runner": "ubuntu-24.04-arm", "gnu": "aarch64-unknown-linux-gnu", "cli": "aarch64-unknown-linux-musl", "app": true, "cross": false, "backfill": true}
+            {"arch": "armhf", "runner": "ubuntu-24.04", "gnu": "", "cli": "armv7-unknown-linux-musleabihf", "app": false, "cross": true, "backfill": true}
+        run: |
+          set -euo pipefail
+          legs=$(jq -cs --argjson b "$BACKFILL" 'map(select(($b | not) or .backfill))' <<<"$LEGS")
+          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          echo "apps=$(jq -c 'map(select(.app))' <<<"$legs")" >> "$GITHUB_OUTPUT"
+
   build:
-    needs: packaging-tests
+    needs: [packaging-tests, plan]
     if: github.ref_name == 'dev' || github.ref_name == 'qa' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-            gnu: x86_64-unknown-linux-gnu
-            cli: x86_64-unknown-linux-musl
-            app: true
-            cross: false
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            gnu: aarch64-unknown-linux-gnu
-            cli: aarch64-unknown-linux-musl
-            app: true
-            cross: false
-          - arch: armhf
-            runner: ubuntu-24.04
-            gnu: ''
-            cli: armv7-unknown-linux-musleabihf
-            app: false
-            cross: true
+        include: ${{ fromJSON(needs.plan.outputs.legs) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { path: freemkv }
+        with:
+          path: freemkv
+          ref: ${{ inputs.tag }}
+          fetch-depth: ${{ inputs.tag && 0 || 1 }}
+      # Backfill: the tag's source with this workflow's packaging scripts.
+      - name: Overlay this workflow's packaging
+        if: inputs.tag
+        working-directory: freemkv
+        env:
+          SHA: ${{ github.sha }}
+        run: git checkout "$SHA" -- .github/scripts/ packaging/deb/
       # Siblings live inside freemkv/ so `cross` (which mounts only the crate)
       # sees them too.
       - name: Pin matching sibling sources
         env:
-          BUILD_REF: ${{ github.ref_name }}
-          BUILD_REF_TYPE: ${{ github.ref_type }}
+          BUILD_REF: ${{ inputs.tag || github.ref_name }}
+          BUILD_REF_TYPE: ${{ inputs.tag && 'tag' || github.ref_type }}
         run: |
           set -euo pipefail
           if [ "$BUILD_REF_TYPE" = tag ]; then ref="$BUILD_REF"
@@ -158,15 +180,11 @@ jobs:
           retention-days: 90
 
   install:
-    needs: build
+    needs: [plan, build]
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJSON(needs.plan.outputs.apps) }}
     runs-on: ${{ matrix.runner }}
     container: ubuntu:24.04
     steps:
@@ -246,7 +264,8 @@ jobs:
   # No hosted armhf runner: the armhf CLI package installs and runs in an
   # arm/v7 Ubuntu 24.04 container under QEMU user emulation.
   install-armhf:
-    needs: build
+    needs: [plan, build]
+    if: contains(needs.plan.outputs.legs, '"armhf"')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
@@ -267,7 +286,7 @@ jobs:
 
   publish:
     needs: [install, install-armhf]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -275,6 +294,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with: { pattern: 'deb-package-*', path: deb-package, merge-multiple: true }
       - name: Attach installed and validated packages to the release
+        if: ${{ !inputs.tag }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -297,6 +317,21 @@ jobs:
           done
           echo "Release $RELEASE_TAG was not created; packages remain in this run."
           exit 1
+      # Only the backfill legs were built, so only their packages exist here; the
+      # release's amd64 packages are never touched.
+      - name: Add the backfilled packages to the existing release
+        if: inputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd deb-package
+          debs=(freemkv-*.deb)
+          for f in "${debs[@]}"; do sha256sum "$f" > "$f.sha256"; done
+          ls -l "${debs[@]}"
+          gh release upload "$TAG" freemkv-*.deb freemkv-*.deb.sha256 --clobber
 
   # FlatPark (flatpark.org) repackages freemkv-amd64.deb as a Flatpak. Ping it
   # once the .deb is on the release so the update ships in minutes instead of

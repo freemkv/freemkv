@@ -5,6 +5,9 @@ name: AppImage
 # push, so a new arch is proven before release like deb/flatpak; on demand; and
 # on a version tag release.yml calls it with release: true to upload
 # freemkv-x86_64-linux.AppImage and freemkv-aarch64-linux.AppImage.
+# release.yml's backfill dispatch calls it with backfill: true and an older tag:
+# only the legs marked backfill build, from that tag's source, and are added to
+# that tag's existing release.
 on:
   workflow_dispatch:
   push:
@@ -13,6 +16,14 @@ on:
   workflow_call:
     inputs:
       release:
+        type: boolean
+        default: false
+      tag:
+        description: release tag to build and upload to; '' = the triggering ref
+        type: string
+        default: ''
+      backfill:
+        description: build only the backfill legs, from `tag`'s source, into its existing release
         type: boolean
         default: false
 
@@ -24,26 +35,45 @@ permissions:
   contents: read
 
 jobs:
+  # The legs, one JSON object per line. `backfill: true` marks one added after
+  # v1.8.0, which a backfill run builds for an already-published tag.
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      legs: ${{ steps.legs.outputs.legs }}
+    steps:
+      - id: legs
+        env:
+          BACKFILL: ${{ inputs.backfill || false }}
+          LEGS: |
+            {"arch": "x86_64", "runner": "ubuntu-24.04", "linuxdeploy": "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"}
+            {"arch": "aarch64", "runner": "ubuntu-24.04-arm", "linuxdeploy": "620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff", "backfill": true}
+        run: echo "legs=$(jq -cs --argjson b "$BACKFILL" 'map(select(($b | not) or .backfill))' <<<"$LEGS")" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
     # 24.04: the shell needs GTK >= 4.10 and libadwaita >= 1.4 (Cargo features
     # v4_10 / v1_4), which 22.04 does not ship. Sets the distro floor to 2024+.
     # No armhf leg: there is no hosted 32-bit ARM runner to build GTK4 against.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-24.04
-            linuxdeploy: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            linuxdeploy: 620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff
+        include: ${{ fromJSON(needs.plan.outputs.legs) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
+          ref: ${{ inputs.tag }}
+          fetch-depth: ${{ inputs.backfill && 0 || 1 }}
           persist-credentials: false
+      # The tag's source with this workflow's toolchain checks.
+      - name: Overlay this workflow's build scripts
+        if: inputs.backfill
+        working-directory: freemkv
+        env:
+          SHA: ${{ github.sha }}
+        run: git checkout "$SHA" -- .github/scripts/
       # Dev builds link sibling dev checkouts; a release links the tagged crates.
       - if: ${{ !inputs.release }}
         uses: freemkv/.github/.github/actions/checkout-siblings@v2
@@ -154,6 +184,7 @@ jobs:
           pattern: freemkv-appimage-release-*
           merge-multiple: true
       - name: Upload to the release
+        if: ${{ !inputs.backfill }}
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           fail_on_unmatched_files: true
@@ -162,3 +193,15 @@ jobs:
             freemkv-x86_64-linux.AppImage.sha256
             freemkv-aarch64-linux.AppImage
             freemkv-aarch64-linux.AppImage.sha256
+      # Only the backfill legs were built, so only their files exist here; the
+      # release's other assets are never touched.
+      - name: Add the backfilled arches to the existing release
+        if: inputs.backfill
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          ls -l freemkv-*-linux.AppImage*
+          gh release upload "$TAG" freemkv-*-linux.AppImage* --clobber
