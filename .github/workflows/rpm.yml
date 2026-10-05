@@ -177,8 +177,8 @@ jobs:
             rpm --import rpms/freemkv.asc
             rpm -K "rpms/freemkv-cli-$ARCH.rpm" | grep -F 'signatures OK'
           fi
-          if [ "$PM" = dnf ]; then dnf -y -q install "./rpms/freemkv-cli-$ARCH.rpm"
-          else zypper -n -q install --allow-unsigned-rpm "./rpms/freemkv-cli-$ARCH.rpm"; fi
+          if [ "$PM" = dnf ]; then dnf -y -q install "./rpms/freemkv-cli-$ARCH.rpm" /usr/bin/awk
+          else zypper -n -q install --allow-unsigned-rpm "./rpms/freemkv-cli-$ARCH.rpm" gawk; fi
           rpm -q freemkv-cli
           expected=$(rpm -qp --qf '%{VERSION}' "rpms/freemkv-cli-$ARCH.rpm")
           /usr/bin/freemkv --version | tee cli-version.log
@@ -195,7 +195,8 @@ jobs:
           set -euo pipefail
           if [ "$PM" = dnf ]; then
             dnf -y -q install --allowerasing "./rpms/freemkv-$ARCH.rpm" \
-              /usr/bin/Xvfb /usr/bin/dbus-run-session /usr/sbin/useradd /usr/sbin/runuser
+              /usr/bin/Xvfb /usr/bin/dbus-run-session /usr/sbin/useradd /usr/sbin/runuser \
+              mesa-dri-drivers libglvnd-gles
           else
             zypper -n -q install --allow-unsigned-rpm --force-resolution "./rpms/freemkv-$ARCH.rpm"
           fi
