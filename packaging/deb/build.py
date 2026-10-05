@@ -1,4 +1,7 @@
-"""Build the amd64 `freemkv` (app) or `freemkv-cli` (static CLI) package on Ubuntu 24.04."""
+"""Build the `freemkv` (app) or `freemkv-cli` (static CLI) package on Ubuntu 24.04.
+
+The app links the host's GTK, so it is built natively (amd64 or arm64). The CLI is a
+static binary, so it can be packaged for any ARCHES entry from any host."""
 
 import argparse
 from datetime import datetime, timezone
@@ -22,6 +25,13 @@ DEVICE_NOTE = ('Optical drives use the distribution\'s existing device ACLs and 
                'Use an active local desktop session. If access is denied, inspect the device\n'
                'owner/group and your distribution\'s optical-drive access policy. No device\n'
                'permissions or group memberships are changed by this package.\n')
+# dpkg architecture -> (readelf `Machine:`, GNU triple of its binutils).
+ARCHES = {
+    'amd64': ('Advanced Micro Devices X86-64', 'x86_64-linux-gnu'),
+    'arm64': ('AArch64', 'aarch64-linux-gnu'),
+    'armhf': ('ARM', 'arm-linux-gnueabihf'),
+}
+APP_ARCHES = ('amd64', 'arm64')
 PACKAGES = {
     'freemkv': {
         'other': 'freemkv-cli',
@@ -29,7 +39,7 @@ PACKAGES = {
         'description': ' Native GTK4 desktop app and command-line interface for selecting titles,\n'
                        ' audio and subtitle tracks and saving them to MKV, MP4 or M2TS.\n'
                        ' Running freemkv without arguments opens the desktop app.\n',
-        'readme': 'Built for Ubuntu 24.04 amd64 and compatible derivatives such as Linux Mint 22.\n'
+        'readme': 'Built for Ubuntu 24.04 {arch} and compatible derivatives such as Linux Mint 22.\n'
                   'Launch freemkv from the application menu, or run freemkv with no arguments.\n'
                   'Any arguments run the command-line interface.\n\n' + DEVICE_NOTE,
         'usage': 'Run freemkv with no arguments for the desktop app, or freemkv --help for CLI usage.',
@@ -40,7 +50,7 @@ PACKAGES = {
         'description': ' Static command-line build of freemkv for selecting titles, audio and\n'
                        ' subtitle tracks and saving them to MKV, MP4 or M2TS. It has no desktop\n'
                        ' interface; install the freemkv package for the desktop app.\n',
-        'readme': 'Static amd64 command-line build with no library dependencies.\n'
+        'readme': 'Static {arch} command-line build with no library dependencies.\n'
                   'Run freemkv --help for usage. Install the freemkv package for the desktop app.\n\n'
                   + DEVICE_NOTE,
         'usage': 'Run freemkv --help for usage.',
@@ -92,7 +102,7 @@ def copy(root, source, path, mode=0o644):
     return dest
 
 
-def stage(binary, root, package_version, depends, epoch, notices, package='freemkv'):
+def stage(binary, root, package_version, depends, epoch, notices, package='freemkv', arch='amd64'):
     meta = PACKAGES[package]
     doc = f'usr/share/doc/{package}'
     copy(root, binary, 'usr/bin/freemkv', 0o755)
@@ -106,9 +116,9 @@ def stage(binary, root, package_version, depends, epoch, notices, package='freem
                       + f'Dependency licenses and notices: /{doc}/third-party-notices.gz\n')
     write(root, f'{doc}/copyright', copyright_text)
     (root / doc / 'third-party-notices.gz').write_bytes(gzip.compress(notices.encode(), mtime=0))
-    write(root, f'{doc}/README.Debian', meta['readme'])
+    write(root, f'{doc}/README.Debian', meta['readme'].format(arch=arch))
     changelog = (f'{package} ({package_version}) unstable; urgency=medium\n\n'
-                 '  * Package the upstream release for Ubuntu 24.04 amd64.\n\n'
+                 f'  * Package the upstream release for Ubuntu 24.04 {arch}.\n\n'
                  f' -- {MAINTAINER}  '
                  + format_datetime(datetime.fromtimestamp(epoch, timezone.utc)) + '\n')
     for filename, content in [('changelog.Debian.gz', changelog),
@@ -126,7 +136,7 @@ def stage(binary, root, package_version, depends, epoch, notices, package='freem
     (root / 'DEBIAN').mkdir(exist_ok=True)
     normalize_modes(root)
     write(root, 'DEBIAN/control',
-          f'Package: {package}\nVersion: {package_version}\nArchitecture: amd64\n'
+          f'Package: {package}\nVersion: {package_version}\nArchitecture: {arch}\n'
           'Section: video\nPriority: optional\n'
           f'Maintainer: {MAINTAINER}\n'
           f'Installed-Size: {(installed + 1023) // 1024}\n'
@@ -181,9 +191,29 @@ def dependency_notices():
     return '\n'.join(notices)
 
 
-def build(binary, output, package='freemkv'):
-    if run('dpkg', '--print-architecture') != 'amd64':
-        raise ValueError('build the native package on Ubuntu 24.04 amd64')
+def elf_machine(header):
+    """The `Machine:` field of `readelf -h` output."""
+    found = re.search(r'^\s*Machine:\s*(.+?)\s*$', header, re.MULTILINE)
+    if not found:
+        raise ValueError('readelf returned no ELF header')
+    return found.group(1)
+
+
+def strip_tool(arch, host):
+    """The host's `strip` reads only its own ELF machine; others need the cross binutils."""
+    return 'strip' if arch == host else ARCHES[arch][1] + '-strip'
+
+
+def build(binary, output, package='freemkv', arch=None):
+    host = run('dpkg', '--print-architecture')
+    arch = arch or host
+    if arch not in ARCHES:
+        raise ValueError(f'unsupported architecture: {arch}')
+    if package == 'freemkv' and (arch != host or arch not in APP_ARCHES):
+        raise ValueError(f'build the app package natively on Ubuntu 24.04 {"/".join(APP_ARCHES)}')
+    machine = elf_machine(run('readelf', '-hW', str(binary)))
+    if machine != ARCHES[arch][0]:
+        raise ValueError(f'{binary} is a {machine} binary, not {arch}')
     package_version = version()
     epoch = int(run('git', 'log', '-1', '--format=%ct'))
     output.mkdir(parents=True, exist_ok=True)
@@ -194,7 +224,7 @@ def build(binary, output, package='freemkv'):
             control.parent.mkdir()
             control.write_text(f'Source: freemkv\nSection: video\nPriority: optional\n'
                                f'Maintainer: {MAINTAINER}\n\n'
-                               'Package: freemkv\nArchitecture: amd64\nDescription: Disc ripper\n')
+                               f'Package: freemkv\nArchitecture: {arch}\nDescription: Disc ripper\n')
             depends = dependencies(run('dpkg-shlibdeps', '-O', str(binary), cwd=root))
         elif static_binary(run('readelf', '-lW', str(binary))):
             depends = ''
@@ -202,13 +232,13 @@ def build(binary, output, package='freemkv'):
             raise ValueError('freemkv-cli must be a static binary')
         stripped = root / 'stripped'
         shutil.copyfile(binary, stripped)
-        subprocess.run(['strip', '--strip-unneeded', str(stripped)], check=True)
-        stage(stripped, root / 'package', package_version, depends, epoch, dependency_notices(), package)
-        artifact = output / f'{package}-amd64.deb'
+        subprocess.run([strip_tool(arch, host), '--strip-unneeded', str(stripped)], check=True)
+        stage(stripped, root / 'package', package_version, depends, epoch, dependency_notices(), package, arch)
+        artifact = output / f'{package}-{arch}.deb'
         subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(root / 'package'), str(artifact)],
                        check=True, env={**os.environ, 'SOURCE_DATE_EPOCH': str(epoch)})
-        (output / f'{package}.json').write_text(json.dumps({'package': package, 'version': package_version,
-            'architecture': 'amd64', 'baseline': 'Ubuntu 24.04', 'depends': depends,
+        (output / f'{package}-{arch}.json').write_text(json.dumps({'package': package, 'version': package_version,
+            'architecture': arch, 'baseline': 'Ubuntu 24.04', 'depends': depends,
             'source': run('git', 'rev-parse', 'HEAD'),
             'sha256': hashlib.sha256(artifact.read_bytes()).hexdigest()}, indent=2) + '\n')
 
@@ -218,5 +248,6 @@ if __name__ == '__main__':
     parser.add_argument('--package', choices=sorted(PACKAGES), default='freemkv')
     parser.add_argument('--binary', type=Path, default=ROOT / 'target/release/freemkv')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--arch', choices=sorted(ARCHES), help='dpkg architecture (default: the host)')
     args = parser.parse_args()
-    build(args.binary.resolve(), args.output.resolve(), args.package)
+    build(args.binary.resolve(), args.output.resolve(), args.package, args.arch)

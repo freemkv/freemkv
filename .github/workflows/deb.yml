@@ -24,13 +24,42 @@ jobs:
         with: { python-version: '3.12' }
       - run: python -m unittest discover -s packaging/deb -p 'test_*.py' -v
 
+  # One leg per Debian architecture. The app links the host's GTK, so it builds
+  # natively (amd64, and arm64 on GitHub's arm64 runner); armhf (Raspberry Pi
+  # 32-bit) is the static CLI only, cross-built with the same pinned `cross`
+  # image as the release's armv7 binary. dev builds and installs every leg so a
+  # new architecture is proven before qa; only a tag publishes.
   build:
     needs: packaging-tests
-    if: github.ref_name == 'qa' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    if: github.ref_name == 'dev' || github.ref_name == 'qa' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            gnu: x86_64-unknown-linux-gnu
+            cli: x86_64-unknown-linux-musl
+            app: true
+            cross: false
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            gnu: aarch64-unknown-linux-gnu
+            cli: aarch64-unknown-linux-musl
+            app: true
+            cross: false
+          - arch: armhf
+            runner: ubuntu-24.04
+            gnu: ''
+            cli: armv7-unknown-linux-musleabihf
+            app: false
+            cross: true
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { path: freemkv }
+      # Siblings live inside freemkv/ so `cross` (which mounts only the crate)
+      # sees them too.
       - name: Pin matching sibling sources
         env:
           BUILD_REF: ${{ github.ref_name }}
@@ -41,7 +70,7 @@ jobs:
           elif [ "$BUILD_REF" = dev ]; then ref=dev
           else ref=qa; fi
           for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
-            git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$repo.git" "$repo"
+            git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$repo.git" "freemkv/siblings/$repo"
           done
           python3 - <<'PY'
           import importlib.util, json, pathlib, subprocess, tomllib
@@ -50,62 +79,99 @@ jobs:
           spec.loader.exec_module(module)
           version = tomllib.loads(pathlib.Path('freemkv/Cargo.toml').read_text())['package']['version']
           revisions = {}
-          for repo in module.REPOS:
-              actual = tomllib.loads(pathlib.Path(repo, 'Cargo.toml').read_text())['package']['version']
+          for repo in module.REPOS[1:]:
+              path = pathlib.Path('freemkv/siblings', repo)
+              actual = tomllib.loads((path / 'Cargo.toml').read_text())['package']['version']
               if actual != version:
                   raise SystemExit(f'{repo} version {actual} differs from {version}')
-              revisions[repo] = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+              revisions[repo] = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
           config = pathlib.Path('freemkv/.cargo/config.toml')
           config.parent.mkdir(exist_ok=True)
-          config.write_text(module.patches())
+          config.write_text(module.patches().replace('"../', '"siblings/'))
           pathlib.Path('revisions.json').write_text(json.dumps(revisions, indent=2) + '\n')
           PY
       - name: Install Ubuntu 24.04 build and package tools
+        env:
+          APP: ${{ matrix.app }}
+          CROSS: ${{ matrix.cross }}
         run: |
+          set -euo pipefail
+          pkgs=(build-essential pkg-config dpkg-dev lintian desktop-file-utils)
+          if [ "$APP" = true ]; then pkgs+=(libgtk-4-dev libadwaita-1-dev); fi
+          # Native musl legs compile C with musl-gcc; the armhf leg strips with the cross binutils.
+          if [ "$CROSS" = true ]; then pkgs+=(binutils-arm-linux-gnueabihf); else pkgs+=(musl-tools); fi
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
-            musl-tools dpkg-dev lintian desktop-file-utils
+          sudo apt-get install -y "${pkgs[@]}"
+      # Pinned + hash-checked like release.yml's cross legs; the build image by digest.
+      - name: Install cross
+        if: matrix.cross
+        run: |
+          set -euo pipefail
+          curl -fsSLo cross.tar.gz https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz
+          echo 'a486cefa6cb486971b97be321ea9dfc2e90c1979550295314a368f53fab6d588  cross.tar.gz' | sha256sum -c -
+          tar xzf cross.tar.gz cross
+          sudo mv cross /usr/local/bin/
+          echo 'CROSS_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_IMAGE=ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:0.2.5@sha256:b4f481f30ceca34730a5723f717396d762d94f6eddd7e1cf7c7862d1377ff98c' >> "$GITHUB_ENV"
       - name: Exact toolchain (freemkv rust-version)
-        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml x86_64-unknown-linux-musl
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml ${{ matrix.cli }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with: { workspaces: freemkv }
+        with:
+          workspaces: freemkv
+          key: deb-${{ matrix.arch }}
       - name: Clean build environment and C toolchain
         run: |
-          bash freemkv/.github/scripts/exact-toolchain.sh assert-env x86_64-unknown-linux-gnu freemkv
-          bash freemkv/.github/scripts/exact-toolchain.sh assert-env x86_64-unknown-linux-musl freemkv
+          set -euo pipefail
+          if [ -n "${{ matrix.gnu }}" ]; then
+            bash freemkv/.github/scripts/exact-toolchain.sh assert-env ${{ matrix.gnu }} freemkv
+          fi
+          bash freemkv/.github/scripts/exact-toolchain.sh assert-env ${{ matrix.cli }} freemkv
       - name: Build app and static CLI packages
         working-directory: freemkv
         run: |
           set -euo pipefail
-          cargo build --release --features gui --bin freemkv
-          python3 packaging/deb/build.py --package freemkv --output ../deb-package
-          cargo build --release --target x86_64-unknown-linux-musl --bin freemkv
-          python3 packaging/deb/build.py --package freemkv-cli --output ../deb-package \
-            --binary target/x86_64-unknown-linux-musl/release/freemkv
+          if [ "${{ matrix.app }}" = true ]; then
+            cargo build --release --features gui --bin freemkv
+            python3 packaging/deb/build.py --package freemkv --output ../deb-package
+          fi
+          if [ "${{ matrix.cross }}" = true ]; then
+            cross build --release --target ${{ matrix.cli }} --bin freemkv
+          else
+            cargo build --release --target ${{ matrix.cli }} --bin freemkv
+          fi
+          python3 packaging/deb/build.py --package freemkv-cli --arch ${{ matrix.arch }} --output ../deb-package \
+            --binary target/${{ matrix.cli }}/release/freemkv
           cp ../revisions.json ../deb-package/revisions.json
       - name: Lint packages and desktop entry
         run: |
           set -euo pipefail
           desktop-file-validate freemkv/packaging/flatpak/org.freemkv.FreeMKV.desktop
-          for deb in deb-package/freemkv-amd64.deb deb-package/freemkv-cli-amd64.deb; do
+          for deb in deb-package/*.deb; do
             lintian --fail-on error "$deb"
             dpkg-deb --info "$deb"
             dpkg-deb --contents "$deb"
           done
       - uses: actions/upload-artifact@v7
         with:
-          name: deb-package
+          name: deb-package-${{ matrix.arch }}
           path: deb-package
           if-no-files-found: error
           retention-days: 90
 
   install:
     needs: build
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     container: ubuntu:24.04
     steps:
       - uses: actions/download-artifact@v8
-        with: { name: deb-package, path: deb-package }
+        with: { name: 'deb-package-${{ matrix.arch }}', path: deb-package }
       - name: Install app into a clean Ubuntu 24.04 runtime
         shell: bash
         env:
@@ -113,12 +179,12 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends ./deb-package/freemkv-amd64.deb \
+          apt-get install -y --no-install-recommends ./deb-package/freemkv-${{ matrix.arch }}.deb \
             xvfb xauth dbus-x11 python3 fonts-dejavu-core
           dpkg-query -W -f='${Status}\n' freemkv | grep -Fx 'install ok installed'
           dpkg-query -W libgtk-4-1 libadwaita-1-0
           ldd /usr/bin/freemkv | grep -F libgtk-4.so
-          expected=$(python3 -c 'import json; print(json.load(open("deb-package/freemkv.json"))["version"])')
+          expected=$(python3 -c 'import json; print(json.load(open("deb-package/freemkv-${{ matrix.arch }}.json"))["version"])')
           freemkv --version | tee version.log
           awk -v expected="$expected" '$1 == expected { found=1 } END { exit !found }' version.log
       - name: Launch installed GUI without a terminal
@@ -138,13 +204,13 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
-          apt-get install -y --no-install-recommends ./deb-package/freemkv-cli-amd64.deb
+          apt-get install -y --no-install-recommends ./deb-package/freemkv-cli-${{ matrix.arch }}.deb
           dpkg-query -W -f='${Status}\n' freemkv-cli | grep -Fx 'install ok installed'
           if dpkg-query -W -f='${Status}\n' freemkv 2>/dev/null | grep -Fxq 'install ok installed'; then
             echo "freemkv is still installed alongside freemkv-cli"; exit 1
           fi
           test ! -e /usr/share/applications/org.freemkv.FreeMKV.desktop
-          expected=$(python3 -c 'import json; print(json.load(open("deb-package/freemkv-cli.json"))["version"])')
+          expected=$(python3 -c 'import json; print(json.load(open("deb-package/freemkv-cli-${{ matrix.arch }}.json"))["version"])')
           /usr/bin/freemkv --version | tee cli-version.log
           awk -v expected="$expected" '$1 == expected { found=1 } END { exit !found }' cli-version.log
           (ldd /usr/bin/freemkv 2>&1 || true) | tee cli-ldd.log
@@ -160,7 +226,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
-          apt-get install -y --no-install-recommends ./deb-package/freemkv-amd64.deb
+          apt-get install -y --no-install-recommends ./deb-package/freemkv-${{ matrix.arch }}.deb
           dpkg-query -W -f='${Status}\n' freemkv | grep -Fx 'install ok installed'
           if dpkg-query -W -f='${Status}\n' freemkv-cli 2>/dev/null | grep -Fxq 'install ok installed'; then
             echo "freemkv-cli is still installed alongside freemkv"; exit 1
@@ -170,22 +236,44 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: deb-validation
+          name: deb-validation-${{ matrix.arch }}
           path: |
             version.log
             gui-launch.log
             cli-*.log
           retention-days: 90
 
+  # No hosted armhf runner: the armhf CLI package installs and runs in an
+  # arm/v7 Ubuntu 24.04 container under QEMU user emulation.
+  install-armhf:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with: { name: deb-package-armhf, path: deb-package }
+      - name: Install and run the armhf CLI package
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          expected=$(python3 -c 'import json; print(json.load(open("deb-package/freemkv-cli-armhf.json"))["version"])')
+          docker run --rm --platform linux/arm/v7 -v "$PWD/deb-package:/deb:ro" ubuntu:24.04 sh -euc '
+            dpkg -i /deb/freemkv-cli-armhf.deb
+            dpkg-query -W -f="\${Status}\n" freemkv-cli | grep -Fx "install ok installed"
+            /usr/bin/freemkv --version
+            status=0; /usr/bin/freemkv > /dev/null 2>&1 || status=$?
+            test "$status" -eq 2' | tee cli-armhf.log
+          awk -v expected="$expected" '$1 == expected { found=1 } END { exit !found }' cli-armhf.log
+
   publish:
-    needs: install
+    needs: [install, install-armhf]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
-        with: { name: deb-package, path: deb-package }
+        with: { pattern: 'deb-package-*', path: deb-package, merge-multiple: true }
       - name: Attach installed and validated packages to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -194,11 +282,14 @@ jobs:
         run: |
           set -euo pipefail
           cd deb-package
-          for deb in freemkv-amd64.deb freemkv-cli-amd64.deb; do sha256sum "$deb" > "$deb.sha256"; done
+          for deb in freemkv-amd64.deb freemkv-cli-amd64.deb freemkv-arm64.deb freemkv-cli-arm64.deb freemkv-cli-armhf.deb; do sha256sum "$deb" > "$deb.sha256"; done
           for attempt in $(seq 1 90); do
             if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
               gh release upload "$RELEASE_TAG" freemkv-amd64.deb freemkv-amd64.deb.sha256 \
-                freemkv-cli-amd64.deb freemkv-cli-amd64.deb.sha256 --clobber
+                freemkv-cli-amd64.deb freemkv-cli-amd64.deb.sha256 \
+                freemkv-arm64.deb freemkv-arm64.deb.sha256 \
+                freemkv-cli-arm64.deb freemkv-cli-arm64.deb.sha256 \
+                freemkv-cli-armhf.deb freemkv-cli-armhf.deb.sha256 --clobber
               exit 0
             fi
             echo "Waiting for release $RELEASE_TAG ($attempt/90)"

@@ -32,6 +32,23 @@ class StaticBinaryTests(unittest.TestCase):
             build.static_binary('readelf: Error: Not an ELF file')
 
 
+class ArchitectureTests(unittest.TestCase):
+    def test_elf_machine_is_read_from_the_header(self):
+        self.assertEqual(build.elf_machine('ELF Header:\n  Class: ELF32\n  Machine:                           ARM\n'), 'ARM')
+        with self.assertRaises(ValueError):
+            build.elf_machine('readelf: Error: Not an ELF file')
+
+    def test_every_arch_has_a_distinct_machine(self):
+        self.assertEqual(set(build.ARCHES), {'amd64', 'arm64', 'armhf'})
+        self.assertEqual(len({m for m, _ in build.ARCHES.values()}), len(build.ARCHES))
+        self.assertTrue(set(build.APP_ARCHES) <= set(build.ARCHES))
+
+    def test_foreign_binaries_use_the_cross_strip(self):
+        self.assertEqual(build.strip_tool('amd64', 'amd64'), 'strip')
+        self.assertEqual(build.strip_tool('arm64', 'arm64'), 'strip')
+        self.assertEqual(build.strip_tool('armhf', 'amd64'), 'arm-linux-gnueabihf-strip')
+
+
 class PackageTests(unittest.TestCase):
     def test_complete_native_layout_version_permissions_and_checksums(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -64,6 +81,20 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(hashlib.md5((root / name).read_bytes()).hexdigest(), checksum)
             self.assertFalse((root / 'etc').exists(), 'package must not install device permission overrides')
             self.assertEqual({p.name for p in (root / 'DEBIAN').iterdir()}, {'control', 'md5sums'})
+
+    def test_arch_reaches_control_readme_and_changelog(self):
+        for package, arch in [('freemkv', 'arm64'), ('freemkv-cli', 'armhf')]:
+            with self.subTest(package=package, arch=arch), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                binary = base / 'binary'
+                binary.write_bytes(b'fixture executable')
+                root = base / 'package'
+                build.stage(binary, root, '1.7.7', '', 1790380800, 'notices\n', package, arch)
+                self.assertIn(f'Architecture: {arch}\n', (root / 'DEBIAN/control').read_text())
+                doc = root / 'usr/share/doc' / package
+                self.assertIn(arch, (doc / 'README.Debian').read_text())
+                self.assertNotIn('amd64', (doc / 'README.Debian').read_text())
+                self.assertIn(f'Ubuntu 24.04 {arch}', gzip.decompress((doc / 'changelog.Debian.gz').read_bytes()).decode())
 
     def test_cli_is_static_without_desktop_files_and_replaces_the_app(self):
         with tempfile.TemporaryDirectory() as temp:
