@@ -34,8 +34,10 @@ function ctlHtml(f, v) {
 
 function hookRow(h) {
   h = typeof h === 'string' ? { url: h, post_rip: true, post_mux: true, post_move: true } : (h || { url: '', post_rip: true, post_mux: true, post_move: true });
+  const savedUrl = h.url || '';
+  const displayUrl = savedUrl.replace(/(\*{8})#\d+$/, '$1');
   const cb = (k, label) => '<label><input type="checkbox" data-flag="' + k + '"' + (h[k] !== false ? ' checked' : '') + '> ' + label + '</label>';
-  return '<div class="hook-entry"><div class="hook"><input class="txt" type="text" data-hook placeholder="https://discord.com/api/webhooks/…" value="' + esc(h.url || '') + '" aria-label="Webhook URL">'
+  return '<div class="hook-entry"><div class="hook"><input class="txt" type="text" data-hook data-saved-url="' + esc(savedUrl) + '" placeholder="https://discord.com/api/webhooks/…" value="' + esc(displayUrl) + '" aria-label="Webhook URL">'
     + '<span class="flags">' + cb('post_rip', 'Rip') + cb('post_mux', 'Mux') + cb('post_move', 'Move') + '</span>'
     + '<button type="button" class="x" data-rmhook aria-label="Remove this webhook">×</button></div>'
     + '<details class="hook-auth"' + (Object.keys(h.headers || {}).length ? ' open' : '') + '><summary>Headers &amp; test</summary>'
@@ -53,7 +55,11 @@ function headerRow(name = '', value = '') {
 
 function collectHook(row) {
   const flag = k => row.querySelector('[data-flag="' + k + '"]').checked;
-  return { url: row.querySelector('[data-hook]').value.trim(),
+  const input = row.querySelector('[data-hook]');
+  const entered = input.value.trim(), saved = input.dataset.savedUrl || '';
+  // Preserve the masked identity in requests, without displaying its internal index.
+  const url = entered === saved.replace(/(\*{8})#\d+$/, '$1') ? saved : entered;
+  return { url,
     post_rip: flag('post_rip'), post_mux: flag('post_mux'), post_move: flag('post_move'),
     headers: Object.fromEntries($$('[data-header-row]', row).map(r => [r.querySelector('[data-header-name]').value.trim(), r.querySelector('[data-header-value]').value]).filter(([name]) => name)) };
 }
