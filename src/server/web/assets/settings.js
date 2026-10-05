@@ -77,17 +77,28 @@ async function mount(view, ctx) {
     const connections = document.createElement('section');
     connections.className = 'card';
     connections.id = 'Connections';
-    connections.innerHTML = `<h2>Connect to Remote Library</h2>
-      <p class="small muted">See and control another Library’s drives here. Rips and files stay on the machine with the drive.</p>
+    connections.innerHTML = `<h2>Connected Libraries</h2>
       <div id="connected-libraries"></div>
-      <form id="connect-library" class="stack">
-        <label>Library name<input class="txt" name="name" required maxlength="100" placeholder="Ripping PC"></label>
-        <label>Remote Library URL<input class="txt" name="url" type="url" required placeholder="http://library-pc:8080"></label>
-        <label>This Library’s reachable URL<input class="txt" name="return_url" type="url" placeholder="http://this-computer:8080"></label>
-        <p class="small muted">Provide this machine’s network URL to show both machines’ drives in either UI. Leave it blank for a one-way connection. Both Libraries need this feature for a two-way connection.</p>
-        <div><button class="btn btn-primary" type="submit">Connect to Remote Library</button></div>
-        <p id="connect-status" role="status" class="small"></p>
-      </form>`;
+      <div class="field"><span class="lbl">Libraries</span><div class="ctl"><button type="button" class="btn btn-ghost btn-sm" id="add-library" aria-expanded="false" aria-controls="connect-library">+ Add a Library</button></div>
+        <div class="help">See and control another Library’s drives here. Rips and files stay on the machine with the drive.</div></div>
+      <form id="connect-library" hidden>
+        <div class="field"><label for="peer-name">Library name</label><div class="ctl"><input id="peer-name" class="txt" name="name" required maxlength="100" placeholder="Ripping PC"></div></div>
+        <div class="field"><label for="peer-url">Remote Library URL</label><div class="ctl"><input id="peer-url" class="txt" name="url" type="url" required placeholder="http://library-pc:8080"></div></div>
+        <div class="field"><label for="peer-return">This Library’s URL</label><div class="ctl"><input id="peer-return" class="txt" name="return_url" type="url" placeholder="http://this-computer:8080"></div>
+          <div class="help">Optional: this machine’s reachable network URL, so both UIs show both machines’ drives. Both Libraries need the connection feature.</div></div>
+        <div class="field"><span class="lbl"></span><div class="ctl"><button class="btn btn-secondary btn-sm" type="submit">Connect to Remote Library</button> <button class="btn btn-ghost btn-sm" id="cancel-library" type="button">Cancel</button></div></div>
+      </form>
+      <p id="connect-status" role="status" class="small muted"></p>`;
+    const connectionForm = $('#connect-library', connections);
+    const addLibrary = $('#add-library', connections);
+    const showConnectionForm = show => {
+      connectionForm.hidden = !show;
+      addLibrary.setAttribute('aria-expanded', String(show));
+      if (show) $('#peer-name', connections).focus();
+      else addLibrary.focus();
+    };
+    addLibrary.addEventListener('click', () => showConnectionForm(true));
+    $('#cancel-library', connections).addEventListener('click', () => { connectionForm.reset(); showConnectionForm(false); });
     const content = document.createElement('div');
     content.className = 'stack';
     const settingsForm = $('#form', view);
@@ -97,7 +108,7 @@ async function mount(view, ctx) {
     const loadConnections = async () => {
       const peers = await api('GET', '/api/peers');
       if (ctx.stale()) return;
-      $('#connected-libraries', connections).innerHTML = peers.map(p => '<p><b>' + esc(p.name) + '</b> <span class="muted">' + esc(p.url) + '</span> <button type="button" class="btn btn-ghost btn-sm" data-disconnect="' + esc(p.id) + '">Disconnect here</button></p>').join('');
+      $('#connected-libraries', connections).innerHTML = peers.map(p => '<div class="field"><span class="lbl">' + esc(p.name) + '</span><div class="ctl"><div class="hook"><input class="txt" type="text" readonly aria-label="' + esc(p.name) + ' URL" value="' + esc(p.url) + '"><button type="button" class="btn btn-ghost btn-sm" data-disconnect="' + esc(p.id) + '">Disconnect here</button></div></div></div>').join('');
     };
     loadConnections().catch(e => { if (!ctx.stale()) $('#connect-status', connections).textContent = e.message; });
     connections.addEventListener('click', async e => {
@@ -114,6 +125,7 @@ async function mount(view, ctx) {
         if (ctx.stale()) return;
         $('#connect-status', connections).textContent = result.warning || 'Connected. Open Drives to see both Libraries.';
         await loadConnections();
+        if (!result.warning) { connectionForm.reset(); showConnectionForm(false); }
       }, 'Connect');
     });
     const form = $('#form', view);
