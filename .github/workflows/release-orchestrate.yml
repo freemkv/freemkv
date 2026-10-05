@@ -1777,7 +1777,10 @@ jobs:
             local poll_secs=30
 
             local missing=0 repo names want checked=0
-            for repo in freemkv; do
+            # The repos whose assets the download page links; the "all checked"
+            # floor below is this list's length, so the two cannot drift apart.
+            local -a asset_repos=(freemkv)
+            for repo in "${asset_repos[@]}"; do
               if $DRY_RUN; then
                 printf '  [dry-run] gh release view v%s --repo %s/%s --json assets\n' \
                   "$VERSION" "$GIT_ORG" "$repo"
@@ -1846,8 +1849,8 @@ jobs:
               # catch on the release itself.
               return 1
             elif ! $DRY_RUN; then
-              if [ "$checked" -lt 2 ]; then
-                err "only $checked of 2 repos were checked — refusing to call this verified"
+              if [ "$checked" -lt "${#asset_repos[@]}" ]; then
+                err "only $checked of ${#asset_repos[@]} repos were checked — refusing to call this verified"
                 return 1
               fi
               ok "every download-page asset is attached to v$VERSION"
