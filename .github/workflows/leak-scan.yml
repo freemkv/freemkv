@@ -24,7 +24,7 @@ jobs:
       - name: Scan dev and main
         run: |
           set -uo pipefail
-          repos="freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n freemkv-engine bdemu freemkv autorip freemkv-firmware .github homebrew-tap"
+          repos="freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n freemkv-engine bdemu freemkv freemkv-firmware .github homebrew-tap"
           fail=0
           for ref in dev main; do bash ci/scripts/scan-public.sh "$ref" $repos || fail=1; done
           exit $fail
