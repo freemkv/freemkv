@@ -174,19 +174,16 @@ jobs:
   # The candidate's server image (the rip daemon + web UI), tagged rc-only so it can be
   # deployed and tested before release; :latest is never touched here. An rc tag cannot
   # trigger release.yml, so without this a candidate would have no image.
+  # Multi-arch (amd64, arm64, arm/v7) like the release image, via server-image.yml.
   rc-image:
     needs: rc-tag
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build and push the rc image
-        env:
-          TAG: ${{ needs.rc-tag.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/server-image.sh "$TAG" qa
+    uses: ./.github/workflows/server-image.yml
+    with:
+      tag: ${{ needs.rc-tag.outputs.tag }}
+      sibling: qa
 
   release-tests:
     needs: [plan-media]

@@ -47,19 +47,17 @@ jobs:
 
   # The server image (the rip daemon + web UI that replaced autorip at 1.8.0), built from
   # the release commit --locked and published under both names, :latest moved with it.
+  # Multi-arch (amd64, arm64, arm/v7) via server-image.yml; both names get the
+  # same manifest list.
   server-image:
     needs: verify
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build and push the release image
-        env:
-          TAG: ${{ github.ref_name }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/server-image.sh "$TAG" "" latest
+    uses: ./.github/workflows/server-image.yml
+    with:
+      tag: ${{ github.ref_name }}
+      latest: true
 
   # Parallel tripwire, exactly as the CLI does it: fails the run, but `build`
   # does NOT `needs:` it, so packaging starts as soon as `verify` passes. The

@@ -1,0 +1,128 @@
+name: Server image
+
+# The server image (rip daemon + web UI), multi-arch: linux/amd64 and
+# linux/arm64 build natively on their own runners; linux/arm/v7 (Raspberry Pi
+# 32-bit) cross-compiles on amd64 (see docker/Dockerfile) with only its alpine
+# harvest stage under QEMU. Each pushes by digest; `merge` publishes the one
+# manifest list under both names. release.yml (tag, and the backfill dispatch)
+# and qa.yml (rc tag) call this with a tag; a dev push that touches the image
+# recipe builds all three without pushing, so a broken arch shows up before qa.
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - 'docker/**'
+      - '.github/scripts/server-image.sh'
+      - '.github/workflows/server-image.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_call:
+    inputs:
+      tag:
+        description: image tag to publish (e.g. v1.8.0 or v1.8.1-rc2)
+        type: string
+        required: true
+      sibling:
+        description: sibling crate branch to build against; '' = the commit's pinned tags
+        type: string
+        default: ''
+      latest:
+        description: also move :latest
+        type: boolean
+        default: false
+      ref:
+        description: source to build; '' = the triggering commit
+        type: string
+        default: ''
+      backfill:
+        description: build an older tag's source with this workflow's image recipe
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            slug: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            slug: arm64
+            runner: ubuntu-24.04-arm
+          - platform: linux/arm/v7
+            slug: armv7
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: ${{ inputs.backfill && 0 || 1 }}
+          persist-credentials: false
+      # An older tag's tree, with this workflow's image recipe (Dockerfile,
+      # build-server.sh, server-image.sh): the binary is the tag's, only the
+      # packaging is new.
+      - name: Overlay this workflow's image recipe
+        if: inputs.backfill
+        env:
+          SHA: ${{ github.sha }}
+        run: git checkout "$SHA" -- docker/ .github/scripts/
+      - name: QEMU (arm/v7 harvest stage) and a buildx builder
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.slug }}" = armv7 ]; then
+            sudo apt-get update && sudo apt-get install -y qemu-user-static
+          fi
+          docker buildx create --use --name freemkv --driver docker-container
+          docker buildx inspect --bootstrap
+      - name: Build${{ inputs.tag && ' and push by digest' || '' }}
+        env:
+          TAG: ${{ inputs.tag || 'dev' }}
+          SIBLING: ${{ inputs.tag && inputs.sibling || 'dev' }}
+          PUSH: ${{ inputs.tag && 'push' || '' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST_DIR: ${{ runner.temp }}/digests
+        run: bash .github/scripts/server-image.sh build "${{ matrix.platform }}" "$TAG" "$SIBLING" "$PUSH"
+      - if: inputs.tag
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-image-digest-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 7
+
+  merge:
+    needs: build
+    if: inputs.tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: server-image-digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - name: Publish the multi-arch manifest under both names
+        env:
+          TAG: ${{ inputs.tag }}
+          LATEST: ${{ inputs.latest && 'latest' || '' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          n=$(find "$RUNNER_TEMP/digests" -type f | wc -l)
+          [ "$n" -eq 3 ] || { echo "::error::expected 3 platform digests, got $n"; exit 1; }
+          bash .github/scripts/server-image.sh merge "$TAG" "$LATEST" "$RUNNER_TEMP/digests"
