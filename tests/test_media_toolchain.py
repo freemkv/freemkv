@@ -205,12 +205,15 @@ class ExactToolchainTests(unittest.TestCase):
                     env={'CROSS_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_IMAGE': image.split('@')[0]})
         self.assertNotEqual(r.returncode, 0, 'an unpinned cross image must fail')
 
-    def test_native_musl_on_the_matching_host_uses_musl_gcc(self):
+    def test_native_arm64_musl_needs_the_compiler_cc_rs_calls(self):
         box = Sandbox(self)
         box.fake('musl-gcc', 'echo "gcc (fake) 13.2.0"\n')
         r = box.run('assert-env', 'aarch64-unknown-linux-musl', str(box.crate), env={'HOSTTYPE': 'aarch64'})
+        self.assertNotEqual(r.returncode, 0, 'cc-rs calls aarch64-linux-musl-gcc, not musl-gcc')
+        box.fake('aarch64-linux-musl-gcc', 'echo "gcc (fake) 13.2.0"\n')
+        r = box.run('assert-env', 'aarch64-unknown-linux-musl', str(box.crate), env={'HOSTTYPE': 'aarch64'})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn('musl-gcc: gcc (fake) 13.2.0', r.stdout)
+        self.assertIn('aarch64-linux-musl-gcc: gcc (fake) 13.2.0', r.stdout)
 
 
 class WorkflowToolchainTests(unittest.TestCase):

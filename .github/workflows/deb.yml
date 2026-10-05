@@ -124,6 +124,12 @@ jobs:
           if [ "$CROSS" = true ]; then pkgs+=(binutils-arm-linux-gnueabihf); else pkgs+=(musl-tools); fi
           sudo apt-get update
           sudo apt-get install -y "${pkgs[@]}"
+          # cc-rs calls <arch>-linux-musl-gcc for any non-x86_64 musl target, even a
+          # native one; musl-tools only ships the musl-gcc wrapper.
+          arch=$(uname -m)
+          if [ "$CROSS" != true ] && [ "$arch" != x86_64 ]; then
+            sudo ln -sf "$(command -v musl-gcc)" "/usr/local/bin/$arch-linux-musl-gcc"
+          fi
       # Pinned + hash-checked like release.yml's cross legs; the build image by digest.
       - name: Install cross
         if: matrix.cross

@@ -61,9 +61,12 @@ c_toolchain() {
         echo "cross image ${!cross}"
         return 0
       fi
-      # A native one: cc-rs compiles musl C with musl-gcc (the musl-tools wrapper).
-      command -v musl-gcc >/dev/null 2>&1 || return 1
-      echo "musl-gcc: $(musl-gcc --version | head -1)"
+      # A native one: cc-rs compiles x86_64 musl C with musl-gcc (the musl-tools
+      # wrapper), and any other arch's with <arch>-linux-musl-gcc.
+      c=musl-gcc
+      [ "${target%%-*}" = x86_64 ] || c="${target%%-*}-linux-musl-gcc"
+      command -v "$c" >/dev/null 2>&1 || return 1
+      echo "$c: $("$c" --version | head -1)"
       if command -v dpkg-query >/dev/null 2>&1; then
         echo "musl-tools: $(dpkg-query -W -f='${Version}' musl-tools 2>/dev/null || echo unknown)"
       fi ;;
