@@ -354,6 +354,8 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         );
     } else if is_post && url == "/api/settings" {
         handle_settings_post(request, cfg);
+    } else if is_post && url == "/api/webhook/test" {
+        handle_webhook_test(request, cfg);
     } else if is_get && url == "/api/system" {
         handle_system_info(request, cfg);
     } else if is_post && url == "/api/move-errors/clear-all" {
@@ -838,10 +840,30 @@ pub(crate) fn resolve_webhook_entries(
             continue;
         }
         resolved.push(WebhookEntry {
-            url,
+            url: url.clone(),
             post_rip: hook.post_rip,
             post_mux: hook.post_mux,
             post_move: hook.post_move,
+            jellyfin_api_key: if hook.jellyfin_api_key == SECRET_SENTINEL {
+                // Bind the saved key to its exact saved URL, never a new host.
+                let matches: Vec<_> = existing.iter().filter(|e| e.url == url).collect();
+                let stored = if let Some((_, idx)) = s.rsplit_once('#') {
+                    idx.parse::<usize>()
+                        .ok()
+                        .and_then(|i| existing.get(i))
+                        .filter(|e| e.url == url)
+                } else if matches.len() == 1 {
+                    Some(matches[0])
+                } else {
+                    None
+                };
+                stored
+                    .ok_or_else(|| "Re-enter the webhook API key".to_string())?
+                    .jellyfin_api_key
+                    .clone()
+            } else {
+                hook.jellyfin_api_key.clone()
+            },
         });
     }
     Ok(resolved)
@@ -1470,6 +1492,44 @@ impl Drop for ConnGuard {
 #[allow(clippy::items_after_test_module)]
 mod web_tests {
     // A new client past the cap closes the oldest stream instead of being refused.
+
+    #[test]
+    fn webhook_key_is_redacted_preserved_and_bound_to_its_destination() {
+        let hook = WebhookEntry::parse(0, &serde_json::json!({"url":"https://jf.example/Library/Refresh","jellyfin_api_key":"new-secret-key"})).unwrap();
+        let roundtrip: WebhookEntry =
+            serde_json::from_str(&serde_json::to_string(&hook).unwrap()).unwrap();
+        assert_eq!(roundtrip, hook);
+        let cfg = Config {
+            webhook_urls: vec![hook.clone()],
+            ..Config::default()
+        };
+        let redacted = settings_json_redacted(&cfg);
+        assert!(!redacted.contains("new-secret-key"));
+        assert!(!format!("{hook:?}").contains("new-secret-key"));
+        let v: serde_json::Value = serde_json::from_str(&redacted).unwrap();
+        let masked = WebhookEntry::parse(0, &v["webhook_urls"][0]).unwrap();
+        assert_eq!(
+            resolve_webhook_entries(std::slice::from_ref(&masked), &cfg.webhook_urls).unwrap()[0],
+            hook
+        );
+        let mut moved = masked.clone();
+        moved.url = "https://other.example/Library/Refresh".into();
+        assert!(resolve_webhook_entries(&[moved], &cfg.webhook_urls).is_err());
+        let mut cleared = masked;
+        cleared.jellyfin_api_key.clear();
+        assert!(
+            resolve_webhook_entries(&[cleared], &cfg.webhook_urls).unwrap()[0]
+                .jellyfin_api_key
+                .is_empty()
+        );
+        assert!(
+            WebhookEntry::parse(
+                0,
+                &serde_json::json!({"url":"https://jf.example","jellyfin_api_key":"bad\r\nkey"})
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn the_oldest_event_stream_gives_way() {
         let admitted: Vec<_> = (0..super::MAX_SSE_CLIENTS + 2)
@@ -2794,6 +2854,7 @@ mod web_tests {
             post_rip: true,
             post_mux: true,
             post_move: true,
+            jellyfin_api_key: String::new(),
         }
     }
 
@@ -2805,6 +2866,7 @@ mod web_tests {
             post_rip: true,
             post_mux: true,
             post_move: true,
+            jellyfin_api_key: String::new(),
         }
     }
 
@@ -3157,6 +3219,7 @@ mod web_tests {
             post_rip: true,
             post_mux: true,
             post_move: true,
+            jellyfin_api_key: String::new(),
         }];
         let masked = mask_webhook_url_indexed(&existing[0].url, 0);
         let incoming = [IncomingWebhook {
@@ -3164,6 +3227,7 @@ mod web_tests {
             post_rip: false,
             post_mux: false,
             post_move: true,
+            jellyfin_api_key: String::new(),
         }];
         let resolved = resolve_webhook_entries(&incoming, &existing).unwrap();
         assert_eq!(
@@ -3173,6 +3237,7 @@ mod web_tests {
                 post_rip: false,
                 post_mux: false,
                 post_move: true,
+                jellyfin_api_key: String::new(),
             }],
             "URL resolves to the stored secret but the flags follow the new request"
         );
@@ -4738,6 +4803,7 @@ mod web_tests {
                 post_rip: true,
                 post_mux: true,
                 post_move: true,
+                jellyfin_api_key: String::new(),
             }];
             cfg.write().unwrap().webhook_urls = stored.clone();
             for (patch, field) in [
@@ -6647,6 +6713,50 @@ mod parse_query_tests {
 // latency, short enough a wedged /config doesn't block the API thread
 // forever. On timeout we 503; write-then-rename keeps the old file intact.
 const SETTINGS_SAVE_DEADLINE_SECS: u64 = 15;
+
+fn handle_webhook_test(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
+    let Ok((request, body)) = read_json_body(request) else {
+        return;
+    };
+    let hook = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| WebhookEntry::parse(0, &v).ok());
+    let Some(hook) = hook else {
+        return json_response(
+            request,
+            400,
+            r#"{"error":"Invalid webhook URL or API key"}"#,
+        );
+    };
+    let existing = cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .webhook_urls
+        .clone();
+    let hooks = resolve_webhook_entries(&[hook], &existing);
+    let Ok(hooks) = hooks else {
+        return json_response(
+            request,
+            400,
+            r#"{"error":"Re-enter the webhook URL and API key"}"#,
+        );
+    };
+    let Some(hook) = hooks.first() else {
+        return json_response(request, 400, r#"{"error":"Enter a webhook URL"}"#);
+    };
+    match crate::server::webhook::test(hook) {
+        Ok(status) => json_response(
+            request,
+            200,
+            &serde_json::json!({"ok":true,"status":status}).to_string(),
+        ),
+        Err(error) => json_response(
+            request,
+            400,
+            &serde_json::json!({"error":error}).to_string(),
+        ),
+    }
+}
 
 fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     let (request, body) = match read_json_body(request) {

@@ -10,6 +10,8 @@
 
 ### Changed
 
+- Webhooks support optional Jellyfin API-key authentication via the modern authorization header, with masked key storage in Settings and a Test button for unsaved changes. Existing URL-only webhooks remain supported. (server only: notifications)
+
 - Combine all connected Libraries in shared muxing, moving and title-review panels, with source badges on remote jobs and a source selector in the system log. (server only: Drives page)
 
 - Connected Libraries include the complete Drives-page pipeline: mux/move progress and queues, errors, title reviews and logs, with actions routed to their owner. Brief connection failures have a 15-second grace period before showing offline status. (server only: Library web UI)

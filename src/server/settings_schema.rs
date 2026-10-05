@@ -696,6 +696,13 @@ pub fn redacted(c: &Config) -> Value {
                 let mut list = cur;
                 if let Some(arr) = list.as_array_mut() {
                     for (i, entry) in arr.iter_mut().enumerate() {
+                        if entry
+                            .get("jellyfin_api_key")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty())
+                        {
+                            entry["jellyfin_api_key"] = json!(SECRET_SENTINEL);
+                        }
                         if let Some(u) = entry.get("url").and_then(Value::as_str)
                             && !u.is_empty()
                         {

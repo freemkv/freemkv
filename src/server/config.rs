@@ -22,9 +22,11 @@ fn default_true() -> bool {
 ///   disc while the mux runs on a separate worker.
 /// - `post_mux`: the `.mkv` has been produced from the staged ISO.
 /// - `post_move`: the finished file has landed in its final library location.
-#[derive(Clone, Serialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct WebhookEntry {
     pub url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub jellyfin_api_key: String,
     /// Fire when the disc read finishes and the drive is free (the
     /// `rip_complete` payload).
     pub post_rip: bool,
@@ -33,6 +35,18 @@ pub struct WebhookEntry {
     /// Fire this webhook when a moved file lands in its final library
     /// location (the `move_complete` payload).
     pub post_move: bool,
+}
+
+impl std::fmt::Debug for WebhookEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookEntry")
+            .field("url", &"<redacted>")
+            .field("jellyfin_api_key", &"<redacted>")
+            .field("post_rip", &self.post_rip)
+            .field("post_mux", &self.post_mux)
+            .field("post_move", &self.post_move)
+            .finish()
+    }
 }
 
 impl WebhookEntry {
@@ -44,6 +58,7 @@ impl WebhookEntry {
             post_rip: true,
             post_mux: true,
             post_move: true,
+            jellyfin_api_key: String::new(),
         }
     }
 
@@ -69,6 +84,20 @@ impl WebhookEntry {
             post_rip: flag("post_rip")?,
             post_mux: flag("post_mux")?,
             post_move: flag("post_move")?,
+            jellyfin_api_key: {
+                let key = obj
+                    .get("jellyfin_api_key")
+                    .map_or(Ok(""), |v| v.as_str().ok_or_else(malformed))?;
+                if key != crate::server::settings_schema::SECRET_SENTINEL
+                    && (key.len() > 256
+                        || !key
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+                {
+                    return Err(format!("webhook_urls[{i}].jellyfin_api_key"));
+                }
+                key.to_string()
+            },
         })
     }
 
@@ -105,6 +134,8 @@ impl<'de> Deserialize<'de> for WebhookEntry {
                 post_mux: bool,
                 #[serde(default = "default_true")]
                 post_move: bool,
+                #[serde(default)]
+                jellyfin_api_key: String,
             },
         }
         Ok(match Raw::deserialize(deserializer)? {
@@ -114,11 +145,13 @@ impl<'de> Deserialize<'de> for WebhookEntry {
                 post_rip,
                 post_mux,
                 post_move,
+                jellyfin_api_key,
             } => WebhookEntry {
                 url,
                 post_rip,
                 post_mux,
                 post_move,
+                jellyfin_api_key,
             },
         })
     }
@@ -789,6 +822,7 @@ mod tests {
                 post_rip: false,
                 post_mux: true,
                 post_move: true,
+                jellyfin_api_key: String::new(),
             }],
             "the malformed entry is dropped; the valid one (absent flags -> true) is kept"
         );
@@ -1148,12 +1182,14 @@ mod tests {
                     post_rip: true,
                     post_mux: true,
                     post_move: true,
+                    jellyfin_api_key: String::new(),
                 },
                 WebhookEntry {
                     url: "https://jellyfin.example.org/hook".to_string(),
                     post_rip: true,
                     post_mux: true,
                     post_move: true,
+                    jellyfin_api_key: String::new(),
                 },
             ],
             "empty webhook URLs must be dropped on load; bare strings fire on every stage"
@@ -1189,24 +1225,28 @@ mod tests {
                     post_rip: true,
                     post_mux: true,
                     post_move: true,
+                    jellyfin_api_key: String::new(),
                 },
                 WebhookEntry {
                     url: "https://both.example/hook".into(),
                     post_rip: true,
                     post_mux: true,
                     post_move: true,
+                    jellyfin_api_key: String::new(),
                 },
                 WebhookEntry {
                     url: "https://rip-only.example/hook".into(),
                     post_rip: true,
                     post_mux: false,
                     post_move: false,
+                    jellyfin_api_key: String::new(),
                 },
                 WebhookEntry {
                     url: "https://move-only.example/hook".into(),
                     post_rip: false,
                     post_mux: false,
                     post_move: true,
+                    jellyfin_api_key: String::new(),
                 },
                 // A pre-1.6.8 object with no post_mux key: the mux stage
                 // defaults ON so the upgrade never silently drops the
@@ -1216,6 +1256,7 @@ mod tests {
                     post_rip: false,
                     post_mux: true,
                     post_move: true,
+                    jellyfin_api_key: String::new(),
                 },
             ],
             "object flags load verbatim; bare string and missing flags default to fire-on-every-stage; blank/urlless entries drop"
@@ -1235,12 +1276,14 @@ mod tests {
                 post_rip: true,
                 post_mux: true,
                 post_move: true,
+                jellyfin_api_key: String::new(),
             },
             WebhookEntry {
                 url: "https://move-only.example/hook".into(),
                 post_rip: false,
                 post_mux: false,
                 post_move: true,
+                jellyfin_api_key: String::new(),
             },
         ];
         save(&cfg).expect("save");
@@ -1382,12 +1425,14 @@ mod tests {
                     post_rip: true,
                     post_mux: true,
                     post_move: true,
+                    jellyfin_api_key: String::new(),
                 },
                 WebhookEntry {
                     url: "https://hooks.example.com?token=WEBHOOK_SECRET".into(),
                     post_rip: true,
                     post_mux: true,
                     post_move: false,
+                    jellyfin_api_key: String::new(),
                 },
             ],
             ..Config::default()

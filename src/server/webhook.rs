@@ -173,6 +173,19 @@ impl Drop for InflightGuard {
 
 fn fire(cfg: &Config, payload: &serde_json::Value, event: WebhookEvent) {
     let urls = active_urls(&cfg.webhook_urls, event);
+    let hooks: Vec<_> = cfg
+        .webhook_urls
+        .iter()
+        .filter(|h| {
+            urls.contains(&h.url)
+                && match event {
+                    WebhookEvent::Rip => h.post_rip,
+                    WebhookEvent::Mux => h.post_mux,
+                    WebhookEvent::Move => h.post_move,
+                }
+        })
+        .cloned()
+        .collect();
     if urls.is_empty() {
         return;
     }
@@ -191,11 +204,11 @@ fn fire(cfg: &Config, payload: &serde_json::Value, event: WebhookEvent) {
         .name("webhook".into())
         .spawn(move || {
             let _guard = guard;
-            for url in &urls {
+            for hook in &hooks {
                 // Deliberately NOT SSRF-guarded: aiming a webhook at a LAN
                 // service (Home Assistant, a NAS) is intended use. Goes
                 // through un-pinned `web::webhook_agent`; see its doc comment.
-                let _ = deliver(url, &body);
+                let _ = deliver_authenticated(&hook.url, &body, &hook.jellyfin_api_key);
             }
         });
     if spawned.is_err() {
@@ -208,13 +221,37 @@ fn fire(cfg: &Config, payload: &serde_json::Value, event: WebhookEvent) {
 
 // POST one payload to one URL. Split out of `fire` so the one HTTP call in this module can be
 // tested against a loopback stub.
+#[cfg(test)]
 fn deliver(url: &str, body: &str) -> bool {
+    deliver_authenticated(url, body, "")
+}
+
+pub(crate) fn test(hook: &WebhookEntry) -> Result<u16, String> {
+    if !try_acquire_slot(&INFLIGHT, MAX_INFLIGHT) {
+        return Err("Too many webhook requests; try again shortly".into());
+    }
+    let _guard = InflightGuard;
+    let response = send(&hook.url, r#"{"event":"test"}"#, &hook.jellyfin_api_key)
+        .map_err(|e| crate::server::web::ureq_error_kind(&e))?;
+    let status = response.status().as_u16();
+    if response.status().is_success() {
+        Ok(status)
+    } else {
+        Err(format!("HTTP {status}"))
+    }
+}
+
+fn send(url: &str, body: &str, key: &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
     let agent = crate::server::web::webhook_agent();
-    match agent
-        .post(url)
-        .header("Content-Type", "application/json")
-        .send(body)
-    {
+    let mut request = agent.post(url).header("Content-Type", "application/json");
+    if !key.is_empty() {
+        request = request.header("Authorization", format!("MediaBrowser Token=\"{key}\""));
+    }
+    request.send(body)
+}
+
+fn deliver_authenticated(url: &str, body: &str, key: &str) -> bool {
+    match send(url, body, key) {
         // NOT every `Ok` is a delivery: at `max_redirects(0)` ureq still
         // returns `Ok` for a 3xx, so an http->https redirected webhook used
         // to log "sent" while nothing delivered. This closes that gap.
@@ -250,6 +287,37 @@ fn deliver(url: &str, body: &str) -> bool {
 mod tests {
     // `send_rich` end-to-end through `fire`'s real spawn path to a loopback stub — the one
     // rip-complete delivery this module exists for.
+
+    #[test]
+    fn jellyfin_header_auth_and_test_status() {
+        for status in [204, 401, 302] {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let address = server.server_addr();
+            let worker = std::thread::spawn(move || {
+                let request = server.recv().unwrap();
+                assert_eq!(request.url(), "/Library/Refresh");
+                assert_eq!(
+                    request
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("Authorization"))
+                        .unwrap()
+                        .value
+                        .as_str(),
+                    "MediaBrowser Token=\"secret-test-key\""
+                );
+                request.respond(tiny_http::Response::empty(status)).unwrap();
+            });
+            let hook = WebhookEntry::parse(0, &serde_json::json!({"url":format!("http://{address}/Library/Refresh"),"jellyfin_api_key":"secret-test-key"})).unwrap();
+            let result = super::test(&hook);
+            if status == 204 {
+                assert_eq!(result.unwrap(), 204);
+            } else {
+                assert!(result.unwrap_err().contains(&status.to_string()));
+            }
+            worker.join().unwrap();
+        }
+    }
     #[test]
     fn send_rich_delivers_the_rip_complete_payload_end_to_end() {
         use std::io::{Read as _, Write as _};
@@ -640,6 +708,7 @@ mod tests {
                 post_rip: false,
                 post_mux: false,
                 post_move: true,
+                jellyfin_api_key: String::new(),
             }],
             ..Default::default()
         };
@@ -741,6 +810,7 @@ mod tests {
             post_rip: true,
             post_mux: true,
             post_move: true,
+            jellyfin_api_key: String::new(),
         }
     }
 
@@ -784,18 +854,21 @@ mod tests {
                 post_rip: true,
                 post_mux: false,
                 post_move: false,
+                jellyfin_api_key: String::new(),
             },
             WebhookEntry {
                 url: "https://mux-only.example/hook".to_string(),
                 post_rip: false,
                 post_mux: true,
                 post_move: false,
+                jellyfin_api_key: String::new(),
             },
             WebhookEntry {
                 url: "https://move-only.example/hook".to_string(),
                 post_rip: false,
                 post_mux: false,
                 post_move: true,
+                jellyfin_api_key: String::new(),
             },
             both("https://all.example/hook"),
         ];
@@ -833,6 +906,7 @@ mod tests {
             post_rip: false,
             post_mux: false,
             post_move: false,
+            jellyfin_api_key: String::new(),
         }];
         assert!(active_urls(&entries, WebhookEvent::Rip).is_empty());
         assert!(active_urls(&entries, WebhookEvent::Mux).is_empty());

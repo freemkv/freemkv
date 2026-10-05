@@ -449,3 +449,12 @@ table.det.raw td:last-child { overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
+
+/* Optional webhook authentication stays beneath its destination and events. */
+.hook-entry { margin-bottom: .75rem; }
+.hook-auth { margin-top: .35rem; }
+.hook-auth summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
+.hook-auth-fields { display: flex; flex-wrap: wrap; align-items: end; gap: .65rem; margin-top: .6rem; }
+.hook-auth-fields label { display: grid; gap: .3rem; font-size: .85rem; flex: 1 1 12rem; }
+.hook-auth-fields [hidden] { display: none; }
+.hook-auth-fields .txt { width: 100%; min-width: 0; }

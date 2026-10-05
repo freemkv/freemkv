@@ -35,9 +35,21 @@ function ctlHtml(f, v) {
 function hookRow(h) {
   h = typeof h === 'string' ? { url: h, post_rip: true, post_mux: true, post_move: true } : (h || { url: '', post_rip: true, post_mux: true, post_move: true });
   const cb = (k, label) => '<label><input type="checkbox" data-flag="' + k + '"' + (h[k] !== false ? ' checked' : '') + '> ' + label + '</label>';
-  return '<div class="hook"><input class="txt" type="text" data-hook placeholder="https://discord.com/api/webhooks/…" value="' + esc(h.url || '') + '" aria-label="Webhook URL">'
+  return '<div class="hook-entry"><div class="hook"><input class="txt" type="text" data-hook placeholder="https://discord.com/api/webhooks/…" value="' + esc(h.url || '') + '" aria-label="Webhook URL">'
     + '<span class="flags">' + cb('post_rip', 'Rip') + cb('post_mux', 'Mux') + cb('post_move', 'Move') + '</span>'
-    + '<button type="button" class="x" data-rmhook aria-label="Remove this webhook">×</button></div>';
+    + '<button type="button" class="x" data-rmhook aria-label="Remove this webhook">×</button></div>'
+    + '<details class="hook-auth"' + (h.jellyfin_api_key ? ' open' : '') + '><summary>Authentication &amp; test</summary><div class="hook-auth-fields">'
+    + '<label>Authentication <select class="txt" data-hook-auth><option value="none">None</option><option value="jellyfin"' + (h.jellyfin_api_key ? ' selected' : '') + '>Jellyfin API key</option></select></label>'
+    + '<label data-hook-key-label' + (h.jellyfin_api_key ? '' : ' hidden') + '>API key <input class="txt" type="password" autocomplete="new-password" data-hook-key' + (h.jellyfin_api_key ? ' required' : '') + ' value="' + esc(h.jellyfin_api_key || '') + '"></label>'
+    + '<button type="button" class="btn btn-secondary btn-sm" data-testhook>Test</button><span class="small muted" data-hook-status role="status"></span></div>'
+    + '<p class="small muted">Test sends a request to this URL using the fields above, without saving.</p></details></div>';
+}
+
+function collectHook(row) {
+  const flag = k => row.querySelector('[data-flag="' + k + '"]').checked;
+  return { url: row.querySelector('[data-hook]').value.trim(),
+    post_rip: flag('post_rip'), post_mux: flag('post_mux'), post_move: flag('post_move'),
+    jellyfin_api_key: row.querySelector('[data-hook-auth]').value === 'jellyfin' ? row.querySelector('[data-hook-key]').value.trim() : '' };
 }
 
 function fieldHtml(f, v, sub) {
@@ -159,10 +171,7 @@ async function mount(view, ctx) {
       });
       const hooks = $('#hooks', form);
       if (hooks) {
-        out.webhook_urls = $$('.hook', hooks).map(row => {
-          const flag = (k) => row.querySelector('[data-flag="' + k + '"]').checked;
-          return { url: row.querySelector('[data-hook]').value.trim(), post_rip: flag('post_rip'), post_mux: flag('post_mux'), post_move: flag('post_move') };
-        }).filter(h => h.url);
+        out.webhook_urls = $$('.hook-entry', hooks).map(collectHook).filter(h => h.url);
       }
       return out;
     }
@@ -175,6 +184,7 @@ async function mount(view, ctx) {
       $('#revert', form).disabled = !d;
     }
     form.addEventListener('input', (e) => {
+      if (e.target.matches('[data-hook-auth]')) { const row = e.target.closest('.hook-entry'); row.querySelector('[data-hook-key-label]').hidden = e.target.value !== 'jellyfin'; row.querySelector('[data-hook-key]').required = e.target.value === 'jellyfin'; }
       if (e.target.matches('.seg input')) {
         const oh = form.querySelector('#oh-' + e.target.dataset.key);
         if (oh) oh.textContent = e.target.dataset.help || '';
@@ -187,11 +197,19 @@ async function mount(view, ctx) {
     form.addEventListener('click', async (e) => {
       if (e.target.closest('#addhook')) {
         $('#hooks', form).insertAdjacentHTML('beforeend', hookRow(null));
-        $('#hooks .hook:last-child [data-hook]', form).focus();
+        $('#hooks .hook-entry:last-child [data-hook]', form).focus();
         paintDirty();
       } else if (e.target.closest('[data-rmhook]')) {
-        e.target.closest('.hook').remove();
+        e.target.closest('.hook-entry').remove();
         paintDirty();
+      } else if (e.target.closest('[data-testhook]')) {
+        const b = e.target.closest('[data-testhook]'), row = b.closest('.hook-entry');
+        const status = row.querySelector('[data-hook-status]');
+        if (row.querySelector('[data-hook-auth]').value === 'jellyfin' && !row.querySelector('[data-hook-key]').value.trim()) { status.textContent = 'Enter the API key first.'; return; }
+        status.textContent = 'Testing…';
+        let failure = 'Test failed';
+        const r = await act(b, () => api('POST', '/api/webhook/test', collectHook(row)).catch(err => { failure = err.message; throw err; }), 'Webhook test');
+        status.textContent = r ? 'Success · HTTP ' + r.status : failure;
       } else if (e.target.closest('[data-endpoint]')) {
         const b = e.target.closest('[data-endpoint]');
         const st = b.parentElement.querySelector('[data-status]');
