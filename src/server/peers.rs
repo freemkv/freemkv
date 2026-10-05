@@ -1,4 +1,4 @@
-//! Explicit LAN Library connections. Only drive APIs may cross a connection;
+//! Explicit LAN Library connections. Only Drives-page APIs may cross a connection;
 //! state remains local, preventing recursive federation and duplicated jobs.
 use super::{config::Config, web};
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,29 @@ fn reply(request: Request, status: u16, value: serde_json::Value) {
 }
 fn allowed(method: &Method, target: &str) -> bool {
     let path = target.split('?').next().unwrap_or("");
-    if *method == Method::Get && matches!(path, "/api/state" | "/api/version") {
+    if *method == Method::Get
+        && matches!(
+            path,
+            "/api/state"
+                | "/api/version"
+                | "/api/system"
+                | "/api/review"
+                | "/api/tmdb/search"
+                | "/api/debug"
+        )
+    {
+        return true;
+    }
+    if *method == Method::Post
+        && matches!(
+            path,
+            "/api/review/resolve"
+                | "/api/mux-errors/clear"
+                | "/api/mux-errors/clear-all"
+                | "/api/move-errors/clear"
+                | "/api/move-errors/clear-all"
+        )
+    {
         return true;
     }
     let Some(rest) = path.strip_prefix("/api/") else {
@@ -237,7 +259,7 @@ pub fn handle(request: Request, cfg: &Arc<RwLock<Config>>) {
         return reply(
             request,
             403,
-            serde_json::json!({"error": "Only drive APIs can be forwarded"}),
+            serde_json::json!({"error": "Only Drives-page APIs can be forwarded"}),
         );
     }
     let peer = read(cfg)
@@ -324,6 +346,34 @@ mod tests {
             assert!(!allowed(&Method::Post, bad));
         }
         assert!(!allowed(&Method::Get, "/api/stop/sg3"));
+        for path in [
+            "/api/system",
+            "/api/review",
+            "/api/tmdb/search?q=Dune",
+            "/api/debug?device=sg0",
+        ] {
+            assert!(allowed(&Method::Get, path), "{path}");
+            assert!(!allowed(&Method::Post, path), "{path}");
+        }
+        for path in [
+            "/api/review/resolve",
+            "/api/mux-errors/clear?path=x",
+            "/api/mux-errors/clear-all",
+            "/api/move-errors/clear?path=x",
+            "/api/move-errors/clear-all",
+        ] {
+            assert!(allowed(&Method::Post, path), "{path}");
+            assert!(!allowed(&Method::Get, path), "{path}");
+        }
+        for path in [
+            "/api/peers/p123/api/system",
+            "/api/settings",
+            "/api/system/keyserver-test",
+            "/api/review/../settings",
+        ] {
+            assert!(!allowed(&Method::Get, path), "{path}");
+            assert!(!allowed(&Method::Post, path), "{path}");
+        }
     }
     // Two independent HTTP servers, without poll/rip workers or physical-drive access.
     struct Fixture {

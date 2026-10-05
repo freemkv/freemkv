@@ -85,6 +85,27 @@ sudo mv "${ASSET}" /usr/local/bin/freemkv
 freemkv --version
 ```
 
+### Native Library service
+
+A binary built with `--features server` can run Library directly on macOS,
+including access to USB optical drives. To install its login service from
+this checkout:
+
+```bash
+macos/install-library-service.sh /absolute/path/to/freemkv
+```
+
+The installer uses `~/Library/Application Support/freemkv-library` by default
+(`AUTORIP_DIR` and `PORT` can be set for a new installation). It preserves an
+existing service's environment and Library settings. Use `--no-start` to only
+write the configuration. An already-running service is never restarted by the
+installer; log out and back in after its jobs finish to apply an update.
+
+The LaunchAgent sets `ProcessType` to `Interactive` so macOS gives Library
+app-level resource limits. Leaving this unspecified can throttle SMB moves:
+a same-file, same-destination test measured about 11 MiB/s with the default
+service policy versus 46 MiB/s with the app policy. Copy chunk size was unchanged.
+
 ## Windows
 
 Use the `aarch64` assets on Windows on ARM (Snapdragon, Surface Pro X) and the

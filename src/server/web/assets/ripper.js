@@ -9,6 +9,24 @@ import { esc, escLinks, $, put, fill, api, act, toast, twoStep, terminal, modal,
 import { subscribe } from './bus.js';
 
 const ACTIVE = ['ripping', 'scanning', 'detecting'];
+const ownerUrl = (owner, path) => owner ? '/api/peers/' + owner + path : path;
+const deviceOwner = dev => /^(p[0-9a-f]+):/.exec(dev)?.[1] || '';
+const ownDevice = dev => deviceOwner(dev) ? dev.slice(dev.indexOf(':') + 1) : dev;
+
+// Keep successful snapshots through brief network gaps; explicit disconnection
+// removes the owner immediately. Each Library has an independent grace timer.
+export function reconcilePeers(results, health, now = Date.now()) {
+  for (const id of health.keys()) if (!results.some(r => r.peer.id === id)) health.delete(id);
+  return results.map(r => {
+    const previous = health.get(r.peer.id);
+    if (!r.error) { health.set(r.peer.id, { value: r, failedSince: null }); return r; }
+    const failedSince = previous?.failedSince ?? now;
+    health.set(r.peer.id, { value: previous?.value, failedSince });
+    const offline = now - failedSince >= 15000;
+    return { ...(previous?.value || { snapshot: {}, sys: {}, reviews: [] }), peer: r.peer,
+      error: offline ? r.error : null, reconnecting: true, offline };
+  });
+}
 
 // ── Formatting, as autorip showed it ──────────────────────────────────────
 
@@ -290,9 +308,9 @@ function moveHtml(state, sys) {
   return h + errorRows(sys.move_errors, 'move');
 }
 function reviewHtml(items) {
-  return items.map((it, i) => '<div class="pipe-row"><span class="dot dot-teal"></span><div class="grow"><div class="name">' + esc(it.title || it.dir) + (it.year ? ' (' + it.year + ')' : '') + '</div>'
+  return items.map(it => '<div class="pipe-row"><span class="dot dot-teal"></span><div class="grow"><div class="name">' + esc(it.title || it.dir) + (it.year ? ' (' + it.year + ')' : '') + '</div>'
     + '<div class="sub">' + esc(it.reason || '') + '</div><div class="sub mono">' + esc(it.file || '') + '</div></div>'
-    + '<button class="btn btn-secondary btn-sm" data-review="' + i + '">Review…</button></div>').join('');
+    + '<button class="btn btn-secondary btn-sm" data-review="' + esc(it.dir) + '">Review…</button></div>').join('');
 }
 
 // ── Dialogs ────────────────────────────────────────────────────────────────
@@ -307,7 +325,7 @@ function parseName(raw, fallbackYear) {
 }
 
 /** Search TMDB or type a name. `onPick({title, year, ...})` files it. */
-function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra }) {
+function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, owner = '' }) {
   const m = modal({
     title: esc(heading), wide: true,
     body: (sub ? '<p class="small muted" style="margin:0 0 .9rem">' + sub + '</p>' : '')
@@ -323,7 +341,7 @@ function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra })
     const q = qi.value.trim();
     if (!q) { toast('Type something to search for', 'info'); return; }
     res.innerHTML = '<div class="muted small">Searching…</div>';
-    const cs = await act(btn, () => api('GET', '/api/tmdb/search?q=' + encodeURIComponent(q)), 'TMDB search');
+    const cs = await act(btn, () => api('GET', ownerUrl(owner, '/api/tmdb/search?q=' + encodeURIComponent(q))), 'TMDB search');
     if (!cs) { res.innerHTML = '<div class="muted small">Search failed.</div>'; return; }
     found = cs;
     res.innerHTML = cs.length ? cs.map((c, i) => '<div class="pipe-row">' + (c.poster_url ? '<img src="' + esc(c.poster_url) + '" alt="" style="width:40px;height:60px;object-fit:cover;border-radius:6px">' : '')
@@ -349,7 +367,8 @@ function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra })
 
 function changeTitle(dev, s) {
   titlePicker({
-    heading: 'Title for the disc in ' + dev,
+    heading: 'Title for the disc in ' + (s._owner ? s._owner + ' · ' : '') + ownDevice(dev),
+    owner: deviceOwner(dev),
     initial: s.tmdb_title || s.disc_name,
     sub: 'Fix the name before ripping. Pick a TMDB match or type a name; "(YYYY)" at the end is the year. It applies to this rip only.',
     onPick: async (c, btn) => {
@@ -361,8 +380,9 @@ function changeTitle(dev, s) {
   });
 }
 
-function reviewDialog(it, reload) {
+function reviewDialog(it, reload, owner = '') {
   titlePicker({
+    owner,
     heading: 'Which title is this? ' + (it.title || it.dir) + (it.year ? ' (' + it.year + ')' : ''),
     initial: it.title || '',
     sub: esc(it.reason || '') + (it.file ? '<br><span class="mono">' + esc(it.file) + '</span>' : ''),
@@ -376,7 +396,7 @@ function reviewDialog(it, reload) {
     },
   });
   async function resolve(btn, body) {
-    const r = await act(btn, () => api('POST', '/api/review/resolve', { dir: it.dir, ...body }), 'Resolve');
+    const r = await act(btn, () => api('POST', ownerUrl(owner, '/api/review/resolve'), { dir: it.dir, ...body }), 'Resolve');
     if (r === undefined) return false;
     toast(body.action === 'cancel' ? 'Discarded' : body.action === 'proceed' ? 'Filing as-is' : 'Filing as ' + body.title, 'ok');
     reload();
@@ -404,8 +424,8 @@ function parseDebugLine(line) {
 
 /** A terminal on one drive's log, with its live rip status. `dev` may be
     "system" for the daemon's own log. */
-export function openDeviceTerminal(dev, debugOn) {
-  const tools = debugOn && dev !== 'system' ? '<button class="tb" data-mode="log">Log</button><button class="tb" data-mode="debug">Debug</button>' : '';
+export function openDeviceTerminal(dev, debugOn, snapshot) {
+  const tools = debugOn && ownDevice(dev) !== 'system' ? '<button class="tb" data-mode="log">Log</button><button class="tb" data-mode="debug">Debug</button>' : '';
   const t = terminal({ title: 'freemkv — ' + (dev === 'system' ? 'system log' : dev), tools });
   // Log mode follows the ring by sequence number (`since=`), so it keeps
   // up after the server's 500-line ring wraps. Debug mode re-reads its
@@ -420,8 +440,8 @@ export function openDeviceTerminal(dev, debugOn) {
     if (closed) return;
     try {
       if (mode === 'debug') {
-        const text = await api('GET', '/api/debug?device=' + encodeURIComponent(dev) + '&n=1000');
-        const raw = String(text || '').split('\n').filter(Boolean);
+        const text = await api('GET', ownerUrl(deviceOwner(dev), '/api/debug?device=' + encodeURIComponent(ownDevice(dev)) + '&n=1000'));
+        const raw = (typeof text === 'string' ? text : JSON.stringify(text || '')).split('\n').filter(Boolean);
         let from = 0;
         if (lastDebug != null) {
           const at = raw.lastIndexOf(lastDebug);
@@ -439,15 +459,18 @@ export function openDeviceTerminal(dev, debugOn) {
     } catch (e) {
       t.idle('could not load the log: ' + e.message);
     }
+    if (snapshot) paintStatus(snapshot());
     timer = setTimeout(poll, 2000);
   }
-  const off = subscribe('state', (state) => {
+  const paintStatus = (state) => {
     const s = state[dev];
+    if (s?._offline) { t.status('Offline · last known state', 0); return; }
     if (!s || s.status !== 'ripping') { t.status(s ? '<b>' + esc(stateLabel(s)) + '</b>' + (s.tmdb_title || s.disc_name ? ' · ' + esc(s.tmdb_title || s.disc_name) : '') : null, 0); return; }
     const pct = typeof s.pass_progress_pct === 'number' ? s.pass_progress_pct : s.progress_pct;
     t.status('<b>' + esc(s.tmdb_title || s.disc_name) + '</b> · ' + esc(passLabel(s) || 'ripping') + ' · <b>' + pct + '%</b>'
       + (s.speed_mbs != null ? ' · ' + fmtSpeed(s.speed_mbs) : '') + (s.pass_eta ? ' · ETA ' + esc(s.pass_eta) : ''), pct);
-  });
+  };
+  const off = snapshot ? () => {} : subscribe('state', paintStatus);
   t.onClose(() => { closed = true; clearTimeout(timer); off(); });
   poll();
   return t;
@@ -465,18 +488,22 @@ export default {
       </div>
       <div id="peer-status" aria-live="polite"></div><div class="drives" id="drives"></div>
       <h2 style="margin:2.25rem 0 1rem;font-size:1.15rem;letter-spacing:-.01em">After the rip</h2>
+      <h3 id="local-pipeline-owner" class="small muted" hidden>This Library</h3>
       <div class="grid grid-2">
         <section class="card"><div class="card-head"><h2>Making video files</h2></div><div id="mux"></div></section>
         <section class="card"><div class="card-head"><h2>Moving to your library</h2></div><div id="move"></div></section>
       </div>
       <section class="card" id="review-card" style="margin-top:1.25rem" hidden><div class="card-head"><h2>Waiting for a title <span class="count" id="review-n"></span></h2></div>
-        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips are done, but the movie's name wasn't certain. Pick the right one to file them.</p><div id="review"></div></section></div>`;
+        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips are done, but the movie's name wasn't certain. Pick the right one to file them.</p><div id="review"></div></section><div id="remote-pipelines"></div></div>`;
     const root = $('#rp', view);
     const cards = new Map();
     let state = {};
     let localState = {};
     let remoteState = {};
     let peers = [];
+    let remoteLibraries = [];
+    const pipelines = new Map();
+    const peerHealth = new Map();
     let polling = false;
     let sys = {};
     let reviews = [];
@@ -499,37 +526,67 @@ export default {
         if (!el) { el = makeCard(dev); cards.set(dev, el); }
         if (drivesEl.children[i] !== el) drivesEl.insertBefore(el, drivesEl.children[i] || null);
         paintCard(el, dev, state[dev]);
+        if (state[dev]._offline) {
+          put($('.state', el), 'Offline · last known state');
+          $('.dot', el).className = 'dot dot-warn';
+          el.classList.remove('active');
+        }
+        el.querySelectorAll('button').forEach(b => { b.disabled = !!state[dev]._offline || b.classList.contains('busy'); });
         $('.dev', el).textContent = state[dev]._owner ? state[dev]._owner + ' · ' + dev.slice(dev.indexOf(':') + 1) : 'This Library · ' + dev;
       });
       put($('#mux', view), muxHtml(state, sys));
       put($('#move', view), moveHtml(state, sys));
+      $('#local-pipeline-owner', view).hidden = !peers.length;
+      const remoteEl = $('#remote-pipelines', view);
+      for (const [id, el] of pipelines) if (!remoteLibraries.some(r => r.peer.id === id)) { el.remove(); pipelines.delete(id); }
+      for (const r of remoteLibraries) {
+        let el = pipelines.get(r.peer.id);
+        if (!el) { el = document.createElement('section'); el.dataset.peer = r.peer.id; pipelines.set(r.peer.id, el); remoteEl.append(el); }
+        // Preserve an armed destructive-action confirmation across polling.
+        if (el.querySelector('.confirm') && !r.error) continue;
+        put(el, '<div class="page-head" style="margin:1.5rem 0 .75rem"><h3 class="small muted" style="margin:0">' + esc(r.peer.name) + '</h3><button class="btn btn-ghost btn-sm" data-system-log>System log</button></div>'
+          + (r.error ? '<div class="banner bad">Offline — showing last known state</div>' : '') + (
+            (r.detailError ? '<div class="banner bad">Some Library details could not be loaded: ' + esc(r.detailError) + '</div>' : '')
+            + '<div class="grid grid-2"><section class="card"><div class="card-head"><h2>Making video files</h2></div>' + muxHtml(r.snapshot, r.sys) + '</section>'
+            + '<section class="card"><div class="card-head"><h2>Moving to your library</h2></div>' + moveHtml(r.snapshot, r.sys) + '</section></div>'
+            + (r.reviews.length ? '<section class="card" style="margin-top:1.25rem"><div class="card-head"><h2>Waiting for a title <span class="count">(' + r.reviews.length + ')</span></h2></div>' + reviewHtml(r.reviews) + '</section>' : '')));
+        el.querySelectorAll('button').forEach(b => { b.disabled = !!r.offline || b.classList.contains('busy'); });
+      }
     };
     ctx.onState(render);
     const loadPeers = async () => {
       if (polling || ctx.stale()) return;
       polling = true;
       try {
-        peers = await api('GET', '/api/peers');
+        try { peers = await api('GET', '/api/peers'); } catch (e) { if (!peers.length) throw e; }
         const results = await Promise.all(peers.map(async peer => {
           try {
-            const snapshot = await api('GET', '/api/peers/' + peer.id + '/api/state');
+            const [drive, system, review] = await Promise.allSettled(['/api/state', '/api/system', '/api/review'].map(path => api('GET', ownerUrl(peer.id, path))));
+            if (drive.status === 'rejected') throw drive.reason;
+            const snapshot = drive.value;
             if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('Invalid drive state');
-            return { peer, snapshot };
+            return { peer, snapshot, sys: system.status === 'fulfilled' ? system.value || {} : {},
+              reviews: review.status === 'fulfilled' && Array.isArray(review.value) ? review.value : [],
+              detailError: [system, review].filter(r => r.status === 'rejected').map(r => r.reason.message).join('; ') };
           } catch (e) { return { peer, error: e.message }; }
         }));
         if (ctx.stale()) return;
         remoteState = {};
+        remoteLibraries = reconcilePeers(results, peerHealth);
         const notices = [];
-        for (const { peer, snapshot, error } of results) {
-          if (error) { notices.push('<div class="banner bad">' + esc(peer.name) + ': offline — reconnecting automatically</div>'); continue; }
+        for (const { peer, snapshot, error, offline, reconnecting } of remoteLibraries) {
+          if (error) notices.push('<div class="banner bad">' + esc(peer.name) + ': offline — showing last known state; reconnecting automatically</div>');
           const devices = Object.entries(snapshot).filter(([dev, s]) => /^(?:ioreg:)?[a-zA-Z0-9]+$/.test(dev) && s && typeof s === 'object');
-          if (!devices.length) notices.push('<p class="small muted">' + esc(peer.name) + ': connected · no drives</p>');
-          for (const [dev, s] of devices) remoteState[peer.id + ':' + dev] = { ...s, _owner: peer.name };
+          if (!devices.length && !reconnecting) notices.push('<p class="small muted">' + esc(peer.name) + ': connected · no drives</p>');
+          for (const [dev, s] of devices) remoteState[peer.id + ':' + dev] = { ...s, _owner: peer.name, _offline: !!offline };
         }
         put($('#peer-status', view), notices.join(''));
         render(localState);
       } catch (e) {
-        if (!ctx.stale()) put($('#peer-status', view), '<div class="banner bad">Could not load connected Libraries: ' + esc(e.message) + '</div>');
+        if (!ctx.stale()) {
+          remoteState = {}; remoteLibraries = []; render(localState);
+          put($('#peer-status', view), '<div class="banner bad">Could not load connected Libraries: ' + esc(e.message) + '</div>');
+        }
       } finally { polling = false; }
     };
     loadPeers();
@@ -558,7 +615,7 @@ export default {
       const card = e.target.closest('.drive');
       if (!card) return;
       const dev = card.dataset.dev;
-      if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !/^p[0-9a-f]+:/.test(dev) && !!sys.debug_enabled); return; }
+      if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !!(deviceOwner(dev) ? remoteLibraries.find(r => r.peer.id === deviceOwner(dev))?.sys?.debug_enabled : sys.debug_enabled), deviceOwner(dev) ? () => state : undefined); return; }
       if (e.target.closest('[data-title]')) { changeTitle(dev, state[dev] || {}); return; }
       const b = e.target.closest('button[data-url]');
       if (!b) return;
@@ -566,30 +623,38 @@ export default {
       if (b.dataset.two != null) twoStep(b, go); else go(b);
     });
     root.addEventListener('click', async (e) => {
+      const owner = e.target.closest('[data-peer]')?.dataset.peer || '';
+      const ownedUrl = path => ownerUrl(owner, path);
+      const reload = () => owner ? loadPeers() : loadSys();
+      if (e.target.closest('[data-system-log]')) { openDeviceTerminal(owner + ':system', false, () => ({})); return; }
       const c = e.target.closest('[data-clear]');
       if (c) {
         const kind = c.dataset.clear;
-        if (await act(c, () => api('POST', '/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path)), 'Clear') !== undefined) {
+        if (await act(c, () => api('POST', ownedUrl('/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path))), 'Clear') !== undefined) {
           toast('Cleared. It comes back if the problem is still there.', 'info');
         }
-        loadSys();
+        reload();
         return;
       }
       const ca = e.target.closest('[data-clearall]');
       if (ca) {
-        if (await act(ca, () => api('POST', '/api/' + ca.dataset.clearall + '-errors/clear-all'), 'Clear all') !== undefined) {
+        if (await act(ca, () => api('POST', ownedUrl('/api/' + ca.dataset.clearall + '-errors/clear-all')), 'Clear all') !== undefined) {
           toast('Cleared all', 'info');
         }
-        loadSys();
+        reload();
         return;
       }
       if (e.target.closest('[data-refresh]')) {
-        const ok = await api('GET', '/api/system').then(d => { sys = d; render(localState); return true; }).catch(err => { toast('Recheck failed: ' + err.message, 'bad'); return false; });
+        const ok = await api('GET', ownedUrl('/api/system')).then(d => { if (owner) { const r = remoteLibraries.find(r => r.peer.id === owner); if (r) r.sys = d; } else sys = d; render(localState); return true; }).catch(err => { toast('Recheck failed: ' + err.message, 'bad'); return false; });
         if (ok) toast('Rechecked', 'info');
         return;
       }
       const rv = e.target.closest('[data-review]');
-      if (rv) reviewDialog(reviews[+rv.dataset.review], loadReview);
+      if (rv) {
+        const items = owner ? remoteLibraries.find(r => r.peer.id === owner)?.reviews || [] : reviews;
+        const item = items.find(it => it.dir === rv.dataset.review);
+        if (item) reviewDialog(item, owner ? loadPeers : loadReview, owner);
+      }
     });
   },
 };
