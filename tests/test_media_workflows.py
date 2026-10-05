@@ -100,6 +100,11 @@ def idle(workflow):
             for s in ('queued', 'in_progress', 'requested', 'waiting', 'pending')}
 
 
+# Every workflow that builds a shipped freemkv target; preflight requires each on the qa sha.
+FREEMKV_BUILDS = ('CI', 'Release', 'Debian package', 'AppImage', 'Flatpak', 'Snap', 'Windows app',
+                  'RPM package', 'Arch Linux package')
+
+
 def green_runs(branch, names=('CI', 'qa')):
     return [{'name': n, 'head_branch': branch, 'status': 'completed', 'conclusion': 'success',
              'created_at': '2026-09-01T00:00:00Z'} for n in names]
@@ -223,7 +228,8 @@ class ReleasePreflightTests(GhHarness):
         for r in REPOS:
             for branch in ('qa', 'main', 'dev'):
                 routes[f'repos/freemkv/{r}/git/ref/heads/{branch}'] = {'object': {'sha': qa}}
-            routes[f'repos/freemkv/{r}/actions/runs?head_sha={qa}&per_page=100'] = {'workflow_runs': green_runs('qa')}
+            names = ('qa',) + FREEMKV_BUILDS if r == 'freemkv' else ('CI', 'qa')
+            routes[f'repos/freemkv/{r}/actions/runs?head_sha={qa}&per_page=100'] = {'workflow_runs': green_runs('qa', names)}
         return routes
 
     def preflight(self, routes, prerelease='false'):
@@ -233,6 +239,15 @@ class ReleasePreflightTests(GhHarness):
     def test_green_and_coherent_set_passes(self):
         result, _ = self.preflight(self.routes())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_build_workflow_that_never_ran_is_refused(self):
+        routes = self.routes()
+        names = ('qa',) + tuple(n for n in FREEMKV_BUILDS if n != 'Release')
+        routes[f"repos/freemkv/freemkv/actions/runs?head_sha={'a' * 40}&per_page=100"] = {
+            'workflow_runs': green_runs('qa', names)}
+        result, _ = self.preflight(routes)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('freemkv: qa aaaaaaa has no run of: Release', result.stdout)
 
     def test_dev_ahead_of_qa_is_refused_before_any_tag(self):
         routes = self.routes()
@@ -296,11 +311,11 @@ class ReleasePreflightTests(GhHarness):
         key = f"repos/freemkv/freemkv/actions/runs?head_sha={'a' * 40}&per_page=100"
         old = {'name': 'deb', 'head_branch': 'qa', 'status': 'completed', 'created_at': '2026-09-01T00:00:00Z'}
         new = dict(old, created_at='2026-09-02T00:00:00Z')
-        routes[key] = {'workflow_runs': green_runs('qa') + [dict(new, conclusion='success'),
+        routes[key] = {'workflow_runs': green_runs('qa', ('qa',) + FREEMKV_BUILDS) + [dict(new, conclusion='success'),
                                                             dict(old, conclusion='failure')]}
         result, _ = self.preflight(routes)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        routes[key] = {'workflow_runs': green_runs('qa') + [dict(new, conclusion='cancelled'),
+        routes[key] = {'workflow_runs': green_runs('qa', ('qa',) + FREEMKV_BUILDS) + [dict(new, conclusion='cancelled'),
                                                             dict(old, conclusion='success')]}
         result, _ = self.preflight(routes)
         self.assertNotEqual(result.returncode, 0)

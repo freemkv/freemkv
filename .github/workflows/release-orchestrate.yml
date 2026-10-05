@@ -49,17 +49,18 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # Generous: the qa-green gate, 9 checkouts, toolchain, the 8-repo tag cascade
-    # AND verify_release_assets (which waits up to 30m for platform builds). Too
-    # low and the job is killed mid-cascade, after tags are already public.
-    timeout-minutes: 180
+    # Generous: the qa-green gate, 9 checkouts, toolchain, the 8-repo tag cascade,
+    # verify_release_assets (up to 60m for platform builds) AND verify_channels
+    # (up to 60m for the stores and repos). Too low and the job is killed after
+    # tags are already public.
+    timeout-minutes: 300
     steps:
       - name: Preflight — qa green on all eight, main coherent, media evidence
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           SKIP_MEDIA: ${{ inputs.skip_media }}
           PRERELEASE: ${{ inputs.prerelease }}
-          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release)$|^[a-z_]+ in /\. - Update #[0-9]+$'
+          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate)$|^[a-z_]+ in /\. - Update #[0-9]+$'
         run: |
           set -uo pipefail
           if [ "$SKIP_MEDIA" = true ]; then
@@ -100,6 +101,16 @@ jobs:
               || { echo "::error::$r: qa still running for ${sha:0:7}"; fail=1; continue; }
             bad=$(echo "$gating" | jq -r '[.[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]|unique|join(", ")')
             [ -z "$bad" ] || { echo "::error::$r: qa ${sha:0:7} not green ($bad)"; fail=1; continue; }
+            # A build workflow that never ran is as bad as one that failed: every
+            # target freemkv ships must have built green on this exact qa sha.
+            if [ "$r" = freemkv ]; then
+              absent=""
+              for w in CI Release "Debian package" AppImage Flatpak Snap "Windows app" \
+                       "RPM package" "Arch Linux package"; do
+                echo "$gating" | jq -e --arg w "$w" 'any(.[]; .name == $w)' >/dev/null || absent="${absent:+$absent, }$w"
+              done
+              [ -z "$absent" ] || { echo "::error::$r: qa ${sha:0:7} has no run of: $absent"; fail=1; continue; }
+            fi
 
             # main COHERENCE (F1): main must be an ANCESTOR of the qa sha we are
             # about to tag, so qa→main is a clean push. If main carries commits qa
@@ -1774,6 +1785,20 @@ jobs:
             )
             # Each asset ships with a .sha256.
             freemkv_expected+=("${freemkv_expected[@]/%/.sha256}")
+            # rpm.yml and arch.yml repackage every .deb above (amd64/arm64/armhf ->
+            # x86_64/aarch64/armv7hl for rpm, armv7h for pacman); tests/release_assets.rs
+            # keeps this list equal to the .debs.
+            local freemkv_repackaged=(
+              freemkv-x86_64.rpm freemkv-aarch64.rpm
+              freemkv-cli-x86_64.rpm freemkv-cli-aarch64.rpm freemkv-cli-armv7hl.rpm
+              freemkv-x86_64.pkg.tar.zst freemkv-aarch64.pkg.tar.zst
+              freemkv-cli-x86_64.pkg.tar.zst freemkv-cli-aarch64.pkg.tar.zst freemkv-cli-armv7h.pkg.tar.zst
+            )
+            freemkv_expected+=("${freemkv_repackaged[@]}" "${freemkv_repackaged[@]/%/.sha256}")
+            # pacman checks each package against its detached signature.
+            for n in "${freemkv_repackaged[@]}"; do
+              case "$n" in *.pkg.tar.zst) freemkv_expected+=("$n.sig") ;; esac
+            done
 
             # How long to wait for a release's assets to appear. The release workflow
             # builds them after the tag lands, so an empty list right after tagging is
@@ -1781,7 +1806,7 @@ jobs:
             # `continue`, which skipped every expected asset for that repo, left `missing`
             # at zero, and printed "every download-page asset is attached" for a release
             # that had NONE. A gate that passes hardest when there is least to check.
-            local wait_secs="${RELEASE_ASSET_WAIT_SECS:-1800}"
+            local wait_secs="${RELEASE_ASSET_WAIT_SECS:-3600}"
             local poll_secs=30
 
             local missing=0 repo names want checked=0
@@ -1864,6 +1889,20 @@ jobs:
               ok "every download-page asset is attached to v$VERSION"
             fi
             return 0
+          }
+
+          # Step 6b: every install channel serves this version (GHCR images for
+          # every arch under both names, Homebrew, Snap Store, freemkv.org APT,
+          # RPM and pacman). Polls up to an hour: the repos refresh after their
+          # packages land and the Snap Store publishes after its own build.
+          verify_channels() {
+            say "step 6b: verify every install channel serves v$VERSION"
+            if $DRY_RUN; then
+              printf '  [dry-run] verify-channels.py %s --wait %s\n' "$VERSION" "${CHANNEL_WAIT_SECS:-3600}"
+              return 0
+            fi
+            python3 "$CANONICAL_ROOT/freemkv/.github/scripts/verify-channels.py" "$VERSION" \
+              --wait "${CHANNEL_WAIT_SECS:-3600}"
           }
 
           # ───────────────────────────────── main ──────────────────────────────────
@@ -1950,6 +1989,10 @@ jobs:
           else
           verify_release_assets || {
             err "release v$VERSION is TAGGED and PUBLISHED but incomplete — fix the assets above before announcing it"
+            exit 1
+          }
+          verify_channels || {
+            err "release v$VERSION is TAGGED and its assets are attached, but the channels above do not serve it — fix them before announcing it"
             exit 1
           }
 

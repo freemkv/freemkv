@@ -9,6 +9,11 @@ on:
       # which would have this workflow build and PUBLISH a GitHub release for
       # every candidate, including the red ones.
       - '!v*-rc*'
+    # Rehearsal: every push to qa builds every leg below that no other qa
+    # workflow already builds (the macOS app, all seven CLI binaries) and
+    # publishes nothing. release-orchestrate gates on this run, so a target
+    # that cannot build stops the release before any tag is public.
+    branches: [qa]
   # Backfill: build ONLY the targets added after a release (the legs marked
   # `backfill`, plus the multi-arch server image) from that tag's source, with
   # this workflow's packaging, and add them to its existing GitHub release. The
@@ -33,9 +38,16 @@ on:
 permissions:
   contents: read
 
+# A newer qa push supersedes a rehearsal; a tag build is never cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,9 +63,23 @@ jobs:
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::'$TAG' is not a release tag"; exit 1; }
           gh release view "$TAG" --json tagName,isDraft --jq '"\(.tagName) draft=\(.isDraft)"'
-      - name: Verify Cargo.toml version matches tag
+      # The version every leg checks its binary against: the tag, or for a qa
+      # rehearsal the version qa would be released as.
+      - name: Release version
+        id: tag
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = branch ]; then
+            TAG="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release version: $TAG"
+      - name: Verify Cargo.toml version matches tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           CARGO_VER="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
           if [ "$CARGO_VER" != "$TAG" ]; then
@@ -65,7 +91,7 @@ jobs:
       # A stale Info.plist ships a build that lies about which release it is.
       - name: Verify Info.plist version matches tag
         env:
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           PLIST_VER="v$(sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p' macos/Info.plist)"
           if [ "$PLIST_VER" != "$TAG" ]; then
@@ -80,6 +106,8 @@ jobs:
   # same manifest list.
   server-image:
     needs: verify
+    # On qa, qa.yml's rc-image builds the same multi-arch image.
+    if: github.ref_type != 'branch'
     permissions:
       contents: read
       packages: write
@@ -95,7 +123,7 @@ jobs:
   # tag decision was already gated by CI (ci.yml on dev, then a green qa.yml) on the same exact Rust.
   test:
     needs: verify
-    if: github.event_name == 'push'
+    if: github.ref_type == 'tag'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,6 +141,7 @@ jobs:
     # NOTE: deliberately does NOT `needs: test` — see the test job above.
     needs: verify
     # Already shipped for every macOS arch; a backfill never rebuilds it.
+    # A qa push rehearses it (built, bundled and verified, not uploaded).
     if: github.event_name == 'push'
     # Uploads assets to the GitHub release.
     permissions:
@@ -132,6 +161,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # qa rehearsal: build against the sibling crates' qa branches, as deb.yml
+      # does (the tag's pinned git deps exist only after the release tags them).
+      - name: Pin sibling sources (qa rehearsal)
+        if: github.ref_type == 'branch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
+            git clone --depth 1 --branch qa "https://github.com/freemkv/$repo.git" "siblings/$repo"
+          done
+          # Windows runners have `python`, not always `python3`.
+          py=$(command -v python3 || command -v python)
+          "$py" - <<'PY'
+          import importlib.util, pathlib, tomllib
+          spec = importlib.util.spec_from_file_location('flatpak_prepare', 'packaging/flatpak/prepare.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
+          for repo in module.REPOS[1:]:
+              actual = tomllib.loads(pathlib.Path('siblings', repo, 'Cargo.toml').read_text())['package']['version']
+              if actual != version:
+                  raise SystemExit(f'{repo} qa is {actual}, freemkv qa is {version}')
+          config = pathlib.Path('.cargo/config.toml')
+          config.parent.mkdir(exist_ok=True)
+          config.write_text(module.patches().replace('"../', '"siblings/'))
+          PY
       - name: Exact toolchain (rust-version)
         shell: bash
         run: bash .github/scripts/exact-toolchain.sh install Cargo.toml "${{ matrix.target }}"
@@ -142,7 +197,7 @@ jobs:
       - name: Clean build environment and C toolchain
         run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }} --features gui --bin freemkv
+        run: cargo build ${{ github.ref_type == 'tag' && '--locked' || '' }} --release --target ${{ matrix.target }} --features gui --bin freemkv
 
       # ── Developer ID signing ──────────────────────────────────────────────
       #
@@ -152,6 +207,7 @@ jobs:
       # nobody but this repo could build the app at all.
       - name: Import the Developer ID certificate
         id: signing
+        if: github.ref_type == 'tag'
         uses: ./.github/actions/import-developer-id
         with:
           certificate-p12: ${{ secrets.MACOS_CERT_P12 }}
@@ -259,6 +315,7 @@ jobs:
           rm -rf "$X"
 
       - name: Upload
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
@@ -272,6 +329,8 @@ jobs:
   build-windows:
     # Same rationale as `build`: does NOT `needs: test` (parallel tripwire).
     needs: verify
+    # windows-app.yml runs on every qa push itself.
+    if: github.ref_type != 'branch'
     permissions:
       contents: write
     uses: ./.github/workflows/windows-app.yml
@@ -329,6 +388,32 @@ jobs:
         env:
           SHA: ${{ github.sha }}
         run: git checkout "$SHA" -- .github/scripts/
+      # qa rehearsal: build against the sibling crates' qa branches, as deb.yml
+      # does (the tag's pinned git deps exist only after the release tags them).
+      - name: Pin sibling sources (qa rehearsal)
+        if: github.ref_type == 'branch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
+            git clone --depth 1 --branch qa "https://github.com/freemkv/$repo.git" "siblings/$repo"
+          done
+          # Windows runners have `python`, not always `python3`.
+          py=$(command -v python3 || command -v python)
+          "$py" - <<'PY'
+          import importlib.util, pathlib, tomllib
+          spec = importlib.util.spec_from_file_location('flatpak_prepare', 'packaging/flatpak/prepare.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
+          for repo in module.REPOS[1:]:
+              actual = tomllib.loads(pathlib.Path('siblings', repo, 'Cargo.toml').read_text())['package']['version']
+              if actual != version:
+                  raise SystemExit(f'{repo} qa is {actual}, freemkv qa is {version}')
+          config = pathlib.Path('.cargo/config.toml')
+          config.parent.mkdir(exist_ok=True)
+          config.write_text(module.patches().replace('"../', '"siblings/'))
+          PY
       # As windows-app.yml: the windows-11-arm image may lack rustup and keep
       # clang (which ring needs on ARM64) off PATH. rustup-init pinned + hash-checked.
       - name: rustup and clang on PATH (Windows ARM64)
@@ -380,10 +465,10 @@ jobs:
         run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
       - name: Build CLI
         if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'armv7-unknown-linux-musleabihf'
-        run: cargo build --locked --release --target ${{ matrix.target }} --bin freemkv
+        run: cargo build ${{ github.ref_type == 'tag' && '--locked' || '' }} --release --target ${{ matrix.target }} --bin freemkv
       - name: Build CLI (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'armv7-unknown-linux-musleabihf'
-        run: cross build --locked --release --target ${{ matrix.target }} --bin freemkv
+        run: cross build ${{ github.ref_type == 'tag' && '--locked' || '' }} --release --target ${{ matrix.target }} --bin freemkv
 
       # The CLI must not pull in UI libraries: none at all on static Linux,
       # no AppKit/UserNotifications on macOS.
@@ -409,7 +494,7 @@ jobs:
       - name: Run the CLI
         shell: bash
         env:
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
           set -euo pipefail
           BIN="target/${{ matrix.target }}/release/freemkv${{ matrix.ext }}"
@@ -427,7 +512,7 @@ jobs:
       # signing and notarizing too.
       - name: Import the Developer ID certificate
         id: signing
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
         uses: ./.github/actions/import-developer-id
         with:
           certificate-p12: ${{ secrets.MACOS_CERT_P12 }}
@@ -474,7 +559,7 @@ jobs:
             $SHA "$L$E" > "$L$E.sha256"
           fi
       - name: Upload
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           fail_on_unmatched_files: true
@@ -491,7 +576,7 @@ jobs:
           F: ${{ matrix.asset }}${{ matrix.ext }}
         run: gh release upload "$TAG" "$F" "$F.sha256" --clobber
       - name: Upload the legacy alias
-        if: matrix.legacy && github.event_name == 'push'
+        if: matrix.legacy && github.ref_type == 'tag'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           fail_on_unmatched_files: true
@@ -502,6 +587,8 @@ jobs:
   # ── Linux desktop app (AppImage, bundles GTK4 + libadwaita) ─────────────
   linux-appimage:
     needs: verify
+    # appimage.yml runs on every qa push itself.
+    if: github.ref_type != 'branch'
     permissions:
       contents: write
     uses: ./.github/workflows/appimage.yml
@@ -523,7 +610,7 @@ jobs:
   # published assets, so they all have to exist first.
   update-homebrew-tap:
     needs: [build, build-windows, cli-binaries]
-    if: always() && github.event_name == 'push' && needs.build.result == 'success' && needs['cli-binaries'].result == 'success'
+    if: always() && github.ref_type == 'tag' && needs.build.result == 'success' && needs['cli-binaries'].result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Update the tap to this release
@@ -561,7 +648,7 @@ jobs:
     # skip the dispatch, and a failed app leg definitively does.
     # NOTE: bracket form for `build-windows` — a hyphen in a job id is parsed as
     # subtraction in the dot form, so `needs.build-windows.result` is invalid.
-    if: always() && github.event_name == 'push' && needs.build.result == 'success' && needs['build-windows'].result == 'success'
+    if: always() && github.ref_type == 'tag' && needs.build.result == 'success' && needs['build-windows'].result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Update org README with new version

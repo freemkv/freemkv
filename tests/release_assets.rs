@@ -466,3 +466,37 @@ fn optional_assets_are_the_snap_and_stay_off_the_required_list() {
         assert!(doc.contains(n.as_str()), "INSTALL.md never mentions {n}");
     }
 }
+
+/// Entries of the `local freemkv_repackaged=( ... )` bash array.
+fn repackaged() -> BTreeSet<String> {
+    let yml = workflow("release-orchestrate.yml");
+    let start = yml
+        .find("freemkv_repackaged=(")
+        .expect("release-orchestrate.yml: no freemkv_repackaged=( array");
+    let body = &yml[start + "freemkv_repackaged=(".len()..];
+    let body = &body[..body.find(')').expect("unterminated freemkv_repackaged")];
+    body.split_whitespace().map(String::from).collect()
+}
+
+#[test]
+fn repackaged_assets_are_exactly_the_verified_debs() {
+    // rpm.yml and arch.yml convert every .deb on the release (packaging/rpm/deb2rpm.py,
+    // packaging/arch/deb2pkg.py), so the verified .rpm and pacman names follow the .debs.
+    let arches = [
+        ("amd64", "x86_64", "x86_64"),
+        ("arm64", "aarch64", "aarch64"),
+        ("armhf", "armv7hl", "armv7h"),
+    ];
+    let mut want = BTreeSet::new();
+    for deb in expected().current.iter().filter(|n| n.ends_with(".deb")) {
+        let stem = deb.trim_end_matches(".deb");
+        let (pkg, arch) = stem.rsplit_once('-').unwrap();
+        let (_, rpm, pac) = arches
+            .iter()
+            .find(|a| a.0 == arch)
+            .unwrap_or_else(|| panic!("{deb}: no rpm/pacman arch for {arch}"));
+        want.insert(format!("{pkg}-{rpm}.rpm"));
+        want.insert(format!("{pkg}-{pac}.pkg.tar.zst"));
+    }
+    assert_eq!(repackaged(), want);
+}
