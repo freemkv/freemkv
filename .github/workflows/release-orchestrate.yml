@@ -1742,9 +1742,7 @@ jobs:
 
             local freemkv_expected=(
               # app
-              freemkv-aarch64-macos.dmg
               freemkv-aarch64-macos.zip
-              freemkv-x86_64-macos.dmg
               freemkv-x86_64-macos.zip
               freemkv-x86_64-windows-setup.exe
               freemkv-x86_64-windows.zip

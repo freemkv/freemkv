@@ -131,20 +131,18 @@ jobs:
           MACOS_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
         run: bash macos/bundle.sh release ${{ matrix.target }}
 
-      # The .dmg only. The .zip and the checksums are built AFTER stapling —
-      # a zip made here would carry an un-stapled .app, and its hash would not
-      # match the file that actually ships.
-      - name: Package the disk image
-        run: |
-          hdiutil create -volname "freemkv" -srcfolder target/freemkv.app \
-            -ov -format UDZO "${{ matrix.asset }}.dmg"
-
       # ── Notarization ──────────────────────────────────────────────────────
       #
       # Apple scans the upload and issues a ticket; stapling attaches that
       # ticket to the file so Gatekeeper accepts it with NO network. Skipping
       # the staple is the subtle failure: it passes every test on a connected
       # machine and refuses to launch on an offline one.
+      #
+      # notarytool takes a .zip but a ticket cannot be stapled to one, so a
+      # throwaway zip goes to Apple and the ticket is stapled to the .app
+      # itself. The shipped .zip and its checksum are built AFTER this step —
+      # a zip made earlier would carry an un-stapled .app, and its hash would
+      # not match the file that actually ships.
       - name: Notarize and staple
         if: steps.signing.outputs.signed == 'true'
         env:
@@ -154,10 +152,11 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
-          A="${{ matrix.asset }}"
+          SUBMIT="$RUNNER_TEMP/notarize-app.zip"
+          ditto -c -k --keepParent target/freemkv.app "$SUBMIT"
           # --wait blocks until Apple returns a verdict; without it the job
           # would "succeed" having only queued the submission.
-          if ! xcrun notarytool submit "$A.dmg" \
+          if ! xcrun notarytool submit "$SUBMIT" \
                  --key "$RUNNER_TEMP/notary.p8" \
                  --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
                  --wait --timeout 30m; then
@@ -168,30 +167,34 @@ jobs:
               | python3 -c 'import json,sys;print(json.load(sys.stdin)["history"][0]["id"])')" \
               --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" \
               --issuer "$NOTARY_ISSUER_ID" || true
-            rm -f "$RUNNER_TEMP/notary.p8"
+            rm -f "$RUNNER_TEMP/notary.p8" "$SUBMIT"
             exit 1
           fi
-          rm -f "$RUNNER_TEMP/notary.p8"
-          xcrun stapler staple "$A.dmg"
-          # Staple the .app as well, so the .zip built next carries the ticket
-          # too. A ticket cannot be attached to a bare binary or to a .zip.
+          rm -f "$RUNNER_TEMP/notary.p8" "$SUBMIT"
           xcrun stapler staple target/freemkv.app
 
       - name: Finalize artifacts
         run: |
           set -euo pipefail
           A="${{ matrix.asset }}"
-          # Built from the (now stapled) .app. The .zip is for scripted
-          # installs — brew casks, MDM — that would rather not mount a .dmg.
+          # Built from the (stapled, when signed) .app — the only macOS app
+          # download. ditto keeps the code signature and extended attributes
+          # that a plain `zip` would drop.
           ditto -c -k --keepParent target/freemkv.app "$A.zip"
-          shasum -a 256 "$A.dmg" > "$A.dmg.sha256"
           shasum -a 256 "$A.zip" > "$A.zip.sha256"
 
       - name: Verify the bundle
         run: |
-          BIN=target/freemkv.app/Contents/MacOS/freemkv
-          # A .dmg built for the wrong arch is indistinguishable from the right
-          # one until a user double-clicks it, so pin the arch here.
+          set -euo pipefail
+          # Check the .app as it comes OUT of the shipped .zip, not the build
+          # tree: that is the file users actually run.
+          X="$RUNNER_TEMP/verify-zip"
+          rm -rf "$X" && mkdir -p "$X"
+          ditto -x -k "${{ matrix.asset }}.zip" "$X"
+          APP="$X/freemkv.app"
+          BIN="$APP/Contents/MacOS/freemkv"
+          # A zip built for the wrong arch is indistinguishable from the right
+          # one until a user double-clicks the app, so pin the arch here.
           case "${{ matrix.target }}" in
             aarch64-*) WANT=arm64 ;;
             x86_64-*)  WANT=x86_64 ;;
@@ -204,7 +207,7 @@ jobs:
             || { echo "::error::$BIN does not link AppKit — built without --features gui?"; exit 1; }
           # An .app that fails signature validation is one Gatekeeper refuses
           # to open, which users report as "the app is damaged".
-          codesign --verify --deep --strict --verbose=2 target/freemkv.app
+          codesign --verify --deep --strict --verbose=2 "$APP"
 
           # When signed for real, prove the thing users actually download would
           # pass Gatekeeper. codesign only says the signature is well-formed --
@@ -214,21 +217,20 @@ jobs:
           # that: spctl evaluates the policy, stapler proves the ticket is
           # attached and therefore works offline.
           if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
-            spctl -a -vvv -t install "${{ matrix.asset }}.dmg"
-            xcrun stapler validate "${{ matrix.asset }}.dmg"
-            codesign -dv --verbose=4 target/freemkv.app 2>&1 | grep -q "Authority=Developer ID Application" \
+            spctl -a -vvv -t execute "$APP"
+            xcrun stapler validate "$APP"
+            codesign -dv --verbose=4 "$APP" 2>&1 | grep -q "Authority=Developer ID Application" \
               || { echo "::error::bundle is not signed by a Developer ID authority"; exit 1; }
           else
             echo "ad-hoc build — skipping Gatekeeper checks (they would fail by design)"
           fi
+          rm -rf "$X"
 
       - name: Upload
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
-            ${{ matrix.asset }}.dmg
             ${{ matrix.asset }}.zip
-            ${{ matrix.asset }}.dmg.sha256
             ${{ matrix.asset }}.zip.sha256
 
   # ── Windows app (`gui` build) ───────────────────────────────────────────────

@@ -24,14 +24,15 @@ points at the newest release.
 
 | Platform | App | CLI |
 |----------|-----|-----|
-| macOS Apple Silicon | `freemkv-aarch64-macos.dmg` / `.zip` | `freemkv-cli-aarch64-macos` |
-| macOS Intel | `freemkv-x86_64-macos.dmg` / `.zip` | `freemkv-cli-x86_64-macos` |
+| macOS Apple Silicon | `freemkv-aarch64-macos.zip` | `freemkv-cli-aarch64-macos` |
+| macOS Intel | `freemkv-x86_64-macos.zip` | `freemkv-cli-x86_64-macos` |
 | Windows x86_64 | `freemkv-x86_64-windows-setup.exe` (installer), `freemkv-x86_64-windows.zip` (portable) | `freemkv-cli-x86_64-windows.exe` |
 | Linux x86_64 | `freemkv-amd64.deb`, `freemkv-x86_64-linux.AppImage`, `freemkv-x86_64-linux.flatpak`, `freemkv-amd64.snap` | `freemkv-cli-amd64.deb`, `freemkv-cli-x86_64-linux` |
 | Linux arm64 | — | `freemkv-cli-aarch64-linux` |
 
 The Linux CLI binaries are static (musl) and need no shared libraries. The
-macOS app and CLI are Developer ID signed and notarized.
+macOS app is ad-hoc signed, not notarized (see [macOS](#macos) for the first
+launch).
 
 The CLI binaries are also published under their pre-split names
 (`freemkv-x86_64-linux`, `freemkv-aarch64-linux`, `freemkv-x86_64-macos`,
@@ -40,13 +41,22 @@ existing download scripts keep working. Switch to the `freemkv-cli-*` names.
 
 ## macOS
 
-**App.** Open the `.dmg` and drag `freemkv.app` to Applications, or:
+**App.** Unzip `freemkv-<arch>-macos.zip` and drag `freemkv.app` to
+Applications, or:
 
 ```bash
 brew install --cask freemkv/tap/freemkv
 ```
 
-The cask also links the `freemkv` command. With the `.dmg`, link it yourself:
+The app is not notarized, so macOS blocks its first launch. Open it once, then
+allow it under System Settings → Privacy & Security → **Open Anyway**, or clear
+the download quarantine yourself:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/freemkv.app
+```
+
+The cask also links the `freemkv` command. With the `.zip`, link it yourself:
 
 ```bash
 sudo ln -sf /Applications/freemkv.app/Contents/MacOS/freemkv /usr/local/bin/freemkv

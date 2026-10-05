@@ -58,12 +58,14 @@ secrets — keep building.
   is a common way to produce a bundle notarization rejects.
 * `--options runtime` (hardened runtime) and `--timestamp` on every signature.
   Notarization refuses anything missing either, with an unhelpful error.
-* submits the `.dmg` to `notarytool --wait`, then **staples** the ticket to the
-  `.dmg` and the `.app`. Stapling is what makes an offline first launch work;
-  without it, a Mac with no network still refuses the app.
-* builds the `.zip` and every checksum **after** stapling — a zip made earlier
-  would carry an unstapled app, and its hash would not match what ships.
-* verifies with `spctl -a -t install` and `stapler validate`. `codesign
+* zips the `.app` for `notarytool --wait` (it accepts a `.zip` but a ticket
+  cannot be stapled to one), then **staples** the ticket to the `.app`.
+  Stapling is what makes an offline first launch work; without it, a Mac with
+  no network still refuses the app.
+* builds the shipped `.zip` and its checksum **after** stapling — a zip made
+  earlier would carry an unstapled app, and its hash would not match what ships.
+* unpacks that `.zip` and verifies the `.app` inside with `spctl -a -t execute`
+  and `stapler validate`. `codesign
   --verify` alone is not enough: it only says the signature is well-formed, so
   an ad-hoc bundle passes it and is still refused on every other Mac.
 
@@ -72,7 +74,8 @@ secrets — keep building.
 A notarization ticket can only be stapled to a `.app`, `.dmg` or `.pkg` — never
 to a bare Mach-O. The CLI binaries are signed and notarized, so Gatekeeper
 accepts them, but the first launch needs Apple to be reachable for the online
-check. The `.dmg` is the artifact that verifies fully offline.
+check. The stapled `.app` (shipped in the `.zip`) is the artifact that verifies
+fully offline.
 
 ## Verifying a real release
 
@@ -80,8 +83,9 @@ Download the artifact from the release page — do not test the local build, whi
 has no quarantine attribute and therefore proves nothing:
 
 ```sh
-spctl -a -vvv -t install freemkv-aarch64-macos.dmg   # accepted / Notarized Developer ID
-xcrun stapler validate freemkv-aarch64-macos.dmg     # The validate action worked!
+ditto -x -k freemkv-aarch64-macos.zip .
+spctl -a -vvv -t execute freemkv.app   # accepted / Notarized Developer ID
+xcrun stapler validate freemkv.app     # The validate action worked!
 codesign -dv --verbose=4 /Applications/freemkv.app 2>&1 | grep Authority
 ```
 

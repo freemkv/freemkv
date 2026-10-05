@@ -23,7 +23,7 @@ DVDs (CSS) need no setup. Blu-ray and UHD (AACS) require a `keydb.cfg` supplying
 ### 1. Install
 
 **App:** download from the [latest release](https://github.com/freemkv/freemkv/releases/latest) —
-`.dmg` on macOS, `freemkv-x86_64-windows-setup.exe` on Windows, `freemkv-amd64.deb`,
+`freemkv-<arch>-macos.zip` on macOS, `freemkv-x86_64-windows-setup.exe` on Windows, `freemkv-amd64.deb`,
 AppImage, Flatpak or Snap (`freemkv-amd64.snap`) on Linux. On macOS: `brew install --cask freemkv/tap/freemkv`.
 
 **CLI:**

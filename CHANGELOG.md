@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- macOS: the `.dmg` is no longer built. The app ships as `freemkv-aarch64-macos.zip` / `freemkv-x86_64-macos.zip` (the same ad-hoc-signed `freemkv.app`); it is not notarized, so allow its first launch under System Settings → Privacy & Security → Open Anyway (see [INSTALL.md](INSTALL.md)). (app only: macOS packaging)
+
 ## [1.8.0] — 2026-10-05
 
 ### Changed

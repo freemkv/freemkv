@@ -256,7 +256,7 @@ jobs:
         working-directory: freemkv
 
   # ── Intel Mac: a target we SHIP but never otherwise compile ────────────────
-  # Both the .dmg and the bare CLI binary ship an x86_64-apple-darwin build,
+  # Both the macOS app .zip and the bare CLI binary ship an x86_64-apple-darwin build,
   # and until this job existed no CI leg compiled that target at all — the
   # runners are arm64, so a break would have surfaced at tag time, in the
   # release workflow, after the version bump and the tag push.

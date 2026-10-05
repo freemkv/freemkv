@@ -383,7 +383,7 @@ fn install_md_offers_every_current_asset() {
         if doc.contains(n.as_str()) {
             continue;
         }
-        // "`freemkv-aarch64-macos.dmg` / `.zip`": a sibling extension on the same line.
+        // "`<stem>.<a>` / `.<b>`": a sibling extension on the same line.
         let (stem, ext) = n.rsplit_once('.').unwrap_or((n, ""));
         let shorthand = !ext.is_empty()
             && doc
