@@ -37,16 +37,16 @@ def stamp(base, **delta):
 SIB_SHA = {r: f'{i + 1:x}' * 40 for i, r in enumerate(mg.FIRST_PARTY)}
 
 LOCK_PACKAGES = [
-    ('freemkv', '1.7.7', None, ['freemkv-engine', 'freemkv-i18n', 'freemkv-keysources', 'libfreemkv',
+    ('freemkv', '1.8.0', None, ['freemkv-engine', 'freemkv-i18n', 'freemkv-keysources', 'libfreemkv',
                                 'mimalloc', 'ureq', 'libc', 'gtk4', 'zip']),
-    ('libfreemkv', '1.7.7', 'git+https://github.com/freemkv/libfreemkv?tag=v1.7.7#aaaa',
+    ('libfreemkv', '1.8.0', 'git+https://github.com/freemkv/libfreemkv?tag=v1.8.0#aaaa',
      ['freemkv-unlock', 'serde_json', 'tracing', 'libc']),
-    ('freemkv-engine', '1.7.7', 'git+https://github.com/freemkv/freemkv-engine?tag=v1.7.7#bbbb',
+    ('freemkv-engine', '1.8.0', 'git+https://github.com/freemkv/freemkv-engine?tag=v1.8.0#bbbb',
      ['libfreemkv', 'serde_json']),
-    ('freemkv-keysources', '1.7.7', 'git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.7#cccc',
+    ('freemkv-keysources', '1.8.0', 'git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.0#cccc',
      ['libfreemkv', 'ureq']),
-    ('freemkv-i18n', '1.7.7', 'git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.7#dddd', ['serde_json']),
-    ('freemkv-unlock', '1.7.7', 'git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.7#eeee', ['num-bigint']),
+    ('freemkv-i18n', '1.8.0', 'git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.0#dddd', ['serde_json']),
+    ('freemkv-unlock', '1.8.0', 'git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.0#eeee', ['num-bigint']),
     ('serde_json', '1.0.151', 'reg', ['serde']),
     ('serde', '1.0.229', 'reg', []),
     ('tracing', '0.1.44', 'reg', []),
@@ -87,12 +87,12 @@ def bump(target, version):
 
 LIB_TOML = '''[package]
 name = "{name}"
-version = "1.7.7"
+version = "1.8.0"
 edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
-freemkv-unlock = {{ git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.7.7" }}
+freemkv-unlock = {{ git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.8.0" }}
 serde_json = "1"
 
 [dev-dependencies]
@@ -517,12 +517,12 @@ class FingerprintTests(unittest.TestCase):
             'non-K CLI crate bump (zip)': lambda: self.lock(lock_text(edit=bump('zip', '8.6.1'))),
             'unlock-only third-party bump': lambda: self.lock(lock_text(edit=bump('num-bigint', '0.5.2'))),
             'first-party lock version/source': lambda: self.lock(lock_text(edit=lambda n, v, s, d: (
-                n, '1.7.8' if n in mg.FIRST_PARTY else v,
-                s.replace('v1.7.7', 'v1.7.8') if s and n in mg.FIRST_PARTY else s, d))),
-            'package.version': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'version = "1.7.7"', 'version = "1.7.8"'),
+                n, '1.8.1' if n in mg.FIRST_PARTY else v,
+                s.replace('v1.8.0', 'v1.8.1') if s and n in mg.FIRST_PARTY else s, d))),
+            'package.version': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'version = "1.8.0"', 'version = "1.8.1"'),
             'description': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'description = ', 'description = "x" #'),
-            'first-party pins': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'tag = "v1.7.7"', 'tag = "v1.7.8"'),
-            'lib version + pins': lambda: self.ws.edit('libfreemkv', 'Cargo.toml', 'tag = "v1.7.7"', 'tag = "v9"'),
+            'first-party pins': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'tag = "v1.8.0"', 'tag = "v1.8.1"'),
+            'lib version + pins': lambda: self.ws.edit('libfreemkv', 'Cargo.toml', 'tag = "v1.8.0"', 'tag = "v9"'),
             'lib dev-dependency': lambda: self.ws.edit('libfreemkv', 'Cargo.toml', 'tempfile = "3"', 'tempfile = "4"'),
             'gui dependency': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'block2 = { version = "=0.6"',
                                                    'block2 = { version = "=0.7"'),
@@ -547,8 +547,8 @@ class FingerprintTests(unittest.TestCase):
                 self.assertFalse(self.changed(), name)
 
     def test_parse_tree_normalizes_first_party_and_duplicates(self):
-        text = ('freemkv v1.7.7 (/w/freemkv) default\n'
-                'libfreemkv v1.7.7 (https://github.com/freemkv/libfreemkv?tag=v1.7.7#c8e67f16) default,rip\n'
+        text = ('freemkv v1.8.0 (/w/freemkv) default\n'
+                'libfreemkv v1.8.0 (https://github.com/freemkv/libfreemkv?tag=v1.8.0#c8e67f16) default,rip\n'
                 'serde_json v1.0.151 default,std\n'
                 'serde_json v1.0.151 default,std (*)\n'
                 'serde_derive v1.0.229 (proc-macro) \n'
@@ -1024,8 +1024,8 @@ class LockTests(unittest.TestCase):
     def test_third_party_change_fails_and_first_party_bumps_pass(self):
         base = lock_text()
         self.assertEqual(mg.lock_assert(base, lock_text(edit=bump('zip', '8.6.1'))) != [], True)
-        released = lock_text(edit=lambda n, v, s, d: (n, '1.7.8' if n in mg.FIRST_PARTY else v,
-                                                       s.replace('v1.7.7', 'v1.7.8') if s and n in mg.FIRST_PARTY
+        released = lock_text(edit=lambda n, v, s, d: (n, '1.8.1' if n in mg.FIRST_PARTY else v,
+                                                       s.replace('v1.8.0', 'v1.8.1') if s and n in mg.FIRST_PARTY
                                                        else s, d))
         self.assertEqual(mg.lock_assert(base, released), [])
 
@@ -1039,7 +1039,7 @@ class LockTests(unittest.TestCase):
         self.addCleanup(rmtree_quiet, d)
         (d / 'a.lock').write_text(lock_text())
         (d / 'b.lock').write_text(lock_text(edit=bump('ureq', '3.4.3')))
-        (d / 'c.lock').write_text(lock_text(edit=bump('freemkv', '1.7.8')))
+        (d / 'c.lock').write_text(lock_text(edit=bump('freemkv', '1.8.1')))
         run = lambda *a: mg.main(['release-lock-assert', '--base', str(d / 'a.lock'), *a])
         self.assertEqual(run('--candidate', str(d / 'b.lock')), 1)
         self.assertEqual(run('--candidate', str(d / 'c.lock')), 0)
