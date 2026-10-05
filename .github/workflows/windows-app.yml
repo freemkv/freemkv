@@ -75,7 +75,10 @@ jobs:
         shell: bash
         env:
           SHA: ${{ github.sha }}
-        run: git checkout "$SHA" -- .github/scripts/ packaging/windows/
+        run: |
+          # The tag checkout lacks this workflow's commit; fetch it to overlay from.
+          git fetch --no-tags --depth=1 origin "$SHA"
+          git checkout "$SHA" -- .github/scripts/ packaging/windows/
       # Dev builds link sibling dev checkouts; a release links the tagged crates.
       - if: ${{ !inputs.release }}
         uses: freemkv/.github/.github/actions/checkout-siblings@v2

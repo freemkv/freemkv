@@ -79,7 +79,10 @@ jobs:
         working-directory: freemkv
         env:
           SHA: ${{ github.sha }}
-        run: git checkout "$SHA" -- .github/scripts/ packaging/deb/
+        run: |
+          # The tag checkout lacks this workflow's commit; fetch it to overlay from.
+          git fetch --no-tags --depth=1 origin "$SHA"
+          git checkout "$SHA" -- .github/scripts/ packaging/deb/
       # Siblings live inside freemkv/ so `cross` (which mounts only the crate)
       # sees them too.
       - name: Pin matching sibling sources

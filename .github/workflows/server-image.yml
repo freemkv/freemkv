@@ -75,7 +75,10 @@ jobs:
         if: inputs.backfill
         env:
           SHA: ${{ github.sha }}
-        run: git checkout "$SHA" -- docker/ .github/scripts/
+        run: |
+          # The tag checkout lacks this workflow's commit; fetch it to overlay from.
+          git fetch --no-tags --depth=1 origin "$SHA"
+          git checkout "$SHA" -- docker/ .github/scripts/
       - name: QEMU (arm/v7 harvest stage) and a buildx builder
         run: |
           set -euo pipefail

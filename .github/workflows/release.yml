@@ -387,7 +387,10 @@ jobs:
         shell: bash
         env:
           SHA: ${{ github.sha }}
-        run: git checkout "$SHA" -- .github/scripts/
+        run: |
+          # The tag checkout lacks this workflow's commit; fetch it to overlay from.
+          git fetch --no-tags --depth=1 origin "$SHA"
+          git checkout "$SHA" -- .github/scripts/
       # qa rehearsal: build against the sibling crates' qa branches, as deb.yml
       # does (the tag's pinned git deps exist only after the release tags them).
       - name: Pin sibling sources (qa rehearsal)
