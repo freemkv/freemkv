@@ -209,6 +209,13 @@ class UploadSuccess(unittest.TestCase):
         self.assertEqual(sc.classify_upload(0, self.OK + self.REV, "beta"), "released")
         self.assertEqual(sc.classify_upload(0, (self.OK + self.REV).replace("\n", "\r\n"), "beta"), "released")
 
+    def test_raw_released_status_is_released(self):
+        # snapcraft 9.x, v1.8.0 upload: the poll ends on the raw status code.
+        log = START + "Uploading...\nStatus: processing\nStatus: released\n"
+        rev = "Revision 8 created for 'freemkv' and released to 'stable'\n"
+        self.assertEqual(sc.classify_upload(0, log + rev, "stable"), "released")
+        self.assertEqual(sc.classify_upload(0, "Status: released\n" + rev, "stable"), "released")
+
     def test_held_status_is_not_released(self):
         log = START + "Status: will need manual review\n" + self.REV
         self.assertEqual(sc.classify_upload(0, log, "beta"), "held-unreported")

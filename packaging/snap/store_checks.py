@@ -49,6 +49,8 @@ TRAILER = re.compile(
     r"Full execution log: '[^'\n]+'|For more information, check out: https://\S+"
 )
 READY_STATUS = "Status: ready to release!"
+# snapcraft 9.x prints the raw status code once the store has released the revision.
+RELEASED_STATUS = "Status: released"
 # The store or the network dropping the connection mid-upload (requests' and
 # urllib3's own wording). Only this, among recognised lines, makes an upload
 # "transient": worth one more try rather than a verdict.
@@ -117,7 +119,7 @@ def _released_or_held(lines, channel):
     *preamble, last = content
     if not revision.fullmatch(last) or not all(_preamble_line(line) for line in preamble):
         return "failed"
-    return {READY_STATUS: "released", HELD_STATUS: "held-unreported"}.get(
+    return {READY_STATUS: "released", RELEASED_STATUS: "released", HELD_STATUS: "held-unreported"}.get(
         _last_status(preamble), "failed"
     )
 
