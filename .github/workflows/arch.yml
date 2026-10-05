@@ -1,32 +1,33 @@
-name: RPM package
+name: Arch Linux package
 
-# .rpm packages for Fedora, RHEL and openSUSE, repackaged from the release's
-# validated .debs (packaging/rpm/deb2rpm.py): same binaries, so nothing is
-# compiled here. Every .deb on the release becomes an .rpm, any package, any
-# architecture (amd64 -> x86_64, arm64 -> aarch64, armhf -> armv7hl).
+# pacman packages (.pkg.tar.zst) for Arch Linux and Arch Linux ARM, repackaged
+# from the release's validated .debs (packaging/arch/deb2pkg.py): same
+# binaries, so nothing is compiled here. Every .deb on the release becomes a
+# package, any architecture (amd64 -> x86_64, arm64 -> aarch64, armhf -> armv7h).
+# freemkv.org/arch (marketing's arch.yml) indexes them; the payloads stay here.
 #
 #   tag push        wait for deb.yml's .debs on the release, convert, install-test,
-#                   sign, attach freemkv-*.rpm (+ .sha256), refresh freemkv.org/rpm
+#                   sign (.sig), attach freemkv-*.pkg.tar.zst, refresh freemkv.org/arch
 #   dispatch + tag  the same for an existing release (backfill):
-#                     gh workflow run rpm.yml --ref dev -f tag=v1.8.0
+#                     gh workflow run arch.yml --ref dev -f tag=v1.8.0
 #   dev/qa/PR       convert the LATEST release's .debs and install-test; publish nothing
 #
-# Packages are signed with secret APT_SIGNING_KEY (the freemkv.org APT/RPM key).
+# Packages are signed with secret APT_SIGNING_KEY (the freemkv.org repository key).
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: existing release tag to add .rpms to (e.g. v1.8.0); empty = test only
+        description: existing release tag to add pacman packages to (e.g. v1.8.0); empty = test only
         type: string
         default: ''
   push:
     branches: [dev, qa]
     tags: ['v*', '!v*-rc*']
   pull_request:
-    paths: ['packaging/rpm/**', '.github/workflows/rpm.yml']
+    paths: ['packaging/arch/**', '.github/workflows/arch.yml']
 
 concurrency:
-  group: rpm-${{ github.ref }}-${{ inputs.tag }}
+  group: arch-${{ github.ref }}-${{ inputs.tag }}
   cancel-in-progress: true
 
 permissions:
@@ -39,7 +40,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: '3.12' }
-      - run: python -m unittest discover -s packaging/rpm -p 'test_*.py' -v
+      - run: python -m unittest discover -s packaging/arch -p 'test_*.py' -v
 
   debs:
     needs: packaging-tests
@@ -102,9 +103,7 @@ jobs:
   build:
     needs: debs
     runs-on: ubuntu-24.04
-    container: fedora:40
-    outputs:
-      legs: ${{ steps.legs.outputs.legs }}
+    container: archlinux:latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@v8
@@ -112,11 +111,13 @@ jobs:
       - name: Convert
         run: |
           set -euo pipefail
-          dnf -y -q install rpm-build rpm-sign zstd python3 gnupg2 jq
-          python3 packaging/rpm/deb2rpm.py --output rpms --floor gtk4=4.10 --floor libadwaita=1.4 debs/*.deb
-          for r in rpms/*.rpm; do
-            echo "== $r"; rpm -qp --info "$r" | sed -n '1,12p'; rpm -qp --requires "$r"; rpm -qp --conflicts "$r"; rpm -qpl "$r"
-          done
+          pacman -Syu --noconfirm --needed base-devel python zstd
+          useradd --create-home builder
+          install -d -o builder out
+          chown -R builder debs
+          runuser -u builder -- python3 packaging/arch/deb2pkg.py --output out \
+            --floor gtk4=4.10 --floor libadwaita=1.4 debs/*.deb
+          for p in out/*.pkg.tar.zst; do echo "== $p"; pacman -Qip "$p"; pacman -Qlp "$p"; done
       - name: Sign
         env:
           KEY: ${{ secrets.APT_SIGNING_KEY }}
@@ -130,84 +131,53 @@ jobs:
           GNUPGHOME=$(mktemp -d); export GNUPGHOME
           printf '%s\n' "$KEY" | gpg --batch --import
           fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
-          gpg --armor --export "$fpr" > rpms/freemkv.asc
-          rpmsign --addsign --define "_gpg_name $fpr" --define "_gpg_path $GNUPGHOME" \
-            --define '_gpg_sign_cmd_extra_args --pinentry-mode loopback' rpms/*.rpm
-          rpm --import rpms/freemkv.asc
-          out=$(rpm -K rpms/*.rpm)
-          echo "$out"
-          if grep -v ' signatures OK$' <<<"$out"; then echo "unsigned or bad signature"; exit 1; fi
-      - name: Install legs
-        id: legs
-        run: |
-          set -euo pipefail
-          legs='[]'
-          add() { legs=$(jq -c --argjson l "$1" '. + [$l]' <<<"$legs"); }
-          if [ -f rpms/freemkv-x86_64.rpm ]; then
-            add '{"name": "fedora-40-x86_64", "runner": "ubuntu-24.04", "image": "fedora:40", "arch": "x86_64", "pm": "dnf", "app": true}'
-            add '{"name": "opensuse-tumbleweed-x86_64", "runner": "ubuntu-24.04", "image": "opensuse/tumbleweed", "arch": "x86_64", "pm": "zypper", "app": true}'
-            add '{"name": "almalinux-9-x86_64", "runner": "ubuntu-24.04", "image": "almalinux:9", "arch": "x86_64", "pm": "dnf", "app": false}'
-          fi
-          if [ -f rpms/freemkv-aarch64.rpm ]; then
-            add '{"name": "fedora-40-aarch64", "runner": "ubuntu-24.04-arm", "image": "fedora:40", "arch": "aarch64", "pm": "dnf", "app": true}'
-          fi
-          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          gpg --armor --export "$fpr" > out/freemkv.asc
+          for p in out/*.pkg.tar.zst; do
+            gpg --batch --pinentry-mode loopback --local-user "$fpr" --detach-sign --no-armor -o "$p.sig" "$p"
+            gpg --verify "$p.sig" "$p"
+          done
       - uses: actions/upload-artifact@v7
-        with: { name: rpm-package, path: rpms, if-no-files-found: error, retention-days: 90 }
+        with: { name: arch-package, path: out, if-no-files-found: error, retention-days: 90 }
 
+  # No hosted Arch Linux ARM runner: the aarch64/armv7h packages are built and
+  # signed with the same payload as the .debs deb.yml installs on arm64/armhf.
   install:
     needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.build.outputs.legs) }}
-    name: install (${{ matrix.name }})
-    runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
     steps:
       - uses: actions/download-artifact@v8
-        with: { name: rpm-package, path: rpms }
+        with: { name: arch-package, path: pkgs }
       - name: CLI package installs, is static and runs
-        shell: bash
-        env:
-          ARCH: ${{ matrix.arch }}
-          PM: ${{ matrix.pm }}
         run: |
           set -euo pipefail
-          if [ -f rpms/freemkv.asc ]; then
-            rpm --import rpms/freemkv.asc
-            rpm -K "rpms/freemkv-cli-$ARCH.rpm" | grep -F 'signatures OK'
+          pacman -Syu --noconfirm
+          if [ -f pkgs/freemkv.asc ]; then
+            pacman-key --init
+            pacman-key --add pkgs/freemkv.asc
+            fpr=$(gpg --with-colons --show-keys pkgs/freemkv.asc | awk -F: '/^fpr/{print $10; exit}')
+            pacman-key --lsign-key "$fpr"
+            for s in pkgs/*.sig; do pacman-key --verify "$s" "${s%.sig}"; done
           fi
-          if [ "$PM" = dnf ]; then dnf -y -q install "./rpms/freemkv-cli-$ARCH.rpm"
-          else zypper -n -q install --allow-unsigned-rpm "./rpms/freemkv-cli-$ARCH.rpm"; fi
-          rpm -q freemkv-cli
-          expected=$(rpm -qp --qf '%{VERSION}' "rpms/freemkv-cli-$ARCH.rpm")
+          pacman -U --noconfirm ./pkgs/freemkv-cli-x86_64.pkg.tar.zst
+          pacman -Q freemkv-cli
+          expected=$(pacman -Qip pkgs/freemkv-cli-x86_64.pkg.tar.zst | awk '/^Version/{sub(/-[0-9]+$/, "", $3); print $3}')
           /usr/bin/freemkv --version | tee cli-version.log
           awk -v e="$expected" '$1 == e { f=1 } END { exit !f }' cli-version.log
           status=0; /usr/bin/freemkv > /dev/null 2>&1 || status=$?
           test "$status" -eq 2
       - name: App package replaces the CLI and runs
-        if: matrix.app
-        shell: bash
-        env:
-          ARCH: ${{ matrix.arch }}
-          PM: ${{ matrix.pm }}
         run: |
           set -euo pipefail
-          if [ "$PM" = dnf ]; then
-            dnf -y -q install --allowerasing "./rpms/freemkv-$ARCH.rpm" \
-              /usr/bin/Xvfb /usr/bin/dbus-run-session /usr/sbin/useradd /usr/sbin/runuser
-          else
-            zypper -n -q install --allow-unsigned-rpm --force-resolution "./rpms/freemkv-$ARCH.rpm"
-          fi
-          rpm -q freemkv
-          if rpm -q freemkv-cli; then echo "freemkv-cli is still installed alongside freemkv"; exit 1; fi
+          pacman -R --noconfirm freemkv-cli
+          pacman -U --noconfirm ./pkgs/freemkv-x86_64.pkg.tar.zst
+          pacman -S --noconfirm --needed xorg-server-xvfb dbus
+          pacman -Q freemkv
           ldd /usr/bin/freemkv | grep -F libgtk-4.so
           test -f /usr/share/applications/org.freemkv.FreeMKV.desktop
+          test -f /usr/share/licenses/freemkv/LICENSE
           freemkv --version
       - name: Launch the installed GUI without a terminal
-        if: matrix.app && matrix.pm == 'dnf'
-        shell: bash
         run: |
           set -euo pipefail
           useradd --create-home tester
@@ -227,7 +197,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
-        with: { name: rpm-package, path: rpm-package }
+        with: { name: arch-package, path: arch-package }
       - name: Attach the installed and validated packages to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -235,14 +205,14 @@ jobs:
           TAG: ${{ needs.debs.outputs.tag }}
         run: |
           set -euo pipefail
-          cd rpm-package
-          rpms=(freemkv-*.rpm)
-          for f in "${rpms[@]}"; do sha256sum "$f" > "$f.sha256"; done
+          cd arch-package
+          pkgs=(freemkv-*.pkg.tar.zst)
+          for f in "${pkgs[@]}"; do sha256sum "$f" > "$f.sha256"; done
           ls -l
-          gh release upload "$TAG" freemkv-*.rpm freemkv-*.rpm.sha256 --clobber
-      # A marketing outage must not turn the release red; rpm.yml there also runs daily.
-      - name: Refresh the freemkv.org RPM repository
+          gh release upload "$TAG" freemkv-*.pkg.tar.zst freemkv-*.pkg.tar.zst.sig freemkv-*.pkg.tar.zst.sha256 --clobber
+      # A marketing outage must not turn the release red; arch.yml there also runs daily.
+      - name: Refresh the freemkv.org pacman repository
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
-        run: gh api repos/freemkv/marketing/dispatches -f event_type=rpm-refresh
+        run: gh api repos/freemkv/marketing/dispatches -f event_type=arch-refresh
