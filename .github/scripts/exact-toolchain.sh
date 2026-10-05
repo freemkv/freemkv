@@ -51,14 +51,17 @@ CONFIG_RE='^[[:space:]]*(\[+[[:space:]]*["'"'"']?(build|env|profile|target|host)
 
 # The C compiler cc-rs resolves for the target, and its version.
 c_toolchain() {
-  local target="$1" c vswhere inst ver
+  local target="$1" c vswhere inst ver comp cross
+  cross="CROSS_TARGET_$(tr 'a-z-' 'A-Z_' <<<"$target")_IMAGE"
   case "$target" in
-    aarch64-unknown-linux-musl)
-      # Built through `cross`: the compiler is the pinned image's.
-      [[ "${CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE:-}" == *@sha256:* ]] || return 1
-      echo "cross image $CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE" ;;
-    *-linux-musl)
-      # cc-rs compiles x86_64 musl C with musl-gcc (the musl-tools wrapper).
+    *-linux-musl*)
+      # A foreign arch is built through `cross`: the compiler is the pinned image's.
+      if [ -n "${!cross:-}" ] || [ "${target%%-*}" != "${HOSTTYPE:-}" ]; then
+        [[ "${!cross:-}" == *@sha256:* ]] || return 1
+        echo "cross image ${!cross}"
+        return 0
+      fi
+      # A native one: cc-rs compiles musl C with musl-gcc (the musl-tools wrapper).
       command -v musl-gcc >/dev/null 2>&1 || return 1
       echo "musl-gcc: $(musl-gcc --version | head -1)"
       if command -v dpkg-query >/dev/null 2>&1; then
@@ -67,11 +70,17 @@ c_toolchain() {
     *-windows-msvc)
       vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
       [ -x "$vswhere" ] || return 1
-      inst=$("$vswhere" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
-               -property installationPath | tr -d '\r')
+      comp=Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+      [[ "$target" != aarch64-* ]] || comp=Microsoft.VisualStudio.Component.VC.Tools.ARM64
+      inst=$("$vswhere" -latest -products '*' -requires "$comp" -property installationPath | tr -d '\r')
       [ -n "$inst" ] || return 1
       ver=$(tr -d '\r' < "$(cygpath -u "$inst")/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt")
-      echo "msvc: VC tools $ver ($inst)" ;;
+      echo "msvc: VC tools $ver ($inst)"
+      # ring compiles its C with clang on Windows ARM64, whatever cc-rs picks.
+      if [[ "$target" == aarch64-* ]]; then
+        command -v clang >/dev/null 2>&1 || return 1
+        echo "clang: $(clang --version | head -1 | tr -d '\r')"
+      fi ;;
     *)
       command -v cc >/dev/null 2>&1 || return 1
       echo "cc: $(cc --version | head -1)" ;;

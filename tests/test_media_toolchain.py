@@ -72,8 +72,10 @@ class Sandbox:
         return path
 
     def run(self, *args, env=None):
-        base = dict(PATH=str(self.bin), HOME=str(self.dir), CARGO_HOME=str(self.home),
-                    GITHUB_ENV=str(self.dir / 'env'), GITHUB_OUTPUT=str(self.dir / 'out'), **(env or {}))
+        # HOSTTYPE pinned: bash sets it from its own build, and musl targets depend on it.
+        base = dict(PATH=str(self.bin), HOME=str(self.dir), CARGO_HOME=str(self.home), HOSTTYPE='x86_64',
+                    GITHUB_ENV=str(self.dir / 'env'), GITHUB_OUTPUT=str(self.dir / 'out'))
+        base.update(env or {})
         return subprocess.run([str(self.bin / 'bash'), str(SCRIPT), *args], capture_output=True,
                               text=True, env=base, cwd=self.dir)
 
@@ -187,6 +189,28 @@ class ExactToolchainTests(unittest.TestCase):
         self.assertIn(image, r.stdout)
         r = box.run('assert-env', 'aarch64-unknown-linux-musl', str(box.crate))
         self.assertNotEqual(r.returncode, 0, 'an unpinned cross image must fail')
+
+    def test_armv7_cross_leg_records_its_pinned_image(self):
+        box = Sandbox(self)
+        box.fake('musl-gcc', 'echo "gcc (fake) 13.2.0"\n')
+        image = 'ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:0.2.5@sha256:abc'
+        target = 'armv7-unknown-linux-musleabihf'
+        r = box.run('assert-env', target, str(box.crate),
+                    env={'CROSS_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_IMAGE': image})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(image, r.stdout)
+        r = box.run('assert-env', target, str(box.crate))
+        self.assertNotEqual(r.returncode, 0, 'a foreign musl target without a pinned image must fail')
+        r = box.run('assert-env', target, str(box.crate),
+                    env={'CROSS_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_IMAGE': image.split('@')[0]})
+        self.assertNotEqual(r.returncode, 0, 'an unpinned cross image must fail')
+
+    def test_native_musl_on_the_matching_host_uses_musl_gcc(self):
+        box = Sandbox(self)
+        box.fake('musl-gcc', 'echo "gcc (fake) 13.2.0"\n')
+        r = box.run('assert-env', 'aarch64-unknown-linux-musl', str(box.crate), env={'HOSTTYPE': 'aarch64'})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('musl-gcc: gcc (fake) 13.2.0', r.stdout)
 
 
 class WorkflowToolchainTests(unittest.TestCase):
