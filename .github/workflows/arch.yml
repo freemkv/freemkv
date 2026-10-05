@@ -76,10 +76,9 @@ jobs:
           last=
           for attempt in $(seq 1 280); do
             debs=$(gh release view "$TAG" --json assets -q '[.assets[].name | select(endswith(".deb"))] | sort | join(" ")' 2>/dev/null || true)
-            case " $debs " in
-              *" freemkv-amd64.deb "*" freemkv-cli-amd64.deb "*)
+            case " $debs " in *" freemkv-amd64.deb "*) case " $debs " in *" freemkv-cli-amd64.deb "*)
                 if [ "$debs" = "$last" ]; then echo "debs: $debs"; exit 0; fi ;;
-            esac
+            esac ;; esac
             last=$debs
             echo "waiting for $TAG .debs ($attempt): ${debs:-none}"
             sleep 30
