@@ -26,7 +26,7 @@ async function harness(id = 'p123') {
   const c = module.namespace.libraryConnection({ id, name: 'Library' }, () => {});
   const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
   await flush();
-  return { c, requests, handlers, flush, stopped: () => stopped,
+  return { module: module.namespace, c, requests, handlers, flush, stopped: () => stopped,
     tick(ms) { now += ms; for (const [fn, interval] of timers) if (interval === 3000) fn(); },
     take(path) { const i = requests.findIndex(r => r.url.endsWith(path)); assert(i >= 0, path); return requests.splice(i, 1)[0]; }
   };
@@ -63,4 +63,24 @@ test('poll fallback retains last state through grace, recovers, and stops on rem
   h.take('/api/system').resolve({ debug_enabled: true }); await h.flush();
   assert.equal(h.c.status().sys.debug_enabled, undefined);
   assert(h.stopped());
+});
+
+
+test('badge and page share namespaced drives and exclude sustained offline activity', async () => {
+  const h = await harness();
+  const { connections, driveState, busyDriveCount } = h.module;
+  connections.set('', { status: () => ({ peer: { id: '' }, snapshot: { sg0: { status: 'ripping' }, _mux: { status: 'ripping' } } }) });
+  connections.set('p123', h.c);
+  h.handlers.state({ sg0: { status: 'ripping' } });
+  assert.equal(Object.keys(driveState()).length, 2);
+  assert.equal(busyDriveCount(driveState()), 2);
+  h.handlers.error(); h.tick(6000);
+  assert.equal(busyDriveCount(driveState()), 2);
+  h.tick(12000);
+  assert.equal(busyDriveCount(driveState()), 1);
+  h.handlers.state({ sg0: { status: 'idle' } });
+  assert.equal(busyDriveCount(driveState()), 1);
+  connections.delete('p123');
+  assert.equal(Object.keys(driveState()).length, 1);
+  h.c.close();
 });

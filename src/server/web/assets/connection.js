@@ -58,3 +58,53 @@ export function libraryConnection(peer, changed) {
     close() { closed = true; stop(); abort.abort(); clearInterval(timer); clearInterval(detailTimer); }
   };
 }
+
+// App-wide connections keep navigation and the Drives page on one snapshot,
+// including while another page is open.
+export const connections = new Map();
+const listeners = new Set();
+let discoveryTimer, discovering = false;
+function changed() { for (const f of listeners) f(); }
+export function subscribeConnections(fn) {
+  listeners.add(fn); fn();
+  return () => listeners.delete(fn);
+}
+export function driveState() {
+  const state = {};
+  for (const c of connections.values()) {
+    const r = c.status();
+    for (const [dev, snapshot] of Object.entries(r.snapshot)) {
+      if (!/^(?:ioreg:)?[a-zA-Z0-9]+$/.test(dev) || !snapshot || typeof snapshot !== 'object') continue;
+      const key = r.peer.id ? r.peer.id + ':' + dev : dev;
+      state[key] = { ...snapshot, _owner: r.peer.id ? r.peer.name : '', _offline: !!r.offline };
+    }
+  }
+  return state;
+}
+export function busyDriveCount(state) {
+  return Object.values(state).filter(s => !s._offline && ['ripping', 'scanning', 'detecting'].includes(s.status)).length;
+}
+export function startConnections() {
+  if (discoveryTimer) return;
+  connections.set('', libraryConnection({ id: '', name: location.hostname }, changed));
+  const discover = async () => {
+    if (discovering) return;
+    discovering = true;
+    try {
+      const peers = await api('GET', '/api/peers');
+      for (const [id, c] of connections) {
+        if (id && !peers.some(p => p.id === id && p.url === c.value.peer.url)) {
+          c.close(); connections.delete(id);
+        }
+      }
+      for (const peer of peers) {
+        if (!connections.has(peer.id)) connections.set(peer.id, libraryConnection(peer, changed));
+        else connections.get(peer.id).value.peer = peer;
+      }
+      changed();
+    } catch (_) { /* Keep existing connections through a discovery failure. */ }
+    finally { discovering = false; }
+  };
+  discoveryTimer = setInterval(discover, 3000);
+  discover();
+}

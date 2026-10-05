@@ -7,7 +7,7 @@
 
 import { esc, escLinks, $, put, fill, api, act, toast, twoStep, terminal, modal, bytes, plural, ICON } from './ui.js';
 import { subscribe } from './bus.js';
-import { libraryConnection } from './connection.js';
+import { connections, subscribeConnections, driveState, busyDriveCount } from './connection.js';
 
 const ACTIVE = ['ripping', 'scanning', 'detecting'];
 const ownerUrl = (owner, path) => owner ? '/api/peers/' + owner + path : path;
@@ -489,30 +489,22 @@ export default {
     const root = $('#rp', view);
     const cards = new Map();
     let state = {};
-    let peers = [];
-    const connections = new Map();
     const pipelines = new Map();
-    let polling = false;
     const drivesEl = $('#drives', view);
 
     const render = () => {
       if (ctx.stale()) return;
       const owners = [...connections.values()].map(c => c.status());
-      state = {};
+      state = driveState();
       const notices = [];
       for (const r of owners) {
         if (r.error) notices.push('<div class="banner bad">' + esc(r.peer.name) + ': offline — showing last known state; reconnecting automatically</div>');
         if (r.detailError) notices.push('<div class="banner bad">' + esc(r.peer.name) + ': some details could not be loaded — ' + esc(r.detailError) + '</div>');
-        for (const [dev, snapshot] of Object.entries(r.snapshot)) {
-          if (!/^(?:ioreg:)?[a-zA-Z0-9]+$/.test(dev) || !snapshot || typeof snapshot !== 'object') continue;
-          const key = r.peer.id ? r.peer.id + ':' + dev : dev;
-          state[key] = { ...snapshot, _owner: r.peer.id ? r.peer.name : '', _offline: !!r.offline };
-        }
       }
       put($('#peer-status', view), notices.join(''));
       const devs = Object.keys(state).filter(k => !k.startsWith('_')).sort((a, b) => Number(!!state[a]._owner) - Number(!!state[b]._owner) || a.localeCompare(b));
       put($('#lede', view), devs.length
-        ? plural(devs.length, 'drive') + ' · ' + devs.filter(d => ACTIVE.includes(state[d].status)).length + ' busy'
+        ? plural(devs.length, 'drive') + ' · ' + busyDriveCount(state) + ' busy'
         : 'No drives found. A drive appears here about a minute after it is plugged in.');
       for (const [dev, el] of cards) if (!devs.includes(dev)) { el.remove(); cards.delete(dev); }
       const emptyEl = drivesEl.querySelector(':scope > .empty');
@@ -559,30 +551,7 @@ export default {
 
 
     };
-    connections.set('', libraryConnection({ id: '', name: location.hostname }, render));
-    ctx.cleanup.push(() => { for (const c of connections.values()) c.close(); });
-    const loadPeers = async () => {
-      if (polling || ctx.stale()) return;
-      polling = true;
-      try {
-        const found = await api('GET', '/api/peers');
-        if (ctx.stale()) return;
-        peers = found;
-        for (const [id, connection] of connections) {
-          if (id && !peers.some(p => p.id === id && p.url === connection.value.peer.url)) {
-            connection.close(); connections.delete(id);
-          }
-        }
-        for (const peer of peers) {
-          if (!connections.has(peer.id)) connections.set(peer.id, libraryConnection(peer, render));
-          else connections.get(peer.id).value.peer = peer;
-        }
-        render();
-      } catch (_) { /* Retain established connections through a temporary discovery failure. */ }
-      finally { polling = false; }
-    };
-    loadPeers();
-    ctx.every(3000, loadPeers);
+    ctx.cleanup.push(subscribeConnections(render));
 
     ctx.every(1000, () => {
       const now = Math.floor(Date.now() / 1000);
@@ -592,7 +561,7 @@ export default {
       });
     });
 
-    $('#syslog', view).addEventListener('click', () => openDeviceTerminal('system', false, undefined, '', [{ id: '', name: location.hostname }, ...peers.map(p => ({ id: p.id, name: p.name }))]));
+    $('#syslog', view).addEventListener('click', () => openDeviceTerminal('system', false, undefined, '', [...connections.values()].map(c => c.value.peer)));
     drivesEl.addEventListener('click', (e) => {
       const card = e.target.closest('.drive');
       if (!card) return;

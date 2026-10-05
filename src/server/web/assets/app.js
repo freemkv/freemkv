@@ -4,6 +4,7 @@
 
 import { $, $$, api, ICON } from './ui.js';
 import { live, connect, subscribe, publishState } from './bus.js';
+import { startConnections, subscribeConnections, driveState, busyDriveCount } from './connection.js';
 
 const ROUTES = {
   '/library': () => import('./library.js'),
@@ -107,9 +108,8 @@ function badge(href, text, label) {
   b.setAttribute('aria-label', label);
   a.title = label;
 }
-const RIPPING = ['ripping', 'scanning', 'detecting'];
-subscribe('state', (s) => {
-  const busy = Object.keys(s).filter(k => !k.startsWith('_') && RIPPING.includes(s[k].status)).length;
+subscribeConnections(() => {
+  const busy = busyDriveCount(driveState());
   badge('/drives', busy ? String(busy) : '', busy + (busy === 1 ? ' drive' : ' drives') + ' busy');
 });
 
@@ -138,6 +138,7 @@ if (typeof Notification !== 'undefined' && Notification.permission === 'default'
 // ── Start ──────────────────────────────────────────────────────────────────
 
 connect();
+startConnections();
 fetch('/api/state', { cache: 'no-store' })
   .then(r => r.json())
   .then(s => { if (!live.state) publishState(s); })
