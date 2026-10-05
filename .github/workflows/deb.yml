@@ -333,6 +333,20 @@ jobs:
           ls -l "${debs[@]}"
           gh release upload "$TAG" freemkv-*.deb freemkv-*.deb.sha256 --clobber
 
+  # The APT repository at freemkv.org/apt indexes every .deb on the latest
+  # release; ask marketing's apt.yml to rebuild it now instead of at its daily
+  # run. Like FlatPark, a failure here never turns the release red.
+  apt:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions: {}
+    continue-on-error: true
+    steps:
+      - name: Refresh the freemkv.org APT repository
+        env:
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+        run: gh api repos/freemkv/marketing/dispatches -f event_type=apt-refresh
+
   # FlatPark (flatpark.org) repackages freemkv-amd64.deb as a Flatpak. Ping it
   # once the .deb is on the release so the update ships in minutes instead of
   # at its daily scan. No token is sent; FlatPark checks public release state.
