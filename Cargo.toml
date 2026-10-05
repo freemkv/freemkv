@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "1.7.7"
+version = "1.8.0"
 edition = "2024"
 rust-version = "1.98.1"
 license = "MIT"
@@ -68,10 +68,10 @@ gui = ["dep:winsafe", "dep:windows", "dep:gtk4", "dep:libadwaita",
        "dep:objc2-user-notifications", "dep:block2"]
 
 [dependencies]
-freemkv-engine = "1.7"
-libfreemkv = "1.7"
-freemkv-keysources = "1.7"
-freemkv-i18n = "1.7"
+freemkv-engine = "1.8"
+libfreemkv = "1.8"
+freemkv-keysources = "1.8"
+freemkv-i18n = "1.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "3", features = ["json"] }
@@ -153,9 +153,9 @@ block2 = { version = "=0.6", optional = true }
 [dev-dependencies]
 # `test_util` fixtures (`aacs_state`, …) for this crate's tests (keys-upfront
 # KU-P1). CI resolves it through the sibling path patch.
-libfreemkv = { version = "1.7", features = ["test-util"] }
+libfreemkv = { version = "1.8", features = ["test-util"] }
 # The server's reachability tests plant a decode verdict offline.
-freemkv-keysources = { version = "1.7", features = ["test-hooks"] }
+freemkv-keysources = { version = "1.8", features = ["test-hooks"] }
 tempfile = "3"
 
 # Resolve the freemkv crates from their GIT TAGS. They are OFF crates.io
@@ -172,8 +172,8 @@ tempfile = "3"
 # dev overrides this with a path patch in the gitignored .cargo/config.toml (a
 # config-level [patch.crates-io] wins over this manifest one).
 [patch.crates-io]
-libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.7.7" }
-freemkv-engine = { git = "https://github.com/freemkv/freemkv-engine", tag = "v1.7.7" }
-freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.7.7" }
-freemkv-unlock = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.7.7" }
-freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.7.7" }
+libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.8.0" }
+freemkv-engine = { git = "https://github.com/freemkv/freemkv-engine", tag = "v1.8.0" }
+freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.8.0" }
+freemkv-unlock = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.8.0" }
+freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.8.0" }

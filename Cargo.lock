@@ -113,9 +113,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.5.1"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
+checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -123,9 +123,9 @@ dependencies = [
 
 [[package]]
 name = "cfg-expr"
-version = "0.20.9"
+version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe4ece8474b5f766c63426647e7b4b316b67431ade1036a8313cee24a03ae917"
+checksum = "9ba9e9ec16c447027685b1f897b720e18e9a8afd00bd7332c483537e38086c9f"
 dependencies = [
  "smallvec",
  "target-lexicon",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.7.7"
+version = "1.8.0"
 dependencies = [
  "block2",
  "freemkv-engine",
@@ -411,7 +411,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.7.7"
+version = "1.8.0"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.0#2dd9bfd716b7610e6ca5016f3eeff8b21b8142aa"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -424,14 +425,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.7.7"
+version = "1.8.0"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.0#b43bf9d5126dcf4beb3821f9ca862b96ae22fadf"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.7.7"
+version = "1.8.0"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.0#d2f6bbd27267ec960f6f44926e33dfdf9c55aeb6"
 dependencies = [
  "base64",
  "flate2",
@@ -444,13 +447,14 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.7.7"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.7#1d20be4a411b5c15bc3e29d4beeb2537d6cd3ebc"
+version = "1.8.0"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.0#04cddb11f62b4e35af3e4775f949bace7b6a9ab0"
 dependencies = [
  "aes",
  "base64",
  "num-bigint",
  "num-traits",
+ "pioneer-optical",
  "rand",
  "serde",
  "serde_json",
@@ -976,9 +980,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "lazy_static"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libadwaita"
@@ -1013,13 +1017,14 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libfreemkv"
-version = "1.7.7"
+version = "1.8.0"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.0#92847607b9de38dcc82bdcdc49ecb27d3849e88f"
 dependencies = [
  "aes",
  "base64",
@@ -1382,6 +1387,12 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pioneer-optical"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48a5bdb9e9a07422ceb5133d227fbe4ecce77060007e5a9bac0dda3d82d72911"
 
 [[package]]
 name = "pkg-config"
@@ -2350,9 +2361,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2471,7 +2482,3 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
-
-[[patch.unused]]
-name = "freemkv-unlock"
-version = "1.7.7"
