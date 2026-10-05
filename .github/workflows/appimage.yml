@@ -1,13 +1,14 @@
 name: AppImage
 
 # Builds a portable AppImage of the Linux desktop app (bundles GTK4 +
-# libadwaita). On every qa push, so a green qa proves it like deb/flatpak; on
-# demand; and on a version tag release.yml calls it with release: true to
-# upload freemkv-x86_64-linux.AppImage.
+# libadwaita) for x86_64 and aarch64 (native arm64 runner). On every dev and qa
+# push, so a new arch is proven before release like deb/flatpak; on demand; and
+# on a version tag release.yml calls it with release: true to upload
+# freemkv-x86_64-linux.AppImage and freemkv-aarch64-linux.AppImage.
 on:
   workflow_dispatch:
   push:
-    branches: [qa]
+    branches: [dev, qa]
   # release.yml calls this with release: true on a version tag.
   workflow_call:
     inputs:
@@ -26,7 +27,18 @@ jobs:
   build:
     # 24.04: the shell needs GTK >= 4.10 and libadwaita >= 1.4 (Cargo features
     # v4_10 / v1_4), which 22.04 does not ship. Sets the distro floor to 2024+.
-    runs-on: ubuntu-24.04
+    # No armhf leg: there is no hosted 32-bit ARM runner to build GTK4 against.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            linuxdeploy: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            linuxdeploy: 620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,6 +52,9 @@ jobs:
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - name: Install GTK4 + libadwaita and AppImage tooling
+        env:
+          ARCH: ${{ matrix.arch }}
+          LINUXDEPLOY_SHA256: ${{ matrix.linuxdeploy }}
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -49,20 +64,21 @@ jobs:
             desktop-file-utils \
             wget
           # Pinned + hash-checked: executed in the release build, so never "continuous".
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+          wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-$ARCH.AppImage"
           wget -q https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/7a3fbc31a9e5075073ff8790f26effbac5f84453/linuxdeploy-plugin-gtk.sh
           printf '%s  %s\n' \
-            c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d linuxdeploy-x86_64.AppImage \
+            "$LINUXDEPLOY_SHA256" "linuxdeploy-$ARCH.AppImage" \
             b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171 linuxdeploy-plugin-gtk.sh \
             | sha256sum -c -
-          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
+          chmod +x "linuxdeploy-$ARCH.AppImage" linuxdeploy-plugin-gtk.sh
       - name: Exact toolchain (freemkv rust-version)
         run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
+          key: appimage-${{ matrix.arch }}
       - name: Clean build environment and C toolchain
-        run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env x86_64-unknown-linux-gnu freemkv
+        run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env ${{ matrix.arch }}-unknown-linux-gnu freemkv
       - name: Build release binary
         working-directory: freemkv
         # A release links the tagged crates, so its committed lock must hold as-is.
@@ -86,7 +102,7 @@ jobs:
           set -euo pipefail
           # The gtk plugin bundles GTK4/libadwaita runtime libs so the
           # AppImage doesn't rely on the target distro shipping them.
-          ./linuxdeploy-x86_64.AppImage \
+          "./linuxdeploy-${{ matrix.arch }}.AppImage" \
             --appdir AppDir \
             --plugin gtk \
             --output appimage \
@@ -98,30 +114,31 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y xvfb
-          ./freemkv-x86_64.AppImage --version
+          app="./freemkv-${{ matrix.arch }}.AppImage"
+          "$app" --version
           # A bare launch and `gui` must both still be running after 10s (124 = timed out, alive).
           for args in "" gui; do
-            rc=0; xvfb-run -a timeout 10 ./freemkv-x86_64.AppImage $args || rc=$?
+            rc=0; xvfb-run -a timeout 10 "$app" $args || rc=$?
             [ "$rc" = 124 ] || { echo "::error::GUI '$args' exited early (rc=$rc)"; exit 1; }
           done
       - if: ${{ !inputs.release }}
         uses: actions/upload-artifact@v7
         with:
-          name: freemkv-appimage-${{ github.run_id }}
+          name: freemkv-appimage-${{ matrix.arch }}-${{ github.run_id }}
           path: freemkv-*.AppImage
           if-no-files-found: error
       - name: Package for release
         if: ${{ inputs.release }}
         run: |
           set -euo pipefail
-          A=freemkv-x86_64-linux
-          mv freemkv-x86_64.AppImage "$A.AppImage"
+          A=freemkv-${{ matrix.arch }}-linux
+          mv "freemkv-${{ matrix.arch }}.AppImage" "$A.AppImage"
           sha256sum "$A.AppImage" > "$A.AppImage.sha256"
       - if: ${{ inputs.release }}
         uses: actions/upload-artifact@v7
         with:
-          name: freemkv-appimage-release
-          path: freemkv-x86_64-linux.AppImage*
+          name: freemkv-appimage-release-${{ matrix.arch }}
+          path: freemkv-${{ matrix.arch }}-linux.AppImage*
           if-no-files-found: error
 
   # Only this job holds contents: write, and only when called for a release.
@@ -134,10 +151,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: freemkv-appimage-release
+          pattern: freemkv-appimage-release-*
+          merge-multiple: true
       - name: Upload to the release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
+          fail_on_unmatched_files: true
           files: |
             freemkv-x86_64-linux.AppImage
             freemkv-x86_64-linux.AppImage.sha256
+            freemkv-aarch64-linux.AppImage
+            freemkv-aarch64-linux.AppImage.sha256

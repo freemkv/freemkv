@@ -330,6 +330,8 @@ fn only_real_upload_steps_count_as_produced() {
     let want: BTreeSet<String> = [
         "freemkv-x86_64-linux.AppImage",
         "freemkv-x86_64-linux.AppImage.sha256",
+        "freemkv-aarch64-linux.AppImage",
+        "freemkv-aarch64-linux.AppImage.sha256",
     ]
     .map(String::from)
     .into();
