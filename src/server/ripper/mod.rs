@@ -757,6 +757,7 @@ fn forget_removed_device(device: &str) -> bool {
 /// How the poll loop reacts to a failed disc probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeFailure {
+    Pending,
     /// Absent from the enumeration: unplugged, left for the next rescan.
     HotUnplug,
     /// Newly found enumerated but not answering: warn and surface the wedge in the UI.
@@ -770,6 +771,7 @@ enum ProbeFailure {
 // failing drive can't force `list_drives` (INQUIRY to every drive, busy ones too) every tick.
 #[derive(Default)]
 struct ProbeFailTracker {
+    failures: std::collections::HashMap<String, u8>,
     wedged: std::collections::HashSet<String>,
     unplug_suspect: std::collections::HashSet<String>,
     /// This tick's latest enumeration, always taken before the probe being classified.
@@ -788,11 +790,27 @@ impl ProbeFailTracker {
 
     /// The drive answered, or it was torn down: forget any failure recorded for it.
     fn clear(&mut self, device: &str) {
+        self.failures.remove(device);
         self.wedged.remove(device);
         self.unplug_suspect.remove(device);
     }
 
     fn on_probe_err(
+        &mut self,
+        device: &str,
+        path: &str,
+        enumerate: impl FnOnce() -> Vec<String>,
+    ) -> ProbeFailure {
+        // Three consecutive failures span at least two poll intervals (10 seconds).
+        let failures = self.failures.entry(device.to_string()).or_default();
+        *failures = failures.saturating_add(1);
+        if *failures < 3 {
+            return ProbeFailure::Pending;
+        }
+        self.classify_probe_err(device, path, enumerate)
+    }
+
+    fn classify_probe_err(
         &mut self,
         device: &str,
         path: &str,
@@ -985,6 +1003,23 @@ fn publish_poll_row(device: &str, row: RipState) -> bool {
     published
 }
 
+// Clear only the poller's warning, leaving worker errors and active jobs intact.
+fn clear_probe_error(row: &mut RipState, presence: libfreemkv::DiscPresence) {
+    if row.status == "error"
+        && row
+            .last_error
+            .starts_with("Drive communication failed repeatedly (")
+    {
+        row.last_error.clear();
+        row.status = "idle".to_string();
+        match presence {
+            libfreemkv::DiscPresence::Present => row.disc_present = true,
+            libfreemkv::DiscPresence::Absent => row.disc_present = false,
+            _ => {}
+        }
+    }
+}
+
 /// Poll drives for disc insertion. Only triggers on state change
 /// (no disc → disc present), not on disc already being there.
 ///
@@ -1129,6 +1164,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                 let presence = match libfreemkv::disc_presence(std::path::Path::new(path)) {
                     Ok(p) => {
                         probe_fail.clear(&device);
+                        update_state_with(&device, |row| clear_probe_error(row, p));
                         p
                     }
                     Err(e) => {
@@ -1146,6 +1182,9 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                                 .collect()
                         };
                         let class = probe_fail.on_probe_err(&device, path, enumerate);
+                        if class == ProbeFailure::Pending {
+                            continue;
+                        }
                         if class == ProbeFailure::HotUnplug {
                             tracing::debug!(
                                 device = %device,
@@ -1160,7 +1199,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                                 device = %device,
                                 path = %path,
                                 error = %e,
-                                "disc_presence failed — drive firmware unresponsive; physical reconnect or host reboot required"
+                                "disc_presence repeatedly failed — drive communication error"
                             );
                             // Surface the wedge in the UI; the Ok(_) arm clears it once the
                             // drive recovers. A worker that claimed the drive since the busy
@@ -1170,8 +1209,9 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                                 RipState {
                                     device: device.clone(),
                                     status: "error".to_string(),
+                                    disc_present: had_disc.contains(&device),
                                     last_error: format!(
-                                        "Drive firmware unresponsive ({}). Power-cycle drive or host required.",
+                                        "Drive communication failed repeatedly ({}). Retrying automatically.",
                                         e
                                     ),
                                     ..Default::default()
@@ -10749,6 +10789,74 @@ mod probe_failure_tests {
     use super::{ProbeFailTracker, ProbeFailure};
     use std::cell::Cell;
 
+    #[test]
+    fn transient_failures_do_not_publish_and_success_restarts_grace() {
+        let mut tracker = ProbeFailTracker::default();
+        for _ in 0..2 {
+            assert_eq!(
+                tracker.on_probe_err("sg3", "/dev/sg3", no_enum),
+                ProbeFailure::Pending
+            );
+            tracker.begin_tick();
+        }
+        tracker.clear("sg3");
+        for _ in 0..2 {
+            assert_eq!(
+                tracker.on_probe_err("sg3", "/dev/sg3", no_enum),
+                ProbeFailure::Pending
+            );
+            tracker.begin_tick();
+        }
+        assert_eq!(
+            tracker.on_probe_err("sg3", "/dev/sg3", || paths(&["/dev/sg3"])),
+            ProbeFailure::NewWedge
+        );
+        assert_eq!(
+            tracker.on_probe_err("sg3", "/dev/sg3", no_enum),
+            ProbeFailure::KnownWedge
+        );
+    }
+
+    #[test]
+    fn recovered_probe_clears_warning_for_present_absent_and_settling() {
+        use libfreemkv::DiscPresence::{Absent, Present, Settling};
+        for presence in [Present, Absent, Settling] {
+            let mut row = super::RipState {
+                status: "error".into(),
+                last_error:
+                    "Drive communication failed repeatedly (E4000). Retrying automatically.".into(),
+                disc_present: true,
+                disc_name: "Test disc".into(),
+                ..Default::default()
+            };
+            super::clear_probe_error(&mut row, presence);
+            assert_eq!(row.status, "idle");
+            assert!(row.last_error.is_empty());
+            assert_eq!(row.disc_present, presence != Absent);
+            assert_eq!(row.disc_name, "Test disc");
+        }
+    }
+
+    #[test]
+    fn successful_probe_preserves_worker_errors_and_active_jobs() {
+        for (status, error) in [
+            ("error", "Disc read failed"),
+            (
+                "scanning",
+                "Drive communication failed repeatedly (E4000). Retrying automatically.",
+            ),
+        ] {
+            let mut row = super::RipState {
+                status: status.into(),
+                last_error: error.into(),
+                ..Default::default()
+            };
+            super::clear_probe_error(&mut row, libfreemkv::DiscPresence::Present);
+            assert_eq!(row.status, status);
+            assert_eq!(row.last_error, error);
+        }
+    }
+
     fn paths(p: &[&str]) -> Vec<String> {
         p.iter().map(|s| s.to_string()).collect()
     }
@@ -10760,10 +10868,10 @@ mod probe_failure_tests {
     #[test]
     fn enumeration_membership_separates_unplug_from_wedge() {
         let mut t = ProbeFailTracker::default();
-        let r = t.on_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg2"]));
+        let r = t.classify_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg2"]));
         assert_eq!(r, ProbeFailure::HotUnplug);
         let mut t = ProbeFailTracker::default();
-        let r = t.on_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"]));
+        let r = t.classify_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"]));
         assert_eq!(r, ProbeFailure::NewWedge);
     }
 
@@ -10772,19 +10880,19 @@ mod probe_failure_tests {
         let mut t = ProbeFailTracker::default();
         t.begin_tick();
         assert_eq!(
-            t.on_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"])),
+            t.classify_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"])),
             ProbeFailure::NewWedge
         );
         for _ in 0..3 {
             t.begin_tick();
             assert_eq!(
-                t.on_probe_err("sg1", "/dev/sg1", no_enum),
+                t.classify_probe_err("sg1", "/dev/sg1", no_enum),
                 ProbeFailure::KnownWedge
             );
         }
         t.on_rescan(paths(&["/dev/sg1"]));
         assert_eq!(
-            t.on_probe_err("sg1", "/dev/sg1", no_enum),
+            t.classify_probe_err("sg1", "/dev/sg1", no_enum),
             ProbeFailure::KnownWedge
         );
     }
@@ -10793,27 +10901,27 @@ mod probe_failure_tests {
     fn an_unplug_suspect_waits_for_the_rescan() {
         let mut t = ProbeFailTracker::default();
         assert_eq!(
-            t.on_probe_err("sg1", "/dev/sg1", Vec::new),
+            t.classify_probe_err("sg1", "/dev/sg1", Vec::new),
             ProbeFailure::HotUnplug
         );
         t.begin_tick();
         assert_eq!(
-            t.on_probe_err("sg1", "/dev/sg1", no_enum),
+            t.classify_probe_err("sg1", "/dev/sg1", no_enum),
             ProbeFailure::HotUnplug
         );
         // Still listed at the rescan: re-check once against a post-probe enumeration.
         t.on_rescan(paths(&["/dev/sg1"]));
-        let r = t.on_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"]));
+        let r = t.classify_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"]));
         assert_eq!(r, ProbeFailure::NewWedge);
     }
 
     #[test]
     fn recovery_or_teardown_rearms_the_warning() {
         let mut t = ProbeFailTracker::default();
-        t.on_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"]));
+        t.classify_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"]));
         t.clear("sg1");
         t.begin_tick();
-        let r = t.on_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"]));
+        let r = t.classify_probe_err("sg1", "/dev/sg1", || paths(&["/dev/sg1"]));
         assert_eq!(
             r,
             ProbeFailure::NewWedge,
@@ -10827,7 +10935,7 @@ mod probe_failure_tests {
         let calls = Cell::new(0);
         let mut t = ProbeFailTracker::default();
         t.on_rescan(paths(&["/dev/sg1"]));
-        let r = t.on_probe_err("sg1", "/dev/sg1", || {
+        let r = t.classify_probe_err("sg1", "/dev/sg1", || {
             calls.set(calls.get() + 1);
             Vec::new()
         });
@@ -10840,7 +10948,7 @@ mod probe_failure_tests {
         let mut t = ProbeFailTracker::default();
         t.on_rescan(paths(&["/dev/sg2"]));
         assert_eq!(
-            t.on_probe_err("sg1", "/dev/sg1", no_enum),
+            t.classify_probe_err("sg1", "/dev/sg1", no_enum),
             ProbeFailure::HotUnplug
         );
     }
@@ -10855,11 +10963,11 @@ mod probe_failure_tests {
         let mut t = ProbeFailTracker::default();
         t.begin_tick();
         assert_eq!(
-            t.on_probe_err("sg1", "/dev/sg1", enumerate),
+            t.classify_probe_err("sg1", "/dev/sg1", enumerate),
             ProbeFailure::NewWedge
         );
         assert_eq!(
-            t.on_probe_err("sg2", "/dev/sg2", enumerate),
+            t.classify_probe_err("sg2", "/dev/sg2", enumerate),
             ProbeFailure::HotUnplug
         );
         assert_eq!(
@@ -10868,8 +10976,8 @@ mod probe_failure_tests {
             "an absent drive reuses this tick's enumeration"
         );
         t.begin_tick();
-        t.on_probe_err("sg1", "/dev/sg1", enumerate);
-        t.on_probe_err("sg2", "/dev/sg2", enumerate);
+        t.classify_probe_err("sg1", "/dev/sg1", enumerate);
+        t.classify_probe_err("sg2", "/dev/sg2", enumerate);
         assert_eq!(
             calls.get(),
             1,

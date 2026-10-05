@@ -310,7 +310,9 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     }
 
     let path = url.split('?').next().unwrap_or("");
-    if is_get && PAGES.contains(&path) {
+    if path == "/api/peers" || path.starts_with("/api/peers/") {
+        crate::server::peers::handle(request, cfg);
+    } else if is_get && PAGES.contains(&path) {
         serve_html(request);
     } else if is_get && path == "/favicon.svg" {
         serve_asset(request, "favicon.svg");
@@ -911,14 +913,29 @@ pub(crate) fn read_json_body(
     }
 }
 
-// Validate device name is alphanumeric-only (sgN/diskN/CdRomN): rejects
+// Validate device names (sgN/diskN/CdRomN or ioreg:<digits>): reject
 // slashes/traversal so a malformed URL like /api/rip/sg4/stop can't reach
 // the rip handler with device="sg4/stop" (previously spawned a doomed thread).
-fn is_valid_device_name(s: &str) -> bool {
+pub(crate) fn is_valid_device_name(s: &str) -> bool {
     // Cross-OS device key (Linux `sgN`, macOS `diskN`, Windows `CdRomN`).
-    // ASCII-alphanumeric only is the path-safety boundary rejecting
+    // Alphanumeric names and numeric registry selectors form the boundary rejecting
     // separators/traversal (`sg4/stop`); not a "this drive exists" check.
+    if let Some(id) = s.strip_prefix("ioreg:") {
+        return !id.is_empty()
+            && id.bytes().all(|b| b.is_ascii_digit())
+            && id.parse::<u64>().is_ok();
+    }
     (3..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+fn device_path(device: &str) -> String {
+    if device.starts_with("ioreg:") {
+        device.to_string()
+    } else if cfg!(windows) {
+        format!(r"\\.\{device}")
+    } else {
+        format!("/dev/{device}")
+    }
 }
 
 // media_type on a title override is the one field handle_title_override left
@@ -2509,6 +2526,16 @@ mod web_tests {
         assert!(is_valid_device_name("sg4"));
         assert!(is_valid_device_name("sg15"));
         assert!(is_valid_device_name("disk6")); // macOS
+        assert!(is_valid_device_name("ioreg:4295125507"));
+        assert_eq!(device_path("ioreg:4295125507"), "ioreg:4295125507");
+        for bad in [
+            "ioreg:",
+            "ioreg:../a",
+            "ioreg:1/stop",
+            "ioreg:18446744073709551616",
+        ] {
+            assert!(!is_valid_device_name(bad));
+        }
         assert!(is_valid_device_name("CdRom0")); // Windows
     }
 
@@ -6843,7 +6870,7 @@ fn handle_scan(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &
     };
 
     let dev = device.to_string();
-    let dev_path = format!("/dev/{}", device);
+    let dev_path = device_path(device);
     let cfg = Arc::clone(cfg);
     ripper::update_state(
         &dev,
@@ -6922,7 +6949,7 @@ fn spawn_rip_after_claim(
     claim_gen: u64,
 ) -> bool {
     let dev = device.to_string();
-    let dev_path = format!("/dev/{}", device);
+    let dev_path = device_path(device);
     let cfg = Arc::clone(cfg);
 
     let dev_for_register = dev.clone();
@@ -7566,7 +7593,7 @@ fn handle_eject(request: tiny_http::Request, device: &str) {
             r#"{"ok":false,"error":"drive busy; stop the rip before ejecting"}"#,
         );
     }
-    let device_path = format!("/dev/{}", device);
+    let device_path = device_path(device);
     crate::server::ripper::eject_drive(&device_path);
     ripper::update_state(
         device,

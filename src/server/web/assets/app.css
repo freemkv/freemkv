@@ -222,7 +222,7 @@ table.list tr.grey td.title b { font-weight: 500; }
 .discmap .head { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--teal-dark); transition: left 0.9s linear; }
 .steps { display: flex; gap: 0.35rem; align-items: center; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.7rem; flex-wrap: wrap; }
 .steps .s { display: inline-flex; align-items: center; gap: 0.3rem; }
-.steps .s.done { color: var(--ok); } .steps .s.now { color: var(--teal-dark); font-weight: 650; }
+.steps .s.done { color: var(--ok); } .steps .s.current { color: var(--teal-dark); font-weight: 650; }
 .steps .sep { opacity: 0.5; }
 .banner { display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.65rem 0.9rem; border-radius: 10px; font-size: 0.85rem; margin: 0 1.1rem 1rem; border: 1px solid; }
 .banner.bad { background: var(--bad-tint); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, transparent); }

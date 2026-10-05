@@ -87,10 +87,10 @@ function discHtml(s) {
 
 function stepsHtml(s) {
   const st = s.status;
-  const steps = st === 'scanning' ? ['now', '', ''] : st === 'ripping' ? ['done', 'now', ''] : (st === 'moving' || st === 'done') ? ['done', 'done', 'done'] : null;
+  const steps = st === 'scanning' ? ['current', '', ''] : st === 'ripping' ? ['done', 'current', ''] : (st === 'moving' || st === 'done') ? ['done', 'done', 'done'] : null;
   if (!steps) return '';
   const names = ['Read', 'Rip', 'Finish'];
-  return '<div class="steps">' + names.map((n, i) => '<span class="s ' + steps[i] + '">' + (steps[i] === 'done' ? '✓' : steps[i] === 'now' ? '●' : '○') + ' ' + n + '</span>').join('<span class="sep">›</span>') + '</div>';
+  return '<div class="steps">' + names.map((n, i) => '<span class="s ' + steps[i] + '">' + (steps[i] === 'done' ? '✓' : steps[i] === 'current' ? '●' : '○') + ' ' + n + '</span>').join('<span class="sep">›</span>') + '</div>';
 }
 
 /* The disc map. Pass 1: green grows to the read head; only damage already
@@ -463,7 +463,7 @@ export default {
         <div><h1>Drives</h1><p class="lede" id="lede">Waiting for the drives…</p></div>
         <div class="actions"><button class="btn btn-ghost" id="syslog">${ICON.term} System log</button></div>
       </div>
-      <div class="drives" id="drives"></div>
+      <div id="peer-status" aria-live="polite"></div><div class="drives" id="drives"></div>
       <h2 style="margin:2.25rem 0 1rem;font-size:1.15rem;letter-spacing:-.01em">After the rip</h2>
       <div class="grid grid-2">
         <section class="card"><div class="card-head"><h2>Making video files</h2></div><div id="mux"></div></section>
@@ -474,14 +474,19 @@ export default {
     const root = $('#rp', view);
     const cards = new Map();
     let state = {};
+    let localState = {};
+    let remoteState = {};
+    let peers = [];
+    let polling = false;
     let sys = {};
     let reviews = [];
     const drivesEl = $('#drives', view);
 
     const render = (s) => {
       if (ctx.stale()) return;
-      state = s || {};
-      const devs = Object.keys(state).filter(k => !k.startsWith('_')).sort();
+      localState = s || {};
+      state = { ...localState, ...remoteState };
+      const devs = Object.keys(state).filter(k => !k.startsWith('_')).sort((a, b) => Number(!!state[a]._owner) - Number(!!state[b]._owner) || a.localeCompare(b));
       put($('#lede', view), devs.length
         ? plural(devs.length, 'drive') + ' · ' + devs.filter(d => ACTIVE.includes(state[d].status)).length + ' busy'
         : 'No drives found. A drive appears here about a minute after it is plugged in.');
@@ -494,13 +499,43 @@ export default {
         if (!el) { el = makeCard(dev); cards.set(dev, el); }
         if (drivesEl.children[i] !== el) drivesEl.insertBefore(el, drivesEl.children[i] || null);
         paintCard(el, dev, state[dev]);
+        $('.dev', el).textContent = state[dev]._owner ? state[dev]._owner + ' · ' + dev.slice(dev.indexOf(':') + 1) : 'This Library · ' + dev;
       });
       put($('#mux', view), muxHtml(state, sys));
       put($('#move', view), moveHtml(state, sys));
     };
     ctx.onState(render);
+    const loadPeers = async () => {
+      if (polling || ctx.stale()) return;
+      polling = true;
+      try {
+        peers = await api('GET', '/api/peers');
+        const results = await Promise.all(peers.map(async peer => {
+          try {
+            const snapshot = await api('GET', '/api/peers/' + peer.id + '/api/state');
+            if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('Invalid drive state');
+            return { peer, snapshot };
+          } catch (e) { return { peer, error: e.message }; }
+        }));
+        if (ctx.stale()) return;
+        remoteState = {};
+        const notices = [];
+        for (const { peer, snapshot, error } of results) {
+          if (error) { notices.push('<div class="banner bad">' + esc(peer.name) + ': offline — reconnecting automatically</div>'); continue; }
+          const devices = Object.entries(snapshot).filter(([dev, s]) => /^(?:ioreg:)?[a-zA-Z0-9]+$/.test(dev) && s && typeof s === 'object');
+          if (!devices.length) notices.push('<p class="small muted">' + esc(peer.name) + ': connected · no drives</p>');
+          for (const [dev, s] of devices) remoteState[peer.id + ':' + dev] = { ...s, _owner: peer.name };
+        }
+        put($('#peer-status', view), notices.join(''));
+        render(localState);
+      } catch (e) {
+        if (!ctx.stale()) put($('#peer-status', view), '<div class="banner bad">Could not load connected Libraries: ' + esc(e.message) + '</div>');
+      } finally { polling = false; }
+    };
+    loadPeers();
+    ctx.every(3000, loadPeers);
 
-    const loadSys = () => api('GET', '/api/system').then(d => { if (!ctx.stale()) { sys = d; render(state); } }).catch(() => {});
+    const loadSys = () => api('GET', '/api/system').then(d => { if (!ctx.stale()) { sys = d; render(localState); } }).catch(() => {});
     const loadReview = () => api('GET', '/api/review').then(items => {
       if (ctx.stale()) return;
       reviews = items || [];
@@ -523,7 +558,7 @@ export default {
       const card = e.target.closest('.drive');
       if (!card) return;
       const dev = card.dataset.dev;
-      if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !!sys.debug_enabled); return; }
+      if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !/^p[0-9a-f]+:/.test(dev) && !!sys.debug_enabled); return; }
       if (e.target.closest('[data-title]')) { changeTitle(dev, state[dev] || {}); return; }
       const b = e.target.closest('button[data-url]');
       if (!b) return;
@@ -549,7 +584,7 @@ export default {
         return;
       }
       if (e.target.closest('[data-refresh]')) {
-        const ok = await api('GET', '/api/system').then(d => { sys = d; render(state); return true; }).catch(err => { toast('Recheck failed: ' + err.message, 'bad'); return false; });
+        const ok = await api('GET', '/api/system').then(d => { sys = d; render(localState); return true; }).catch(err => { toast('Recheck failed: ' + err.message, 'bad'); return false; });
         if (ok) toast('Rechecked', 'info');
         return;
       }

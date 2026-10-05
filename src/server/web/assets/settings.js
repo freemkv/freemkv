@@ -74,6 +74,48 @@ async function mount(view, ctx) {
       + groups.map(g => '<a href="#' + g.id + '">' + esc(g.title) + '</a>').join('') + '</nav>'
       + '<form id="form" class="stack" novalidate>' + html
       + '<div class="savebar"><button type="submit" class="btn btn-primary" id="save">Save changes</button><button type="button" class="btn btn-ghost" id="revert">Discard</button><span class="msg" id="msg">No changes</span></div></form></div>';
+    const connections = document.createElement('section');
+    connections.className = 'card';
+    connections.id = 'Connections';
+    connections.innerHTML = `<h2>Connect to Remote Library</h2>
+      <p class="small muted">See and control another Library’s drives here. Rips and files stay on the machine with the drive.</p>
+      <div id="connected-libraries"></div>
+      <form id="connect-library" class="stack">
+        <label>Library name<input class="txt" name="name" required maxlength="100" placeholder="Ripping PC"></label>
+        <label>Remote Library URL<input class="txt" name="url" type="url" required placeholder="http://library-pc:8080"></label>
+        <label>This Library’s reachable URL<input class="txt" name="return_url" type="url" placeholder="http://this-computer:8080"></label>
+        <p class="small muted">Provide this machine’s network URL to show both machines’ drives in either UI. Leave it blank for a one-way connection. Both Libraries need this feature for a two-way connection.</p>
+        <div><button class="btn btn-primary" type="submit">Connect to Remote Library</button></div>
+        <p id="connect-status" role="status" class="small"></p>
+      </form>`;
+    const content = document.createElement('div');
+    content.className = 'stack';
+    const settingsForm = $('#form', view);
+    settingsForm.replaceWith(content);
+    content.append(settingsForm, connections);
+    $('.settings-nav', view).insertAdjacentHTML('beforeend', '<a href="#Connections">Connected Libraries</a>');
+    const loadConnections = async () => {
+      const peers = await api('GET', '/api/peers');
+      if (ctx.stale()) return;
+      $('#connected-libraries', connections).innerHTML = peers.map(p => '<p><b>' + esc(p.name) + '</b> <span class="muted">' + esc(p.url) + '</span> <button type="button" class="btn btn-ghost btn-sm" data-disconnect="' + esc(p.id) + '">Disconnect here</button></p>').join('');
+    };
+    loadConnections().catch(e => { if (!ctx.stale()) $('#connect-status', connections).textContent = e.message; });
+    connections.addEventListener('click', async e => {
+      const b = e.target.closest('[data-disconnect]');
+      if (!b) return;
+      await act(b, async () => { await api('POST', '/api/peers', { remove: b.dataset.disconnect }); await loadConnections(); }, 'Disconnect');
+    });
+    $('#connect-library', connections).addEventListener('submit', async e => {
+      e.preventDefault();
+      const fields = new FormData(e.target);
+      const button = e.target.querySelector('button');
+      await act(button, async () => {
+        const result = await api('POST', '/api/peers', Object.fromEntries(fields));
+        if (ctx.stale()) return;
+        $('#connect-status', connections).textContent = result.warning || 'Connected. Open Drives to see both Libraries.';
+        await loadConnections();
+      }, 'Connect');
+    });
     const form = $('#form', view);
     const initial = JSON.stringify(collect());
 

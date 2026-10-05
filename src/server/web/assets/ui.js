@@ -30,6 +30,9 @@ export function fill(el, pct) {
 /** Call the API. Resolves with the JSON (or text) body; rejects with the
     server's error message on any non-2xx, so no failure is ever silent. */
 export async function api(method, url, body, signal) {
+  // Remote drive keys carry their owner; only drive endpoints use this route.
+  url = url.replace(/^\/api\/(scan|rip|stop|eject|title|accept-loss|logs)\/(p[0-9a-f]+)(?::|%3A)((?:ioreg(?::|%3A))?[a-zA-Z0-9]+)/i,
+    (_, action, peer, device) => '/api/peers/' + peer + '/api/' + action + '/' + device);
   const opt = { method, headers: {}, cache: 'no-store', signal };
   if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers['Content-Type'] = 'application/json'; }
   let r;

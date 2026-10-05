@@ -4,9 +4,13 @@
 
 ### Added
 
+- **Connect to Remote Library** in Settings shows local and remote drives together with machine labels, live progress, controls and console logs. An optional return URL connects both UIs; offline Libraries reconnect automatically. Jobs and output paths remain on the owning machine. (server only: Library web UI)
+
 - ARM builds: Windows on ARM gets `freemkv-aarch64-windows-setup.exe` / `freemkv-aarch64-windows.zip` and `freemkv-cli-aarch64-windows.exe`; 64-bit ARM Linux gets `freemkv-arm64.deb`, `freemkv-cli-arm64.deb` and `freemkv-aarch64-linux.AppImage`; 32-bit ARM (Raspberry Pi OS 32-bit) gets `freemkv-cli-armv7-linux` and `freemkv-cli-armhf.deb`; the server image is multi-arch (linux/amd64, linux/arm64, linux/arm/v7) under both `freemkv-library` and `autorip`. Each ships with a `.sha256`. (CLI, app, server)
 
 ### Changed
+
+- Drive warnings wait for repeated probe failures and clear after recovery; the Read / Rip / Finish indicator stays aligned without button styling. macOS drive controls accept stable optical-service IDs, preventing a second drive card when exclusive ripping removes the disk name. (server only: Library polling and web UI)
 
 - macOS: the `.dmg` is no longer built. The app ships as `freemkv-aarch64-macos.zip` / `freemkv-x86_64-macos.zip` (the same ad-hoc-signed `freemkv.app`); it is not notarized, so allow its first launch under System Settings → Privacy & Security → Open Anyway (see [INSTALL.md](INSTALL.md)). (app only: macOS packaging)
 
