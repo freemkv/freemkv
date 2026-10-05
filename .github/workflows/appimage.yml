@@ -28,7 +28,7 @@ on:
         default: false
 
 concurrency:
-  group: appimage-${{ github.ref }}
+  group: appimage-${{ github.ref }}-${{ inputs.tag }}
   cancel-in-progress: true
 
 permissions:

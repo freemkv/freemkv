@@ -29,7 +29,7 @@ on:
         default: false
 
 concurrency:
-  group: windows-app-${{ github.ref }}
+  group: windows-app-${{ github.ref }}-${{ inputs.tag }}
   cancel-in-progress: true
 
 permissions:

@@ -18,7 +18,7 @@ on:
     paths: ['packaging/deb/**', '.github/workflows/deb.yml']
 
 concurrency:
-  group: deb-${{ github.ref }}
+  group: deb-${{ github.ref }}-${{ inputs.tag }}
   cancel-in-progress: true
 
 permissions:
