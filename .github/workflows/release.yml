@@ -249,7 +249,8 @@ jobs:
   # ── CLI (no features) ───────────────────────────────────────────────────────
   # Bare binaries, no UI libraries; Linux is static musl. `legacy` re-uploads
   # the same bytes under the pre-split name so old `releases/latest/download/`
-  # URLs keep working for one release cycle.
+  # URLs keep working for one release cycle; arches added after the split
+  # (armv7 Linux, ARM64 Windows) never had one.
   cli-binaries:
     needs: verify
     # Uploads assets to the GitHub release.
@@ -269,6 +270,11 @@ jobs:
             asset: freemkv-cli-aarch64-linux
             legacy: freemkv-aarch64-linux
             ext: ''
+          # Raspberry Pi OS 32-bit and other ARMv7 hard-float Linux.
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            asset: freemkv-cli-armv7-linux
+            ext: ''
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: freemkv-cli-aarch64-macos
@@ -284,11 +290,37 @@ jobs:
             asset: freemkv-cli-x86_64-windows
             legacy: freemkv-x86_64-windows
             ext: '.exe'
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset: freemkv-cli-aarch64-windows
+            ext: '.exe'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # As windows-app.yml: the windows-11-arm image may lack rustup and keep
+      # clang (which ring needs on ARM64) off PATH. rustup-init pinned + hash-checked.
+      - name: rustup and clang on PATH (Windows ARM64)
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl -fsSLo "$RUNNER_TEMP/rustup-init.exe" \
+              https://static.rust-lang.org/rustup/archive/1.29.1/aarch64-pc-windows-msvc/rustup-init.exe
+            echo "01aa49cf9574a8bd0ae52005d7de2590e8f27181ded6748236e702c92aef826d  $RUNNER_TEMP/rustup-init.exe" | sha256sum -c -
+            "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal --default-toolchain none --no-modify-path
+            cygpath -w "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          if ! command -v clang >/dev/null 2>&1; then
+            vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' \
+                   -property installationPath | tr -d '\r')
+            for d in "/c/Program Files/LLVM/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/ARM64/bin"; do
+              if [ -x "$d/clang.exe" ]; then cygpath -w "$d" >> "$GITHUB_PATH"; exit 0; fi
+            done
+            echo "::error::no clang.exe found for the ARM64 build"; exit 1
+          fi
       - name: Exact toolchain (rust-version)
         shell: bash
         run: bash .github/scripts/exact-toolchain.sh install Cargo.toml "${{ matrix.target }}"
@@ -298,11 +330,11 @@ jobs:
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      # arm64 musl goes through `cross`: mimalloc-sys and ring compile C, which
-      # a plain x86 `cargo build --target` cannot link.
-      # Pinned + hash-checked like linuxdeploy in appimage.yml; the build image by digest.
+      # arm64 and armv7 musl go through `cross`: mimalloc-sys and ring compile C,
+      # which a plain x86 `cargo build --target` cannot link.
+      # Pinned + hash-checked like linuxdeploy in appimage.yml; the build images by digest.
       - name: Install cross
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'armv7-unknown-linux-musleabihf'
         run: |
           set -euo pipefail
           curl -fsSLo cross.tar.gz https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz
@@ -310,14 +342,17 @@ jobs:
           tar xzf cross.tar.gz cross
           sudo mv cross /usr/local/bin/
           echo 'CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE=ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5@sha256:702154f52b2d8091671aa2c84d5582d849f949977228c735ff8462f93cc0e1e4' >> "$GITHUB_ENV"
+          echo 'CROSS_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_IMAGE=ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:0.2.5@sha256:b4f481f30ceca34730a5723f717396d762d94f6eddd7e1cf7c7862d1377ff98c' >> "$GITHUB_ENV"
+          # QEMU user emulation, so the cross-built binary can be run below.
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
       - name: Clean build environment and C toolchain
         shell: bash
         run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
       - name: Build CLI
-        if: matrix.target != 'aarch64-unknown-linux-musl'
+        if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'armv7-unknown-linux-musleabihf'
         run: cargo build --locked --release --target ${{ matrix.target }} --bin freemkv
       - name: Build CLI (cross)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'armv7-unknown-linux-musleabihf'
         run: cross build --locked --release --target ${{ matrix.target }} --bin freemkv
 
       # The CLI must not pull in UI libraries: none at all on static Linux,
@@ -338,6 +373,25 @@ jobs:
               echo "::error::the Linux CLI is not static"; exit 1
             fi
           fi
+
+      # Every binary must run and report this version: natively, or for the
+      # cross-built Linux legs under QEMU (binfmt), on the CPU it ships for.
+      - name: Run the CLI
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/freemkv${{ matrix.ext }}"
+          if [ "$RUNNER_OS" = Linux ]; then readelf -h "$BIN" | grep -E 'Class|Machine'; fi
+          # The Intel build runs on the arm64 Mac only through Rosetta.
+          if [ "$RUNNER_OS" = macOS ] && ! arch -x86_64 /usr/bin/true 2>/dev/null \
+             && [ "${{ matrix.target }}" = x86_64-apple-darwin ]; then
+            echo "::warning::no Rosetta on this runner; $BIN not run"; exit 0
+          fi
+          out=$("$BIN" --version)
+          echo "$out"
+          grep -qF "${TAG#v}" <<<"$out" || { echo "::error::--version does not report ${TAG#v}"; exit 1; }
 
       # Downloaded bare binaries are quarantined like the .app, so they need
       # signing and notarizing too.
@@ -381,18 +435,27 @@ jobs:
           L="${{ matrix.legacy }}"
           E="${{ matrix.ext }}"
           BIN="target/${{ matrix.target }}/release/freemkv$E"
-          cp "$BIN" "$A$E"
-          cp "$BIN" "$L$E"
           # Hash AFTER signing: a signature rewrites the binary.
           if [ "$RUNNER_OS" = "macOS" ]; then SHA="shasum -a 256"; else SHA=sha256sum; fi
+          cp "$BIN" "$A$E"
           $SHA "$A$E" > "$A$E.sha256"
-          $SHA "$L$E" > "$L$E.sha256"
+          if [ -n "$L" ]; then
+            cp "$BIN" "$L$E"
+            $SHA "$L$E" > "$L$E.sha256"
+          fi
       - name: Upload
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
+          fail_on_unmatched_files: true
           files: |
             ${{ matrix.asset }}${{ matrix.ext }}
             ${{ matrix.asset }}${{ matrix.ext }}.sha256
+      - name: Upload the legacy alias
+        if: matrix.legacy
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          fail_on_unmatched_files: true
+          files: |
             ${{ matrix.legacy }}${{ matrix.ext }}
             ${{ matrix.legacy }}${{ matrix.ext }}.sha256
 
