@@ -37,6 +37,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("web/assets/app.js"),
     ),
     (
+        "connection.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/connection.js"),
+    ),
+    (
         "bus.js",
         "text/javascript; charset=utf-8",
         include_bytes!("web/assets/bus.js"),

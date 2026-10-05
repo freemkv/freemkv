@@ -60,7 +60,8 @@ fn allowed(method: &Method, target: &str) -> bool {
     if *method == Method::Get
         && matches!(
             path,
-            "/api/state"
+            "/events"
+                | "/api/state"
                 | "/api/version"
                 | "/api/system"
                 | "/api/review"
@@ -272,6 +273,9 @@ pub fn handle(request: Request, cfg: &Arc<RwLock<Config>>) {
             serde_json::json!({"error": "Unknown Library"}),
         );
     };
+    if target == "/events" {
+        return relay_events(request, &peer.url);
+    }
     let is_post = *request.method() == Method::Post;
     let (request, body) = if is_post {
         let Ok(pair) = web::read_json_body(request) else {
@@ -316,6 +320,70 @@ pub fn handle(request: Request, cfg: &Arc<RwLock<Config>>) {
     }
 }
 
+// Streams bypass the JSON proxy's body buffering. Bound their number and lifetime
+// so an abandoned browser or silent upstream cannot retain a worker indefinitely.
+fn relay_events(request: Request, origin: &str) {
+    use std::io::{Read, Write};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+    static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+    if !super::webhook::try_acquire_slot(&INFLIGHT, 16) {
+        return reply(
+            request,
+            503,
+            serde_json::json!({"error":"Too many remote streams"}),
+        );
+    }
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            super::webhook::release_slot(&INFLIGHT);
+        }
+    }
+    let _slot = Slot;
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_recv_response(Some(Duration::from_secs(5)))
+            .timeout_global(Some(Duration::from_secs(60)))
+            .build(),
+    );
+    let Ok(mut upstream) = agent.get(format!("{origin}/events")).call() else {
+        return reply(
+            request,
+            502,
+            serde_json::json!({"error":"Remote Library stream unavailable"}),
+        );
+    };
+    if upstream.status().as_u16() != 200
+        || !upstream
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.split(';').next() == Some("text/event-stream"))
+    {
+        return reply(
+            request,
+            502,
+            serde_json::json!({"error":"Remote Library does not provide an event stream"}),
+        );
+    }
+    let response = tiny_http::Response::empty(200)
+        .with_header(tiny_http::Header::from_bytes("Content-Type", "text/event-stream").unwrap())
+        .with_header(tiny_http::Header::from_bytes("Cache-Control", "no-cache").unwrap())
+        .with_header(tiny_http::Header::from_bytes("X-Accel-Buffering", "no").unwrap());
+    let mut downstream = request.upgrade("sse", response);
+    let mut reader = upstream.body_mut().as_reader();
+    let mut buf = [0; 8192];
+    while let Ok(n) = reader.read(&mut buf) {
+        if n == 0 || downstream.write_all(&buf[..n]).is_err() || downstream.flush().is_err() {
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +415,7 @@ mod tests {
         }
         assert!(!allowed(&Method::Get, "/api/stop/sg3"));
         for path in [
+            "/events",
             "/api/system",
             "/api/review",
             "/api/tmdb/search?q=Dune",
@@ -375,6 +444,58 @@ mod tests {
             assert!(!allowed(&Method::Post, path), "{path}");
         }
     }
+    #[test]
+    fn events_relay_flushes_before_upstream_finishes() {
+        use std::io::{BufRead, Write};
+        use std::time::Duration;
+        let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", upstream.local_addr().unwrap());
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            assert!(line.starts_with("GET /events "));
+            loop {
+                line.clear();
+                request.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+            stream
+                .write_all(b"data: {\"sg0\":{\"status\":\"ripping\"}}\n\n")
+                .unwrap();
+            stream.flush().unwrap();
+            // The client must see the first frame without waiting for EOF.
+            received.recv_timeout(Duration::from_secs(5)).unwrap();
+            stream.write_all(b"event: library\ndata: {}\n\n").unwrap();
+            stream.flush().unwrap();
+        });
+        let proxy = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/events", proxy.server_addr());
+        let relay = std::thread::spawn(move || relay_events(proxy.recv().unwrap(), &origin));
+        let mut response = agent().get(url).call().unwrap();
+        assert_eq!(response.status(), 200);
+        let mut reader = std::io::BufReader::new(response.body_mut().as_reader());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.contains("ripping"));
+        sent.send(()).unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "event: library\n");
+        worker.join().unwrap();
+        relay.join().unwrap();
+    }
+
     // Two independent HTTP servers, without poll/rip workers or physical-drive access.
     struct Fixture {
         url: String,

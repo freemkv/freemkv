@@ -3,9 +3,7 @@
 
 const listeners = { state: new Set(), library: new Set(), reconnect: new Set() };
 export const live = { state: null, library: null };
-let es = null;
-let reconnectTimer = null;
-let watchdog = null;
+let disconnect = null;
 
 function publish(kind, value) {
   listeners[kind].forEach(f => {
@@ -13,39 +11,48 @@ function publish(kind, value) {
   });
 }
 
+/** The same transport for local and proxied remote /events endpoints. */
+export function openStream(url, handlers) {
+  let es, retry, watchdog, closed = false;
+  const start = () => {
+    if (closed) return;
+    clearTimeout(retry); clearTimeout(watchdog);
+    if (es) es.close();
+    const source = new EventSource(url);
+    es = source;
+    const heartbeat = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => { handlers.error?.(); start(); }, 15000);
+    };
+    heartbeat();
+    source.onopen = () => { if (es === source && !closed) handlers.reconnect?.(); };
+    const receive = (kind, e) => {
+      if (es !== source || closed) return;
+      let value;
+      try { value = JSON.parse(e.data); } catch (_) { return; }
+      heartbeat();
+      handlers[kind]?.(value);
+    };
+    source.onmessage = e => receive('state', e);
+    source.addEventListener('library', e => receive('library', e));
+    source.onerror = () => {
+      if (es !== source || closed) return;
+      clearTimeout(watchdog); source.close(); es = null;
+      handlers.error?.();
+      retry = setTimeout(start, 2000);
+    };
+  };
+  start();
+  return () => { closed = true; clearTimeout(retry); clearTimeout(watchdog); es?.close(); };
+}
+
 export function connect() {
-  clearTimeout(reconnectTimer);
-  clearTimeout(watchdog);
-  if (es) es.close();
-  const source = new EventSource('/events');
-  es = source;
-  // The server sends state every second, even when no work is running.
-  // Half-open connections do not always fire onerror (sleep, proxy, network).
-  const heartbeat = () => {
-    clearTimeout(watchdog);
-    watchdog = setTimeout(connect, 15000);
-  };
-  heartbeat();
-  source.onopen = () => { if (es === source) publish('reconnect'); };
-  source.onmessage = (e) => {
-    if (es !== source) return;
-    heartbeat();
-    try { live.state = JSON.parse(e.data); } catch (x) { return; }
-    publish('state', live.state);
-  };
-  source.addEventListener('library', (e) => {
-    if (es !== source) return;
-    heartbeat();
-    try { live.library = JSON.parse(e.data); } catch (x) { return; }
-    publish('library', live.library);
+  disconnect?.();
+  disconnect = openStream('/events', {
+    state(value) { live.state = value; publish('state', value); },
+    library(value) { live.library = value; publish('library', value); },
+    reconnect() { publish('reconnect'); }
   });
-  source.onerror = () => {
-    if (es !== source) return;
-    clearTimeout(watchdog);
-    source.close();
-    es = null;
-    reconnectTimer = setTimeout(connect, 2000);
-  };
 }
 
 /** Listen for `state`, `library` or `reconnect`; returns the unsubscribe. */

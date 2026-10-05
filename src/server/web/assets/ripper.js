@@ -7,26 +7,12 @@
 
 import { esc, escLinks, $, put, fill, api, act, toast, twoStep, terminal, modal, bytes, plural, ICON } from './ui.js';
 import { subscribe } from './bus.js';
+import { libraryConnection } from './connection.js';
 
 const ACTIVE = ['ripping', 'scanning', 'detecting'];
 const ownerUrl = (owner, path) => owner ? '/api/peers/' + owner + path : path;
 const deviceOwner = dev => /^(p[0-9a-f]+):/.exec(dev)?.[1] || '';
 const ownDevice = dev => deviceOwner(dev) ? dev.slice(dev.indexOf(':') + 1) : dev;
-
-// Keep successful snapshots through brief network gaps; explicit disconnection
-// removes the owner immediately. Each Library has an independent grace timer.
-export function reconcilePeers(results, health, now = Date.now()) {
-  for (const id of health.keys()) if (!results.some(r => r.peer.id === id)) health.delete(id);
-  return results.map(r => {
-    const previous = health.get(r.peer.id);
-    if (!r.error) { health.set(r.peer.id, { value: r, failedSince: null }); return r; }
-    const failedSince = previous?.failedSince ?? now;
-    health.set(r.peer.id, { value: previous?.value, failedSince });
-    const offline = now - failedSince >= 15000;
-    return { ...(previous?.value || { snapshot: {}, sys: {}, reviews: [] }), peer: r.peer,
-      error: offline ? r.error : null, reconnecting: true, offline };
-  });
-}
 
 // ── Formatting, as autorip showed it ──────────────────────────────────────
 
@@ -503,21 +489,27 @@ export default {
     const root = $('#rp', view);
     const cards = new Map();
     let state = {};
-    let localState = {};
-    let remoteState = {};
     let peers = [];
-    let remoteLibraries = [];
+    const connections = new Map();
     const pipelines = new Map();
-    const peerHealth = new Map();
     let polling = false;
-    let sys = {};
-    let reviews = [];
     const drivesEl = $('#drives', view);
 
-    const render = (s) => {
+    const render = () => {
       if (ctx.stale()) return;
-      localState = s || {};
-      state = { ...localState, ...remoteState };
+      const owners = [...connections.values()].map(c => c.status());
+      state = {};
+      const notices = [];
+      for (const r of owners) {
+        if (r.error) notices.push('<div class="banner bad">' + esc(r.peer.name) + ': offline — showing last known state; reconnecting automatically</div>');
+        if (r.detailError) notices.push('<div class="banner bad">' + esc(r.peer.name) + ': some details could not be loaded — ' + esc(r.detailError) + '</div>');
+        for (const [dev, snapshot] of Object.entries(r.snapshot)) {
+          if (!/^(?:ioreg:)?[a-zA-Z0-9]+$/.test(dev) || !snapshot || typeof snapshot !== 'object') continue;
+          const key = r.peer.id ? r.peer.id + ':' + dev : dev;
+          state[key] = { ...snapshot, _owner: r.peer.id ? r.peer.name : '', _offline: !!r.offline };
+        }
+      }
+      put($('#peer-status', view), notices.join(''));
       const devs = Object.keys(state).filter(k => !k.startsWith('_')).sort((a, b) => Number(!!state[a]._owner) - Number(!!state[b]._owner) || a.localeCompare(b));
       put($('#lede', view), devs.length
         ? plural(devs.length, 'drive') + ' · ' + devs.filter(d => ACTIVE.includes(state[d].status)).length + ' busy'
@@ -539,7 +531,6 @@ export default {
         el.querySelectorAll('button').forEach(b => { b.disabled = !!state[dev]._offline || b.classList.contains('busy'); });
         put($('.dev', el), esc(ownDevice(dev)) + (state[dev]._owner ? ' <span class="badge badge-muted">' + esc(state[dev]._owner) + '</span>' : ''));
       });
-      const owners = [{ peer: { id: '', name: 'This Library' }, snapshot: localState, sys, reviews }, ...remoteLibraries];
       for (const [key, el] of pipelines) if (!owners.some(r => key === r.peer.id + ':' + el.dataset.kind)) { el.remove(); pipelines.delete(key); }
       for (const kind of ['mux', 'move', 'review']) {
         const target = $('#' + kind, view);
@@ -568,54 +559,31 @@ export default {
 
 
     };
-    ctx.onState(render);
+    connections.set('', libraryConnection({ id: '', name: location.hostname }, render));
+    ctx.cleanup.push(() => { for (const c of connections.values()) c.close(); });
     const loadPeers = async () => {
       if (polling || ctx.stale()) return;
       polling = true;
       try {
-        try { peers = await api('GET', '/api/peers'); } catch (e) { if (!peers.length) throw e; }
-        const results = await Promise.all(peers.map(async peer => {
-          try {
-            const [drive, system, review] = await Promise.allSettled(['/api/state', '/api/system', '/api/review'].map(path => api('GET', ownerUrl(peer.id, path))));
-            if (drive.status === 'rejected') throw drive.reason;
-            const snapshot = drive.value;
-            if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('Invalid drive state');
-            return { peer, snapshot, sys: system.status === 'fulfilled' ? system.value || {} : {},
-              reviews: review.status === 'fulfilled' && Array.isArray(review.value) ? review.value : [],
-              detailError: [system, review].filter(r => r.status === 'rejected').map(r => r.reason.message).join('; ') };
-          } catch (e) { return { peer, error: e.message }; }
-        }));
+        const found = await api('GET', '/api/peers');
         if (ctx.stale()) return;
-        remoteState = {};
-        remoteLibraries = reconcilePeers(results, peerHealth);
-        const notices = [];
-        for (const { peer, snapshot, error, offline, reconnecting, detailError } of remoteLibraries) {
-          if (error) notices.push('<div class="banner bad">' + esc(peer.name) + ': offline — showing last known state; reconnecting automatically</div>');
-          if (detailError) notices.push('<div class="banner bad">' + esc(peer.name) + ': some details could not be loaded — ' + esc(detailError) + '</div>');
-          const devices = Object.entries(snapshot).filter(([dev, s]) => /^(?:ioreg:)?[a-zA-Z0-9]+$/.test(dev) && s && typeof s === 'object');
-          if (!devices.length && !reconnecting) notices.push('<p class="small muted">' + esc(peer.name) + ': connected · no drives</p>');
-          for (const [dev, s] of devices) remoteState[peer.id + ':' + dev] = { ...s, _owner: peer.name, _offline: !!offline };
+        peers = found;
+        for (const [id, connection] of connections) {
+          if (id && !peers.some(p => p.id === id && p.url === connection.value.peer.url)) {
+            connection.close(); connections.delete(id);
+          }
         }
-        put($('#peer-status', view), notices.join(''));
-        render(localState);
-      } catch (e) {
-        if (!ctx.stale()) {
-          remoteState = {}; remoteLibraries = []; render(localState);
-          put($('#peer-status', view), '<div class="banner bad">Could not load connected Libraries: ' + esc(e.message) + '</div>');
+        for (const peer of peers) {
+          if (!connections.has(peer.id)) connections.set(peer.id, libraryConnection(peer, render));
+          else connections.get(peer.id).value.peer = peer;
         }
-      } finally { polling = false; }
+        render();
+      } catch (_) { /* Retain established connections through a temporary discovery failure. */ }
+      finally { polling = false; }
     };
     loadPeers();
     ctx.every(3000, loadPeers);
 
-    const loadSys = () => api('GET', '/api/system').then(d => { if (!ctx.stale()) { sys = d; render(localState); } }).catch(() => {});
-    const loadReview = () => api('GET', '/api/review').then(items => {
-      if (ctx.stale()) return;
-      reviews = items || [];
-      render(localState);
-    }).catch(() => {});
-    loadSys(); loadReview();
-    ctx.every(5000, () => { loadSys(); loadReview(); });
     ctx.every(1000, () => {
       const now = Math.floor(Date.now() / 1000);
       view.querySelectorAll('.elapsed[data-started]').forEach(el => {
@@ -629,7 +597,7 @@ export default {
       const card = e.target.closest('.drive');
       if (!card) return;
       const dev = card.dataset.dev;
-      if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !!(deviceOwner(dev) ? remoteLibraries.find(r => r.peer.id === deviceOwner(dev))?.sys?.debug_enabled : sys.debug_enabled), deviceOwner(dev) ? () => state : undefined, state[dev]?._owner || ''); return; }
+      if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !!connections.get(deviceOwner(dev))?.value.sys.debug_enabled, () => state, state[dev]?._owner || ''); return; }
       if (e.target.closest('[data-title]')) { changeTitle(dev, state[dev] || {}); return; }
       const b = e.target.closest('button[data-url]');
       if (!b) return;
@@ -639,7 +607,7 @@ export default {
     root.addEventListener('click', async (e) => {
       const owner = e.target.closest('[data-peer]')?.dataset.peer || '';
       const ownedUrl = path => ownerUrl(owner, path);
-      const reload = () => owner ? loadPeers() : loadSys();
+      const reload = () => connections.get(owner)?.refresh();
       const c = e.target.closest('[data-clear]');
       if (c) {
         const kind = c.dataset.clear;
@@ -658,15 +626,15 @@ export default {
         return;
       }
       if (e.target.closest('[data-refresh]')) {
-        const ok = await api('GET', ownedUrl('/api/system')).then(d => { if (owner) { const r = remoteLibraries.find(r => r.peer.id === owner); if (r) r.sys = d; } else sys = d; render(localState); return true; }).catch(err => { toast('Recheck failed: ' + err.message, 'bad'); return false; });
+        const ok = await api('GET', ownedUrl('/api/system')).then(d => { const c = connections.get(owner); if (c) c.value.sys = d; render(); return true; }).catch(err => { toast('Recheck failed: ' + err.message, 'bad'); return false; });
         if (ok) toast('Rechecked', 'info');
         return;
       }
       const rv = e.target.closest('[data-review]');
       if (rv) {
-        const items = owner ? remoteLibraries.find(r => r.peer.id === owner)?.reviews || [] : reviews;
+        const items = connections.get(owner)?.value.reviews || [];
         const item = items.find(it => it.dir === rv.dataset.review);
-        if (item) reviewDialog(item, owner ? loadPeers : loadReview, owner);
+        if (item) reviewDialog(item, reload, owner);
       }
     });
   },

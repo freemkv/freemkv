@@ -10,6 +10,8 @@
 
 ### Changed
 
+- Local and connected drives share one connection model and the same live event stream, with polling fallback and automatic reconnection. Slow system or review requests no longer delay drive progress. (server only: Drives page)
+
 - Webhooks support custom authentication headers, with masked values in Settings and a Test button for unsaved changes. Existing URL-only webhooks remain supported. (server only: notifications)
 
 - Combine all connected Libraries in shared muxing, moving and title-review panels, with source badges on remote jobs and a source selector in the system log. (server only: Drives page)
