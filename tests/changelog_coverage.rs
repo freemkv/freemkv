@@ -46,21 +46,23 @@ fn bullets(section: &str) -> Vec<&str> {
         .collect()
 }
 
-#[test]
-fn every_unreleased_line_states_its_front_end_coverage() {
-    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/CHANGELOG.md"))
-        .unwrap()
-        .replace("\r\n", "\n");
+// Problems with the Unreleased section of `text`; none when there is no such section
+// (a just-released changelog has nothing unreleased to check).
+fn unreleased_problems(text: &str) -> Vec<String> {
     // `## Unreleased`, or the release-ready `## [X.Y.Z] — Unreleased` the release dates.
-    let heading = text
+    let Some(heading) = text
         .lines()
         .find(|l| l.starts_with("## ") && l.to_ascii_lowercase().ends_with("unreleased"))
-        .expect("an Unreleased section");
+    else {
+        return Vec::new();
+    };
     let start = text.find(heading).unwrap();
     let body = &text[start + heading.len()..];
     let end = body.find("\n## ").unwrap_or(body.len());
     let lines = bullets(&body[..end]);
-    assert!(!lines.is_empty(), "the Unreleased section has no bullets");
+    if lines.is_empty() {
+        return vec!["the Unreleased section has no bullets".into()];
+    }
     let mut problems = Vec::new();
     for line in lines {
         match coverage(line) {
@@ -71,7 +73,32 @@ fn every_unreleased_line_states_its_front_end_coverage() {
             )),
         }
     }
+    problems
+}
+
+#[test]
+fn every_unreleased_line_states_its_front_end_coverage() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/CHANGELOG.md"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let problems = unreleased_problems(&text);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn no_unreleased_section_means_nothing_to_check() {
+    let released = "# Changelog\n\n## [1.8.0] — 2026-10-05\n\n- shipped without a tag\n";
+    assert!(unreleased_problems(released).is_empty());
+}
+
+#[test]
+fn an_unreleased_section_is_still_checked() {
+    for heading in ["## Unreleased", "## [1.9.0] — Unreleased"] {
+        let bad = format!("# Changelog\n\n{heading}\n\n- untagged\n\n## [1.8.0] — 2026-10-05\n");
+        assert_eq!(unreleased_problems(&bad).len(), 1, "{heading}");
+        let good = bad.replace("- untagged", "- tagged (CLI, app, server)");
+        assert!(unreleased_problems(&good).is_empty(), "{heading}");
+    }
 }
 
 #[test]
