@@ -289,22 +289,22 @@ function errorRows(list, kind) {
       + '<button class="x" data-clear="' + kind + '" data-path="' + esc(e.path) + '" title="Clear this error" aria-label="Clear this error">×</button></div>').join('');
 }
 
-function muxHtml(state, sys) {
+function muxHtml(state, sys, empty = true) {
   const mx = state._mux;
   let h = '';
   if (mx && mx.status === 'ripping' && mx.disc_name) {
     h += barRow(mx.disc_name, [mx.progress_pct + '%', mx.speed_mbs > 0 ? fmtSpeed(mx.speed_mbs) : '', mx.eta ? mx.eta + ' remaining' : ''].filter(Boolean).join(' · '), mx.progress_pct);
   }
   h += queueRows(state._mux_queue != null ? state._mux_queue : sys.mux_queue);
-  if (!h) h = '<div class="muted small">Nothing waiting.</div>';
+  if (!h && empty) h = '<div class="muted small">Nothing waiting.</div>';
   return h + errorRows(sys.mux_errors, 'mux');
 }
-function moveHtml(state, sys) {
+function moveHtml(state, sys, empty = true) {
   const moves = Array.isArray(state._move) ? state._move : (state._move && state._move.name ? [state._move] : []);
   let h = moves.filter(m => m && m.name).map(m => barRow(m.name + (m.artifact ? ' (' + m.artifact + ')' : ''),
     [m.progress_pct + '%', m.speed_mbs > 0 ? fmtSpeed(m.speed_mbs) : '', m.eta ? m.eta + ' remaining' : ''].filter(Boolean).join(' · '), m.progress_pct)).join('');
   h += queueRows(state._move_queue != null ? state._move_queue : sys.move_queue);
-  if (!h) h = '<div class="muted small">Nothing waiting.</div>';
+  if (!h && empty) h = '<div class="muted small">Nothing waiting.</div>';
   return h + errorRows(sys.move_errors, 'move');
 }
 function reviewHtml(items) {
@@ -424,23 +424,27 @@ function parseDebugLine(line) {
 
 /** A terminal on one drive's log, with its live rip status. `dev` may be
     "system" for the daemon's own log. */
-export function openDeviceTerminal(dev, debugOn, snapshot) {
-  const tools = debugOn && ownDevice(dev) !== 'system' ? '<button class="tb" data-mode="log">Log</button><button class="tb" data-mode="debug">Debug</button>' : '';
-  const t = terminal({ title: 'freemkv — ' + (dev === 'system' ? 'system log' : dev), tools });
+export function openDeviceTerminal(dev, debugOn, snapshot, ownerName = '', sources = []) {
+  const tools = sources.length > 1 ? '<select class="txt" aria-label="Log source" data-log-source>' + sources.map(s => '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>').join('') + '</select>' : debugOn && ownDevice(dev) !== 'system' ? '<button class="tb" data-mode="log">Log</button><button class="tb" data-mode="debug">Debug</button>' : '';
+  const t = terminal({ title: (ownerName ? ownerName + ' · ' : '') + (ownDevice(dev) === 'system' ? 'System log' : ownDevice(dev)), tools });
   // Log mode follows the ring by sequence number (`since=`), so it keeps
   // up after the server's 500-line ring wraps. Debug mode re-reads its
   // window and appends whatever follows the last line it showed.
-  let mode = 'log', since = 0, lastDebug = null, timer = null, closed = false;
-  const reset = () => { since = 0; lastDebug = null; t.clear(); };
+  let mode = 'log', since = 0, lastDebug = null, timer = null, closed = false, generation = 0;
+  const reset = () => { generation++; since = 0; lastDebug = null; t.clear(); };
   const paintTools = () => t.box.querySelectorAll('.tb').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   t.box.querySelectorAll('.tb').forEach(b => b.addEventListener('click', () => { mode = b.dataset.mode; reset(); paintTools(); poll(); }));
   paintTools();
+  const selector = t.box.querySelector('[data-log-source]');
+  if (selector) selector.onchange = () => { dev = selector.value ? selector.value + ':system' : 'system'; reset(); poll(); };
   async function poll() {
     clearTimeout(timer);
     if (closed) return;
+    const requestGeneration = generation;
     try {
       if (mode === 'debug') {
         const text = await api('GET', ownerUrl(deviceOwner(dev), '/api/debug?device=' + encodeURIComponent(ownDevice(dev)) + '&n=1000'));
+        if (closed || requestGeneration !== generation) return;
         const raw = (typeof text === 'string' ? text : JSON.stringify(text || '')).split('\n').filter(Boolean);
         let from = 0;
         if (lastDebug != null) {
@@ -452,11 +456,13 @@ export function openDeviceTerminal(dev, debugOn, snapshot) {
         t.idle(t.lines().length ? null : 'no debug lines yet');
       } else {
         const r = await api('GET', '/api/logs/' + encodeURIComponent(dev) + '?since=' + since);
+        if (closed || requestGeneration !== generation) return;
         t.append(r.lines.map(([, line]) => parseLogLine(line)));
         since = r.seq;
         t.idle(t.lines().length ? null : 'no log lines yet');
       }
     } catch (e) {
+      if (closed || requestGeneration !== generation) return;
       t.idle('could not load the log: ' + e.message);
     }
     if (snapshot) paintStatus(snapshot());
@@ -488,13 +494,12 @@ export default {
       </div>
       <div id="peer-status" aria-live="polite"></div><div class="drives" id="drives"></div>
       <h2 style="margin:2.25rem 0 1rem;font-size:1.15rem;letter-spacing:-.01em">After the rip</h2>
-      <h3 id="local-pipeline-owner" class="small muted" hidden>This Library</h3>
       <div class="grid grid-2">
-        <section class="card"><div class="card-head"><h2>Making video files</h2></div><div id="mux"></div></section>
+        <section class="card"><div class="card-head"><h2>Muxing video files</h2></div><div id="mux"></div></section>
         <section class="card"><div class="card-head"><h2>Moving to your library</h2></div><div id="move"></div></section>
       </div>
       <section class="card" id="review-card" style="margin-top:1.25rem" hidden><div class="card-head"><h2>Waiting for a title <span class="count" id="review-n"></span></h2></div>
-        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips are done, but the movie's name wasn't certain. Pick the right one to file them.</p><div id="review"></div></section><div id="remote-pipelines"></div></div>`;
+        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips are done, but the movie's name wasn't certain. Pick the right one to file them.</p><div id="review"></div></section></div>`;
     const root = $('#rp', view);
     const cards = new Map();
     let state = {};
@@ -532,26 +537,36 @@ export default {
           el.classList.remove('active');
         }
         el.querySelectorAll('button').forEach(b => { b.disabled = !!state[dev]._offline || b.classList.contains('busy'); });
-        $('.dev', el).textContent = state[dev]._owner ? state[dev]._owner + ' · ' + dev.slice(dev.indexOf(':') + 1) : 'This Library · ' + dev;
+        put($('.dev', el), esc(ownDevice(dev)) + (state[dev]._owner ? ' <span class="badge badge-muted">' + esc(state[dev]._owner) + '</span>' : ''));
       });
-      put($('#mux', view), muxHtml(state, sys));
-      put($('#move', view), moveHtml(state, sys));
-      $('#local-pipeline-owner', view).hidden = !peers.length;
-      const remoteEl = $('#remote-pipelines', view);
-      for (const [id, el] of pipelines) if (!remoteLibraries.some(r => r.peer.id === id)) { el.remove(); pipelines.delete(id); }
-      for (const r of remoteLibraries) {
-        let el = pipelines.get(r.peer.id);
-        if (!el) { el = document.createElement('section'); el.dataset.peer = r.peer.id; pipelines.set(r.peer.id, el); remoteEl.append(el); }
-        // Preserve an armed destructive-action confirmation across polling.
-        if (el.querySelector('.confirm') && !r.error) continue;
-        put(el, '<div class="page-head" style="margin:1.5rem 0 .75rem"><h3 class="small muted" style="margin:0">' + esc(r.peer.name) + '</h3><button class="btn btn-ghost btn-sm" data-system-log>System log</button></div>'
-          + (r.error ? '<div class="banner bad">Offline — showing last known state</div>' : '') + (
-            (r.detailError ? '<div class="banner bad">Some Library details could not be loaded: ' + esc(r.detailError) + '</div>' : '')
-            + '<div class="grid grid-2"><section class="card"><div class="card-head"><h2>Making video files</h2></div>' + muxHtml(r.snapshot, r.sys) + '</section>'
-            + '<section class="card"><div class="card-head"><h2>Moving to your library</h2></div>' + moveHtml(r.snapshot, r.sys) + '</section></div>'
-            + (r.reviews.length ? '<section class="card" style="margin-top:1.25rem"><div class="card-head"><h2>Waiting for a title <span class="count">(' + r.reviews.length + ')</span></h2></div>' + reviewHtml(r.reviews) + '</section>' : '')));
-        el.querySelectorAll('button').forEach(b => { b.disabled = !!r.offline || b.classList.contains('busy'); });
+      const owners = [{ peer: { id: '', name: 'This Library' }, snapshot: localState, sys, reviews }, ...remoteLibraries];
+      for (const [key, el] of pipelines) if (!owners.some(r => key === r.peer.id + ':' + el.dataset.kind)) { el.remove(); pipelines.delete(key); }
+      for (const kind of ['mux', 'move', 'review']) {
+        const target = $('#' + kind, view);
+        owners.forEach((r, i) => {
+          const key = r.peer.id + ':' + kind;
+          let el = pipelines.get(key);
+          if (!el) { el = document.createElement('div'); el.dataset.peer = r.peer.id; el.dataset.kind = kind; pipelines.set(key, el); }
+          if (target.children[i] !== el) target.insertBefore(el, target.children[i] || null);
+          if (el.querySelector('.confirm') && !r.offline) return;
+          const content = kind === 'mux' ? muxHtml(r.snapshot, r.sys, false) : kind === 'move' ? moveHtml(r.snapshot, r.sys, false) : reviewHtml(r.reviews);
+          el.hidden = !content;
+          // A small source badge travels with remote work; no repeated machine
+          // headings or duplicate empty-state sections in the shared boxes.
+          const badge = r.peer.id ? ' <span class="badge badge-muted">' + esc(r.peer.name) + (r.offline ? ' · offline' : '') + '</span>' : '';
+          put(el, content.replace(/(<div class="name(?: mono)?"[^>]*>)(.*?)(<\/div>)/g, (_, open, name, close) => open + name + badge + close));
+          el.querySelectorAll('button').forEach(b => { b.disabled = !!r.offline || b.classList.contains('busy'); });
+        });
+        let empty = target.querySelector('[data-empty]');
+        const nothing = ![...target.children].some(el => el.dataset.kind && !el.hidden);
+        if (nothing && kind !== 'review' && !empty) { empty = document.createElement('div'); empty.dataset.empty = ''; empty.className = 'muted small'; empty.textContent = 'Nothing waiting.'; target.append(empty); }
+        if (empty) empty.hidden = !nothing;
       }
+      const reviewCount = owners.reduce((n, r) => n + r.reviews.length, 0);
+      $('#review-card', view).hidden = !reviewCount;
+      put($('#review-n', view), reviewCount ? '(' + reviewCount + ')' : '');
+
+
     };
     ctx.onState(render);
     const loadPeers = async () => {
@@ -574,8 +589,9 @@ export default {
         remoteState = {};
         remoteLibraries = reconcilePeers(results, peerHealth);
         const notices = [];
-        for (const { peer, snapshot, error, offline, reconnecting } of remoteLibraries) {
+        for (const { peer, snapshot, error, offline, reconnecting, detailError } of remoteLibraries) {
           if (error) notices.push('<div class="banner bad">' + esc(peer.name) + ': offline — showing last known state; reconnecting automatically</div>');
+          if (detailError) notices.push('<div class="banner bad">' + esc(peer.name) + ': some details could not be loaded — ' + esc(detailError) + '</div>');
           const devices = Object.entries(snapshot).filter(([dev, s]) => /^(?:ioreg:)?[a-zA-Z0-9]+$/.test(dev) && s && typeof s === 'object');
           if (!devices.length && !reconnecting) notices.push('<p class="small muted">' + esc(peer.name) + ': connected · no drives</p>');
           for (const [dev, s] of devices) remoteState[peer.id + ':' + dev] = { ...s, _owner: peer.name, _offline: !!offline };
@@ -596,9 +612,7 @@ export default {
     const loadReview = () => api('GET', '/api/review').then(items => {
       if (ctx.stale()) return;
       reviews = items || [];
-      $('#review-card', view).hidden = !reviews.length;
-      put($('#review-n', view), reviews.length ? '(' + reviews.length + ')' : '');
-      put($('#review', view), reviewHtml(reviews));
+      render(localState);
     }).catch(() => {});
     loadSys(); loadReview();
     ctx.every(5000, () => { loadSys(); loadReview(); });
@@ -610,12 +624,12 @@ export default {
       });
     });
 
-    $('#syslog', view).addEventListener('click', () => openDeviceTerminal('system', false));
+    $('#syslog', view).addEventListener('click', () => openDeviceTerminal('system', false, undefined, '', [{ id: '', name: location.hostname }, ...peers.map(p => ({ id: p.id, name: p.name }))]));
     drivesEl.addEventListener('click', (e) => {
       const card = e.target.closest('.drive');
       if (!card) return;
       const dev = card.dataset.dev;
-      if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !!(deviceOwner(dev) ? remoteLibraries.find(r => r.peer.id === deviceOwner(dev))?.sys?.debug_enabled : sys.debug_enabled), deviceOwner(dev) ? () => state : undefined); return; }
+      if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !!(deviceOwner(dev) ? remoteLibraries.find(r => r.peer.id === deviceOwner(dev))?.sys?.debug_enabled : sys.debug_enabled), deviceOwner(dev) ? () => state : undefined, state[dev]?._owner || ''); return; }
       if (e.target.closest('[data-title]')) { changeTitle(dev, state[dev] || {}); return; }
       const b = e.target.closest('button[data-url]');
       if (!b) return;
@@ -626,7 +640,6 @@ export default {
       const owner = e.target.closest('[data-peer]')?.dataset.peer || '';
       const ownedUrl = path => ownerUrl(owner, path);
       const reload = () => owner ? loadPeers() : loadSys();
-      if (e.target.closest('[data-system-log]')) { openDeviceTerminal(owner + ':system', false, () => ({})); return; }
       const c = e.target.closest('[data-clear]');
       if (c) {
         const kind = c.dataset.clear;

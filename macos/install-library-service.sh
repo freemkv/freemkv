@@ -19,7 +19,6 @@ tmp=$(mktemp "$agent_dir/.library-install.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 if [[ -f $plist ]]; then
   cp "$plist" "$tmp"
-  /usr/bin/plutil -replace ProgramArguments.0 -string "$binary" "$tmp"
 else
   data_dir="${AUTORIP_DIR:-$HOME/Library/Application Support/freemkv-library}"
   mkdir -p "$data_dir/logs"
@@ -40,6 +39,13 @@ else
   /usr/bin/plutil -insert KeepAlive -bool YES "$tmp"
   /usr/bin/plutil -insert ThrottleInterval -integer 10 "$tmp"
 fi
+# Rebuild the argument array: plutil's indexed replacement can insert rather
+# than replace on some macOS versions, duplicating argv[0] on an update.
+/usr/bin/plutil -remove ProgramArguments "$tmp"
+/usr/bin/plutil -insert ProgramArguments -json '[]' "$tmp"
+/usr/bin/plutil -insert ProgramArguments.0 -string "$binary" "$tmp"
+/usr/bin/plutil -insert ProgramArguments.1 -string server "$tmp"
+/usr/bin/plutil -insert ProgramArguments.2 -string serve "$tmp"
 # The default launchd service policy throttles network file copies. Use the
 # same resource policy as an app for this user-requested rip/mux/move service.
 /usr/bin/plutil -remove ProcessType "$tmp" 2>/dev/null || true

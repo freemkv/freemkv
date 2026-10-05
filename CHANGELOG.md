@@ -10,6 +10,8 @@
 
 ### Changed
 
+- Combine all connected Libraries in shared muxing, moving and title-review panels, with source badges on remote jobs and a source selector in the system log. (server only: Drives page)
+
 - Connected Libraries include the complete Drives-page pipeline: mux/move progress and queues, errors, title reviews and logs, with actions routed to their owner. Brief connection failures have a 15-second grace period before showing offline status. (server only: Library web UI)
 
 - The native macOS Library service installer sets app-level resource limits to prevent default launchd I/O throttling. (macOS service installation)
