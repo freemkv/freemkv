@@ -1854,7 +1854,11 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
         let _ = tx.send(copy_counting(&src_owned, &dest_owned, &written_w));
     });
 
-    let start = std::time::Instant::now();
+    // Match ripping's progressively smoothed display window (10–60 seconds).
+    // on_progress derives move ETA from this same recent rate, so a slow start
+    // does not keep depressing speed and inflating ETA throughout a long copy.
+    let mut speed = freemkv_engine::SpeedEstimator::new();
+    speed.observe(std::time::Instant::now(), 0);
     loop {
         match rx.try_recv() {
             Ok(Ok(_bytes)) => {
@@ -1952,22 +1956,16 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                     ));
                     return MoveOutcome::Failed;
                 }
-                // Progress straight from the bytes we've written — no NFS stat,
-                // so it can't stall and can't read stale. `speed` is the simple
-                // average so far (bytes/elapsed), surfaced in MB/s.
+                // Progress straight from the bytes we've written — no network stat,
+                // so sampling cannot stall on the destination or read stale metadata.
                 let done = written.load(std::sync::atomic::Ordering::Relaxed);
-                let elapsed = start.elapsed().as_secs_f64();
                 let pct = if let Some(p) = done.saturating_mul(100).checked_div(src_size) {
                     p.min(100) as u8
                 } else {
                     0
                 };
                 let gb = done as f64 / crate::server::util::BYTES_PER_GIB;
-                let speed_mbs = if elapsed > 0.0 {
-                    (done as f64 / elapsed) / crate::server::util::BYTES_PER_MIB
-                } else {
-                    0.0
-                };
+                let speed_mbs = speed.observe(std::time::Instant::now(), done);
                 on_progress(pct, gb, total_gb, speed_mbs);
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }

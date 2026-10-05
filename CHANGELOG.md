@@ -10,6 +10,8 @@
 
 ### Changed
 
+- File moves show recent transfer speed using the rip estimator’s growing 10–60 second window; move ETA uses that recent rate so a slow start ages out. (server only: Library mover progress)
+
 - Drive warnings wait for repeated probe failures and clear after recovery; the Read / Rip / Finish indicator stays aligned without button styling. macOS drive controls accept stable optical-service IDs, preventing a second drive card when exclusive ripping removes the disk name. (server only: Library polling and web UI)
 
 - macOS: the `.dmg` is no longer built. The app ships as `freemkv-aarch64-macos.zip` / `freemkv-x86_64-macos.zip` (the same ad-hoc-signed `freemkv.app`); it is not notarized, so allow its first launch under System Settings → Privacy & Security → Open Anyway (see [INSTALL.md](INSTALL.md)). (app only: macOS packaging)
