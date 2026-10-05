@@ -37,7 +37,7 @@ DEPS = {
     'libxkbcommon-x11-0': 'libxkbcommon-x11', 'libwayland-client0': 'wayland', 'libfontconfig1': 'fontconfig',
     'libfreetype6': 'freetype2', 'libdbus-1-3': 'dbus', 'libudev1': 'systemd-libs',
     'libssl3t64': 'openssl', 'libssl3': 'openssl', 'libxcursor1': 'libxcursor', 'libxrandr2': 'libxrandr',
-    'libxi6': 'libxi', 'libvulkan1': 'vulkan-icd-loader',
+    'libxi6': 'libxi', 'libvulkan1': 'vulkan-icd-loader', 'libwayland-egl1': 'wayland',
     'libcairo2': 'cairo', 'libgdk-pixbuf-2.0-0': 'gdk-pixbuf2', 'libpango-1.0-0': 'pango',
     'libpangocairo-1.0-0': 'pango', 'libharfbuzz0b': 'harfbuzz', 'libgraphene-1.0-0': 'graphene',
 }
