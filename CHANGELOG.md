@@ -32,13 +32,13 @@
 
 ### Added
 
-- The app's title list shows a title's chapters under a collapsed **Chapters** row, named where the disc names them (DVD text data), each with its length. (app only)
-- `freemkv info` shows a DVD's region from its navigation data; an all-prohibited region mask reads as none. (CLI, app)
+- The app's title list shows a title's chapters under a collapsed **Chapters** row, named where the disc names them (DVD text data), each with its length. (app only: the title list is the app's)
+- `freemkv info` shows a DVD's region from its navigation data; an all-prohibited region mask reads as none. (CLI, app only: the server shows no disc info)
 - Linux: a strictly confined Snap of the app and CLI, `freemkv-amd64.snap`, attached to every release. Install it with `snap install --dangerous` and connect `freemkv:optical-write` for drive access; Snap Store publishing follows once the listing is approved. See [INSTALL.md](INSTALL.md). (CLI, app only: Linux packaging)
 
 ### Server (replaces autorip)
 
-- **A network share that failed to remount is retried, and nothing is written to the container's own disk meanwhile.** While the share is not mounted, rips, moves and remuxes into it hold or stop with an error.
+- **A network share that failed to remount is retried, and nothing is written to the container's own disk meanwhile.** While the share is not mounted, rips, moves and remuxes into it hold or stop with an error. (server only: the share and its rips and moves are the server's)
 - **Keys come from the source picked in settings.** AACS Key Source = online asks only the online key service; local uses only the local KEYDB. An autorip `settings.json` loads unchanged, and a stored `http://` Keyserver URL is warned about at startup. (server only: the server's key-source setting)
 - The multi-pass recovery (sweep, retry passes, end-of-recovery promotion) runs the engine's passes, the same implementation as the app's and the CLI's; the server keeps its own drive recovery (re-open after a USB bridge crash, a spin-cycle before each retry pass), its device-log lines and its loss gate. (server only: the server's pass loop moved into the engine)
 - A staged disc image (a multi-pass rip, a resumed rip, a deferred mux) is muxed through the same image path as the CLI and the app. A mux that fails removes its partial MKV from staging; the ISO and mapfile stay for the retry. (server only: brings the server onto the CLI's and app's image path)

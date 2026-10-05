@@ -51,8 +51,13 @@ fn every_unreleased_line_states_its_front_end_coverage() {
     let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/CHANGELOG.md"))
         .unwrap()
         .replace("\r\n", "\n");
-    let start = text.find("## Unreleased").expect("an Unreleased section");
-    let body = &text[start + "## Unreleased".len()..];
+    // `## Unreleased`, or the release-ready `## [X.Y.Z] — Unreleased` the release dates.
+    let heading = text
+        .lines()
+        .find(|l| l.starts_with("## ") && l.to_ascii_lowercase().ends_with("unreleased"))
+        .expect("an Unreleased section");
+    let start = text.find(heading).unwrap();
+    let body = &text[start + heading.len()..];
     let end = body.find("\n## ").unwrap_or(body.len());
     let lines = bullets(&body[..end]);
     assert!(!lines.is_empty(), "the Unreleased section has no bullets");
