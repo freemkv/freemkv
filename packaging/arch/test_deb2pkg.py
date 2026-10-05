@@ -20,6 +20,15 @@ class Depends(unittest.TestCase):
         self.assertEqual(deb2pkg.depends(APP['Depends'], {'gtk4': '4.10', 'libadwaita': '1.4'}),
                          ['libadwaita>=1.4', 'glibc', 'gcc-libs', 'glib2', 'gtk4>=4.10', 'ca-certificates'])
 
+    def test_arm64_app_maps_its_extra_libraries(self):
+        # dpkg-shlibdeps on arm64 lists cairo, gdk-pixbuf and pango directly.
+        arm64 = ('libadwaita-1-0 (>= 1.4~beta), libc6 (>= 2.39), libcairo2 (>= 1.2.4), libgcc-s1 (>= 4.2), '
+                 'libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.54.0), libgtk-4-1 (>= 4.9.3), '
+                 'libpango-1.0-0 (>= 1.14.0), ca-certificates')
+        self.assertEqual(deb2pkg.depends(arm64, {}),
+                         ['libadwaita', 'glibc', 'cairo', 'gcc-libs', 'gdk-pixbuf2', 'glib2', 'gtk4', 'pango',
+                          'ca-certificates'])
+
     def test_static_cli_has_none(self):
         self.assertEqual(deb2pkg.depends('', {}), [])
 
