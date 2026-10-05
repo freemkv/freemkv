@@ -41,7 +41,7 @@ permissions:
 # A newer qa push supersedes a rehearsal; a tag build is never cancelled.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+  cancel-in-progress: ${{ (github.event_name == 'push' && github.ref_type == 'branch') }}
 
 jobs:
   verify:
@@ -69,10 +69,10 @@ jobs:
         id: tag
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
+          REHEARSAL: ${{ (github.event_name == 'push' && github.ref_type == 'branch') }}
         run: |
           set -euo pipefail
-          if [ "$REF_TYPE" = branch ]; then
+          if [ "$REHEARSAL" = true ]; then
             TAG="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -107,7 +107,7 @@ jobs:
   server-image:
     needs: verify
     # On qa, qa.yml's rc-image builds the same multi-arch image.
-    if: github.ref_type != 'branch'
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch') }}
     permissions:
       contents: read
       packages: write
@@ -164,7 +164,7 @@ jobs:
       # qa rehearsal: build against the sibling crates' qa branches, as deb.yml
       # does (the tag's pinned git deps exist only after the release tags them).
       - name: Pin sibling sources (qa rehearsal)
-        if: github.ref_type == 'branch'
+        if: (github.event_name == 'push' && github.ref_type == 'branch')
         shell: bash
         run: |
           set -euo pipefail
@@ -197,7 +197,7 @@ jobs:
       - name: Clean build environment and C toolchain
         run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
       - name: Build
-        run: cargo build ${{ github.ref_type == 'tag' && '--locked' || '' }} --release --target ${{ matrix.target }} --features gui --bin freemkv
+        run: cargo build ${{ !(github.event_name == 'push' && github.ref_type == 'branch') && '--locked' || '' }} --release --target ${{ matrix.target }} --features gui --bin freemkv
 
       # ── Developer ID signing ──────────────────────────────────────────────
       #
@@ -207,7 +207,7 @@ jobs:
       # nobody but this repo could build the app at all.
       - name: Import the Developer ID certificate
         id: signing
-        if: github.ref_type == 'tag'
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch') }}
         uses: ./.github/actions/import-developer-id
         with:
           certificate-p12: ${{ secrets.MACOS_CERT_P12 }}
@@ -330,7 +330,7 @@ jobs:
     # Same rationale as `build`: does NOT `needs: test` (parallel tripwire).
     needs: verify
     # windows-app.yml runs on every qa push itself.
-    if: github.ref_type != 'branch'
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch') }}
     permissions:
       contents: write
     uses: ./.github/workflows/windows-app.yml
@@ -391,7 +391,7 @@ jobs:
       # qa rehearsal: build against the sibling crates' qa branches, as deb.yml
       # does (the tag's pinned git deps exist only after the release tags them).
       - name: Pin sibling sources (qa rehearsal)
-        if: github.ref_type == 'branch'
+        if: (github.event_name == 'push' && github.ref_type == 'branch')
         shell: bash
         run: |
           set -euo pipefail
@@ -465,10 +465,10 @@ jobs:
         run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
       - name: Build CLI
         if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'armv7-unknown-linux-musleabihf'
-        run: cargo build ${{ github.ref_type == 'tag' && '--locked' || '' }} --release --target ${{ matrix.target }} --bin freemkv
+        run: cargo build ${{ !(github.event_name == 'push' && github.ref_type == 'branch') && '--locked' || '' }} --release --target ${{ matrix.target }} --bin freemkv
       - name: Build CLI (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'armv7-unknown-linux-musleabihf'
-        run: cross build ${{ github.ref_type == 'tag' && '--locked' || '' }} --release --target ${{ matrix.target }} --bin freemkv
+        run: cross build ${{ !(github.event_name == 'push' && github.ref_type == 'branch') && '--locked' || '' }} --release --target ${{ matrix.target }} --bin freemkv
 
       # The CLI must not pull in UI libraries: none at all on static Linux,
       # no AppKit/UserNotifications on macOS.
@@ -512,7 +512,7 @@ jobs:
       # signing and notarizing too.
       - name: Import the Developer ID certificate
         id: signing
-        if: runner.os == 'macOS' && github.ref_type == 'tag'
+        if: runner.os == 'macOS' && !(github.event_name == 'push' && github.ref_type == 'branch')
         uses: ./.github/actions/import-developer-id
         with:
           certificate-p12: ${{ secrets.MACOS_CERT_P12 }}
@@ -588,7 +588,7 @@ jobs:
   linux-appimage:
     needs: verify
     # appimage.yml runs on every qa push itself.
-    if: github.ref_type != 'branch'
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch') }}
     permissions:
       contents: write
     uses: ./.github/workflows/appimage.yml
