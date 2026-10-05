@@ -168,6 +168,7 @@ fn produced() -> BTreeSet<String> {
         "flatpak.yml",
         "release.yml",
         "snap.yml",
+        "windows-app.yml",
     ];
     let texts: Vec<(&str, String)> = files.iter().map(|f| (*f, workflow(f))).collect();
     produced_from(&texts)

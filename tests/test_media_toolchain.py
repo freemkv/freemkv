@@ -12,7 +12,7 @@ ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / '.github/scripts/exact-toolchain.sh'
 WORKFLOWS = ROOT / '.github/workflows'
 # Workflows whose builds are media evidence or ship.
-PINNED = ['qa.yml', 'hash-matrix.yml', 'release.yml', 'deb.yml', 'appimage.yml']
+PINNED = ['qa.yml', 'hash-matrix.yml', 'release.yml', 'deb.yml', 'appimage.yml', 'windows-app.yml']
 EXACT = re.compile(r'^\d+\.\d+\.\d+$')
 
 
@@ -249,7 +249,7 @@ class WorkflowToolchainTests(unittest.TestCase):
                     self.assertLess(tc[0], idx[0])
 
     def test_shipped_and_evidence_builds_assert_a_clean_environment(self):
-        shipped = [('release.yml', 'test'), ('release.yml', 'build'), ('release.yml', 'build-windows'), ('release.yml', 'cli-binaries'),
+        shipped = [('release.yml', 'test'), ('release.yml', 'build'), ('windows-app.yml', 'build'), ('release.yml', 'cli-binaries'),
                    ('deb.yml', 'build'), ('appimage.yml', 'build'), ('qa.yml', 'cli-matrix')]
         for wf, job in shipped:
             steps = jobs(wf)[job]
@@ -264,12 +264,14 @@ class WorkflowToolchainTests(unittest.TestCase):
                 for i in built:
                     self.assertNotRegex(steps[i], r'\n        env:', 'a build step sets its own env')
 
-    def test_release_appimage_is_locked(self):
-        steps = jobs('appimage.yml')['build']
-        cmds = [c for s in steps for c in re.findall(r'cargo build[^\n]*', s)]
-        self.assertTrue(cmds)
-        for cmd in cmds:
-            self.assertIn("inputs.release && '--locked'", cmd)
+    def test_release_appimage_and_windows_app_are_locked(self):
+        for wf in ('appimage.yml', 'windows-app.yml'):
+            steps = jobs(wf)['build']
+            cmds = [c for s in steps for c in re.findall(r'cargo build[^\n]*', s)]
+            with self.subTest(wf=wf):
+                self.assertTrue(cmds)
+                for cmd in cmds:
+                    self.assertIn("inputs.release && '--locked'", cmd)
 
     def test_release_builds_are_locked(self):
         for job, steps in jobs('release.yml').items():

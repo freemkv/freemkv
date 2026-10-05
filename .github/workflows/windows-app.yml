@@ -1,0 +1,225 @@
+name: Windows app
+
+# The Windows app (`gui` build) for x86_64 and ARM64 (native windows-11-arm
+# runner). The build yields two images of one program: console `freemkv.exe`
+# and windows-subsystem `freemkv-gui.exe`. They ship as `freemkv.com` (CLI;
+# wins PATHEXT lookup) and `freemkv.exe` (double-click → window), in a portable
+# .zip and a per-user Inno Setup installer (packaging/windows/freemkv.iss).
+# Every dev and qa push builds and round-trips both, so a new arch is proven
+# before release; on a version tag release.yml calls this with release: true to
+# upload them.
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, qa]
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+
+concurrency:
+  group: windows-app-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+            runner: windows-latest
+            machine: '0x8664'
+          - target: aarch64-pc-windows-msvc
+            arch: aarch64
+            runner: windows-11-arm
+            machine: '0xAA64'
+    runs-on: ${{ matrix.runner }}
+    env:
+      A: freemkv-${{ matrix.arch }}-windows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+      # Dev builds link sibling dev checkouts; a release links the tagged crates.
+      - if: ${{ !inputs.release }}
+        uses: freemkv/.github/.github/actions/checkout-siblings@v2
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          self: freemkv
+      # The windows-11-arm image may lack rustup and put clang (which ring needs
+      # on ARM64) off PATH. rustup-init is pinned + hash-checked.
+      - name: rustup and clang on PATH
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" == aarch64-* ]] && ! command -v rustup >/dev/null 2>&1; then
+            curl -fsSLo "$RUNNER_TEMP/rustup-init.exe" \
+              https://static.rust-lang.org/rustup/archive/1.29.1/aarch64-pc-windows-msvc/rustup-init.exe
+            echo "01aa49cf9574a8bd0ae52005d7de2590e8f27181ded6748236e702c92aef826d  $RUNNER_TEMP/rustup-init.exe" | sha256sum -c -
+            "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal --default-toolchain none --no-modify-path
+            cygpath -w "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          if [[ "$TARGET" == aarch64-* ]] && ! command -v clang >/dev/null 2>&1; then
+            vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' \
+                   -property installationPath | tr -d '\r')
+            for d in "/c/Program Files/LLVM/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/ARM64/bin"; do
+              if [ -x "$d/clang.exe" ]; then cygpath -w "$d" >> "$GITHUB_PATH"; exit 0; fi
+            done
+            echo "::error::no clang.exe found for the ARM64 build"; exit 1
+          fi
+      - name: Exact toolchain (rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml "${{ matrix.target }}"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv
+          key: ${{ matrix.target }}-app
+
+      - name: Clean build environment and C toolchain
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}" freemkv
+      - name: Build
+        working-directory: freemkv
+        # A release links the tagged crates, so its committed lock must hold as-is.
+        run: cargo build ${{ inputs.release && '--locked' || '' }} --release --target ${{ matrix.target }} --features gui
+
+      - name: Stage and zip
+        shell: pwsh
+        run: |
+          $rel = "freemkv/target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item "$rel/freemkv-gui.exe" stage/freemkv.exe
+          Copy-Item "$rel/freemkv.exe" stage/freemkv.com
+          Compress-Archive -Path stage/* -DestinationPath "$env:A.zip" -Force
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) {
+            # Pinned + hash-checked; the same 6.4.3 on every runner image.
+            $setup = "$env:RUNNER_TEMP\innosetup-6.4.3.exe"
+            Invoke-WebRequest -Uri https://github.com/jrsoftware/issrc/releases/download/is-6_4_3/innosetup-6.4.3.exe -OutFile $setup
+            if ((Get-FileHash -Algorithm SHA256 $setup).Hash -ne 'F3C42116542C4CC57263C5BA6C4FEABFC49FE771F2F98A79D2F7628B8762723B') { throw "innosetup-6.4.3.exe hash mismatch" }
+            Start-Process -Wait $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-'
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          $ver = (Select-String -Path freemkv/Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          & $iscc "/DAppVersion=$ver" "/DArch=${{ matrix.arch }}" "/DBinDir=$((Resolve-Path stage).Path)" "/O$PWD" freemkv/packaging/windows/freemkv.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc exited $LASTEXITCODE" }
+
+      - name: Verify
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path freemkv/Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $a   = $env:A
+          function Get-PeField($path, $offset) {
+            $b  = [IO.File]::ReadAllBytes($path)
+            $pe = [BitConverter]::ToInt32($b, 0x3C)
+            if ([Text.Encoding]::ASCII.GetString($b, $pe, 4) -ne "PE`0`0") { throw "$path is not a PE image" }
+            [BitConverter]::ToUInt16($b, $pe + $offset)
+          }
+          $names = ([IO.Compression.ZipFile]::OpenRead((Resolve-Path "$a.zip").Path).Entries.FullName | Sort-Object) -join ','
+          Write-Output "zip contents: $names"
+          if ($names -ne 'freemkv.com,freemkv.exe') { throw "$a.zip must hold exactly freemkv.com + freemkv.exe" }
+          # Subsystem sits at optional-header offset 68 in both PE32 and PE32+.
+          $gui = Get-PeField stage/freemkv.exe (24 + 68)
+          $con = Get-PeField stage/freemkv.com (24 + 68)
+          if ($gui -ne 2) { throw "freemkv.exe subsystem is $gui, want 2 (windows)" }
+          if ($con -ne 3) { throw "freemkv.com subsystem is $con, want 3 (console)" }
+          # COFF Machine, so an x64 image can never ship under the arm64 name (it would still run, emulated).
+          foreach ($f in 'stage/freemkv.exe','stage/freemkv.com') {
+            $m = Get-PeField $f 4
+            if ($m -ne ${{ matrix.machine }}) { throw ("{0} machine is 0x{1:X4}, want ${{ matrix.machine }}" -f $f, $m) }
+          }
+          $out = & ./stage/freemkv.com --version
+          if ($LASTEXITCODE -ne 0) { throw "freemkv.com --version exited $LASTEXITCODE" }
+          Write-Output "freemkv.com --version => $out"
+          if ("$out" -notmatch [regex]::Escape($ver)) { throw "freemkv.com --version does not report $ver" }
+          if (-not (Test-Path "$a-setup.exe")) { throw "$a-setup.exe was not built" }
+
+      # Round-trip the installer: files, shortcut and PATH land; uninstall
+      # removes them and leaves the user's other PATH entries intact.
+      - name: Verify the installer
+        shell: pwsh
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\freemkv"
+          $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\freemkv.lnk"
+          $userPath = { [Environment]::GetEnvironmentVariable('Path', 'User') }
+          $keep = @("$env:RUNNER_TEMP\keep-a", "$env:RUNNER_TEMP\keep-b")
+          [Environment]::SetEnvironmentVariable('Path', ((@((& $userPath) -split ';') + $keep) | Where-Object { $_ }) -join ';', 'User')
+          $before = (& $userPath) -split ';'
+          Start-Process -Wait "./$env:A-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          foreach ($f in 'freemkv.exe','freemkv.com','unins000.exe') {
+            if (-not (Test-Path "$dir\$f")) { throw "installer did not create $dir\$f" }
+          }
+          if (-not (Test-Path $lnk)) { throw "installer did not create $lnk" }
+          if ((& $userPath) -split ';' -notcontains $dir) { throw "installer did not add $dir to the user PATH" }
+          & "$dir\freemkv.com" --version
+          if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
+          # The bare name must resolve to the console .com (PATHEXT), not the windowed .exe.
+          $env:Path = (& $userPath) + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          $bare = (Get-Command freemkv -CommandType Application | Select-Object -First 1).Source
+          if ($bare -ne "$dir\freemkv.com") { throw "bare 'freemkv' resolves to $bare, want $dir\freemkv.com" }
+          freemkv --version
+          if ($LASTEXITCODE -ne 0) { throw "bare freemkv --version exited $LASTEXITCODE" }
+          Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          # The uninstaller relaunches itself from %TEMP%, so -Wait can return early.
+          $done = { -not (Test-Path "$dir\freemkv.exe") -and ((& $userPath) -split ';' -notcontains $dir) }
+          for ($i = 0; $i -lt 60 -and -not (& $done); $i++) { Start-Sleep 1 }
+          if (Test-Path "$dir\freemkv.exe") { throw "uninstaller left $dir\freemkv.exe" }
+          if ((& $userPath) -split ';' -contains $dir) { throw "uninstaller left $dir on the user PATH" }
+          if (Test-Path $lnk) { throw "uninstaller left $lnk" }
+          $after = (& $userPath) -split ';'
+          if (Compare-Object $before $after -SyncWindow 0) { throw "uninstall changed other user PATH entries: '$($before -join ';')' -> '$($after -join ';')'" }
+
+      - name: Checksums
+        shell: bash
+        run: |
+          sha256sum "$A.zip" > "$A.zip.sha256"
+          sha256sum "$A-setup.exe" > "$A-setup.exe.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-app-${{ matrix.arch }}
+          path: |
+            ${{ env.A }}.zip*
+            ${{ env.A }}-setup.exe*
+          if-no-files-found: error
+          retention-days: ${{ inputs.release && 90 || 14 }}
+
+  # Only this job holds contents: write, and only when called for a release.
+  publish:
+    needs: build
+    if: ${{ inputs.release }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: windows-app-*
+          merge-multiple: true
+      - name: Upload to the release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            freemkv-x86_64-windows.zip
+            freemkv-x86_64-windows.zip.sha256
+            freemkv-x86_64-windows-setup.exe
+            freemkv-x86_64-windows-setup.exe.sha256
+            freemkv-aarch64-windows.zip
+            freemkv-aarch64-windows.zip.sha256
+            freemkv-aarch64-windows-setup.exe
+            freemkv-aarch64-windows-setup.exe.sha256

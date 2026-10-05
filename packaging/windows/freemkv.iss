@@ -1,5 +1,6 @@
-; Per-user installer for the Windows app. Built by release.yml:
-;   iscc /DAppVersion=X.Y.Z /DBinDir=<dir with freemkv.exe + freemkv.com> /O<out> freemkv.iss
+; Per-user installer for the Windows app. Built by windows-app.yml:
+;   iscc /DAppVersion=X.Y.Z /DBinDir=<dir with freemkv.exe + freemkv.com> [/DArch=aarch64] /O<out> freemkv.iss
+; Arch is the build's CPU, x86_64 (default) or aarch64.
 ; freemkv.exe is the windowed image, freemkv.com the console one; `freemkv` on
 ; PATH resolves to the .com first (PATHEXT).
 
@@ -8,6 +9,16 @@
 #endif
 #ifndef BinDir
   #error BinDir must be defined (/DBinDir=...)
+#endif
+#ifndef Arch
+  #define Arch "x86_64"
+#endif
+#if Arch == "x86_64"
+  #define InnoArch "x64compatible"
+#elif Arch == "aarch64"
+  #define InnoArch "arm64"
+#else
+  #error Arch must be x86_64 or aarch64
 #endif
 
 [Setup]
@@ -23,14 +34,15 @@ PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\freemkv
 DisableDirPage=yes
 DisableProgramGroupPage=yes
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+; One AppId for both: installing the arm64 build over the x64 one upgrades in place.
+ArchitecturesAllowed={#InnoArch}
+ArchitecturesInstallIn64BitMode={#InnoArch}
 MinVersion=10.0
 ChangesEnvironment=yes
 SetupIconFile=..\..\res\freemkv.ico
 UninstallDisplayIcon={app}\freemkv.exe
 UninstallDisplayName=freemkv
-OutputBaseFilename=freemkv-x86_64-windows-setup
+OutputBaseFilename=freemkv-{#Arch}-windows-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

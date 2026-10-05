@@ -233,145 +233,18 @@ jobs:
             ${{ matrix.asset }}.zip
             ${{ matrix.asset }}.zip.sha256
 
-  # ── Windows app (`gui` build) ───────────────────────────────────────────────
-  # The build yields two images of one program: console `freemkv.exe` and
-  # windows-subsystem `freemkv-gui.exe`. They ship as `freemkv.com` (CLI; wins
-  # PATHEXT lookup) and `freemkv.exe` (double-click → window), in a portable
-  # .zip and a per-user Inno Setup installer (packaging/windows/freemkv.iss).
+  # ── Windows app (`gui` build), x86_64 + ARM64 ───────────────────────────────
+  # windows-app.yml builds, verifies and installer-round-trips both arches (dev
+  # and qa run the same workflow), and with release: true uploads the
+  # installers and portable zips.
   build-windows:
     # Same rationale as `build`: does NOT `needs: test` (parallel tripwire).
     needs: verify
-    # Uploads assets to the GitHub release.
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        # x64 only: no hosted ARM64 Windows runner; x64 runs emulated there.
-        include:
-          - target: x86_64-pc-windows-msvc
-            asset: freemkv-x86_64-windows
-
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Exact toolchain (rust-version)
-        shell: bash
-        run: bash .github/scripts/exact-toolchain.sh install Cargo.toml "${{ matrix.target }}"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          key: ${{ matrix.target }}-app
-
-      - name: Clean build environment and C toolchain
-        shell: bash
-        run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
-      - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }} --features gui
-
-      - name: Stage and zip
-        shell: pwsh
-        run: |
-          $a   = "${{ matrix.asset }}"
-          $rel = "target/${{ matrix.target }}/release"
-          New-Item -ItemType Directory -Force stage | Out-Null
-          Copy-Item "$rel/freemkv-gui.exe" stage/freemkv.exe
-          Copy-Item "$rel/freemkv.exe" stage/freemkv.com
-          Compress-Archive -Path stage/* -DestinationPath "$a.zip" -Force
-
-      - name: Build the installer
-        shell: pwsh
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup --version 6.4.3 -y --no-progress
-            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          }
-          $ver = $env:TAG.TrimStart('v')
-          & $iscc "/DAppVersion=$ver" "/DBinDir=$((Resolve-Path stage).Path)" "/O$PWD" packaging/windows/freemkv.iss
-          if ($LASTEXITCODE -ne 0) { throw "iscc exited $LASTEXITCODE" }
-
-      - name: Verify
-        shell: pwsh
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          $ver = $env:TAG.TrimStart('v')
-          $a   = "${{ matrix.asset }}"
-          function Get-Subsystem($path) {
-            $b  = [IO.File]::ReadAllBytes($path)
-            $pe = [BitConverter]::ToInt32($b, 0x3C)
-            if ([Text.Encoding]::ASCII.GetString($b, $pe, 4) -ne "PE`0`0") { throw "$path is not a PE image" }
-            # Subsystem sits at optional-header offset 68 in both PE32 and PE32+.
-            [BitConverter]::ToUInt16($b, $pe + 24 + 68)
-          }
-          $names = ([IO.Compression.ZipFile]::OpenRead((Resolve-Path "$a.zip").Path).Entries.FullName | Sort-Object) -join ','
-          Write-Output "zip contents: $names"
-          if ($names -ne 'freemkv.com,freemkv.exe') { throw "$a.zip must hold exactly freemkv.com + freemkv.exe" }
-          $gui = Get-Subsystem stage/freemkv.exe
-          $con = Get-Subsystem stage/freemkv.com
-          if ($gui -ne 2) { throw "freemkv.exe subsystem is $gui, want 2 (windows)" }
-          if ($con -ne 3) { throw "freemkv.com subsystem is $con, want 3 (console)" }
-          $out = & ./stage/freemkv.com --version
-          if ($LASTEXITCODE -ne 0) { throw "freemkv.com --version exited $LASTEXITCODE" }
-          Write-Output "freemkv.com --version => $out"
-          if ("$out" -notmatch [regex]::Escape($ver)) { throw "freemkv.com --version does not report $ver" }
-          if (-not (Test-Path "$a-setup.exe")) { throw "$a-setup.exe was not built" }
-
-      # Round-trip the installer: files, shortcut and PATH land; uninstall
-      # removes them and leaves the user's other PATH entries intact.
-      - name: Verify the installer
-        shell: pwsh
-        run: |
-          $dir = "$env:LOCALAPPDATA\Programs\freemkv"
-          $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\freemkv.lnk"
-          $userPath = { [Environment]::GetEnvironmentVariable('Path', 'User') }
-          $keep = @("$env:RUNNER_TEMP\keep-a", "$env:RUNNER_TEMP\keep-b")
-          [Environment]::SetEnvironmentVariable('Path', ((@((& $userPath) -split ';') + $keep) | Where-Object { $_ }) -join ';', 'User')
-          $before = (& $userPath) -split ';'
-          Start-Process -Wait "./${{ matrix.asset }}-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
-          foreach ($f in 'freemkv.exe','freemkv.com','unins000.exe') {
-            if (-not (Test-Path "$dir\$f")) { throw "installer did not create $dir\$f" }
-          }
-          if (-not (Test-Path $lnk)) { throw "installer did not create $lnk" }
-          if ((& $userPath) -split ';' -notcontains $dir) { throw "installer did not add $dir to the user PATH" }
-          & "$dir\freemkv.com" --version
-          if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
-          # The bare name must resolve to the console .com (PATHEXT), not the windowed .exe.
-          $env:Path = (& $userPath) + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
-          $bare = (Get-Command freemkv -CommandType Application | Select-Object -First 1).Source
-          if ($bare -ne "$dir\freemkv.com") { throw "bare 'freemkv' resolves to $bare, want $dir\freemkv.com" }
-          freemkv --version
-          if ($LASTEXITCODE -ne 0) { throw "bare freemkv --version exited $LASTEXITCODE" }
-          Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
-          # The uninstaller relaunches itself from %TEMP%, so -Wait can return early.
-          $done = { -not (Test-Path "$dir\freemkv.exe") -and ((& $userPath) -split ';' -notcontains $dir) }
-          for ($i = 0; $i -lt 60 -and -not (& $done); $i++) { Start-Sleep 1 }
-          if (Test-Path "$dir\freemkv.exe") { throw "uninstaller left $dir\freemkv.exe" }
-          if ((& $userPath) -split ';' -contains $dir) { throw "uninstaller left $dir on the user PATH" }
-          if (Test-Path $lnk) { throw "uninstaller left $lnk" }
-          $after = (& $userPath) -split ';'
-          if (Compare-Object $before $after -SyncWindow 0) { throw "uninstall changed other user PATH entries: '$($before -join ';')' -> '$($after -join ';')'" }
-
-      - name: Checksums
-        shell: bash
-        run: |
-          A="${{ matrix.asset }}"
-          sha256sum "$A.zip" > "$A.zip.sha256"
-          sha256sum "$A-setup.exe" > "$A-setup.exe.sha256"
-
-      - name: Upload
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
-        with:
-          files: |
-            ${{ matrix.asset }}.zip
-            ${{ matrix.asset }}.zip.sha256
-            ${{ matrix.asset }}-setup.exe
-            ${{ matrix.asset }}-setup.exe.sha256
+    uses: ./.github/workflows/windows-app.yml
+    with:
+      release: true
 
   # ── CLI (no features) ───────────────────────────────────────────────────────
   # Bare binaries, no UI libraries; Linux is static musl. `legacy` re-uploads
