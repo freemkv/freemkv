@@ -23,8 +23,8 @@ DVDs (CSS) need no setup. Blu-ray and UHD (AACS) require a `keydb.cfg` supplying
 ### 1. Install
 
 **App:** download from the [latest release](https://github.com/freemkv/freemkv/releases/latest) —
-`freemkv-<arch>-macos.zip` on macOS, `freemkv-x86_64-windows-setup.exe` on Windows, `freemkv-amd64.deb`,
-AppImage, Flatpak or Snap (`freemkv-amd64.snap`) on Linux. On macOS: `brew install --cask freemkv/tap/freemkv`.
+`freemkv-<arch>-macos.zip` on macOS, `freemkv-<arch>-windows-setup.exe` (x86_64 or aarch64) on Windows,
+`freemkv-amd64.deb` / `freemkv-arm64.deb`, AppImage, Flatpak or Snap (`freemkv-amd64.snap`) on Linux. On macOS: `brew install --cask freemkv/tap/freemkv`.
 
 **CLI:**
 
@@ -32,13 +32,14 @@ AppImage, Flatpak or Snap (`freemkv-amd64.snap`) on Linux. On macOS: `brew insta
 # macOS
 brew install freemkv/tap/freemkv-cli
 
-# Linux x86_64 (static; freemkv-cli-aarch64-linux on arm64)
+# Linux x86_64 (static; freemkv-cli-aarch64-linux on arm64, freemkv-cli-armv7-linux on 32-bit Raspberry Pi)
 curl -fsSLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-cli-x86_64-linux
 curl -fsSLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-cli-x86_64-linux.sha256
 sha256sum -c freemkv-cli-x86_64-linux.sha256
 mv freemkv-cli-x86_64-linux freemkv && chmod +x freemkv && sudo mv freemkv /usr/local/bin/
 
-# Windows — download freemkv-cli-x86_64-windows.exe, rename to freemkv.exe, put it on PATH
+# Windows — download freemkv-cli-x86_64-windows.exe (freemkv-cli-aarch64-windows.exe on ARM),
+# rename to freemkv.exe, put it on PATH
 ```
 
 See [INSTALL.md](INSTALL.md) for every asset, the `freemkv-cli` `.deb`, checksum

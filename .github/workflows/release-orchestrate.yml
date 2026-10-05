@@ -1746,8 +1746,12 @@ jobs:
               freemkv-x86_64-macos.zip
               freemkv-x86_64-windows-setup.exe
               freemkv-x86_64-windows.zip
+              freemkv-aarch64-windows-setup.exe
+              freemkv-aarch64-windows.zip
               freemkv-x86_64-linux.AppImage
+              freemkv-aarch64-linux.AppImage
               freemkv-amd64.deb
+              freemkv-arm64.deb
               freemkv-x86_64-linux.flatpak
               freemkv-flatpak-package.tar.gz
               # CLI
@@ -1755,8 +1759,12 @@ jobs:
               freemkv-cli-x86_64-macos
               freemkv-cli-x86_64-linux
               freemkv-cli-aarch64-linux
+              freemkv-cli-armv7-linux
               freemkv-cli-x86_64-windows.exe
+              freemkv-cli-aarch64-windows.exe
               freemkv-cli-amd64.deb
+              freemkv-cli-arm64.deb
+              freemkv-cli-armhf.deb
               # legacy CLI aliases, kept for one release
               freemkv-aarch64-macos
               freemkv-x86_64-macos

@@ -3,7 +3,8 @@
 # an autorip install can point this at the same ./config directory.
 #
 # Releases publish the image as ghcr.io/freemkv/freemkv-library (:latest and
-# :vX.Y.Z), and also as ghcr.io/freemkv/autorip for existing installs. To run
+# :vX.Y.Z), and also as ghcr.io/freemkv/autorip for existing installs, for
+# linux/amd64, linux/arm64 and linux/arm/v7 (Docker pulls the right one). To run
 # a local build instead, uncomment the `build:` block below and set
 # `image: freemkv-library:local`.
 services:

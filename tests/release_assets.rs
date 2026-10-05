@@ -140,6 +140,16 @@ fn every_os_ships_an_app_and_a_cli() {
         "freemkv-cli-amd64.deb",
         "freemkv-x86_64-linux.AppImage",
         "freemkv-x86_64-linux.flatpak",
+        // ARM: Windows on ARM, arm64 Linux, Raspberry Pi 32-bit.
+        "freemkv-aarch64-windows-setup.exe",
+        "freemkv-aarch64-windows.zip",
+        "freemkv-cli-aarch64-windows.exe",
+        "freemkv-aarch64-linux.AppImage",
+        "freemkv-arm64.deb",
+        "freemkv-cli-arm64.deb",
+        "freemkv-cli-aarch64-linux",
+        "freemkv-cli-armhf.deb",
+        "freemkv-cli-armv7-linux",
     ] {
         assert!(
             e.current.iter().any(|n| n == must),

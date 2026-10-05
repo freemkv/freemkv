@@ -27,10 +27,15 @@ points at the newest release.
 | macOS Apple Silicon | `freemkv-aarch64-macos.zip` | `freemkv-cli-aarch64-macos` |
 | macOS Intel | `freemkv-x86_64-macos.zip` | `freemkv-cli-x86_64-macos` |
 | Windows x86_64 | `freemkv-x86_64-windows-setup.exe` (installer), `freemkv-x86_64-windows.zip` (portable) | `freemkv-cli-x86_64-windows.exe` |
+| Windows ARM64 | `freemkv-aarch64-windows-setup.exe` (installer), `freemkv-aarch64-windows.zip` (portable) | `freemkv-cli-aarch64-windows.exe` |
 | Linux x86_64 | `freemkv-amd64.deb`, `freemkv-x86_64-linux.AppImage`, `freemkv-x86_64-linux.flatpak`, `freemkv-amd64.snap` | `freemkv-cli-amd64.deb`, `freemkv-cli-x86_64-linux` |
-| Linux arm64 | — | `freemkv-cli-aarch64-linux` |
+| Linux arm64 (Raspberry Pi OS 64-bit) | `freemkv-arm64.deb`, `freemkv-aarch64-linux.AppImage` | `freemkv-cli-arm64.deb`, `freemkv-cli-aarch64-linux` |
+| Linux armv7 (Raspberry Pi OS 32-bit) | — | `freemkv-cli-armhf.deb`, `freemkv-cli-armv7-linux` |
+| Server (Docker) | `ghcr.io/freemkv/freemkv-library` for linux/amd64, linux/arm64 and linux/arm/v7 | |
 
-The Linux CLI binaries are static (musl) and need no shared libraries. The
+The Linux CLI binaries are static (musl) and need no shared libraries. There
+is no 32-bit ARM desktop app: GTK 4.10+ cannot be built and tested on any
+hosted 32-bit runner, so armv7 gets the CLI and the server image. The
 macOS app is ad-hoc signed, not notarized (see [macOS](#macos) for the first
 launch).
 
@@ -82,12 +87,15 @@ freemkv --version
 
 ## Windows
 
-**App (installer).** Run `freemkv-x86_64-windows-setup.exe`. It installs for
+Use the `aarch64` assets on Windows on ARM (Snapdragon, Surface Pro X) and the
+`x86_64` ones everywhere else; the x86_64 build also runs emulated on ARM.
+
+**App (installer).** Run `freemkv-<arch>-windows-setup.exe`. It installs for
 the current user (no administrator rights) into
 `%LOCALAPPDATA%\Programs\freemkv`, adds a Start menu shortcut, and puts the
 folder on your user `PATH`. Uninstall from Settings → Apps.
 
-**App (portable).** Unzip `freemkv-x86_64-windows.zip` and keep its two files
+**App (portable).** Unzip `freemkv-<arch>-windows.zip` and keep its two files
 together:
 
 - `freemkv.exe` — double-click to open the window.
@@ -97,7 +105,7 @@ together:
 
 Add the folder to your `PATH` to run `freemkv` from anywhere.
 
-**CLI.** Download `freemkv-cli-x86_64-windows.exe`, rename it to
+**CLI.** Download `freemkv-cli-<arch>-windows.exe`, rename it to
 `freemkv.exe`, and place it on your `PATH`.
 
 ## Linux
@@ -110,6 +118,8 @@ curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-am
 sudo apt install ./freemkv-amd64.deb
 ```
 
+On 64-bit ARM (Raspberry Pi OS 64-bit, Ubuntu arm64) use `freemkv-arm64.deb`.
+
 This installs the package `freemkv` and replaces `freemkv-cli` if present.
 
 **App — AppImage:**
@@ -119,6 +129,8 @@ curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x8
 chmod +x freemkv-x86_64-linux.AppImage
 ./freemkv-x86_64-linux.AppImage
 ```
+
+On 64-bit ARM use `freemkv-aarch64-linux.AppImage`.
 
 **App — Flatpak:**
 
@@ -173,9 +185,11 @@ sudo apt install ./freemkv-cli-amd64.deb
 ```
 
 This installs the package `freemkv-cli` (no dependencies) and replaces the
-`freemkv` app package if present.
+`freemkv` app package if present. Use `freemkv-cli-arm64.deb` on 64-bit ARM and
+`freemkv-cli-armhf.deb` on 32-bit Raspberry Pi OS.
 
-**CLI — static binary** (x86_64 shown; use `freemkv-cli-aarch64-linux` on arm64):
+**CLI — static binary** (x86_64 shown; use `freemkv-cli-aarch64-linux` on arm64,
+`freemkv-cli-armv7-linux` on 32-bit ARM such as Raspberry Pi OS 32-bit):
 
 ```bash
 ASSET=freemkv-cli-x86_64-linux
