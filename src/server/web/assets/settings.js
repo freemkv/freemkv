@@ -38,18 +38,24 @@ function hookRow(h) {
   return '<div class="hook-entry"><div class="hook"><input class="txt" type="text" data-hook placeholder="https://discord.com/api/webhooks/…" value="' + esc(h.url || '') + '" aria-label="Webhook URL">'
     + '<span class="flags">' + cb('post_rip', 'Rip') + cb('post_mux', 'Mux') + cb('post_move', 'Move') + '</span>'
     + '<button type="button" class="x" data-rmhook aria-label="Remove this webhook">×</button></div>'
-    + '<details class="hook-auth"' + (h.jellyfin_api_key ? ' open' : '') + '><summary>Authentication &amp; test</summary><div class="hook-auth-fields">'
-    + '<label>Authentication <select class="txt" data-hook-auth><option value="none">None</option><option value="jellyfin"' + (h.jellyfin_api_key ? ' selected' : '') + '>Jellyfin API key</option></select></label>'
-    + '<label data-hook-key-label' + (h.jellyfin_api_key ? '' : ' hidden') + '>API key <input class="txt" type="password" autocomplete="new-password" data-hook-key' + (h.jellyfin_api_key ? ' required' : '') + ' value="' + esc(h.jellyfin_api_key || '') + '"></label>'
+    + '<details class="hook-auth"' + (Object.keys(h.headers || {}).length ? ' open' : '') + '><summary>Headers &amp; test</summary>'
+    + '<div data-hook-headers>' + Object.entries(h.headers || {}).map(([name, value]) => headerRow(name, value)).join('') + '</div>'
+    + '<div class="hook-auth-fields"><button type="button" class="btn btn-ghost btn-sm" data-addheader>+ Add a header</button>'
     + '<button type="button" class="btn btn-secondary btn-sm" data-testhook>Test</button><span class="small muted" data-hook-status role="status"></span></div>'
-    + '<p class="small muted">Test sends a request to this URL using the fields above, without saving.</p></details></div>';
+    + '<p class="small muted">Test sends a request using these fields without saving. Header values are hidden after saving.</p></details></div>';
+}
+
+function headerRow(name = '', value = '') {
+  return '<div class="hook-auth-fields" data-header-row><label>Header name<input class="txt" data-header-name placeholder="Authorization" value="' + esc(name) + '"></label>'
+    + '<label>Value<input class="txt" type="password" autocomplete="new-password" data-header-value value="' + esc(value) + '"></label>'
+    + '<button type="button" class="x" data-rmheader aria-label="Remove this header">×</button></div>';
 }
 
 function collectHook(row) {
   const flag = k => row.querySelector('[data-flag="' + k + '"]').checked;
   return { url: row.querySelector('[data-hook]').value.trim(),
     post_rip: flag('post_rip'), post_mux: flag('post_mux'), post_move: flag('post_move'),
-    jellyfin_api_key: row.querySelector('[data-hook-auth]').value === 'jellyfin' ? row.querySelector('[data-hook-key]').value.trim() : '' };
+    headers: Object.fromEntries($$('[data-header-row]', row).map(r => [r.querySelector('[data-header-name]').value.trim(), r.querySelector('[data-header-value]').value]).filter(([name]) => name)) };
 }
 
 function fieldHtml(f, v, sub) {
@@ -184,7 +190,6 @@ async function mount(view, ctx) {
       $('#revert', form).disabled = !d;
     }
     form.addEventListener('input', (e) => {
-      if (e.target.matches('[data-hook-auth]')) { const row = e.target.closest('.hook-entry'); row.querySelector('[data-hook-key-label]').hidden = e.target.value !== 'jellyfin'; row.querySelector('[data-hook-key]').required = e.target.value === 'jellyfin'; }
       if (e.target.matches('.seg input')) {
         const oh = form.querySelector('#oh-' + e.target.dataset.key);
         if (oh) oh.textContent = e.target.dataset.help || '';
@@ -202,10 +207,17 @@ async function mount(view, ctx) {
       } else if (e.target.closest('[data-rmhook]')) {
         e.target.closest('.hook-entry').remove();
         paintDirty();
+      } else if (e.target.closest('[data-addheader]')) {
+        const headers = e.target.closest('.hook-entry').querySelector('[data-hook-headers]');
+        headers.insertAdjacentHTML('beforeend', headerRow());
+        headers.lastElementChild.querySelector('input').focus();
+        paintDirty();
+      } else if (e.target.closest('[data-rmheader]')) {
+        e.target.closest('[data-header-row]').remove();
+        paintDirty();
       } else if (e.target.closest('[data-testhook]')) {
         const b = e.target.closest('[data-testhook]'), row = b.closest('.hook-entry');
         const status = row.querySelector('[data-hook-status]');
-        if (row.querySelector('[data-hook-auth]').value === 'jellyfin' && !row.querySelector('[data-hook-key]').value.trim()) { status.textContent = 'Enter the API key first.'; return; }
         status.textContent = 'Testing…';
         let failure = 'Test failed';
         const r = await act(b, () => api('POST', '/api/webhook/test', collectHook(row)).catch(err => { failure = err.message; throw err; }), 'Webhook test');

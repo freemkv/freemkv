@@ -10,7 +10,7 @@
 
 ### Changed
 
-- Webhooks support optional Jellyfin API-key authentication via the modern authorization header, with masked key storage in Settings and a Test button for unsaved changes. Existing URL-only webhooks remain supported. (server only: notifications)
+- Webhooks support custom authentication headers, with masked values in Settings and a Test button for unsaved changes. Existing URL-only webhooks remain supported. (server only: notifications)
 
 - Combine all connected Libraries in shared muxing, moving and title-review panels, with source badges on remote jobs and a source selector in the system log. (server only: Drives page)
 

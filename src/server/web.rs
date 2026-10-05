@@ -844,26 +844,38 @@ pub(crate) fn resolve_webhook_entries(
             post_rip: hook.post_rip,
             post_mux: hook.post_mux,
             post_move: hook.post_move,
-            jellyfin_api_key: if hook.jellyfin_api_key == SECRET_SENTINEL {
-                // Bind the saved key to its exact saved URL, never a new host.
-                let matches: Vec<_> = existing.iter().filter(|e| e.url == url).collect();
-                let stored = if let Some((_, idx)) = s.rsplit_once('#') {
-                    idx.parse::<usize>()
-                        .ok()
-                        .and_then(|i| existing.get(i))
-                        .filter(|e| e.url == url)
-                } else if matches.len() == 1 {
-                    Some(matches[0])
-                } else {
-                    None
-                };
-                stored
-                    .ok_or_else(|| "Re-enter the webhook API key".to_string())?
-                    .jellyfin_api_key
-                    .clone()
-            } else {
-                hook.jellyfin_api_key.clone()
-            },
+            headers: hook
+                .headers
+                .iter()
+                .map(|(name, value)| {
+                    let value = if value == SECRET_SENTINEL {
+                        // Bind the saved key to its exact saved URL, never a new host.
+                        let matches: Vec<_> = existing.iter().filter(|e| e.url == url).collect();
+                        let stored = if let Some((_, idx)) = s.rsplit_once('#') {
+                            idx.parse::<usize>()
+                                .ok()
+                                .and_then(|i| existing.get(i))
+                                .filter(|e| e.url == url)
+                        } else if matches.len() == 1 {
+                            Some(matches[0])
+                        } else {
+                            None
+                        };
+                        stored
+                            .and_then(|entry| {
+                                entry
+                                    .headers
+                                    .iter()
+                                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                                    .map(|(_, value)| value.clone())
+                            })
+                            .ok_or_else(|| "Re-enter the webhook header value".to_string())?
+                    } else {
+                        value.clone()
+                    };
+                    Ok((name.clone(), value))
+                })
+                .collect::<Result<_, String>>()?,
         });
     }
     Ok(resolved)
@@ -1495,7 +1507,7 @@ mod web_tests {
 
     #[test]
     fn webhook_key_is_redacted_preserved_and_bound_to_its_destination() {
-        let hook = WebhookEntry::parse(0, &serde_json::json!({"url":"https://jf.example/Library/Refresh","jellyfin_api_key":"new-secret-key"})).unwrap();
+        let hook = WebhookEntry::parse(0, &serde_json::json!({"url":"https://jf.example/Library/Refresh","headers":{"Authorization":"new-secret-key"}})).unwrap();
         let roundtrip: WebhookEntry =
             serde_json::from_str(&serde_json::to_string(&hook).unwrap()).unwrap();
         assert_eq!(roundtrip, hook);
@@ -1515,17 +1527,42 @@ mod web_tests {
         let mut moved = masked.clone();
         moved.url = "https://other.example/Library/Refresh".into();
         assert!(resolve_webhook_entries(&[moved], &cfg.webhook_urls).is_err());
+        let mut renamed = masked.clone();
+        renamed.headers = [("X-Other-Key".into(), SECRET_SENTINEL.into())].into();
+        assert!(resolve_webhook_entries(&[renamed], &cfg.webhook_urls).is_err());
+        let migrated = WebhookEntry::parse(
+            0,
+            &serde_json::json!({"url":"https://jf.example","jellyfin_api_key":"old-key"}),
+        )
+        .unwrap();
+        assert_eq!(
+            migrated.headers["Authorization"],
+            "MediaBrowser Token=\"old-key\""
+        );
+        for headers in [
+            serde_json::json!({"Bad Header":"value"}),
+            serde_json::json!({"Host":"other.example"}),
+            serde_json::json!({"Authorization":"a", "authorization":"b"}),
+        ] {
+            assert!(
+                WebhookEntry::parse(
+                    0,
+                    &serde_json::json!({"url":"https://jf.example", "headers":headers})
+                )
+                .is_err()
+            );
+        }
         let mut cleared = masked;
-        cleared.jellyfin_api_key.clear();
+        cleared.headers.clear();
         assert!(
             resolve_webhook_entries(&[cleared], &cfg.webhook_urls).unwrap()[0]
-                .jellyfin_api_key
+                .headers
                 .is_empty()
         );
         assert!(
             WebhookEntry::parse(
                 0,
-                &serde_json::json!({"url":"https://jf.example","jellyfin_api_key":"bad\r\nkey"})
+                &serde_json::json!({"url":"https://jf.example","headers":{"Authorization":"bad\r\nkey"}})
             )
             .is_err()
         );
@@ -2854,7 +2891,7 @@ mod web_tests {
             post_rip: true,
             post_mux: true,
             post_move: true,
-            jellyfin_api_key: String::new(),
+            headers: Default::default(),
         }
     }
 
@@ -2866,7 +2903,7 @@ mod web_tests {
             post_rip: true,
             post_mux: true,
             post_move: true,
-            jellyfin_api_key: String::new(),
+            headers: Default::default(),
         }
     }
 
@@ -3219,7 +3256,7 @@ mod web_tests {
             post_rip: true,
             post_mux: true,
             post_move: true,
-            jellyfin_api_key: String::new(),
+            headers: Default::default(),
         }];
         let masked = mask_webhook_url_indexed(&existing[0].url, 0);
         let incoming = [IncomingWebhook {
@@ -3227,7 +3264,7 @@ mod web_tests {
             post_rip: false,
             post_mux: false,
             post_move: true,
-            jellyfin_api_key: String::new(),
+            headers: Default::default(),
         }];
         let resolved = resolve_webhook_entries(&incoming, &existing).unwrap();
         assert_eq!(
@@ -3237,7 +3274,7 @@ mod web_tests {
                 post_rip: false,
                 post_mux: false,
                 post_move: true,
-                jellyfin_api_key: String::new(),
+                headers: Default::default(),
             }],
             "URL resolves to the stored secret but the flags follow the new request"
         );
@@ -4803,7 +4840,7 @@ mod web_tests {
                 post_rip: true,
                 post_mux: true,
                 post_move: true,
-                jellyfin_api_key: String::new(),
+                headers: Default::default(),
             }];
             cfg.write().unwrap().webhook_urls = stored.clone();
             for (patch, field) in [

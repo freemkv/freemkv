@@ -208,7 +208,7 @@ fn fire(cfg: &Config, payload: &serde_json::Value, event: WebhookEvent) {
                 // Deliberately NOT SSRF-guarded: aiming a webhook at a LAN
                 // service (Home Assistant, a NAS) is intended use. Goes
                 // through un-pinned `web::webhook_agent`; see its doc comment.
-                let _ = deliver_authenticated(&hook.url, &body, &hook.jellyfin_api_key);
+                let _ = deliver_authenticated(&hook.url, &body, &hook.headers);
             }
         });
     if spawned.is_err() {
@@ -223,7 +223,7 @@ fn fire(cfg: &Config, payload: &serde_json::Value, event: WebhookEvent) {
 // tested against a loopback stub.
 #[cfg(test)]
 fn deliver(url: &str, body: &str) -> bool {
-    deliver_authenticated(url, body, "")
+    deliver_authenticated(url, body, &Default::default())
 }
 
 pub(crate) fn test(hook: &WebhookEntry) -> Result<u16, String> {
@@ -231,7 +231,7 @@ pub(crate) fn test(hook: &WebhookEntry) -> Result<u16, String> {
         return Err("Too many webhook requests; try again shortly".into());
     }
     let _guard = InflightGuard;
-    let response = send(&hook.url, r#"{"event":"test"}"#, &hook.jellyfin_api_key)
+    let response = send(&hook.url, r#"{"event":"test"}"#, &hook.headers)
         .map_err(|e| crate::server::web::ureq_error_kind(&e))?;
     let status = response.status().as_u16();
     if response.status().is_success() {
@@ -241,17 +241,25 @@ pub(crate) fn test(hook: &WebhookEntry) -> Result<u16, String> {
     }
 }
 
-fn send(url: &str, body: &str, key: &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+fn send(
+    url: &str,
+    body: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
     let agent = crate::server::web::webhook_agent();
     let mut request = agent.post(url).header("Content-Type", "application/json");
-    if !key.is_empty() {
-        request = request.header("Authorization", format!("MediaBrowser Token=\"{key}\""));
+    for (name, value) in headers {
+        request = request.header(name, value);
     }
     request.send(body)
 }
 
-fn deliver_authenticated(url: &str, body: &str, key: &str) -> bool {
-    match send(url, body, key) {
+fn deliver_authenticated(
+    url: &str,
+    body: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    match send(url, body, headers) {
         // NOT every `Ok` is a delivery: at `max_redirects(0)` ureq still
         // returns `Ok` for a 3xx, so an http->https redirected webhook used
         // to log "sent" while nothing delivered. This closes that gap.
@@ -289,7 +297,7 @@ mod tests {
     // rip-complete delivery this module exists for.
 
     #[test]
-    fn jellyfin_header_auth_and_test_status() {
+    fn custom_headers_and_test_status() {
         for status in [204, 401, 302] {
             let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
             let address = server.server_addr();
@@ -306,9 +314,19 @@ mod tests {
                         .as_str(),
                     "MediaBrowser Token=\"secret-test-key\""
                 );
+                assert_eq!(
+                    request
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("X-API-Key"))
+                        .unwrap()
+                        .value
+                        .as_str(),
+                    "another-secret"
+                );
                 request.respond(tiny_http::Response::empty(status)).unwrap();
             });
-            let hook = WebhookEntry::parse(0, &serde_json::json!({"url":format!("http://{address}/Library/Refresh"),"jellyfin_api_key":"secret-test-key"})).unwrap();
+            let hook = WebhookEntry::parse(0, &serde_json::json!({"url":format!("http://{address}/Library/Refresh"),"headers":{"Authorization":"MediaBrowser Token=\"secret-test-key\"","X-API-Key":"another-secret"}})).unwrap();
             let result = super::test(&hook);
             if status == 204 {
                 assert_eq!(result.unwrap(), 204);
@@ -708,7 +726,7 @@ mod tests {
                 post_rip: false,
                 post_mux: false,
                 post_move: true,
-                jellyfin_api_key: String::new(),
+                headers: Default::default(),
             }],
             ..Default::default()
         };
@@ -810,7 +828,7 @@ mod tests {
             post_rip: true,
             post_mux: true,
             post_move: true,
-            jellyfin_api_key: String::new(),
+            headers: Default::default(),
         }
     }
 
@@ -854,21 +872,21 @@ mod tests {
                 post_rip: true,
                 post_mux: false,
                 post_move: false,
-                jellyfin_api_key: String::new(),
+                headers: Default::default(),
             },
             WebhookEntry {
                 url: "https://mux-only.example/hook".to_string(),
                 post_rip: false,
                 post_mux: true,
                 post_move: false,
-                jellyfin_api_key: String::new(),
+                headers: Default::default(),
             },
             WebhookEntry {
                 url: "https://move-only.example/hook".to_string(),
                 post_rip: false,
                 post_mux: false,
                 post_move: true,
-                jellyfin_api_key: String::new(),
+                headers: Default::default(),
             },
             both("https://all.example/hook"),
         ];
@@ -906,7 +924,7 @@ mod tests {
             post_rip: false,
             post_mux: false,
             post_move: false,
-            jellyfin_api_key: String::new(),
+            headers: Default::default(),
         }];
         assert!(active_urls(&entries, WebhookEvent::Rip).is_empty());
         assert!(active_urls(&entries, WebhookEvent::Mux).is_empty());
