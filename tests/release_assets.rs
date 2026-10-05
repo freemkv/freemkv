@@ -260,7 +260,10 @@ fn json_legs(y: &str) -> Vec<(Vec<String>, String)> {
         .map(str::trim)
         .filter(|t| t.starts_with('{') && t.contains("\"asset\""))
         .map(|t| {
-            let names = ["asset", "legacy"].iter().filter_map(|k| field(t, k)).collect();
+            let names = ["asset", "legacy"]
+                .iter()
+                .filter_map(|k| field(t, k))
+                .collect();
             (names, field(t, "ext").unwrap_or_default())
         })
         .collect()
@@ -287,7 +290,10 @@ fn produced_from(workflows: &[(&str, String)]) -> BTreeSet<String> {
             }
             let mut entries: Vec<(Vec<String>, String)> = Vec::new();
             // A matrix read from a plan job's output has that workflow's JSON legs.
-            if job.iter().any(|l| l.contains("include: ${{ fromJSON(needs.")) {
+            if job
+                .iter()
+                .any(|l| l.contains("include: ${{ fromJSON(needs."))
+            {
                 entries.extend(planned.iter().cloned());
             }
             let mut suffixes = BTreeSet::new();
