@@ -317,6 +317,58 @@ pub fn take_title_override(device: &str) -> Option<crate::server::tmdb::TmdbResu
     m.remove(device)
 }
 
+// An explicit Stop suppresses automatic work for this insertion, not just a timer.
+static STOPPED_INSERTIONS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, bool>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+
+pub fn hold_stopped_disc(device: &str) {
+    STOPPED_INSERTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(device.into(), false);
+}
+
+pub fn release_stopped_disc(device: &str) {
+    STOPPED_INSERTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(device);
+}
+
+// Some USB drives briefly report no medium while cancellation releases the drive.
+// Require two absent observations before ending a stopped insertion.
+pub(super) fn stopped_disc_presence(
+    device: &str,
+    presence: libfreemkv::DiscPresence,
+) -> libfreemkv::DiscPresence {
+    use libfreemkv::DiscPresence;
+    let mut stopped = STOPPED_INSERTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(absent) = stopped.get_mut(device) else {
+        return presence;
+    };
+    if presence == DiscPresence::Absent {
+        if *absent {
+            stopped.remove(device);
+            DiscPresence::Absent
+        } else {
+            *absent = true;
+            DiscPresence::Settling
+        }
+    } else {
+        *absent = false;
+        presence
+    }
+}
+
+pub(super) fn try_claim_insert(device: &str) -> Option<u64> {
+    // Serialize the automatic claim with Stop arming its hold.
+    let stopped = STOPPED_INSERTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if stopped.contains_key(device) {
+        return None;
+    }
+    try_claim_active(device)
+}
+
 // Stop cooldowns: device -> the MONOTONIC instant the cooldown expires. `Instant`, not an
 // `epoch_secs()` deadline, so it can't step backwards (NTP/clock-reset/VM-resume).
 pub(super) static STOP_COOLDOWNS: once_cell::sync::Lazy<
@@ -344,6 +396,7 @@ pub(super) fn is_in_cooldown(device: &str) -> bool {
 /// Drop auxiliary per-device state on hot-unplug so changing device paths do not
 /// accumulate stale entries. Recovers poisoned locks before cleanup.
 pub(super) fn forget_device_state(device: &str) {
+    release_stopped_disc(device);
     TITLE_OVERRIDES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1151,6 +1204,51 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(dev);
+    }
+
+    #[test]
+    fn stopped_disc_ignores_transient_absence_but_rearms_after_removal() {
+        use libfreemkv::DiscPresence::{Absent, Present, Settling};
+        let dev = "sg_stop_presence";
+        hold_stopped_disc(dev);
+        assert_eq!(stopped_disc_presence(dev, Absent), Settling);
+        assert_eq!(stopped_disc_presence(dev, Present), Present);
+        assert!(try_claim_insert(dev).is_none());
+        assert_eq!(stopped_disc_presence(dev, Absent), Settling);
+        assert_eq!(stopped_disc_presence(dev, Absent), Absent);
+        assert!(try_claim_insert(dev).is_some());
+        STATE.lock().unwrap_or_else(|e| e.into_inner()).remove(dev);
+        forget_device_state(dev);
+    }
+
+    #[test]
+    fn stopped_insertion_stays_held_after_cooldown_but_allows_explicit_work() {
+        let dev = "sg_stopped_insertion";
+        hold_stopped_disc(dev);
+        set_stop_cooldown(dev);
+        STOP_COOLDOWNS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                dev.into(),
+                std::time::Instant::now() - std::time::Duration::from_secs(1),
+            );
+        assert!(!is_in_cooldown(dev));
+        for _ in 0..3 {
+            assert!(try_claim_insert(dev).is_none());
+        }
+        // Manual Scan/Rip bypasses the automatic-insert guard.
+        assert!(try_claim_active(dev).is_some());
+        release_stopped_disc(dev);
+        STATE.lock().unwrap_or_else(|e| e.into_inner()).remove(dev);
+        assert!(try_claim_insert(dev).is_some());
+        STATE.lock().unwrap_or_else(|e| e.into_inner()).remove(dev);
+        // Device removal clears the hold as well.
+        hold_stopped_disc(dev);
+        forget_device_state(dev);
+        assert!(try_claim_insert(dev).is_some());
+        STATE.lock().unwrap_or_else(|e| e.into_inner()).remove(dev);
+        forget_device_state(dev);
     }
 
     /// A disc-supplied extent (untrusted `start_lba`/`sector_count`) must never be able to

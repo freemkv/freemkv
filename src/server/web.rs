@@ -7021,6 +7021,7 @@ fn handle_scan(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &
         return;
     };
 
+    ripper::release_stopped_disc(device);
     let dev = device.to_string();
     let dev_path = device_path(device);
     let cfg = Arc::clone(cfg);
@@ -7086,6 +7087,7 @@ fn handle_rip(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &s
         json_response(request, 409, r#"{"ok":false,"error":"already ripping"}"#);
         return;
     };
+    ripper::release_stopped_disc(device);
     let _ = spawn_rip_after_claim(request, cfg, device, resume_mode, claim_gen);
 }
 
@@ -7770,6 +7772,7 @@ fn handle_stop(request: tiny_http::Request, device: &str) {
     // Armed before the drain, which can take up to 60s, so the poll loop does
     // not re-dispatch the drive the operator is stopping; refreshed after it.
     if entry_gen.is_some() {
+        ripper::hold_stopped_disc(device);
         ripper::set_stop_cooldown(device);
     }
 

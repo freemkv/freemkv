@@ -28,9 +28,9 @@ pub use session::{
 };
 #[allow(unused_imports)]
 pub use state::{
-    BadRange, Resumable, RipState, STATE, device_known, is_busy, set_stop_cooldown,
-    set_title_override, take_title_override, try_claim_active, try_claim_active_checked,
-    update_state, update_state_with,
+    BadRange, Resumable, RipState, STATE, device_known, hold_stopped_disc, is_busy,
+    release_stopped_disc, set_stop_cooldown, set_title_override, take_title_override,
+    try_claim_active, try_claim_active_checked, update_state, update_state_with,
 };
 
 // Internal-use imports for the orchestrator code that lives in this
@@ -1164,6 +1164,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                 let presence = match libfreemkv::disc_presence(std::path::Path::new(path)) {
                     Ok(p) => {
                         probe_fail.clear(&device);
+                        let p = state::stopped_disc_presence(&device, p);
                         update_state_with(&device, |row| clear_probe_error(row, p));
                         p
                     }
@@ -1296,7 +1297,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                     // Claim like /api/scan and /api/rip do (try_claim_active_checked):
                     // the old separate check+set was a TOCTOU letting two rip
                     // threads claim one drive.
-                    let Some(claim_gen) = try_claim_active(&device) else {
+                    let Some(claim_gen) = state::try_claim_insert(&device) else {
                         continue;
                     };
 
