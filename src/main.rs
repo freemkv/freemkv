@@ -56,6 +56,7 @@ mod title_identity;
 mod engine;
 // The KU fixture `engine`'s tests use.
 #[cfg(all(test, feature = "gui", target_os = "macos"))]
+#[allow(dead_code)] // Shared fixture: the GUI binary uses a subset of the library cases.
 mod ku_fixture;
 #[cfg(all(feature = "gui", target_os = "macos"))]
 mod mac;
@@ -419,13 +420,5 @@ fn dev_harness() -> bool {
 }
 
 #[cfg(all(test, feature = "server"))]
-mod autorip_alias_tests {
-    #[test]
-    fn only_the_autorip_name_runs_the_daemon() {
-        let is = |a0: &str| super::invoked_as_autorip(&[a0.to_string()]);
-        assert!(is("/usr/local/bin/autorip"));
-        assert!(is("autorip"));
-        assert!(!is("/usr/local/bin/freemkv"));
-        assert!(!super::invoked_as_autorip(&[]));
-    }
-}
+#[path = "main_autorip_alias_tests.rs"]
+mod autorip_alias_tests;
