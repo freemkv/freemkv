@@ -244,3 +244,46 @@ fn two_libraries_pair_forward_disconnect_and_reject_self() {
     .unwrap();
     assert!(read(&a.cfg).unwrap().is_empty());
 }
+
+#[test]
+fn slow_remote_stop_preserves_the_actual_response() {
+    use std::time::Duration;
+    let upstream = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", upstream.server_addr());
+    let worker = std::thread::spawn(move || {
+        let request = upstream
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.method(), &Method::Post);
+        assert_eq!(request.url(), "/api/stop/sg0");
+        // Exceed the normal read deadline, as a draining drive can do.
+        std::thread::sleep(Duration::from_secs(6));
+        reply(
+            request,
+            409,
+            serde_json::json!({"ok":false,"error":"worker still draining"}),
+        );
+    });
+    let proxy = Fixture::new();
+    save(
+        &proxy.cfg,
+        &[Peer {
+            id: "pslow".into(),
+            name: "Slow".into(),
+            url: origin,
+        }],
+    )
+    .unwrap();
+    let mut response = agent()
+        .post(format!("{}/api/peers/pslow/api/stop/sg0", proxy.url))
+        .config()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .build()
+        .send_empty()
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 409);
+    let body: serde_json::Value = response.body_mut().read_json().unwrap();
+    assert_eq!(body["error"], "worker still draining");
+    worker.join().unwrap();
+}

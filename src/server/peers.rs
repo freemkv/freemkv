@@ -48,6 +48,7 @@ fn agent() -> ureq::Agent {
         ureq::config::Config::builder()
             .max_redirects(0)
             .http_status_as_error(false)
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
             .timeout_global(Some(std::time::Duration::from_secs(5)))
             .build(),
     )
@@ -290,6 +291,10 @@ pub fn handle(request: Request, cfg: &Arc<RwLock<Config>>) {
     let response = if is_post {
         agent
             .post(destination)
+            // Stop can spend 60 seconds draining a worker before replying.
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(65)))
+            .build()
             .content_type("application/json")
             .send(body.as_bytes())
     } else {

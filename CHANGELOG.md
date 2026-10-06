@@ -10,7 +10,7 @@
 
 ### Changed
 
-- Local and connected drives share one connection model and the same live event stream, with polling fallback and automatic reconnection. Slow system or review requests no longer delay drive progress. (server only: Drives page)
+- Local and connected drives share one connection model. Local drives use the live event stream; remote drives poll every three seconds so connected Libraries cannot exhaust browser connections and stall controls. Slow system or review requests no longer delay drive progress. (server only: Drives page)
 
 - Webhooks support custom authentication headers, with masked values in Settings and a Test button for unsaved changes. Existing URL-only webhooks remain supported. (server only: notifications)
 
@@ -76,6 +76,8 @@
 ## [1.7.7] — 2026-09-26
 
 ### Fixed
+
+- Remote drive actions allow time for Stop to drain its worker and return the actual result, instead of reporting a connection failure after five seconds. (server only: connected Libraries)
 
 - Forced PGS subtitles now disappear when their display period ends, instead of remaining until the next subtitle.
 - Preserve PGS clear-event timestamps when remuxing, addressing the reproduced issue in #52. A fresh rip is needed to confirm the fix on affected discs.

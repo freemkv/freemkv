@@ -1,6 +1,6 @@
 // A Library connection has the same state, details and actions at any API base.
 import { api } from './ui.js';
-import { openStream, subscribe, live } from './bus.js';
+import { subscribe, live } from './bus.js';
 
 export function libraryConnection(peer, changed) {
   const base = peer.id ? '/api/peers/' + peer.id : '';
@@ -14,8 +14,10 @@ export function libraryConnection(peer, changed) {
     value.snapshot = snapshot; lastState = Date.now(); failedSince = null; notify(); return true;
   };
   const handlers = { state(snapshot) { if (state(snapshot)) streamVersion++; }, error: failed };
-  // Reuse the application's existing local stream; all connection behavior below is shared.
-  const stop = peer.id ? openStream(base + '/events', handlers) : (() => {
+  // Remote snapshots use short polls: one SSE per peer would exhaust the
+  // browser's per-origin HTTP/1 connection pool and block controls/navigation.
+  // The local connection reuses the application's existing stream.
+  const stop = peer.id ? () => {} : (() => {
     const off = subscribe('state', handlers.state);
     if (live.state) handlers.state(live.state);
     return off;
@@ -41,7 +43,7 @@ export function libraryConnection(peer, changed) {
   }
   const details = () => Promise.all([load('/api/system', 'sys'), load('/api/review', 'reviews')]);
   const tick = () => {
-    if (Date.now() - lastState > 3000) load('/api/state', 'snapshot');
+    if (peer.id || Date.now() - lastState >= 3000) load('/api/state', 'snapshot');
     notify();
   };
   const timer = setInterval(tick, 3000), detailTimer = setInterval(details, 5000);

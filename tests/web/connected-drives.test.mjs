@@ -15,10 +15,13 @@ async function harness(id = 'p123') {
   const module = new vm.SourceTextModule(await readFile(new URL('../../src/server/web/assets/connection.js', import.meta.url), 'utf8'), { context });
   await module.link(name => name === './ui.js'
     ? new vm.SyntheticModule(['api'], function () {
-      this.setExport('api', (method, url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject })));
+      this.setExport('api', (method, url, body, signal) => new Promise((resolve, reject) => {
+        requests.push({ url, resolve, reject });
+        signal?.addEventListener('abort', () => { stopped = true; reject(Error('aborted')); });
+      }));
     }, { context })
     : new vm.SyntheticModule(['openStream', 'subscribe', 'live'], function () {
-      this.setExport('openStream', (url, h) => { assert.equal(url, '/api/peers/p123/events'); handlers = h; return () => { stopped = true; }; });
+      this.setExport('openStream', () => { throw Error('Remote streams exhaust the HTTP/1 connection pool'); });
       this.setExport('subscribe', (kind, fn) => { handlers = { state: fn }; return () => { stopped = true; }; });
       this.setExport('live', { state: null });
     }, { context }));
@@ -31,8 +34,8 @@ async function harness(id = 'p123') {
     take(path) { const i = requests.findIndex(r => r.url.endsWith(path)); assert(i >= 0, path); return requests.splice(i, 1)[0]; }
   };
 }
-for (const id of ['', 'p123']) test('same stream wins over a slow poll and details: ' + (id || 'local'), async () => {
-  const h = await harness(id);
+test('local stream wins over a slow poll and details', async () => {
+  const h = await harness('');
   h.handlers.state({ sg0: { progress_pct: 80 } });
   assert.equal(h.c.status().snapshot.sg0.progress_pct, 80);
   h.take('/api/state').resolve({ sg0: { progress_pct: 10 } });
@@ -48,16 +51,16 @@ test('poll fallback retains last state through grace, recovers, and stops on rem
   const h = await harness();
   h.take('/api/state').resolve({ sg0: { progress_pct: 20 } });
   await h.flush();
-  h.handlers.error();
-  h.tick(6000);
+  h.tick(3000);
   h.take('/api/state').reject(Error('offline'));
   await h.flush();
   assert.equal(h.c.status().offline, false);
   assert.equal(h.c.status().snapshot.sg0.progress_pct, 20);
-  h.tick(12000);
+  h.tick(15000);
   h.take('/api/state').reject(Error('offline')); await h.flush();
   assert.equal(h.c.status().offline, true);
-  h.handlers.state({ sg0: { progress_pct: 90 } });
+  h.tick(3000);
+  h.take('/api/state').resolve({ sg0: { progress_pct: 90 } }); await h.flush();
   assert.equal(h.c.status().offline, false);
   h.c.close();
   h.take('/api/system').resolve({ debug_enabled: true }); await h.flush();
@@ -71,16 +74,35 @@ test('badge and page share namespaced drives and exclude sustained offline activ
   const { connections, driveState, busyDriveCount } = h.module;
   connections.set('', { status: () => ({ peer: { id: '' }, snapshot: { sg0: { status: 'ripping' }, _mux: { status: 'ripping' } } }) });
   connections.set('p123', h.c);
-  h.handlers.state({ sg0: { status: 'ripping' } });
+  h.take('/api/state').resolve({ sg0: { status: 'ripping' } }); await h.flush();
   assert.equal(Object.keys(driveState()).length, 2);
   assert.equal(busyDriveCount(driveState()), 2);
-  h.handlers.error(); h.tick(6000);
+  h.tick(3000);
+  h.take('/api/state').reject(Error('offline')); await h.flush();
   assert.equal(busyDriveCount(driveState()), 2);
-  h.tick(12000);
+  h.tick(15000);
   assert.equal(busyDriveCount(driveState()), 1);
-  h.handlers.state({ sg0: { status: 'idle' } });
+  h.take('/api/state').resolve({ sg0: { status: 'idle' } }); await h.flush();
   assert.equal(busyDriveCount(driveState()), 1);
   connections.delete('p123');
   assert.equal(Object.keys(driveState()).length, 1);
   h.c.close();
+});
+
+// Exercise the supported maximum without reserving any remote SSE sockets.
+test('eight remote Libraries poll and release requests on removal', async () => {
+  const h = await harness();
+  const peers = [h.c, ...Array.from({ length: 7 }, (_, i) =>
+    h.module.libraryConnection({ id: 'p' + (i + 2), name: 'Remote' }, () => {}))];
+  await h.flush();
+  assert.equal(h.requests.filter(r => r.url.endsWith('/api/state')).length, 8);
+  for (const r of h.requests.splice(0)) r.resolve(r.url.endsWith('/api/review') ? [] : {});
+  await h.flush();
+  h.tick(3000);
+  assert.equal(h.requests.length, 8);
+  for (const c of peers) c.close();
+  await h.flush();
+  h.requests.length = 0;
+  h.tick(3000);
+  assert.equal(h.requests.length, 0);
 });
