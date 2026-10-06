@@ -146,7 +146,8 @@ def base_files():
             'src/disc_copy_verdict.rs', 'src/sources.rs', 'src/rip_keys.rs', 'src/cli_stop.rs', 'src/artifact_lock.rs',
             'src/plan_core.rs',
             '.github/workflows/qa.yml', 'tests/media_gate.py', 'tests/media_checks.py',
-            'tests/media-gate-policy.json')} | {
+            'tests/media-gate-policy.json',
+            *(f for f in POLICY['freemkv_required'] if f.startswith('src/') and f.endswith('_tests.rs')))} | {
             'Cargo.lock': lock_text(), 'src/ui.rs': 'pub fn ui() {}\n', 'res/freemkv.ico': 'ICO',
             'README.md': '# freemkv\n', 'CHANGELOG.md': '# changes\n', 'docs/x.md': 'x\n',
             'packaging/flatpak/org.freemkv.FreeMKV.metainfo.xml': '<x/>\n'},
@@ -319,6 +320,20 @@ class GuardTests(unittest.TestCase):
         ws = Workspace(self)
         ws.write('freemkv', 'src/title_identity.rs', real('src/title_identity.rs') + '\nmod helper;\n')
         self.assert_fires(ws, 'G1', 'mod helper')
+
+    def test_g1_cfg_test_side_file_must_itself_be_required(self):
+        ws = Workspace(self)
+        self.assertEqual(ws.guards(), [])
+        ws.write('freemkv', 'src/title_identity.rs', real('src/title_identity.rs') +
+                 '\n#[cfg(test)]\n#[path = "title_identity_tests.rs"]\nmod tests;\n')
+        ws.write('freemkv', 'src/title_identity_tests.rs', 'use super::*;\n')
+        self.assert_fires(ws, 'G1', 'mod tests')
+        self.assert_fires(ws, 'G1', 'title_identity_tests.rs')
+        policy = with_policy(freemkv_required=POLICY['freemkv_required'] + ['src/title_identity_tests.rs'])
+        self.assertEqual(ws.guards(policy), [])
+        ws.write('freemkv', 'src/title_identity.rs', real('src/title_identity.rs') +
+                 '\n#[path = "title_identity_tests.rs"]\nmod tests;\n')
+        self.assertTrue(any('G1' in e for e in ws.guards(policy)))
 
     def test_g2_library_path_and_include_targets(self):
         ws = Workspace(self)

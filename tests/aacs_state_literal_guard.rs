@@ -390,8 +390,10 @@ fn uses_the_test_util_helper(code: &str) -> bool {
         })
 }
 
-/// `src/<name>.rs` of every module the crate roots declare only under `#[cfg(test)]`.
-fn test_only_modules(root: &Path) -> Vec<PathBuf> {
+/// Files (relative to `root`) of every module declared only under `#[cfg(test)]`: a crate
+/// root's `mod name;` (`src/<name>.rs`), and a side file named by `#[cfg(test)]`
+/// `#[path = "x.rs"]` `mod name;` in any `src/` file (path relative to the declaring file).
+fn test_only_modules(root: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for crate_root in ["src/lib.rs", "src/main.rs"] {
         let text = std::fs::read_to_string(root.join(crate_root)).expect("crate root");
@@ -409,6 +411,32 @@ fn test_only_modules(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    for f in files {
+        let rel = f.strip_prefix(root).unwrap();
+        if !rel.starts_with("src") {
+            continue;
+        }
+        let text = std::fs::read_to_string(f).expect("read source");
+        let (mut test_attr, mut path) = (false, None);
+        for line in text.lines().map(str::trim) {
+            if line == "#[cfg(test)]" {
+                test_attr = true;
+            } else if let Some(p) = line
+                .strip_prefix("#[path = \"")
+                .and_then(|l| l.strip_suffix("\"]"))
+            {
+                path = Some(p.to_string());
+            } else if line.starts_with("mod ") && line.ends_with(';') {
+                if let (true, Some(p)) = (test_attr, path.take()) {
+                    out.push(rel.parent().unwrap().join(p));
+                }
+                test_attr = false;
+            } else if !line.starts_with("#[") {
+                test_attr = false;
+                path = None;
+            }
+        }
+    }
     out
 }
 
@@ -420,7 +448,7 @@ fn no_legacy_key_api_anywhere_in_freemkv() {
     let mut files = Vec::new();
     rs_files(&root.join("src"), &mut files);
     rs_files(&root.join("tests"), &mut files);
-    let test_only = test_only_modules(root);
+    let test_only = test_only_modules(root, &files);
     let mut hits = Vec::new();
     for f in &files {
         let rel = f.strip_prefix(root).unwrap();

@@ -372,6 +372,29 @@ def _required_rs(repo, files, policy):
     return [f for f in files if f.endswith('.rs') and classify(repo, f, policy) == 'required']
 
 
+def _required_side_file(path, attrs, policy):
+    """The side file of a `#[cfg(test)] #[path = "x.rs"] mod name;` whose target is itself required, else None."""
+    cfg_test = any([t[1] for t in a[2:-1]] == ['cfg', '(', 'test', ')'] for a in attrs)
+    paths = [a[4][1] for a in attrs if len(a) == 6 and a[2][1] == 'path' and _is(a[4], 'str')]
+    if not cfg_test or len(paths) != 1 or any(c in paths[0] for c in '\\/'):
+        return None
+    target = str(PurePosixPath(path).parent / paths[0])
+    return target if target in policy['freemkv_required'] else None
+
+
+def _required_source(ws, path, policy):
+    """A required file's tokens; a `#[cfg(test)] #[path]` side file is parsed as the inline `mod { .. }` it replaced,
+    so G4/G5 treat its `super::` and `use` exactly as they did inline."""
+    text = (ws / 'freemkv' / path).read_text()
+    for owner in policy['freemkv_required']:
+        if owner == path or not owner.endswith('.rs') or not owner.startswith('src/'):
+            continue
+        mod = Module((ws / 'freemkv' / owner).read_text())
+        if any(_required_side_file(owner, attrs, policy) == path for _, ool, attrs, _ in mod.mod_decls() if ool):
+            return Module('mod side_file { ' + text + '\n}')
+    return Module(text)
+
+
 def guard_crate_root(ws, policy):
     """G1: the binary root declares every required module plainly; the lib root, where it declares one, too."""
     errors = []
@@ -401,12 +424,19 @@ def guard_crate_root(ws, policy):
         if not path.endswith('.rs') or not path.startswith('src/'):
             continue
         mod = Module((ws / 'freemkv' / path).read_text())
-        for name, ool, _, line in mod.mod_decls():
-            if ool:
+        side_lines = set()
+        for name, ool, attrs, line in mod.mod_decls():
+            if not ool:
+                continue
+            side = _required_side_file(path, attrs, policy)
+            if side is not None:
+                side_lines.update(attr[0][2] for attr in attrs)
+            else:
                 errors.append(f'G1 freemkv/{path}:{line}: out-of-line `mod {name};` in a required file '
                               '(remedy: inline it, or add its file to the required list)')
         for value, line in mod.path_attributes():
-            errors.append(f'G1 freemkv/{path}:{line}: `#[path = {value!r}]` in a required file')
+            if line not in side_lines:
+                errors.append(f'G1 freemkv/{path}:{line}: `#[path = {value!r}]` in a required file')
         for name, _, line in mod.macro_calls(('include',)):
             errors.append(f'G1 freemkv/{path}:{line}: `include!` in a required file')
     return errors
@@ -481,7 +511,7 @@ def guard_call_graph(ws, policy):
     for path in policy['freemkv_required']:
         if not path.endswith('.rs') or not path.startswith('src/'):
             continue
-        mod = Module((ws / 'freemkv' / path).read_text())
+        mod = _required_source(ws, path, policy)
         toks = mod.toks
         # The binary's `crate`, its lib crate `freemkv`, and any alias of either.
         roots = {'crate', 'freemkv'}
@@ -547,7 +577,7 @@ def guard_crate_tokens(ws, policy, k_names):
     for path in policy['freemkv_required']:
         if not path.endswith('.rs') or not path.startswith('src/'):
             continue
-        mod = Module((ws / 'freemkv' / path).read_text())
+        mod = _required_source(ws, path, policy)
         local = set(BUILTIN_SEGMENTS) | {name for name, *_ in mod.mod_decls()}
         for leaves, _, _ in mod.use_trees():
             local.update(leaves)
