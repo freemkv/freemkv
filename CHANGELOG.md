@@ -18,7 +18,7 @@
 
 - Connected Libraries include the complete Drives-page pipeline: mux/move progress and queues, errors, title reviews and logs, with actions routed to their owner. Brief connection failures have a 15-second grace period before showing offline status. (server only: Library web UI)
 
-- The native macOS Library service installer sets app-level resource limits to prevent default launchd I/O throttling. (macOS service installation)
+- The native macOS Library service installer sets app-level resource limits to prevent default launchd I/O throttling. (server only: macOS service installation)
 
 - File moves show recent transfer speed using the rip estimator’s growing 10–60 second window; move ETA uses that recent rate so a slow start ages out. (server only: Library mover progress)
 
