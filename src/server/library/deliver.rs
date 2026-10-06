@@ -51,6 +51,31 @@ impl Default for Timing {
     }
 }
 
+// Bound buffered writes so a multi-GB delivery cannot fill the NFS RPC queue
+// ahead of directory checks. Final sync_all still establishes durability before landing.
+struct CheckpointWriter<W, F> {
+    writer: W,
+    pending: usize,
+    limit: usize,
+    sync: F,
+}
+
+impl<W: Write, F: FnMut(&mut W) -> io::Result<()>> Write for CheckpointWriter<W, F> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let n = self.writer.write(bytes)?;
+        self.pending = self.pending.saturating_add(n);
+        if self.pending >= self.limit {
+            (self.sync)(&mut self.writer)?;
+            self.pending = 0;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 /// A reader the verify can hand to its worker thread.
 pub(crate) trait ReadSeek: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ReadSeek for T {}
@@ -63,7 +88,12 @@ pub(crate) trait DeliverIo: Sync {
             .write(true)
             .create_new(true)
             .open(path)?;
-        Ok(Box::new(file))
+        Ok(Box::new(CheckpointWriter {
+            writer: file,
+            pending: 0,
+            limit: 64 * 1024 * 1024,
+            sync: |f: &mut std::fs::File| f.sync_data(),
+        }))
     }
     /// Make `file` durable: stall-based, `halt`-aware, reporting `(bytes_done, total)`.
     fn sync(
@@ -321,32 +351,59 @@ fn halted() -> io::Error {
     libfreemkv::Error::Halted.into()
 }
 
-// The held `<target>.lock` is deleted on every exit, a panic included.
-struct DeleteOnDrop(Option<ArtifactLock>);
-
-impl Drop for DeleteOnDrop {
-    fn drop(&mut self) {
-        if let Some(lock) = self.0.take() {
-            let _ = lock.delete();
-        }
-    }
+// Cleanup may itself block on NFS. Its worker retains the artifact lock until the
+// partial is removed, so a later delivery cannot race its delayed deletion.
+struct RemoteGuard<'a> {
+    path: Option<PathBuf>,
+    lock: Option<ArtifactLock>,
+    sink: &'a dyn Sink,
 }
 
-// Removes `<target>.partial` unless disarmed; a dead mount may refuse, which is logged.
-struct RemoteGuard<'a> {
-    path: Option<&'a Path>,
-    sink: &'a dyn Sink,
+fn bounded_cleanup(cleanup: impl FnOnce() + Send + 'static, limit: Duration) -> io::Result<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    match std::thread::Builder::new()
+        .name("library-cleanup".into())
+        .spawn(move || {
+            cleanup();
+            let _ = tx.send(());
+        }) {
+        Ok(_) => match rx.recv_timeout(limit) {
+            Ok(()) => Ok(true),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(false),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(io::Error::other("cleanup worker stopped unexpectedly"))
+            }
+        },
+        Err(e) => Err(e),
+    }
 }
 
 impl Drop for RemoteGuard<'_> {
     fn drop(&mut self) {
-        let Some(path) = self.path.take() else { return };
-        match std::fs::remove_file(path) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => self.sink.log(
-                Level::Warn,
-                &format!("could not remove {}: {e}", path.display()),
-            ),
-            _ => {}
+        let path = self.path.take();
+        let lock = self.lock.take();
+        let cleanup = bounded_cleanup(
+            move || {
+                if let Some(path) = path {
+                    match std::fs::remove_file(&path) {
+                        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                            tracing::warn!(path = %path.display(), error = %e, "could not remove delivery partial");
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(lock) = lock
+                    && let Err(e) = lock.delete()
+                {
+                    tracing::warn!(error = %e, "could not remove delivery lock");
+                }
+            },
+            Duration::from_secs(1),
+        );
+        match cleanup {
+            Ok(true) => {}
+            Ok(false) => self.sink.log(Level::Warn, "Delivery cleanup is waiting for storage; the target remains locked until cleanup finishes."),
+            Err(e) => self.sink.log(Level::Warn, &format!("Could not start delivery cleanup: {e}")),
         }
     }
 }
@@ -762,7 +819,11 @@ fn deliver(
     let lock = stop
         .linked(|h| ArtifactLock::acquire(target, &watch, h))
         .map_err(|e| ("copy", io::Error::from(e)))?;
-    let _lock = DeleteOnDrop(Some(lock));
+    let mut remote = RemoteGuard {
+        path: None,
+        lock: Some(lock),
+        sink: stop.sink,
+    };
     if let Some(before) = before {
         let now = match std::fs::symlink_metadata(target) {
             Ok(m) => TargetStamp::present(&m),
@@ -777,10 +838,7 @@ fn deliver(
         }
     }
     let partial = partial_path(target);
-    let mut remote = RemoteGuard {
-        path: Some(&partial),
-        sink: stop.sink,
-    };
+    remote.path = Some(partial.clone());
     let replaced = deliver_steps(local, target, &partial, replace, want, stop, io)?;
     remote.path = None;
     // The landing committed: a Stop or a failure during the folder sync cuts only the sync short.

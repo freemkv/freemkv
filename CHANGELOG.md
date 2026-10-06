@@ -77,6 +77,12 @@
 
 ### Fixed
 
+- Library checkpoints staged delivery writes every 64 MiB to limit queued NFS writes. Stop All reports cancellation in progress; slow remote cleanup runs separately while retaining its artifact lock. Brief connection and detail failures retain cached state quietly, hung polls time out, and reconnecting Libraries refresh their details automatically. (server only)
+
+- Library preserves stale-handle errors from slow probes, write-access checks and capacity checks so its container can recover the NFS mount. Folder health transitions and probe stages are logged for diagnosis. A failed probe no longer permanently blocks later checks. (server only)
+
+- Connected Libraries show one offline warning during connection failures instead of repeating the same error for system and review details. (server only: Drives page)
+
 - Remote drive actions allow time for Stop to drain its worker and return the actual result, instead of reporting a connection failure after five seconds. (server only: connected Libraries)
 
 - Forced PGS subtitles now disappear when their display period ends, instead of remaining until the next subtitle.

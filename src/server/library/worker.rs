@@ -444,7 +444,8 @@ pub(crate) fn finish(
         }
         Ending::Stopped(JobNote::Cancelled) => {
             lib.queue.drop_job(job.id);
-            let _ = std::fs::remove_file(super::queue::partial_path(&job.target));
+            // The engine/delivery owns partial cleanup and its artifact lock. A second
+            // unlink here could block on NFS or race a later delivery's partial.
             sink.line(
                 LineKind::Warn,
                 "Stopped. The existing MKV is unchanged.".into(),

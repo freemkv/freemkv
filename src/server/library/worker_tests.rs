@@ -340,10 +340,25 @@ fn stop_all_leaves_nothing_running_queued_paused_or_partial() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = a.id;
+    lib.set_running(|r| {
+        *r = Some(super::super::Running {
+            job_id: a.id,
+            ..Default::default()
+        })
+    });
     assert!(!sink.should_cancel());
+    assert!(!lib.running().unwrap().stopping);
+    let before = lib.generation();
     assert_eq!(lib.stop_all(), (true, 2));
+    assert!(lib.running().unwrap().stopping);
+    assert_ne!(
+        lib.generation(),
+        before,
+        "stop must reach live clients immediately"
+    );
     assert!(sink.should_cancel(), "the running remux sees the stop");
-    // The engine returns; the worker records the ending.
+    // The engine owns cleanup under its artifact lock; the worker records the ending.
+    std::fs::remove_file(&partial).unwrap();
     finish(
         &lib,
         &a,

@@ -126,6 +126,7 @@ pub struct Running {
     pub eta_secs: Option<u64>,
     pub started_at: u64,
     pub stalled_secs: u64,
+    pub stopping: bool,
     /// The progress line a terminal would keep rewriting in place.
     pub line: String,
 }
@@ -840,6 +841,7 @@ impl Library {
         let running = self.queue.snapshot().running().map(|j| j.id);
         if let Some(id) = running {
             self.cancel_job.store(id, Ordering::SeqCst);
+            self.touch_live();
         }
         (running.is_some(), removed)
     }
@@ -980,7 +982,10 @@ impl Library {
     }
 
     pub fn running(&self) -> Option<Running> {
-        self.live().running.clone()
+        self.live().running.clone().map(|mut r| {
+            r.stopping = self.cancelled(r.job_id);
+            r
+        })
     }
 
     fn set_running(&self, f: impl FnOnce(&mut Option<Running>)) {

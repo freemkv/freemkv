@@ -316,29 +316,34 @@ fn scaled(blocks: u64, frag: u64) -> u64 {
 
 /// The size of the filesystem holding `p`, in bytes (`None` where it cannot be read).
 pub(crate) fn fs_capacity(p: &Path) -> Option<u64> {
-    statvfs(p).map(|(_, total)| total).filter(|t| *t > 0)
+    statvfs(p)
+        .ok()
+        .flatten()
+        .map(|(_, total)| total)
+        .filter(|t| *t > 0)
 }
 
-fn statvfs(p: &Path) -> Option<(u64, u64)> {
+fn statvfs(p: &Path) -> std::io::Result<Option<(u64, u64)>> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt as _;
-        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
         // SAFETY: `c` is a valid NUL-terminated path and `s` a writable statvfs.
         if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-            return None;
+            return Err(std::io::Error::last_os_error());
         }
         let frag = s.f_frsize as u64;
-        Some((
+        Ok(Some((
             scaled(s.f_bavail as u64, frag),
             scaled(s.f_blocks as u64, frag),
-        ))
+        )))
     }
     #[cfg(not(unix))]
     {
         let _ = p;
-        None
+        Ok(None)
     }
 }
 
@@ -410,6 +415,7 @@ pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
     if share_unmounted(path) {
         return m.failed(Fault::Unmounted, UNMOUNTED.into());
     }
+    tracing::debug!(role, path = %path.display(), stage = "read_dir", "folder probe");
     match std::fs::read_dir(path) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -419,19 +425,21 @@ pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
     }
     let mut m = m;
     if want_write {
+        tracing::debug!(role, path = %path.display(), stage = "access", "folder probe");
         let w = writable(path);
         m.writable = Some(w.is_ok());
         if let Err(e) = w {
-            let fault = match Fault::of(&e) {
-                Fault::ReadOnly => Fault::ReadOnly,
-                _ => Fault::Denied,
-            };
-            return m.failed(fault, "not writable".into());
+            return m.failed(Fault::of(&e), format!("write access check failed: {e}"));
         }
     }
-    if let Some((free, total)) = statvfs(path) {
-        m.free_bytes = Some(free);
-        m.total_bytes = Some(total);
+    tracing::debug!(role, path = %path.display(), stage = "statvfs", "folder probe");
+    match statvfs(path) {
+        Ok(Some((free, total))) => {
+            m.free_bytes = Some(free);
+            m.total_bytes = Some(total);
+        }
+        Ok(None) => {}
+        Err(e) => return m.failed(Fault::of(&e), format!("capacity check failed: {e}")),
     }
     m.latency_ms = Some(started.elapsed().as_millis() as u64);
     m.passed()
@@ -497,8 +505,15 @@ where
     let spawned = std::thread::Builder::new()
         .name("folder-probe".into())
         .spawn(move || {
+            struct Release(PathBuf);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    release(&self.0);
+                }
+            }
+            let guard = Release(owned);
             let out = probe();
-            release(&owned);
+            drop(guard);
             let _ = tx.send(out);
         });
     if spawned.is_err() {
@@ -511,10 +526,54 @@ where
     }
 }
 
+// Keep stale-handle evidence even when its probe finishes after the caller timed out.
+// A new mount generation makes late results from the detached mount irrelevant.
+#[derive(Default)]
+struct StaleReports {
+    generation: u64,
+    paths: std::collections::HashSet<PathBuf>,
+}
+
+impl StaleReports {
+    fn record(&mut self, generation: u64, path: &Path, fault: Option<Fault>) {
+        if generation == self.generation && fault == Some(Fault::Stale) {
+            self.paths.insert(path.to_path_buf());
+        }
+    }
+
+    fn renewed(&mut self, mountpoint: &Path) {
+        self.generation = self.generation.wrapping_add(1);
+        self.paths.retain(|p| !p.starts_with(mountpoint));
+    }
+}
+
+static STALE_REPORTS: std::sync::LazyLock<Mutex<StaleReports>> =
+    std::sync::LazyLock::new(|| Mutex::new(StaleReports::default()));
+
+fn probe_generation() -> u64 {
+    STALE_REPORTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .generation
+}
+
+fn report_fault(generation: u64, path: &Path, fault: Option<Fault>) {
+    STALE_REPORTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record(generation, path, fault);
+}
+
 // `check` through `bounded`, abandoned after CHECK_TIMEOUT.
 fn check_bounded(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
     let p = path.clone();
-    match bounded(&path, CHECK_TIMEOUT, move || check(role, &p, want_write)) {
+    let generation = probe_generation();
+    match bounded(&path, CHECK_TIMEOUT, move || {
+        let result = check(role, &p, want_write);
+        report_fault(generation, &p, result.fault);
+        tracing::debug!(role, path = %p.display(), fault = ?result.fault, "folder probe completed");
+        result
+    }) {
         Bounded::Done(m) => m,
         Bounded::TimedOut | Bounded::Busy => not_responding(role, &path, CHECK_TIMEOUT),
     }
@@ -591,7 +650,17 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
     let before = shape(&last);
     let merged: Vec<Mount> = results
         .into_iter()
-        .map(|m| merge(last.iter().find(|p| p.path == m.path), m))
+        .map(|m| {
+            let previous = last.iter().find(|p| p.path == m.path);
+            if previous.is_none_or(|p| p.fault != m.fault || p.state != m.state) {
+                if m.ok {
+                    tracing::info!(role = m.role, path = %m.path.display(), latency_ms = ?m.latency_ms, "folder healthy");
+                } else {
+                    tracing::warn!(role = m.role, path = %m.path.display(), fault = ?m.fault, detail = ?m.problem, "folder unavailable");
+                }
+            }
+            merge(previous, m)
+        })
         .collect();
     if replace_all {
         *last = merged;
@@ -704,7 +773,12 @@ where
     let result = if share_unmounted(dir) {
         Err(Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into()))
     } else {
-        match bounded(dir, limit, move || probe(&owned)) {
+        let generation = probe_generation();
+        match bounded(dir, limit, move || {
+            let result = probe(&owned);
+            report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
+            result
+        }) {
             Bounded::Done(Ok(())) => Ok(()),
             Bounded::Done(Err(e)) => Err(Problem::new(role, dir, Fault::of(&e), e.to_string())),
             Bounded::TimedOut => Err(Problem::new(
@@ -771,14 +845,28 @@ fn heal(cfg: &Config) {
     let mounted = crate::server::daemon::mount_table()
         .is_none_or(|t| crate::server::daemon::listed_in(&t, &share.mountpoint));
     let now = Instant::now();
+    let mut evidence = mounts();
+    {
+        let reports = STALE_REPORTS.lock().unwrap_or_else(|e| e.into_inner());
+        evidence.extend(reports.paths.iter().map(|path| {
+            Mount::blank("Network share", path)
+                .failed(Fault::Stale, "stale handle reported by probe".into())
+        }));
+    }
     {
         let mut last = LAST_REMOUNT.lock().unwrap_or_else(|e| e.into_inner());
-        if !wants_remount(&mounts(), Path::new(&share.mountpoint), mounted, *last, now) {
+        if !wants_remount(&evidence, Path::new(&share.mountpoint), mounted, *last, now) {
             return;
         }
         *last = Some(now);
     }
-    crate::server::daemon::remount_nfs(&share, mounted);
+    tracing::warn!(mountpoint = %share.mountpoint, mounted, "recovering container-owned NFS mount");
+    if crate::server::daemon::remount_nfs(&share, mounted) {
+        STALE_REPORTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .renewed(Path::new(&share.mountpoint));
+    }
     refresh(cfg);
 }
 

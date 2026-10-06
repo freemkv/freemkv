@@ -3,6 +3,7 @@ import { api } from './ui.js';
 import { subscribe, live } from './bus.js';
 
 export function libraryConnection(peer, changed) {
+  const grace = 15000, requestLimit = 10000;
   const base = peer.id ? '/api/peers/' + peer.id : '';
   const value = { peer, snapshot: {}, sys: {}, reviews: [], error: null };
   let closed = false, lastState = 0, streamVersion = 0, failedSince = null;
@@ -11,7 +12,10 @@ export function libraryConnection(peer, changed) {
   const failed = () => { failedSince ??= Date.now(); notify(); };
   const state = snapshot => {
     if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
-    value.snapshot = snapshot; lastState = Date.now(); failedSince = null; notify(); return true;
+    const recovered = failedSince != null;
+    value.snapshot = snapshot; lastState = Date.now(); failedSince = null;
+    if (recovered) { errors.clear(); details(); }
+    notify(); return true;
   };
   const handlers = { state(snapshot) { if (state(snapshot)) streamVersion++; }, error: failed };
   // Remote snapshots use short polls: one SSE per peer would exhaust the
@@ -26,8 +30,12 @@ export function libraryConnection(peer, changed) {
     if (closed || pending.has(path)) return;
     pending.add(path);
     const version = streamVersion;
+    const request = new AbortController();
+    const cancel = () => request.abort();
+    abort.signal.addEventListener('abort', cancel, { once: true });
+    const timeout = setTimeout(cancel, requestLimit);
     try {
-      const result = await api('GET', base + path, undefined, abort.signal);
+      const result = await api('GET', base + path, undefined, request.signal);
       if (closed) return;
       if (field === 'snapshot') {
         if (version === streamVersion && !state(result)) throw new Error('Invalid drive state');
@@ -38,10 +46,14 @@ export function libraryConnection(peer, changed) {
     } catch (e) {
       if (closed) return;
       if (field === 'snapshot') { if (version === streamVersion) failed(); }
-      else errors.set(path, e.message);
-    } finally { pending.delete(path); notify(); }
+      else errors.set(path, { message: e.message, since: errors.get(path)?.since ?? Date.now() });
+    } finally {
+      clearTimeout(timeout); abort.signal.removeEventListener('abort', cancel);
+      pending.delete(path); notify();
+    }
   }
-  const details = () => Promise.all([load('/api/system', 'sys'), load('/api/review', 'reviews')]);
+  const details = () => failedSince == null
+    ? Promise.all([load('/api/system', 'sys'), load('/api/review', 'reviews')]) : Promise.resolve();
   const tick = () => {
     if (peer.id || Date.now() - lastState >= 3000) load('/api/state', 'snapshot');
     notify();
@@ -52,9 +64,11 @@ export function libraryConnection(peer, changed) {
   return {
     value,
     status() {
-      return { ...value, offline: failedSince != null && Date.now() - failedSince >= 15000,
-        error: failedSince != null && Date.now() - failedSince >= 15000 ? 'Connection unavailable' : null,
-        reconnecting: failedSince != null, detailError: [...errors.values()].join('; ') };
+      return { ...value, offline: failedSince != null && Date.now() - failedSince >= grace,
+        error: failedSince != null && Date.now() - failedSince >= grace ? 'Connection unavailable' : null,
+        reconnecting: failedSince != null,
+        // Connection failures have their own grace period and offline banner.
+        detailError: failedSince != null ? '' : [...new Set([...errors.values()].filter(e => Date.now() - e.since >= grace).map(e => e.message))].join('; ') };
     },
     refresh: details,
     close() { closed = true; stop(); abort.abort(); clearInterval(timer); clearInterval(detailTimer); }

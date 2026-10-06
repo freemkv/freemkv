@@ -62,6 +62,7 @@ function actHtml(r) {
 
 function liveText(p) {
   if (!p) return 'starting…';
+  if (p.stopping) return 'Stopping — waiting for storage to return';
   if (p.pct == null) return p.phase === 'start' ? 'starting…' : p.phase + '…';
   return p.pct.toFixed(1) + '% · ' + speed(p.speed_bps) + (p.eta_secs != null ? ' · ETA ' + hms(p.eta_secs) : '')
     + (p.phase !== 'mux' ? ' · ' + p.phase : '');
@@ -221,7 +222,7 @@ export default {
       });
       if (!ok) return;
       const r = await act(e.currentTarget, () => api('POST', '/api/library/queue/stop-all'), 'Stop all');
-      if (r) { toast('Stopped' + (r.removed ? '; removed ' + plural(r.removed, 'queued title') : ''), 'info'); refreshNow(); }
+      if (r) { toast((r.stopped ? 'Stop requested; waiting for the running job to finish cancelling' : 'Stopped') + (r.removed ? '; removed ' + plural(r.removed, 'queued title') : ''), 'info'); refreshNow(); }
     });
     $('#q', view).addEventListener('input', (e) => { q = e.target.value.trim().toLowerCase(); paint(); });
     menu($('#more', view), $('#more-list', view));

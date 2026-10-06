@@ -148,7 +148,13 @@ fn a_read_only_folder_is_reported_not_writable() {
     }
     assert!(!m.ok, "{m:?}");
     assert_eq!(m.writable, Some(false));
-    assert_eq!(m.problem.as_deref(), Some("not writable"));
+    assert_eq!(m.fault, Some(Fault::Denied));
+    assert!(
+        m.problem
+            .as_deref()
+            .unwrap()
+            .contains("write access check failed")
+    );
     assert_eq!(m.fault, Some(Fault::Denied));
     // A folder only read from is fine.
     std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -430,4 +436,71 @@ fn folders_are_listed_once_each() {
         f.iter().filter(|(_, p, _)| p == Path::new("/o/m")).count(),
         1
     );
+}
+
+#[test]
+fn a_panicking_probe_does_not_permanently_block_the_folder() {
+    let key = Path::new("/test/panicking-probe");
+    assert_eq!(
+        bounded(key, Duration::from_secs(1), || -> () {
+            panic!("probe failed")
+        }),
+        Bounded::TimedOut
+    );
+    assert_eq!(
+        bounded(key, Duration::from_secs(1), || 42),
+        Bounded::Done(42)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn capacity_errors_keep_their_os_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = statvfs(&dir.path().join("missing")).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
+    assert_eq!(Fault::of(&error), Fault::Missing);
+    assert!(statvfs(dir.path()).unwrap().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_preflight_result_survives_its_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let (release, wait) = std::sync::mpsc::channel();
+    let result = preflight_with("Library", &path, Duration::from_millis(20), move |_| {
+        wait.recv().unwrap();
+        Err(std::io::Error::from_raw_os_error(libc::ESTALE))
+    });
+    assert_eq!(result.unwrap_err().fault, Fault::Unresponsive);
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut reports = STALE_REPORTS.lock().unwrap();
+        if reports.paths.remove(&path) {
+            break;
+        }
+        drop(reports);
+        assert!(Instant::now() < deadline, "late ESTALE was discarded");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn remount_discards_old_generation_reports_only() {
+    let mut reports = StaleReports::default();
+    let path = Path::new("/mnt/nfs/movies");
+    reports.record(0, path, Some(Fault::Stale));
+    reports.record(0, Path::new("/other"), Some(Fault::Denied));
+    assert_eq!(reports.paths.len(), 1);
+    reports.renewed(Path::new("/mnt/nfs"));
+    assert!(reports.paths.is_empty());
+    reports.record(0, path, Some(Fault::Stale));
+    assert!(
+        reports.paths.is_empty(),
+        "detached mount must not cause another remount"
+    );
+    reports.record(1, path, Some(Fault::Stale));
+    assert!(reports.paths.contains(path));
 }

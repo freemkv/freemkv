@@ -647,3 +647,66 @@ fn one_target_has_one_kept_name_and_the_sidecar_is_written_whole() {
         assert!(raw.get(field).is_some(), "{field}");
     }
 }
+
+#[test]
+fn delayed_cleanup_keeps_the_artifact_locked_without_blocking_the_caller() {
+    let t = tempfile::tempdir().unwrap();
+    let target = t.path().join("movie.mkv");
+    let lock = ArtifactLock::acquire(&target, &[], &Halt::new()).unwrap();
+    let path = lock.path().to_path_buf();
+    let contender = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let (release, wait) = std::sync::mpsc::channel();
+    let (finished, done) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    assert!(
+        !bounded_cleanup(
+            move || {
+                wait.recv().unwrap();
+                lock.delete().unwrap();
+                finished.send(()).unwrap();
+            },
+            Duration::from_millis(20)
+        )
+        .unwrap()
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        contender.try_lock().is_err(),
+        "cleanup must retain exclusive ownership"
+    );
+    release.send(()).unwrap();
+    done.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn copy_checkpoints_bound_buffering_and_surface_sync_failures() {
+    let calls = std::cell::Cell::new(0);
+    let mut writer = CheckpointWriter {
+        writer: Vec::new(),
+        pending: 0,
+        limit: 4,
+        sync: |_: &mut Vec<u8>| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                Err(io::Error::from(io::ErrorKind::StorageFull))
+            } else {
+                Ok(())
+            }
+        },
+    };
+    writer.write_all(b"ab").unwrap();
+    assert_eq!(calls.get(), 0);
+    writer.write_all(b"cd").unwrap();
+    assert_eq!(calls.get(), 1);
+    writer.write_all(b"ef").unwrap();
+    assert_eq!(
+        writer.write_all(b"gh").unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(calls.get(), 2);
+}
