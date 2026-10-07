@@ -1603,6 +1603,12 @@ jobs:
             The release MUST update marketing. Check it out at
             FMKV_ROOT/marketing with push creds. Bypass: WEBSITE_SKIP=1 (logged)."
             fi
+            # The page now renders `{release.tag}` from the Releases API at build time,
+            # and the site push below rebuilds it after this release is published.
+            if grep -q 'data-latest-version>{release.tag}<' "$page"; then
+              ok "download page resolves its version at build time — nothing to bake"
+              return 0
+            fi
             if ! grep -Eq '(data-latest-version>)v[^<]*(<)' "$page"; then
               err "WARN: data-latest-version marker not found in $page — skipping"
               return 0
@@ -1693,8 +1699,8 @@ jobs:
               fi
             fi
 
-            # Download page: the static default version marker.
-            if ! grep -q "data-latest-version>v$VERSION<" "$dl" 2>/dev/null; then
+            # Download page: the static default version marker, or the build-time form.
+            if ! grep -q -e "data-latest-version>v$VERSION<" -e 'data-latest-version>{release.tag}<' "$dl" 2>/dev/null; then
               if $DRY_RUN; then
                 err "WARN: [dry-run] download page default is not v$VERSION"
               else

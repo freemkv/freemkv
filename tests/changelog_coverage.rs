@@ -46,13 +46,15 @@ fn bullets(section: &str) -> Vec<&str> {
         .collect()
 }
 
-// Problems with the Unreleased section of `text`; none when there is no such section
-// (a just-released changelog has nothing unreleased to check).
+// Problems with the Unreleased section of `text`; none when the newest section is dated
+// (a just-released changelog has nothing unreleased to check). Only the newest section
+// counts: old never-shipped versions further down keep their `UNRELEASED` heading.
 fn unreleased_problems(text: &str) -> Vec<String> {
     // `## Unreleased`, or the release-ready `## [X.Y.Z] — Unreleased` the release dates.
     let Some(heading) = text
         .lines()
-        .find(|l| l.starts_with("## ") && l.to_ascii_lowercase().ends_with("unreleased"))
+        .find(|l| l.starts_with("## "))
+        .filter(|l| l.to_ascii_lowercase().ends_with("unreleased"))
     else {
         return Vec::new();
     };
@@ -89,6 +91,8 @@ fn every_unreleased_line_states_its_front_end_coverage() {
 fn no_unreleased_section_means_nothing_to_check() {
     let released = "# Changelog\n\n## [1.8.0] — 2026-10-05\n\n- shipped without a tag\n";
     assert!(unreleased_problems(released).is_empty());
+    let never_shipped = format!("{released}\n## [1.7.2] — UNRELEASED\n\n- untagged\n");
+    assert!(unreleased_problems(&never_shipped).is_empty());
 }
 
 #[test]
