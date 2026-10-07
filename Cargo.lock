@@ -315,9 +315,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.18.0"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "equivalent"
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "block2",
  "freemkv-engine",
@@ -411,8 +411,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.8.0"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.0#2dd9bfd716b7610e6ca5016f3eeff8b21b8142aa"
+version = "1.8.1"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.1#3fc1e3655c0c7dbfdb38a2d6b45a03182728b27a"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -425,16 +425,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.8.0"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.0#b43bf9d5126dcf4beb3821f9ca862b96ae22fadf"
+version = "1.8.1"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.1#06c7910b5dc92ba82ea82d38d2543ca770cb9879"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.8.0"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.0#d2f6bbd27267ec960f6f44926e33dfdf9c55aeb6"
+version = "1.8.1"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.1#bd079272928d874c1169795b7e85e59c2013759e"
 dependencies = [
  "base64",
  "flate2",
@@ -447,8 +447,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.8.0"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.0#04cddb11f62b4e35af3e4775f949bace7b6a9ab0"
+version = "1.8.1"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.1#3965b16740e2d381e5180d8eaa3ecb58dda5f05f"
 dependencies = [
  "aes",
  "base64",
@@ -1023,8 +1023,8 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libfreemkv"
-version = "1.8.0"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.0#92847607b9de38dcc82bdcdc49ecb27d3849e88f"
+version = "1.8.1"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.1#6980b04e63627d044811d7eb6c718afeb7601b7f"
 dependencies = [
  "aes",
  "base64",
@@ -1166,9 +1166,9 @@ dependencies = [
 
 [[package]]
 name = "objc2"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
+checksum = "08849bbd4767dfae9457696856ae1c84fe4e0281bbe4a7abff2d0e06fb7981f8"
 dependencies = [
  "objc2-encode",
 ]
@@ -1390,9 +1390,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pioneer-optical"
-version = "0.7.2"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48a5bdb9e9a07422ceb5133d227fbe4ecce77060007e5a9bac0dda3d82d72911"
+checksum = "bf5074a27cc39fb664d0b994814ffe8530e3e8590aff0d104723332dbcb1abc4"
 
 [[package]]
 name = "pkg-config"
@@ -1411,9 +1411,9 @@ dependencies = [
 
 [[package]]
 name = "powerfmt"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "proc-macro-crate"
@@ -2394,9 +2394,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.9.0"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
  "zeroize_derive",
 ]
