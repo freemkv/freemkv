@@ -538,7 +538,8 @@ jobs:
           PARAM: ${{ steps.spec.outputs.param }}
         run: |
           set -euo pipefail
-          tok=$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token)
+          # Org-level runner: needs only the org "Self-hosted runners" permission, never Administration.
+          tok=$(gh api -X POST "orgs/${REPO%%/*}/actions/runners/registration-token" -q .token)
           echo "::add-mask::$tok"
           aws ssm put-parameter --name "$PARAM" --type SecureString --value "$tok" --overwrite >/dev/null
           echo "param=$PARAM" >> "$GITHUB_OUTPUT"
@@ -556,7 +557,7 @@ jobs:
           labels=$(jq -r .labels <<<"$SPEC")
           userdata="freemkv/$(jq -r .user_data <<<"$SPEC")"
           bdm=$(jq -c .block_device_mappings <<<"$SPEC")
-          tags=$(jq -cn --arg p "$PARAM" --arg r "$REPO" --arg id "$RUN_ID" --arg l "$labels" '[{ResourceType: "instance",
+          tags=$(jq -cn --arg p "$PARAM" --arg r "${REPO%%/*}" --arg id "$RUN_ID" --arg l "$labels" '[{ResourceType: "instance",
             Tags: [{Key: "freemkv-ci", Value: "runner"}, {Key: "runner-token-param", Value: $p},
                    {Key: "runner-repo", Value: $r}, {Key: "launched-by", Value: $id},
                    {Key: "runner-labels", Value: $l}]}]')
