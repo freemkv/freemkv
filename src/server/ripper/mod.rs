@@ -23,8 +23,8 @@ pub use mux::{bounded_call, watchdog_bump_restart_count};
 #[allow(unused_imports)]
 pub use session::{
     RegisterError, device_halt, join_all_rip_threads, join_rip_thread, register_halt,
-    register_rip_thread, rollback_failed_spawn, spawn_rip_thread, stop_and_drain,
-    swap_halt_carrying_cancel, take_rip_thread, unregister_halt,
+    register_rip_thread, release_stopped_drive, rollback_failed_spawn, spawn_rip_thread,
+    stop_and_drain, swap_halt_carrying_cancel, take_rip_thread, unregister_halt,
 };
 #[allow(unused_imports)]
 pub use state::{
@@ -1161,7 +1161,11 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
 
                 // One TUR per drive; `Err` is an unresponsive or unplugged drive,
                 // `Settling` (spin-up, tray closing) changes nothing this tick.
-                let presence = match libfreemkv::disc_presence(std::path::Path::new(path)) {
+                let probe = match session::held_drive_presence(&device) {
+                    Some(p) => Ok(p),
+                    None => libfreemkv::disc_presence(std::path::Path::new(path)),
+                };
+                let presence = match probe {
                     Ok(p) => {
                         probe_fail.clear(&device);
                         let p = state::stopped_disc_presence(&device, p);

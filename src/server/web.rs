@@ -3179,6 +3179,10 @@ fn handle_stop(request: tiny_http::Request, device: &str) {
         json_response(request, 404, r#"{"ok":false,"error":"drive not found"}"#);
         return;
     }
+    // An undrained worker still owns the drive; release only what Stop actually ended.
+    if drained {
+        ripper::release_stopped_drive(device, entry_gen);
+    }
     ripper::set_stop_cooldown(device);
     json_response(request, 200, report.body);
 }

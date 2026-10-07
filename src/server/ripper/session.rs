@@ -436,6 +436,41 @@ pub(super) fn store_session(device: &str, session: DriveSession) {
         .insert(device.to_string(), session);
 }
 
+// macOS unpublishes a disc's IOMedia while this process holds the drive exclusively, so
+// the registry probe reads a held disc as ejected; ask the drive through the held handle.
+pub(super) fn held_drive_presence(device: &str) -> Option<libfreemkv::DiscPresence> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    // Recover-and-proceed on poison (module convention).
+    let mut sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let session = sessions.get_mut(device)?;
+    Some(presence_from_status(session.drive.drive_status()))
+}
+
+pub(super) fn presence_from_status(status: libfreemkv::DriveStatus) -> libfreemkv::DiscPresence {
+    use libfreemkv::{DiscPresence, DriveStatus};
+    match status {
+        DriveStatus::DiscPresent => DiscPresence::Present,
+        DriveStatus::NoDisc | DriveStatus::TrayOpen => DiscPresence::Absent,
+        // Spinning up, or no answer (e.g. the handle's halt token was cancelled): settles nothing.
+        DriveStatus::NotReady | DriveStatus::Unknown => DiscPresence::Settling,
+    }
+}
+
+/// Stop releases the drive the idle session holds, so a stopped disc stays visible to
+/// the presence probe. A device re-claimed since `entry_gen` belongs to a new job.
+pub fn release_stopped_drive(device: &str, entry_gen: Option<u64>) {
+    let current_gen = super::state::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .map(|rs| rs.claim_gen);
+    if current_gen == entry_gen {
+        drop_session(device);
+    }
+}
+
 // Is a rip/scan worker for `device` still running? A fact `is_busy` cannot give: a worker
 // writes its TERMINAL status, then keeps running its tail.
 pub(super) fn rip_thread_running(device: &str) -> bool {
@@ -736,3 +771,7 @@ mod rediscover_tests;
 #[cfg(test)]
 #[path = "session_rollback_tests.rs"]
 mod rollback_tests;
+
+#[cfg(test)]
+#[path = "session_stop_release_tests.rs"]
+mod stop_release_tests;

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- macOS: Stop no longer rescans the disc it stopped. The disc stays held until it is ejected, the drive is unplugged, or Scan/Rip is pressed. The scan's open drive handle hid the disc from macOS, so the poller read it as ejected and re-inserted. While the server holds a drive it now asks the drive itself, and Stop releases the drive. (server only: the drive poller and Stop belong to the Library service)
+
 ## [1.8.1] — 2026-10-07
 
 ### Added
