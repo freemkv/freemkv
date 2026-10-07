@@ -38,6 +38,26 @@ const TEST_ONLY: &[&str] = &[
     "src/test_support.rs",
 ];
 
+/// Files declared as `#[cfg(test)] #[path = "x.rs"] mod name;` side files (relative to the
+/// declaring file): test code, blanked like the inline `#[cfg(test)]` modules they replaced.
+fn test_side_files(files: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        for w in lines.windows(3) {
+            let path = w[1]
+                .strip_prefix("#[path = \"")
+                .and_then(|p| p.strip_suffix("\"]"));
+            if let (true, Some(p), true) = (w[0] == "#[cfg(test)]", path, w[2].starts_with("mod "))
+            {
+                out.push(f.parent().unwrap().join(p));
+            }
+        }
+    }
+    out
+}
+
 fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     for e in std::fs::read_dir(dir).unwrap().flatten() {
         let p = e.path();
@@ -253,9 +273,13 @@ fn front_ends_reach_engine_owned_work_only_through_the_engine() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     rs_files(&root.join("src"), &mut files);
+    let side_tests = test_side_files(&files);
     let mut found: BTreeMap<(String, &str), usize> = BTreeMap::new();
     let mut problems = Vec::new();
     for f in &files {
+        if side_tests.contains(f) {
+            continue;
+        }
         let rel = f
             .strip_prefix(root)
             .unwrap()
