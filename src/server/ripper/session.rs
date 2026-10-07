@@ -380,6 +380,9 @@ pub(super) struct DriveSession {
     pub(super) keys: Option<libfreemkv::keys::KeyRing>,
     /// Why the scan's resolve refused (no key, a key-source failure, …), when it did.
     pub(super) key_error: Option<libfreemkv::Error>,
+    /// The sectors the scan's key resolve read off the disc, so a later resolve (an outage
+    /// retry, the rip's re-resolve) asks the sources without reading the disc again.
+    pub(super) key_reads: crate::server::keysource::KeyReads,
 }
 
 /// Global drive sessions — one per device.

@@ -575,7 +575,11 @@ pub(super) struct PassContext {
     pub(super) duration: String,
     pub(super) codecs: String,
     pub(super) filename: String,
+    /// The disc's capacity: the scale of the UI's disc map (bad ranges at their real LBA).
     pub(super) bytes_total_disc: u64,
+    /// The bytes the sweep reads: an MKV rip's staged scope, else the whole disc. Sizes the
+    /// progress totals, so a scoped sweep reads 100% when its scope is done.
+    pub(super) bytes_sweep: u64,
     /// Preferred batch size (kernel-reported max sectors per CDB) — surfaced
     /// in RipState during Pass 1 / Pass 2+ so the UI shows a non-zero
     /// `preferred_batch` / `current_batch`. Pass 1 never shrinks the batch
@@ -797,12 +801,12 @@ pub(super) fn push_pass_state(
     // bytes_pending made total ≈ 6x capacity, showing Pass 1 as ~16% not ~50%.
     let cfg_max_retries = ctx.max_retries as u64;
     let mux_estimate_bytes = if cfg_max_retries > 0 {
-        ctx.bytes_total_disc // mux re-reads the ISO, ~1× capacity worth of I/O
+        ctx.bytes_sweep // mux re-reads the ISO, ~1× the swept bytes of I/O
     } else {
         0
     };
     let total_work_estimated = ctx
-        .bytes_total_disc
+        .bytes_sweep
         .saturating_add(cfg_max_retries.saturating_mul(retry_denom_bytes))
         .saturating_add(mux_estimate_bytes);
     // Pass 1: total_done = last_pos. Retry pass: capacity + (pass-2)*bytes_lost
@@ -811,7 +815,7 @@ pub(super) fn push_pass_state(
         last_pos
     } else {
         let prior_retry_count = pass.saturating_sub(2) as u64;
-        ctx.bytes_total_disc
+        ctx.bytes_sweep
             .saturating_add(prior_retry_count.saturating_mul(retry_denom_bytes))
             .saturating_add(last_pos)
     };
@@ -869,7 +873,7 @@ pub(super) fn push_pass_state(
             progress_gb: last_pos as f64 / BYTES_PER_GIB,
             // Populate last_sector during sweep too, not just mux: previously
             // left at Default(0), so the UI playhead never moved during sweep.
-            last_sector: last_pos / SECTOR_BYTES,
+            last_sector: map_head_bytes(ctx, last_pos) / SECTOR_BYTES,
             speed_mbs,
             eta,
             errors,
@@ -928,7 +932,7 @@ pub(super) fn push_pass_state(
             s.last_log = std::time::Instant::now();
             let pos_gb = last_pos as f64 / BYTES_PER_GIB;
             let good_gb = bytes_good as f64 / BYTES_PER_GIB;
-            let total_gb = ctx.bytes_total_disc as f64 / BYTES_PER_GIB;
+            let total_gb = ctx.bytes_sweep as f64 / BYTES_PER_GIB;
             let speed_str = if speed_mbs >= 1.0 {
                 format!("{speed_mbs:.1} MB/s")
             } else {
@@ -954,6 +958,18 @@ pub(super) fn push_pass_state(
     }
 }
 
+// The sweep's read head on the disc map's scale: `swept` of `bytes_sweep` as the same share of
+// the disc, so a scoped sweep's bar fills the map as its scope does (identity for a whole disc).
+pub(super) fn map_head_bytes(ctx: &PassContext, swept: u64) -> u64 {
+    if ctx.bytes_sweep == 0 || ctx.bytes_sweep == ctx.bytes_total_disc {
+        return swept;
+    }
+    let head = u128::from(swept) * u128::from(ctx.bytes_total_disc) / u128::from(ctx.bytes_sweep);
+    u64::try_from(head)
+        .unwrap_or(u64::MAX)
+        .min(ctx.bytes_total_disc)
+}
+
 /// Build a RipState snapshot for a multi-pass rip in a specific pass. Immutable
 /// per-rip fields come from `ctx`; the rest are per-pass dynamic values.
 /// Status is always "ripping"; pass=total_passes indicates the mux phase.
@@ -965,7 +981,7 @@ pub(super) fn set_pass_progress(
     bytes_maybe: u64,
     bytes_lost: u64,
 ) {
-    let pct = if let Some(p) = (bytes_good * 100).checked_div(ctx.bytes_total_disc) {
+    let pct = if let Some(p) = (bytes_good * 100).checked_div(ctx.bytes_sweep) {
         p.min(100) as u8
     } else {
         0

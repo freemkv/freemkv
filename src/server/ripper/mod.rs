@@ -43,6 +43,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crate::server::config::Config;
+use crate::server::keysource::KeyReads;
 
 // Live-drive structure scan options: lookup-free, plus AACS host credentials for the
 // handshake. With capture_without_keys an unreadable AACS key file does not stop the
@@ -216,6 +217,7 @@ pub(crate) fn output_scheme_for(output_format: &str) -> &'static str {
 type KeyResult = Result<libfreemkv::keys::KeyRing, libfreemkv::Error>;
 
 // Resolve the rip's key set off the live drive, once (see `keysource::resolve_drive_keys`).
+// `reads` are the scan's: a retry is served the sectors the scan already read off the disc.
 fn resolve_rip_keys(
     device: &str,
     cfg: &Config,
@@ -223,12 +225,13 @@ fn resolve_rip_keys(
     disc: &libfreemkv::Disc,
     scope: &libfreemkv::keys::KeyScope,
     seed: Option<&libfreemkv::keys::KeyRing>,
+    reads: &mut KeyReads,
 ) -> KeyResult {
     let halt = device_halt(device);
     crate::server::keysource::resolve_drive_keys(
         cfg,
         disc,
-        drive,
+        &mut reads.over(drive),
         scope.clone(),
         seed,
         halt.as_ref(),
@@ -583,8 +586,72 @@ fn log_terminal_key_verdict(reach: crate::server::keysource::ServiceReachability
     );
 }
 
+// What a refused key resolution was, before anything is asked of the key service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyRefusal {
+    /// A Stop landed (E6010): no verdict, no probe, no retry.
+    Stopped,
+    /// The disc, drive, transport or filesystem failed (E1xxx–E6xxx, E9xxx), e.g. an E6000
+    /// read failure: the key service was never the question, so its reachability says
+    /// nothing about this disc.
+    NotKeyService,
+    /// A key-source outcome (the AACS and keydb classes, E7xxx–E8xxx): what the service said.
+    KeyService,
+}
+
+// Classify a refused key resolution by the error itself.
+fn key_refusal(e: &libfreemkv::Error) -> KeyRefusal {
+    let halted = match e {
+        libfreemkv::Error::Halted => true,
+        libfreemkv::Error::IoError { source } => libfreemkv::error::is_halt(source),
+        _ => false,
+    };
+    if halted {
+        KeyRefusal::Stopped
+    } else if (7000..=8999).contains(&e.code()) {
+        KeyRefusal::KeyService
+    } else {
+        KeyRefusal::NotKeyService
+    }
+}
+
+// The key service's verdict on `refused`, or `None` when the refusal is not one it gave (a
+// Stop, or the disc failing): only a key-source outcome is classified by reachability, from
+// the real decode's answer, probing only when that decode made no HTTP call.
+fn refusal_verdict(
+    device: &str,
+    refused: &libfreemkv::Error,
+    decode_reach: Option<crate::server::keysource::ServiceReachability>,
+    probe: &dyn Fn() -> crate::server::keysource::ServiceReachability,
+) -> Option<crate::server::keysource::ServiceReachability> {
+    match key_refusal(refused) {
+        KeyRefusal::Stopped => {
+            crate::server::log::device_log(device, "Stopped during key resolution.");
+            None
+        }
+        KeyRefusal::NotKeyService => {
+            crate::server::log::device_log(
+                device,
+                &format!(
+                    "Key resolution failed reading the disc, not at the key service — \
+                     not retrying the key service: {refused}"
+                ),
+            );
+            tracing::info!(
+                phase = "key_resolve",
+                error = %refused,
+                retryable = false,
+                "key resolution failed on the disc, not the key service — no service verdict"
+            );
+            None
+        }
+        KeyRefusal::KeyService => Some(decode_reach.unwrap_or_else(probe)),
+    }
+}
+
 // Classify the key service after a refused online resolution and bounded-retry a transient
-// outage. The verdict is `Some` whenever the rip is still keyless.
+// outage. The verdict is `Some` whenever the key service answered (or never could) and the
+// rip is still keyless; `None` for a Stop or a refusal that was not the service's.
 fn retry_online_keys_on_outage(
     device: &str,
     cfg: &Config,
@@ -592,6 +659,44 @@ fn retry_online_keys_on_outage(
     (disc, scope): (&libfreemkv::Disc, &libfreemkv::keys::KeyScope),
     refused: libfreemkv::Error,
     decode_reach: Option<crate::server::keysource::ServiceReachability>,
+    reads: &mut KeyReads,
+) -> (
+    KeyResult,
+    Option<crate::server::keysource::ServiceReachability>,
+) {
+    // Each retry re-asks the sources over the scan's reads: no second read of the disc.
+    let attempt = || {
+        let result = resolve_rip_keys(device, cfg, drive, disc, scope, None, reads);
+        // Consume THIS retry's decode outcome immediately (before the next loop
+        // overwrites it), so the re-classify reads the real POST.
+        (
+            result,
+            crate::server::keysource::take_online_decode_reachability(),
+        )
+    };
+    retry_keys_with(
+        device,
+        refused,
+        decode_reach,
+        attempt,
+        &|| crate::server::keysource::probe_online_reachability(cfg),
+        |backoff| wait_unless_stopped(device, backoff),
+    )
+}
+
+// `retry_online_keys_on_outage` over its effects: `attempt` re-runs the acquisition and
+// returns its decode verdict, `probe` asks the service's reachability, `wait` sleeps a
+// backoff and is `false` once a Stop lands (the tests inject all three).
+fn retry_keys_with(
+    device: &str,
+    refused: libfreemkv::Error,
+    decode_reach: Option<crate::server::keysource::ServiceReachability>,
+    mut attempt: impl FnMut() -> (
+        KeyResult,
+        Option<crate::server::keysource::ServiceReachability>,
+    ),
+    probe: &dyn Fn() -> crate::server::keysource::ServiceReachability,
+    mut wait: impl FnMut(Duration) -> bool,
 ) -> (
     KeyResult,
     Option<crate::server::keysource::ServiceReachability>,
@@ -599,8 +704,9 @@ fn retry_online_keys_on_outage(
     // Classify from the REAL decode's HTTP outcome — no second empty probe (its
     // 0-byte POST to the POST-only `/decode` logged a spurious `404` after every
     // real no-key). Probe only when the decode made no HTTP answer (`None`).
-    let reach =
-        decode_reach.unwrap_or_else(|| crate::server::keysource::probe_online_reachability(cfg));
+    let Some(reach) = refusal_verdict(device, &refused, decode_reach, probe) else {
+        return (Err(refused), None);
+    };
     if !reach.is_transient() {
         // The service ANSWERED about this disc (or could never be asked). No
         // retry — a 422 "no key for this disc" took the server ~30s of
@@ -614,27 +720,24 @@ fn retry_online_keys_on_outage(
     );
     let mut last = refused;
     let mut last_reach = reach;
-    for attempt in 1..=KEY_SERVICE_RETRY_ATTEMPTS {
+    for n in 1..=KEY_SERVICE_RETRY_ATTEMPTS {
         if crate::server::SHUTDOWN.load(Ordering::Relaxed) {
             break;
         }
-        let backoff = key_service_backoff(attempt);
+        let backoff = key_service_backoff(n);
         crate::server::log::device_log(
             device,
             &format!(
-                "Key-service retry {attempt}/{KEY_SERVICE_RETRY_ATTEMPTS} in {}s...",
+                "Key-service retry {n}/{KEY_SERVICE_RETRY_ATTEMPTS} in {}s...",
                 backoff.as_secs()
             ),
         );
-        if !wait_unless_stopped(device, backoff) {
+        if !wait(backoff) {
             crate::server::log::device_log(device, "Stopped during the key-service retry wait.");
             return (Err(last), Some(last_reach));
         }
-        // Re-attempt the full resolution — the real retry against the service.
-        let result = resolve_rip_keys(device, cfg, drive, disc, scope, None);
-        // Consume THIS retry's decode outcome immediately (before the next loop
-        // overwrites it), so the re-classify below reads the real POST.
-        let retry_reach = crate::server::keysource::take_online_decode_reachability();
+        // Re-attempt the acquisition — the real retry against the service.
+        let (result, retry_reach) = attempt();
         match result {
             Ok(set) => {
                 crate::server::log::device_log(
@@ -645,9 +748,18 @@ fn retry_online_keys_on_outage(
             }
             Err(e) => last = e,
         }
-        // Still no key — is the service back (genuine no-key now) or still down?
-        last_reach =
-            retry_reach.unwrap_or_else(|| crate::server::keysource::probe_online_reachability(cfg));
+        // Still no key — is the service back (genuine no-key now) or still down? A Stop
+        // keeps the outage verdict (as during the wait); a disc failure has none.
+        last_reach = match key_refusal(&last) {
+            KeyRefusal::Stopped => {
+                crate::server::log::device_log(device, "Stopped during the key-service retry.");
+                return (Err(last), Some(last_reach));
+            }
+            _ => match refusal_verdict(device, &last, retry_reach, probe) {
+                Some(r) => r,
+                None => return (Err(last), None),
+            },
+        };
         if !last_reach.is_transient() {
             crate::server::log::device_log(
                 device,
@@ -1616,7 +1728,17 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     scan_wd.enter_resolve();
     let resolve_t0 = std::time::Instant::now();
     tracing::info!(device = %device, "resolve_keys: begin");
-    let keys = resolve_rip_keys(device, &cfg_read, &mut drive, &disc, &key_scope, None);
+    // Filled by this resolve and kept on the session: a retry (here or at the rip) reuses it.
+    let mut key_reads = KeyReads::default();
+    let keys = resolve_rip_keys(
+        device,
+        &cfg_read,
+        &mut drive,
+        &disc,
+        &key_scope,
+        None,
+        &mut key_reads,
+    );
     // Capture the real decode's reachability now, before anything else can overwrite the
     // per-thread slot — it classifies a no-key without a second empty probe.
     let decode_reach = crate::server::keysource::take_online_decode_reachability();
@@ -1626,7 +1748,15 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     let (keys, key_reach) = match keys {
         Err(e) if crate::server::keysource::uses_online(&cfg_read) => {
             let at = (&disc, &key_scope);
-            retry_online_keys_on_outage(device, &cfg_read, &mut drive, at, e, decode_reach)
+            retry_online_keys_on_outage(
+                device,
+                &cfg_read,
+                &mut drive,
+                at,
+                e,
+                decode_reach,
+                &mut key_reads,
+            )
         }
         keys => (keys, None),
     };
@@ -1696,6 +1826,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             key_verdict: key_reach,
             keys,
             key_error,
+            key_reads,
         },
     );
 
@@ -2717,7 +2848,16 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             let media_type = tmdb.as_ref().map(|t| t.media_type.as_str()).unwrap_or("");
             let scope = rip_key_scope(&disc, &cfg_read, media_type, &disc_name);
             scan_wd.enter_resolve();
-            let keys = resolve_rip_keys(device, &cfg_read, &mut drive, &disc, &scope, None);
+            let mut key_reads = KeyReads::default();
+            let keys = resolve_rip_keys(
+                device,
+                &cfg_read,
+                &mut drive,
+                &disc,
+                &scope,
+                None,
+                &mut key_reads,
+            );
             // Capture the real decode's reachability from this fresh resolve so the outage
             // retry below classifies a no-key without a second empty probe.
             resume_decode_reach = crate::server::keysource::take_online_decode_reachability();
@@ -2737,6 +2877,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 key_verdict: None,
                 keys,
                 key_error,
+                key_reads,
             }
         }
     };
@@ -2871,6 +3012,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // The rip's key set, resolved once at the scan (KU §2.1). A scope that outgrew the scan's
     // (a title override made it a TV rip) tops up only the titles it lacks.
     let key_scope = rip_key_scope(&disc, &cfg_read, &tmdb_media_type, &disc_name);
+    // The scan's key reads: every resolve below is served what the scan already read.
+    let mut key_reads = std::mem::take(&mut session.key_reads);
     let mut rip_keys: KeyResult = match (session.keys.take(), session.key_error.take()) {
         (Some(set), _) if keys_cover(&disc, &set, &key_scope) => Ok(set),
         (Some(set), _) => resolve_rip_keys(
@@ -2880,6 +3023,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             &disc,
             &key_scope,
             Some(&set),
+            &mut key_reads,
         ),
         (None, Some(e)) => Err(e),
         (None, None) => resolve_rip_keys(
@@ -2889,6 +3033,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             &disc,
             &key_scope,
             None,
+            &mut key_reads,
         ),
     };
     let mut keyed = rip_keyed(&disc, &key_scope, &rip_keys);
@@ -2909,6 +3054,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             &disc,
             &key_scope,
             None,
+            &mut key_reads,
         );
         seed_verdict = crate::server::keysource::take_online_decode_reachability();
         keyed = rip_keyed(&disc, &key_scope, &rip_keys);
@@ -2930,8 +3076,15 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     ) && let Err(e) = rip_keys
     {
         let at = (&disc, &key_scope);
-        let (retried, reach) =
-            retry_online_keys_on_outage(device, &cfg_read, &mut session.drive, at, e, seed_verdict);
+        let (retried, reach) = retry_online_keys_on_outage(
+            device,
+            &cfg_read,
+            &mut session.drive,
+            at,
+            e,
+            seed_verdict,
+            &mut key_reads,
+        );
         rip_keys = retried;
         key_verdict = reach;
         keyed = rip_keyed(&disc, &key_scope, &rip_keys);
@@ -3254,6 +3407,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
     // An ISO deliverable is decrypted in place by the passes, like the CLI's and GUI's.
     let iso_decrypts = output_is_iso_image(&cfg_read.output_format);
+    // The bytes the sweep reads (its staged scope, else the whole disc): the total-progress
+    // scale the mux phase continues on.
+    let mut bytes_swept_total = disc.capacity_bytes;
     let mux_source = if uses_multipass(cfg_read.max_retries) {
         let iso_path = std::path::Path::new(&iso_path_str);
         let bytes_total_disc = (session.drive.read_capacity().unwrap_or(0) as u64) * 2048;
@@ -3322,6 +3478,53 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             }
         }
 
+        // An MKV rip that discards its ISO after the mux sweeps only what the mux reads; an
+        // ISO deliverable or a kept ISO sweeps the whole disc.
+        let staged = staged_titles(
+            &disc.titles,
+            &cfg_read,
+            &tmdb_media_type,
+            &disc_name,
+            main_idx,
+        );
+        let staging_scope = match sweep_scope(&cfg_read, &disc, &mut session.drive, &staged) {
+            Ok(scope) => scope,
+            Err(libfreemkv::Error::Halted) => {
+                crate::server::log::device_log(
+                    device,
+                    "Rip stopped by user before the sweep — nothing read yet.",
+                );
+                unregister_halt(device);
+                return;
+            }
+            Err(e) => {
+                // Today's whole-disc sweep is always a safe staging image for the mux.
+                crate::server::log::device_log(
+                    device,
+                    &format!(
+                        "Could not map the muxed titles' sectors ({e}) — sweeping the whole disc."
+                    ),
+                );
+                None
+            }
+        };
+        let bytes_sweep = staging_scope
+            .as_deref()
+            .map_or(bytes_total_disc, scope_bytes);
+        if staging_scope.is_some() {
+            crate::server::log::device_log(
+                device,
+                &format!(
+                    "Keep ISO is off: sweeping only the disc structure and the {} muxed title(s) \
+                     — {:.1} GiB of {:.1} GiB.",
+                    staged.len(),
+                    bytes_sweep as f64 / BYTES_PER_GIB,
+                    bytes_total_disc as f64 / BYTES_PER_GIB,
+                ),
+            );
+            bytes_swept_total = bytes_sweep;
+        }
+
         // Shared pass context + title reference for progress callbacks.
         let pass_ctx = PassContext {
             device: device.to_string(),
@@ -3337,6 +3540,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             filename: delivered_file.clone(),
             batch,
             bytes_total_disc,
+            bytes_sweep,
             max_retries: cfg_read.max_retries,
         };
         let title_for_progress = title.clone();
@@ -3387,6 +3591,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 abort_on_lost_secs: cfg_read.abort_on_lost_secs,
                 is_iso_output: output_is_iso_image(&cfg_read.output_format),
             }),
+            // The staged scope (None: the whole disc); its mapfile records it.
+            scope: staging_scope.as_deref(),
             // The staged ISO carries no artifact lock: staging markers govern it.
             locked: true,
             halt: Some(halt_token.clone()),
@@ -3976,7 +4182,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         total_bytes: mux_total_bytes,
         title_bytes_per_sec,
         total_passes,
-        bytes_total_disc: disc.capacity_bytes,
+        bytes_total_disc: bytes_swept_total,
         max_retries: cfg_read.max_retries,
         bytes_unreadable_at_mux,
         dest_url: dest_url.clone(),
@@ -4904,6 +5110,47 @@ fn fanout_episode_indices(
         return Vec::new();
     }
     indices
+}
+
+// The titles a fresh rip's staged image must hold for its mux: the main feature, the TV plan's
+// episodes, and title 0 (the image title a movie's resume muxes).
+fn staged_titles(
+    titles: &[libfreemkv::DiscTitle],
+    cfg: &Config,
+    media_type: &str,
+    disc_name: &str,
+    main_idx: usize,
+) -> Vec<usize> {
+    let mut staged = fanout_episode_indices(titles, cfg, media_type, disc_name);
+    staged.extend([0, main_idx]);
+    staged.retain(|&i| i < titles.len());
+    staged.sort_unstable();
+    staged.dedup();
+    staged
+}
+
+// The disc→ISO sweep's scope (`(lba, sectors)`), or `None` for the whole disc. An ISO
+// deliverable or a kept ISO (`keep_iso`) is a whole-disc image; an MKV rip whose ISO is
+// discarded after the mux stages only the disc's structure (UDF, nav, AACS files) and
+// `titles`, through the engine's `mkv_staging_scope` as the GUI stages it.
+fn sweep_scope(
+    cfg: &Config,
+    disc: &libfreemkv::Disc,
+    reader: &mut dyn libfreemkv::SectorSource,
+    titles: &[usize],
+) -> Result<Option<Vec<(u32, u32)>>, libfreemkv::Error> {
+    if retain_intermediate_iso(cfg.keep_iso, &cfg.output_format) {
+        return Ok(None);
+    }
+    freemkv_engine::mkv_staging_scope(disc, reader, titles, false)
+}
+
+// The bytes a sweep scope covers.
+fn scope_bytes(scope: &[(u32, u32)]) -> u64 {
+    scope
+        .iter()
+        .map(|&(_, sectors)| u64::from(sectors) * 2048)
+        .sum()
 }
 
 // Staging bytes the mux phase writes before the ISO is pruned, for a fresh rip's plan.
@@ -5871,6 +6118,14 @@ mod tests;
 #[cfg(test)]
 #[path = "mod_held_eject_tests.rs"]
 mod held_eject_tests;
+
+#[cfg(test)]
+#[path = "mod_key_retry_tests.rs"]
+mod key_retry_tests;
+
+#[cfg(test)]
+#[path = "mod_staging_scope_tests.rs"]
+mod staging_scope_tests;
 
 #[cfg(test)]
 #[path = "mod_insert_tick_tests.rs"]

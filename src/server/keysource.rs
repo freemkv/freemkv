@@ -5,7 +5,8 @@
 //! engine's key parameters ([`key_params`]): the one the operator picked in
 //! settings — the local keydb, or the online key service — and only that one.
 //!
-//! A live drive scans KEYLESS, then resolves the rip's key set once ([`resolve_drive_keys`]);
+//! A live drive scans KEYLESS, then resolves the rip's key set once ([`resolve_drive_keys`],
+//! its reads kept in [`KeyReads`] for a retry);
 //! a staged image opens through the engine ([`open_staged_image`]).
 
 use std::path::{Path, PathBuf};
@@ -274,6 +275,90 @@ fn resolve_with(
     Ok(set)
 }
 
+/// The most a scan's [`KeyReads`] keeps; past it, reads pass through uncached.
+const KEY_READS_CAP: usize = 64 << 20;
+
+/// The sectors a scan's key resolves read off the drive (memory only, capped at
+/// [`KEY_READS_CAP`]), so a later resolve of the same disc — an outage retry, the rip's own
+/// resolve — asks the key sources again without reading the disc again: the engine rebuilds
+/// its key evidence (the filesystem walk) and its samples from here. Only a full read is
+/// kept: a failed or short one is read from the drive again next time.
+#[derive(Default)]
+pub struct KeyReads {
+    sectors: std::collections::HashMap<(u32, u16), Vec<u8>>,
+    bytes: usize,
+}
+
+impl KeyReads {
+    /// `reader` with these reads in front of it.
+    pub fn over<'a>(&'a mut self, reader: &'a mut dyn libfreemkv::SectorSource) -> CachedReads<'a> {
+        CachedReads {
+            reader,
+            reads: self,
+        }
+    }
+}
+
+/// A raw reader behind a scan's [`KeyReads`]: a read it already holds is served from memory.
+pub struct CachedReads<'a> {
+    reader: &'a mut dyn libfreemkv::SectorSource,
+    reads: &'a mut KeyReads,
+}
+
+impl libfreemkv::SectorSource for CachedReads<'_> {
+    fn capacity_sectors(&self) -> u32 {
+        self.reader.capacity_sectors()
+    }
+
+    fn read_sectors(
+        &mut self,
+        lba: u32,
+        count: u16,
+        buf: &mut [u8],
+        recovery: bool,
+    ) -> libfreemkv::error::Result<usize> {
+        if let Some(held) = self.reads.sectors.get(&(lba, count)) {
+            buf[..held.len()].copy_from_slice(held);
+            return Ok(held.len());
+        }
+        let n = self.reader.read_sectors(lba, count, buf, recovery)?;
+        let full = n == usize::from(count) * 2048;
+        if full && self.reads.bytes + n <= KEY_READS_CAP {
+            self.reads.sectors.insert((lba, count), buf[..n].to_vec());
+            self.reads.bytes += n;
+        }
+        Ok(n)
+    }
+
+    // A forced re-fetch from the medium is never answered from memory.
+    fn read_sectors_fua(
+        &mut self,
+        lba: u32,
+        count: u16,
+        buf: &mut [u8],
+        recovery: bool,
+        fua: bool,
+    ) -> libfreemkv::error::Result<usize> {
+        self.reader.read_sectors_fua(lba, count, buf, recovery, fua)
+    }
+
+    fn set_speed(&mut self, kbs: u16) {
+        self.reader.set_speed(kbs);
+    }
+
+    fn set_unit_base(&mut self, lba: u32) {
+        self.reader.set_unit_base(lba);
+    }
+
+    fn unmapped_stream_files(&self) -> &[libfreemkv::sector::bus_removal::UnmappedStreamFile] {
+        self.reader.unmapped_stream_files()
+    }
+
+    fn random_access(&self) -> bool {
+        self.reader.random_access()
+    }
+}
+
 // A keydb that does not exist and no usable online URL leave every disc at NO KEY: say so
 // loudly (issue #46).
 fn warn_if_no_key_source(cfg: &Config) {
@@ -341,7 +426,7 @@ pub fn open_staged_image(
 }
 
 // `open_staged_image` over an already-built key input (the tests inject their sources).
-fn open_staged(
+pub(crate) fn open_staged(
     iso: &Path,
     disc: libfreemkv::Disc,
     titles: &[usize],
@@ -351,6 +436,9 @@ fn open_staged(
 ) -> Result<freemkv_engine::OpenedImage, libfreemkv::Error> {
     // Drain an earlier decode verdict so the caller's take sees only this resolve's.
     let _ = take_online_decode_reachability();
+    // An image staged for an MKV rip holds only its titles (its mapfile records the scope):
+    // muxing one it never read would mux zeros, so refuse it (E6022) before any key call.
+    freemkv_engine::ensure_titles_staged(iso, &disc, titles)?;
     let src = freemkv_engine::ImageSource::Iso(iso.to_path_buf());
     let opts = freemkv_engine::OpenImageOptions {
         keys,

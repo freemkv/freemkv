@@ -442,6 +442,7 @@ fn minimal_pass_ctx(device: &str) -> PassContext {
         codecs: String::new(),
         filename: "test.mkv".to_string(),
         bytes_total_disc: 50 * 1_073_741_824, // 50 GB
+        bytes_sweep: 50 * 1_073_741_824,      // a whole-disc sweep
         batch: 32,
         max_retries: 5,
     }
@@ -1276,13 +1277,14 @@ fn pass_progress(work_done: u64, unreadable: u64) -> libfreemkv::progress::PassP
     }
 }
 
-/// Total bar = done / (disc + max_retries x frozen unreadable + mux), with
-/// retry passes counting the disc and each prior retry pass as done.
+/// Total bar = done / (swept + max_retries x frozen unreadable + mux), with
+/// retry passes counting the sweep and each prior retry pass as done.
 #[test]
 fn push_pass_state_total_progress_uses_frozen_denominator() {
     let dev = format!("test-pps-total-{}", std::process::id());
     let mut ctx = minimal_pass_ctx(&dev);
     ctx.bytes_total_disc = 1000;
+    ctx.bytes_sweep = 1000;
     ctx.max_retries = 2;
     let total_pct = || STATE.lock().unwrap().get(&dev).unwrap().total_progress_pct;
     let at = |state: &Mutex<PassProgressState>, done: u64| {
@@ -1365,4 +1367,43 @@ fn build_bad_ranges_locates_chapter_time_and_sector_count() {
         ranges.iter().all(|r| r.duration_ms == 0.0),
         "no bitrate means no duration, not inf"
     );
+}
+
+// A scoped sweep (an MKV rip with keep ISO off reads only its titles and the disc's
+// structure) is sized by its scope: the total bar, the pass-boundary percentage and the
+// disc map's read head all reach their end with the scope, while the map keeps the disc's
+// own scale for its bad ranges.
+#[test]
+fn a_scoped_sweep_is_sized_by_its_scope() {
+    const S: u64 = SECTOR_BYTES;
+    let dev = format!("test-pps-scoped-{}", std::process::id());
+    let mut ctx = minimal_pass_ctx(&dev);
+    ctx.bytes_total_disc = 1000 * S;
+    ctx.bytes_sweep = 400 * S;
+    ctx.max_retries = 2;
+    let state = Mutex::new(PassProgressState::new());
+    {
+        let mut s = state.lock().unwrap();
+        s.last_work_done = 200 * S;
+        s.last_work_total = 400 * S;
+    }
+    let mut p = pass_progress(200 * S, 0);
+    p.work_total = 400 * S;
+    push_pass_state(&ctx, &p, 2048.0, 1, 4, &state);
+    let snap = STATE.lock().unwrap().get(&dev).cloned().unwrap();
+    // 200 of (400 swept + 2 x 0 retry + 400 mux) = 25%; sized by the disc it reads 10%.
+    assert_eq!(snap.total_progress_pct, 25);
+    assert_eq!(snap.pass_progress_pct, 50);
+    // Half the scope swept: the map's head at half the disc, which stays the map's scale.
+    assert_eq!(snap.last_sector, 500);
+    assert_eq!(snap.bytes_total_disc, 1000 * S);
+
+    // The scope fully read is 100% of the sweep at the pass boundary.
+    set_pass_progress(&ctx, 2, 4, 400 * S, 0, 0);
+    assert_eq!(STATE.lock().unwrap().get(&dev).unwrap().progress_pct, 100);
+    STATE.lock().unwrap().remove(&dev);
+
+    // A whole-disc sweep keeps the read head where it is.
+    ctx.bytes_sweep = ctx.bytes_total_disc;
+    assert_eq!(map_head_bytes(&ctx, 123 * S), 123 * S);
 }

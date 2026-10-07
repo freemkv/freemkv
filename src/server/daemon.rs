@@ -115,17 +115,15 @@ pub fn run(argv: Vec<String>) {
     // Fail-loud-EARLY destination check: warn if a configured movie/tv/output
     // dir is missing/not writable (e.g. a lost NAS bind-mount). Non-blocking —
     // finished rips stay in staging meanwhile — but surfaces the problem at boot.
+    // It runs on its own thread: a hung network mount must never hold startup
+    // (and the web server) back.
     {
-        let c = cfg.read().unwrap_or_else(|e| e.into_inner());
-        for (root, reason) in mover::check_configured_destinations(&c) {
-            log::syslog(&format!(
-                "WARNING: configured destination '{root}' is not usable at startup: {reason}. \
-                 Finished rips will be PRESERVED in staging (not moved) until this is fixed \
-                 (check the directory exists and its bind-mount/NAS share is present and writable)."
-            ));
-        }
+        let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(msg) = keysource::keyserver_url_startup_warning(&c) {
             log::syslog(&msg);
+        }
+        if let Err(e) = spawn_destination_check(c, mover::check_configured_destinations) {
+            tracing::warn!(error = %e, "could not start the startup destination check");
         }
     }
 
@@ -319,6 +317,28 @@ pub fn run(argv: Vec<String>) {
     );
 
     log::syslog("autorip stopped");
+}
+
+// Run the startup destination `check` over `cfg` on its own thread and warn about each
+// unusable root; returns at once, whatever the check's folders do.
+fn spawn_destination_check<F>(
+    cfg: config::Config,
+    check: F,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    F: FnOnce(&config::Config) -> Vec<(String, String)> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("destination-check".into())
+        .spawn(move || {
+            for (root, reason) in check(&cfg) {
+                log::syslog(&format!(
+                    "WARNING: configured destination '{root}' is not usable at startup: {reason}. \
+                     Finished rips will be PRESERVED in staging (not moved) until this is fixed \
+                     (check the directory exists and its bind-mount/NAS share is present and writable)."
+                ));
+            }
+        })
 }
 
 // Join `handle`, giving up after `timeout` so a wedged worker can't pin

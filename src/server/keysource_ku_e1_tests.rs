@@ -108,6 +108,10 @@ fn a_refused_resolve_logs_its_key_walk() {
     );
     let mut drive = libfreemkv::test_util::MemSource::new(fx.img.image.clone());
     let scope = libfreemkv::keys::KeyScope::Titles(vec![0]);
+    // With this the only live dispatcher, tracing-core decides a callsite's interest from the
+    // default of whichever thread first hits it: a concurrent test with no subscriber would
+    // cache "never" for the walk's lines. A second live dispatcher makes it ask every one.
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
     let r = tracing::subscriber::with_default(subscriber, || {
         resolve_with(&fx.scan(), &mut drive, scope, &counting(&calls), None, None)
     });
@@ -154,4 +158,119 @@ fn rip_keys_are_held_per_iso_until_forgotten() {
     assert!(rip_keys_for(iso).is_some());
     forget_rip_keys(iso);
     assert!(rip_keys_for(iso).is_none());
+}
+
+// A raw reader that records every LBA asked of it, failing the ones in `fail`.
+struct Recording {
+    inner: libfreemkv::test_util::MemSource,
+    lbas: Vec<u32>,
+    fail: Vec<u32>,
+}
+
+impl Recording {
+    fn new(image: Vec<u8>) -> Self {
+        Recording {
+            inner: libfreemkv::test_util::MemSource::new(image),
+            lbas: Vec::new(),
+            fail: Vec::new(),
+        }
+    }
+}
+
+impl libfreemkv::SectorSource for Recording {
+    fn capacity_sectors(&self) -> u32 {
+        self.inner.capacity_sectors()
+    }
+    fn read_sectors(
+        &mut self,
+        lba: u32,
+        count: u16,
+        buf: &mut [u8],
+        recovery: bool,
+    ) -> libfreemkv::error::Result<usize> {
+        self.lbas.push(lba);
+        if self.fail.contains(&lba) {
+            return Err(libfreemkv::Error::DiscRead {
+                sector: u64::from(lba),
+                status: None,
+                sense: None,
+            });
+        }
+        self.inner.read_sectors(lba, count, buf, recovery)
+    }
+}
+
+// A key retry over the scan's reads re-asks the sources without reading the disc again:
+// not its filesystem (the evidence), not its sampled units.
+#[test]
+fn a_retry_over_the_scans_reads_reads_nothing_from_the_disc() {
+    let fx = bd_image();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut drive = Recording::new(fx.img.image.clone());
+    let disc = fx.scan();
+    let scope = || libfreemkv::keys::KeyScope::Titles(vec![0]);
+    let mut reads = KeyReads::default();
+    let first = resolve_with(
+        &disc,
+        &mut reads.over(&mut drive),
+        scope(),
+        &counting(&calls),
+        None,
+        None,
+    );
+    assert!(first.is_err(), "no key");
+    let asked = calls.load(Ordering::SeqCst);
+    assert!(asked >= 1, "the scan asked the sources");
+    // The UDF anchor (ECMA-167 3/8.4.2.1, sector 256) opens every filesystem walk.
+    assert!(
+        drive.lbas.contains(&256),
+        "the scan read the disc: {:?}",
+        drive.lbas
+    );
+    drive.lbas.clear();
+
+    let retry = resolve_with(
+        &disc,
+        &mut reads.over(&mut drive),
+        scope(),
+        &counting(&calls),
+        None,
+        None,
+    );
+    assert!(retry.is_err(), "still no key");
+    assert!(
+        calls.load(Ordering::SeqCst) > asked,
+        "the retry re-asked the sources"
+    );
+    assert!(
+        drive.lbas.is_empty(),
+        "the retry read the disc: {:?}",
+        drive.lbas
+    );
+}
+
+// Only a full read is kept: a failed one is asked of the drive again, and a forced re-fetch
+// (FUA) never comes from memory.
+#[test]
+fn key_reads_keep_only_full_reads() {
+    use libfreemkv::SectorSource as _;
+    let mut drive = Recording::new(vec![7u8; 16 * 2048]);
+    drive.fail = vec![3];
+    let mut reads = KeyReads::default();
+    let mut buf = vec![0u8; 2048];
+    for _ in 0..2 {
+        let mut src = reads.over(&mut drive);
+        assert_eq!(src.read_sectors(1, 1, &mut buf, false).unwrap(), 2048);
+        assert!(src.read_sectors(3, 1, &mut buf, false).is_err());
+    }
+    assert_eq!(
+        drive.lbas,
+        [1, 3, 3],
+        "the good read once, the failed one each time"
+    );
+    assert_eq!(buf[0], 7);
+    drive.lbas.clear();
+    let mut src = reads.over(&mut drive);
+    src.read_sectors_fua(1, 1, &mut buf, false, true).unwrap();
+    assert_eq!(drive.lbas, [1], "a forced re-fetch reads the drive");
 }

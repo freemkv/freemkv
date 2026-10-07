@@ -472,14 +472,20 @@ pub fn load() -> Arc<RwLock<Config>> {
             .to_string_lossy()
             .into_owned();
     }
-    for d in [
+    // Bounded: staging and output may sit on a network mount that has stopped answering,
+    // and startup (the web server with it) must not wait on it.
+    let dirs = vec![
         cfg.log_dir(),
         format!("{}/freemkv", cfg.autorip_dir),
         cfg.staging_dir.clone(),
         cfg.output_dir.clone(),
-    ] {
-        if let Err(e) = std::fs::create_dir_all(&d) {
-            tracing::warn!(path = %d, error = %e, "could not create required directory");
+    ];
+    let created = ensure_dirs_bounded(dirs, crate::server::health::CHECK_TIMEOUT, |p| {
+        std::fs::create_dir_all(p)
+    });
+    for (d, result) in created {
+        if let Err(reason) = result {
+            tracing::warn!(path = %d, error = %reason, "could not create required directory");
         }
     }
 
@@ -488,6 +494,47 @@ pub fn load() -> Arc<RwLock<Config>> {
     apply_decrypt_threads(cfg.decrypt_threads);
 
     Arc::new(RwLock::new(cfg))
+}
+
+// Create every one of `dirs` at once through the folder health check's `bounded`, each given
+// up on after `limit` (its thread left to finish on its own), so folders on one hung mount
+// cost one timeout between them. Results keep the input order.
+fn ensure_dirs_bounded<F>(
+    dirs: Vec<String>,
+    limit: std::time::Duration,
+    create: F,
+) -> Vec<(String, Result<(), String>)>
+where
+    F: Fn(&std::path::Path) -> std::io::Result<()> + Clone + Send + 'static,
+{
+    use crate::server::health::{Bounded, bounded};
+    std::thread::scope(|scope| {
+        let running: Vec<_> = dirs
+            .into_iter()
+            .map(|d| {
+                let create = create.clone();
+                let owned = std::path::PathBuf::from(&d);
+                let key = owned.clone();
+                let h = scope.spawn(move || match bounded(&key, limit, move || create(&owned)) {
+                    Bounded::Done(r) => r.map_err(|e| e.to_string()),
+                    Bounded::TimedOut | Bounded::Busy => Err(format!(
+                        "not responding after {}s (a stale network mount?)",
+                        limit.as_secs().max(1)
+                    )),
+                });
+                (d, h)
+            })
+            .collect();
+        running
+            .into_iter()
+            .map(|(d, h)| {
+                let r = h
+                    .join()
+                    .unwrap_or_else(|_| Err("the folder check panicked".into()));
+                (d, r)
+            })
+            .collect()
+    })
 }
 
 /// Apply the configured decrypt thread count to libfreemkv's global

@@ -839,3 +839,33 @@ fn dir_is_writable_true_for_real_dir_false_for_missing() {
     assert!(!dir_is_writable("/nonexistent-autorip-probe-dir-xyz/sub"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// A configured folder on a hung network mount must not hold startup back: its creation is
+// given up on within the limit and reported not responding; the other folders are created.
+#[test]
+fn startup_folders_are_created_without_waiting_on_a_hung_mount() {
+    let d = scratch("bounded-dirs");
+    let good = d.join("staging").to_string_lossy().into_owned();
+    let hung = format!("/test/hung-output-{}", std::process::id());
+    let hung_key = hung.clone();
+    let limit = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let out = ensure_dirs_bounded(vec![good.clone(), hung.clone()], limit, move |p| {
+        if p == std::path::Path::new(&hung_key) {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            return Ok(());
+        }
+        std::fs::create_dir_all(p)
+    });
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0], (good.clone(), Ok(())));
+    assert!(std::path::Path::new(&good).is_dir());
+    assert_eq!(out[1].0, hung);
+    let reason = out[1].1.as_ref().unwrap_err();
+    assert!(reason.contains("not responding"), "{reason}");
+}

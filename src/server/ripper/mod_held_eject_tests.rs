@@ -24,6 +24,7 @@ fn eject_drive_uses_the_held_session_handle() {
         key_verdict: None,
         keys: None,
         key_error: None,
+        key_reads: Default::default(),
     };
     store_session(&dev, session);
     register_halt(&dev, halt.clone());

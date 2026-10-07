@@ -551,3 +551,24 @@ fn no_fail_open_lock_poison_forms_in_src() {
         all.join("\n")
     );
 }
+
+// The startup destination check runs off the startup path: a check stuck on a hung mount
+// leaves startup (and the web server after it) free to carry on.
+#[test]
+fn the_startup_destination_check_never_blocks_startup() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let started = std::time::Instant::now();
+    let handle = spawn_destination_check(config::Config::default(), move |_| {
+        let _ = rx.recv(); // a stat on a share that never answers
+        Vec::new()
+    })
+    .expect("spawn the destination check");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!handle.is_finished(), "the check is still blocked");
+    drop(tx);
+    handle.join().unwrap();
+}

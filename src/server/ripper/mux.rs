@@ -162,9 +162,9 @@ pub(crate) struct MuxInputs<'a> {
     /// through every per-frame `update_state` so the dashboard's
     /// pass/total bars don't snap back to a "fresh rip" view.
     pub(crate) total_passes: u8,
-    /// Disc capacity in bytes — same value `state.rs` uses to compute
-    /// the sweep + mux contributions to the total-progress denominator.
-    /// Plumbed from `disc.capacity_bytes` at the orchestrator level.
+    /// The bytes the sweep read — same value `state.rs` uses to compute
+    /// the sweep + mux contributions to the total-progress denominator:
+    /// a fresh rip's staged scope, else `disc.capacity_bytes`.
     pub(crate) bytes_total_disc: u64,
     /// User-configured max retry passes (`cfg_read.max_retries`). Used
     /// as the multiplier on `bytes_unreadable` for the retry-phase

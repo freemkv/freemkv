@@ -3383,3 +3383,53 @@ fn move_file_removes_its_own_copy_that_fails_validation() {
     assert!(src.exists(), "the source is the source of truth");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// A destination root on a mount that stopped answering (the SMB share that hung the
+// macOS Library service at startup): the check gives up on it within its limit and
+// reports it not responding, while a healthy root still answers. Roots on one dead
+// mount are checked at once, so two of them cost one timeout, not two.
+#[test]
+fn check_configured_destinations_gives_up_on_a_hung_root() {
+    let base = format!("/test/hung-destination-{}", std::process::id());
+    let (movies, tv, output) = (
+        format!("{base}/movies"),
+        format!("{base}/tv"),
+        format!("{base}/output"),
+    );
+    let cfg = cfg_with_dirs(&movies, &tv, &output);
+    let hung = [movies.clone(), tv.clone()];
+    let limit = std::time::Duration::from_millis(400);
+    let started = std::time::Instant::now();
+    let problems = check_destinations_with(&cfg, limit, move |root: &str| {
+        if hung.iter().any(|h| h == root) {
+            // A stat that never comes back (until long after the limit).
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        Ok(())
+    });
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_millis(800),
+        "two hung roots must cost one timeout, took {took:?}"
+    );
+    let roots: Vec<&str> = problems.iter().map(|(r, _)| r.as_str()).collect();
+    assert_eq!(roots, [movies.as_str(), tv.as_str()], "{problems:?}");
+    for (_, reason) in &problems {
+        assert!(reason.contains("not responding"), "{reason}");
+    }
+}
+
+// The real check still runs through the bounded path: a broken root keeps its own reason.
+#[test]
+fn check_configured_destinations_keeps_the_roots_own_reason() {
+    let problems = check_destinations_with(
+        &cfg_with_dirs("", "", "relative/output"),
+        std::time::Duration::from_secs(5),
+        validate_destination_root,
+    );
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].1.contains("not an absolute path"),
+        "{problems:?}"
+    );
+}
