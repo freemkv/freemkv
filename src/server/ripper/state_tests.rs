@@ -1369,10 +1369,10 @@ fn build_bad_ranges_locates_chapter_time_and_sector_count() {
     );
 }
 
-// A scoped sweep (an MKV rip with keep ISO off reads only its titles and the disc's
-// structure) is sized by its scope: the total bar, the pass-boundary percentage and the
-// disc map's read head all reach their end with the scope, while the map keeps the disc's
-// own scale for its bad ranges.
+/// A scoped sweep (an MKV rip with keep ISO off reads only its titles and the disc's
+/// structure) is sized by its scope: the total bar, the pass-boundary percentage and the
+/// disc map's read head all reach their end with the scope, while the map keeps the disc's
+/// own scale for its bad ranges.
 #[test]
 fn a_scoped_sweep_is_sized_by_its_scope() {
     const S: u64 = SECTOR_BYTES;

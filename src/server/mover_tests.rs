@@ -3384,10 +3384,10 @@ fn move_file_removes_its_own_copy_that_fails_validation() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-// A destination root on a mount that stopped answering (the SMB share that hung the
-// macOS Library service at startup): the check gives up on it within its limit and
-// reports it not responding, while a healthy root still answers. Roots on one dead
-// mount are checked at once, so two of them cost one timeout, not two.
+/// A destination root on a mount that stopped answering (the SMB share that hung the
+/// macOS Library service at startup): the check gives up on it within its limit and
+/// reports it not responding, while a healthy root still answers. Roots on one dead
+/// mount are checked at once, so two of them cost one timeout, not two.
 #[test]
 fn check_configured_destinations_gives_up_on_a_hung_root() {
     let base = format!("/test/hung-destination-{}", std::process::id());

@@ -1724,10 +1724,10 @@ fn unreachable_root(
     })
 }
 
-// Fail-loud-EARLY destination check: validates every configured, non-empty destination root
-// (movie/tv/output). Each root is checked at once on its own thread and given up on after the
-// folder health check's limit, so a hung network mount reads "not responding" instead of
-// blocking the caller (startup, a settings save).
+/// Fail-loud-EARLY destination check: validates every configured, non-empty destination root
+/// (movie/tv/output). Each root is checked at once on its own thread and given up on after the
+/// folder health check's limit, so a hung network mount reads "not responding" instead of
+/// blocking the caller (startup, a settings save).
 pub(crate) fn check_configured_destinations(cfg: &Config) -> Vec<(String, String)> {
     check_destinations_with(
         cfg,

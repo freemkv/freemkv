@@ -112,11 +112,9 @@ pub fn run(argv: Vec<String>) {
     // Load config
     let cfg = config::load();
 
-    // Fail-loud-EARLY destination check: warn if a configured movie/tv/output
-    // dir is missing/not writable (e.g. a lost NAS bind-mount). Non-blocking —
-    // finished rips stay in staging meanwhile — but surfaces the problem at boot.
-    // It runs on its own thread: a hung network mount must never hold startup
-    // (and the web server) back.
+    // Warn at boot if a configured movie/tv/output dir is missing or not writable
+    // (finished rips stay in staging meanwhile). Own thread: a hung network mount
+    // must never hold startup, and the web server, back.
     {
         let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(msg) = keysource::keyserver_url_startup_warning(&c) {

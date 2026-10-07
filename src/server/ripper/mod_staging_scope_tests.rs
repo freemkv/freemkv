@@ -70,10 +70,10 @@ fn the_staged_titles_are_every_title_the_mux_reads() {
     assert_eq!(staged_titles(&titles, &movie, "movie", "Film", 9), [0]);
 }
 
-// A scoped staging image works end to end the way the server uses it: the sweep reads only
-// its scope and the mapfile records it, the resume checks read it as fully swept, and the
-// main title opens and muxes from it. A title outside the scope is refused (E6022), never
-// muxed as zeros.
+/// A scoped staging image works end to end the way the server uses it: the sweep reads only
+/// its scope and the mapfile records it, the resume checks read it as fully swept, and the
+/// main title opens and muxes from it. A title outside the scope is refused (E6022), never
+/// muxed as zeros.
 #[test]
 fn a_scoped_staging_image_resumes_and_muxes() {
     let fx = bd_image();

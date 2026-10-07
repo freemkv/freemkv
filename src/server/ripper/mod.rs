@@ -5129,10 +5129,10 @@ fn staged_titles(
     staged
 }
 
-// The disc→ISO sweep's scope (`(lba, sectors)`), or `None` for the whole disc. An ISO
-// deliverable or a kept ISO (`keep_iso`) is a whole-disc image; an MKV rip whose ISO is
-// discarded after the mux stages only the disc's structure (UDF, nav, AACS files) and
-// `titles`, through the engine's `mkv_staging_scope` as the GUI stages it.
+/// The disc→ISO sweep's scope (`(lba, sectors)`), or `None` for the whole disc. An ISO
+/// deliverable or a kept ISO (`keep_iso`) is a whole-disc image; an MKV rip whose ISO is
+/// discarded after the mux stages only the disc's structure (UDF, nav, AACS files) and
+/// `titles`, through the engine's `mkv_staging_scope` as the GUI stages it.
 fn sweep_scope(
     cfg: &Config,
     disc: &libfreemkv::Disc,
