@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## [1.8.2] — Unreleased
 
 ### Fixed
 
+- **The Library server image is built against the release's own library versions** (server only: the image build): 1.8.1's image was built from the libraries' development branches and reported the rip library as 1.8.0 (same code).
 - **Stop no longer rescans the disc it stopped** (server only: the drive poller belongs to the Library): the disc stays held until it is ejected, the drive is unplugged, or Scan/Rip is pressed.
 - **A network share that stops responding no longer hangs Library startup** (server only: Library service startup): the folder is reported as not responding after 5 s and the web UI comes up.
 - **A disc error or Stop during key lookup is no longer logged as the key service's final answer** (server only: the key-service retry belongs to the Library), so outage retries are no longer skipped.
