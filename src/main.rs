@@ -56,7 +56,8 @@ mod title_identity;
 mod engine;
 // The KU fixture `engine`'s tests use.
 #[cfg(all(test, feature = "gui", target_os = "macos"))]
-#[allow(dead_code)] // Shared fixture: the GUI binary uses a subset of the library cases.
+// Shared fixture: the GUI binary uses a subset. Without `server` the file allows it itself.
+#[cfg_attr(feature = "server", allow(dead_code))]
 mod ku_fixture;
 #[cfg(all(feature = "gui", target_os = "macos"))]
 mod mac;
