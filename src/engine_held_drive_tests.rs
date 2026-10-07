@@ -548,7 +548,7 @@ fn opens_hold_and_release_the_drive_in_order() {
 /// idle timeout: `close_source` calls the release.
 #[test]
 fn close_releases_the_held_drive() {
-    let ui = include_str!("ui.rs");
+    let ui = include_str!("ui.rs").replace("\r\n", "\n");
     let at = ui.find("fn close_source(&mut self)").expect("close_source");
     let body = &ui[at..at + ui[at..].find("\n    }\n").expect("end")];
     assert!(
