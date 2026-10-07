@@ -126,6 +126,10 @@ def real(path):
     return (ROOT / path).read_text()
 
 
+# The release bumps the real Cargo.toml, so edits to it name its current version.
+VERSION = re.search(r'^version = "([^"]+)"', real('Cargo.toml'), re.M).group(1)
+
+
 def base_files():
     return {
         'libfreemkv': {'Cargo.toml': LIB_TOML.format(name='libfreemkv'), 'build.rs': LIBFREEMKV_BUILD,
@@ -534,9 +538,9 @@ class FingerprintTests(unittest.TestCase):
             'first-party lock version/source': lambda: self.lock(lock_text(edit=lambda n, v, s, d: (
                 n, '1.8.1' if n in mg.FIRST_PARTY else v,
                 s.replace('v1.8.0', 'v1.8.1') if s and n in mg.FIRST_PARTY else s, d))),
-            'package.version': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'version = "1.8.0"', 'version = "1.8.1"'),
+            'package.version': lambda: self.ws.edit('freemkv', 'Cargo.toml', f'version = "{VERSION}"', 'version = "9.9.9"'),
             'description': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'description = ', 'description = "x" #'),
-            'first-party pins': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'tag = "v1.8.0"', 'tag = "v1.8.1"'),
+            'first-party pins': lambda: self.ws.edit('freemkv', 'Cargo.toml', f'tag = "v{VERSION}"', 'tag = "v9.9.9"'),
             'lib version + pins': lambda: self.ws.edit('libfreemkv', 'Cargo.toml', 'tag = "v1.8.0"', 'tag = "v9"'),
             'lib dev-dependency': lambda: self.ws.edit('libfreemkv', 'Cargo.toml', 'tempfile = "3"', 'tempfile = "4"'),
             'gui dependency': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'block2 = { version = "=0.6"',
