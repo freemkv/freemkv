@@ -90,7 +90,8 @@ jobs:
       - name: Build${{ inputs.tag && ' and push by digest' || '' }}
         env:
           TAG: ${{ inputs.tag || 'dev' }}
-          SIBLING: ${{ inputs.tag && inputs.sibling || 'dev' }}
+          # A tag build with no sibling ref builds --locked against its pinned tags.
+          SIBLING: ${{ inputs.tag && inputs.sibling || (inputs.tag == '' && 'dev' || '') }}
           PUSH: ${{ inputs.tag && 'push' || '' }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIGEST_DIR: ${{ runner.temp }}/digests
