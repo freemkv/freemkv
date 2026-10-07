@@ -1477,7 +1477,7 @@ fn the_gui_raw_disc_to_iso_scan_requests_raw_copy() {
     let state = Arc::new(RunState::default());
     let sink = UiSink(state.clone());
     let seen = std::cell::Cell::new(None);
-    let _ = run_disc_scanning(&r, &sink, &state, |_, _, raw_copy| {
+    let _ = run_disc_scanning(&r, &sink, &state, None, |_, _, raw_copy| {
         seen.set(Some(raw_copy));
         Err(libfreemkv::Error::DeviceNotFound {
             path: String::new(),

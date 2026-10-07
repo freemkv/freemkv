@@ -422,6 +422,8 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
 /// [`scan_stream`] with the open's key settings and token: a loose `.m2ts` clip's keys are
 /// looked up from its disc folder.
 pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+    // Another source replaces the disc Open held for Start.
+    HOLD.release();
     let scheme = crate::ui::container_scheme(path)
         .ok_or_else(|| format!("not a container source: {path}"))?;
     let url = format!("{scheme}://{path}");
@@ -571,6 +573,8 @@ pub fn scan_with_keys_under(
     keys: &KeyConfig,
     tok: &OpenToken,
 ) -> Result<Scanned, String> {
+    // Another source replaces the disc Open held for Start.
+    HOLD.release();
     // A FOLDER is an image-level source too: "Open Folder" / drag-and-drop.
     let src = fe::ImageSource::from_path(path);
     let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
@@ -823,8 +827,27 @@ fn disc_device(source: &str) -> Option<String> {
 /// gives no clear answer. Bare `disc://` asks every drive, as its autodetect would.
 /// Media presence only (IOKit registry on macOS, TEST UNIT READY elsewhere): no
 /// exclusive open, so it never takes the drive from a later open.
+/// A disc Open holds for Start is asked through that handle: macOS hides held media from
+/// the registry, so the registry would read it as ejected.
 #[cfg_attr(test, allow(dead_code))] // unit tests swap in a fake that touches no drive
 pub fn disc_present(source: &str) -> Option<bool> {
+    disc_present_with(&HOLD, source, registry_disc_present)
+}
+
+// `disc_present` over a hold and a registry probe (seams for the tests).
+fn disc_present_with(
+    hold: &DriveHold,
+    source: &str,
+    registry: impl FnOnce(&str) -> Option<bool>,
+) -> Option<bool> {
+    match hold.presence(source, std::time::Instant::now()) {
+        Some(verdict) => verdict,
+        None => registry(source),
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn registry_disc_present(source: &str) -> Option<bool> {
     let paths = match disc_device(source) {
         Some(p) => vec![p],
         None => libfreemkv::list_drives()
@@ -896,11 +919,246 @@ fn eject_device(device: &str, sink: &UiSink) {
 /// Bare `disc://` resolves like a rip's `DeviceTarget::Autodetect`: the drive
 /// holding media. `Ok` carries the device that was ejected.
 pub fn eject_source(source: &str) -> Result<String, String> {
-    eject_source_with(source, |dev| match dev {
+    eject_held_or(&HOLD, source, |dev| match dev {
         Some(p) => fe::drive::open(std::path::Path::new(p)).map_err(|e| format!("{e}")),
         None => libfreemkv::find_drive()
             .ok_or_else(|| "No drive with a disc found — nothing to eject.".to_string()),
     })
+}
+
+// The disc Open holds for `source` ejects through that handle, never a second open (macOS
+// allows one); a hold on another source is released first so `open` can have its drive.
+fn eject_held_or(
+    hold: &DriveHold,
+    source: &str,
+    open: impl FnOnce(Option<&str>) -> Result<libfreemkv::Drive, String>,
+) -> Result<String, String> {
+    match hold.take().filter(|h| h.source == source) {
+        Some(h) => eject_source_with(source, |_| Ok(h.drive)),
+        None => eject_source_with(source, open),
+    }
+}
+
+/// What Open leaves open for Start, so Start does not open, scan and resolve again (the
+/// server's "Reusing drive session"): the drive, Open's scan and Open's key set.
+struct HeldDrive {
+    serial: u64,
+    source: String,
+    drive: libfreemkv::Drive,
+    disc: libfreemkv::Disc,
+    /// Open's set; `None` when Open's resolve refused.
+    keys: Option<KeySet>,
+    /// The key settings Open scanned under (the drive's host certs come from them).
+    config: KeyConfig,
+    /// The open's own token: the shell cancels it on Close, another Open or Quit.
+    open: libfreemkv::Halt,
+    /// The last time the idle disc watch found the disc in the drive.
+    renewed: std::time::Instant,
+}
+
+/// The idle disc watch renews the hold every `PRESENCE_EVERY`; a hold it stopped renewing
+/// (the source was closed) is released after this.
+const HOLD_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+const HOLD_REAP_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+/// After a release macOS takes a moment to publish the media again, so the registry reads
+/// a disc as gone; a presence check this soon after one says "unknown" instead.
+const HOLD_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The one drive Open holds (one open of a drive at a time on macOS). Released by another
+/// Open, Eject, the disc leaving, a Start that cannot reuse it, the open's token, or the lease.
+struct DriveHold {
+    slot: Mutex<HoldSlot>,
+    next: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Default)]
+struct HoldSlot {
+    held: Option<HeldDrive>,
+    /// The source last released and when, for `HOLD_SETTLE`.
+    released: Option<(String, std::time::Instant)>,
+}
+
+static HOLD: DriveHold = DriveHold::new();
+
+/// Close: release the drive Open held, off the caller's thread (closing the handle can
+/// block on the drive). Nothing held, nothing done.
+pub fn release_held_drive() {
+    let _ = std::thread::Builder::new()
+        .name("release-held-drive".into())
+        .spawn(|| HOLD.release());
+}
+
+impl DriveHold {
+    const fn new() -> Self {
+        DriveHold {
+            slot: Mutex::new(HoldSlot {
+                held: None,
+                released: None,
+            }),
+            next: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HoldSlot> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // Hold `h`, releasing any earlier hold; its generation, for the reaper.
+    fn hold(&self, mut h: HeldDrive) -> u64 {
+        h.serial = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let serial = h.serial;
+        let mut slot = self.lock();
+        slot.release();
+        slot.held = Some(h);
+        serial
+    }
+
+    fn take(&self) -> Option<HeldDrive> {
+        self.lock().held.take()
+    }
+
+    fn release(&self) {
+        self.lock().release();
+    }
+
+    /// The held drive's answer for `source`: `None` when nothing is held for it (a hold on
+    /// another source is released), so the registry answers. The disc leaving releases it.
+    fn presence(&self, source: &str, now: std::time::Instant) -> Option<Option<bool>> {
+        use libfreemkv::DriveStatus as S;
+        let mut slot = self.lock();
+        let Some(h) = slot.held.as_mut().filter(|h| h.source == source) else {
+            slot.release();
+            let settling = slot.released.as_ref().is_some_and(|(s, at)| {
+                s == source && now.saturating_duration_since(*at) < HOLD_SETTLE
+            });
+            return settling.then_some(None);
+        };
+        match h.drive.drive_status() {
+            S::DiscPresent => {
+                h.renewed = now;
+                Some(Some(true))
+            }
+            S::NoDisc | S::TrayOpen => {
+                slot.release();
+                Some(Some(false))
+            }
+            S::NotReady | S::Unknown => Some(None),
+        }
+    }
+
+    /// The reaper's step for hold `serial`: release it once its open was cancelled or its lease
+    /// lapsed. Whether that hold is still there to watch.
+    fn expire(&self, serial: u64, now: std::time::Instant) -> bool {
+        let mut slot = self.lock();
+        let Some(h) = slot.held.as_ref().filter(|h| h.serial == serial) else {
+            return false;
+        };
+        if h.open.is_cancelled() || now.saturating_duration_since(h.renewed) >= HOLD_LEASE {
+            slot.release();
+            return false;
+        }
+        true
+    }
+}
+
+impl HoldSlot {
+    // Dropping the drive closes its handle.
+    fn release(&mut self) {
+        if let Some(h) = self.held.take() {
+            self.released = Some((h.source, std::time::Instant::now()));
+        }
+    }
+}
+
+// Open's scanned session as a hold: the drive gets a token of its own (the open's is cancelled
+// when the shell drops that open, and would refuse Start's reads) and its tray unlocked, as it
+// was before the hold, so the drive's button still ejects.
+fn held_drive(
+    source: &str,
+    session: libfreemkv::DiscSession,
+    disc: libfreemkv::Disc,
+    keys: Option<KeySet>,
+    config: &KeyConfig,
+    open: &libfreemkv::Halt,
+) -> Option<HeldDrive> {
+    let mut drive = session.into_drive().ok()?;
+    drive.attach(&libfreemkv::Halt::new());
+    drive.attach_progress(&libfreemkv::halt::Liveness::new());
+    drive.unlock_tray();
+    Some(HeldDrive {
+        serial: 0,
+        source: source.to_string(),
+        drive,
+        disc,
+        keys,
+        config: config.clone(),
+        open: open.clone(),
+        renewed: std::time::Instant::now(),
+    })
+}
+
+// Hold Open's drive for Start, with a reaper for the lease. A cancelled open holds nothing.
+fn hold_for_start(hold: &'static DriveHold, h: Option<HeldDrive>) {
+    let Some(h) = h.filter(|h| !h.open.is_cancelled()) else {
+        return;
+    };
+    let serial = hold.hold(h);
+    let reaper = std::thread::Builder::new()
+        .name("held-drive".into())
+        .spawn(move || {
+            while hold.expire(serial, std::time::Instant::now()) {
+                std::thread::sleep(HOLD_REAP_EVERY);
+            }
+        });
+    if reaper.is_err() {
+        hold.release();
+    }
+}
+
+/// Open's drive for this rip, when it still holds the disc Open scanned under the same
+/// source and key settings, for a scan of the same kind (a raw copy scans differently).
+/// Anything else is dropped here, closing the handle before the fresh open.
+fn reuse_held(
+    held: Option<HeldDrive>,
+    req: &RipRequest,
+    raw_copy: bool,
+    sink: &UiSink,
+) -> Option<(libfreemkv::DiscSession, libfreemkv::Disc, Option<KeySet>)> {
+    use freemkv_engine::Sink as _;
+    let mut h = held.filter(|h| h.source == req.source && h.config == req.keys && !raw_copy)?;
+    if !same_disc(&mut h.drive, &h.disc) {
+        sink.log(
+            fe::Level::Info,
+            "the disc changed since it was opened; scanning it again",
+        );
+        return None;
+    }
+    sink.log(fe::Level::Info, "reusing the drive and scan from Open");
+    let mut session = libfreemkv::DiscSession::from_drive(h.drive);
+    // As `fe::open_scan` does after its scan: the disc cannot leave mid-rip.
+    session.lock_tray();
+    Some((session, h.disc, h.keys))
+}
+
+// Whether the drive still holds the disc Open scanned: present, with the same volume id and
+// capacity (`Disc::identify`, a few sectors, not a scan).
+fn same_disc(drive: &mut libfreemkv::Drive, disc: &libfreemkv::Disc) -> bool {
+    if drive.drive_status() != libfreemkv::DriveStatus::DiscPresent {
+        return false;
+    }
+    matches!(libfreemkv::Disc::identify(drive),
+        Ok(id) if id.volume_id == disc.volume_id && id.capacity_sectors == disc.capacity_sectors)
+}
+
+// Whether Open's set already keys everything this rip reads (the server's `keys_cover`): the
+// same disc, the rip's scope, and AACS keys for an AACS disc's titles.
+fn open_keys_cover(
+    disc: &libfreemkv::Disc,
+    set: &KeySet,
+    scope: &libfreemkv::keys::KeyScope,
+) -> bool {
+    let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
+    set.is_for(&disc.media_id()) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
 }
 
 // `eject_source` over an injected open (`None` = autodetect): one open, then the eject
@@ -1032,40 +1290,47 @@ fn key_factory(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
 
 /// Scan a live optical drive (`disc://<device>` or bare `disc://` autodetect) with no key
 /// call, then resolve the main title's keys once (KU §2.5 "GUI open"): the SAME `Scanned`
-/// shape the ISO path returns, seed set included. NEEDS HARDWARE to exercise.
+/// shape the ISO path returns, seed set included. The drive, the scan and the set stay held
+/// for Start ([`HeldDrive`]). NEEDS HARDWARE to exercise.
 pub fn scan_disc_with_keys(
     source: &str,
     keys: &KeyConfig,
     tok: &OpenToken,
 ) -> Result<Scanned, String> {
-    let (disc, mut reader) = drive_scan(source, keys, tok)?;
+    // An earlier Open's drive first: this open may be of the same drive.
+    HOLD.release();
+    let (disc, mut session) = drive_scan(source, keys, tok)?;
     let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
     let scope = libfreemkv::keys::KeyScope::Titles(main.clone());
     let (set, trace) = crate::rip_keys::resolve_observed(
         &disc,
-        reader.as_mut(),
+        held_source(&mut session)?,
         scope,
         &key_factory(keys),
         &tok.halt,
         &tok.progress,
     );
-    stopped_open(set, tok).map(|set| scanned_with_keys(&disc, set, &trace, main))
+    let set = stopped_open(set, tok)?;
+    let kept = set.as_ref().ok().cloned();
+    let sc = scanned_with_keys(&disc, set, &trace, main);
+    let held = held_drive(source, session, disc, kept, keys, &tok.halt);
+    hold_for_start(&HOLD, held);
+    Ok(sc)
 }
 
 /// Open and scan the drive behind `source` with NO key call (`fe::open_scan_with`) under
-/// the open's token (stop design v5 §4.3): the disc and its raw reader. The drive is
-/// released when the reader drops.
+/// the open's token (stop design v5 §4.3): the disc, and the session holding the drive.
 fn drive_scan(
     source: &str,
     keys: &KeyConfig,
     tok: &OpenToken,
-) -> Result<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>), String> {
+) -> Result<(libfreemkv::Disc, libfreemkv::DiscSession), String> {
     // The cold keydb parse is work with no progress signal; T29 must not fire on it.
     let credentials = {
         let _busy = tok.progress.busy();
         session_credentials(keys)
     };
-    let session = fe::open_scan_with(
+    let mut session = fe::open_scan_with(
         disc_target(source),
         credentials,
         false,
@@ -1073,17 +1338,8 @@ fn drive_scan(
         &tok.progress,
     )
     .map_err(|e| drive_error(&e))?;
-    staged(session)
-}
-
-/// A scanned session's disc and its drive, staged as the raw reader.
-fn staged(
-    mut session: libfreemkv::DiscSession,
-) -> Result<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>), String> {
     let disc = session.take_disc().ok_or("scan produced no disc")?;
-    session.stage_drive_as_reader();
-    let reader = session.take_reader().ok_or("could not stage the drive")?;
-    Ok((disc, reader))
+    Ok((disc, session))
 }
 
 // "No optical drive found" for autodetect with nothing attached; else the error itself.
@@ -2807,6 +3063,10 @@ fn open_rip_image(
     if req.vid_from.is_some() {
         state.needs_disc.store(true, Ordering::SeqCst);
     }
+    // The Retry opens a drive; a disc an earlier Open still holds would refuse that open.
+    if req.vid_from.is_some() {
+        HOLD.release();
+    }
     let drive_disc = match &req.vid_from {
         Some(drive) => Some(
             crate::rip_keys::drive_scan(drive, session_credentials(&req.keys))
@@ -3105,7 +3365,7 @@ fn iso_recovery_result(result: &fe::MultipassResult, iso_path: &str) -> Result<S
 // once, then runs the chosen sink via fe::run_titles (same loop the ISO path uses). NEEDS
 // HARDWARE VALIDATION end-to-end.
 fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
-    run_disc_scanning(req, sink, state, fe::open_scan)
+    run_disc_scanning(req, sink, state, HOLD.take(), fe::open_scan)
 }
 
 /// What a whole-disc output of a drive decrypts (KU §2.5): nothing for a raw ISO copy
@@ -3139,11 +3399,14 @@ fn disc_rip_keys(
 /// [`run_disc`] with the drive scan as an injectable seam. Production always scans via
 /// `fe::open_scan` (needs a live drive, so THAT path is untestable here); a test can stub
 /// it and observe the exact `raw_copy` `run_disc` handed it — proving the wiring is real,
-/// not just that `disc_raw_copy`'s own logic is right.
+/// not just that `disc_raw_copy`'s own logic is right. `held` is what Open left open
+/// ([`reuse_held`]): when it still fits, there is no open, no scan and, when Open's set
+/// covers the rip, no resolve.
 fn run_disc_scanning(
     req: &RipRequest,
     sink: &UiSink,
     state: &Arc<RunState>,
+    held: Option<HeldDrive>,
     scan: impl FnOnce(
         libfreemkv::DeviceTarget,
         Option<libfreemkv::DriveCredentials>,
@@ -3155,18 +3418,26 @@ fn run_disc_scanning(
     }
     let kind = out_kind(&req.format);
 
-    // Scan once (shared drive core, no key call): titles, label, per-disc name.
+    // Scan once (shared drive core, no key call): titles, label, per-disc name. Open's scan
+    // when the drive Open held still has that disc.
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-    let mut session = scan(
-        disc_target(&req.source),
-        session_credentials(&req.keys),
-        disc_raw_copy(kind, req.raw),
-    )
-    .map_err(|e| drive_error(&e))?;
+    let raw_copy = disc_raw_copy(kind, req.raw);
+    let (mut session, disc, open_keys) = match reuse_held(held, req, raw_copy, sink) {
+        Some(reused) => reused,
+        None => {
+            let mut session = scan(
+                disc_target(&req.source),
+                session_credentials(&req.keys),
+                raw_copy,
+            )
+            .map_err(|e| drive_error(&e))?;
+            let disc = session.take_disc().ok_or("scan produced no disc")?;
+            (session, disc, None)
+        }
+    };
     // The resolved device path (autodetect included), for the per-title arm's eject.
-    let device = session.device_path().to_string();
     // The drive stays in `session`, read through `held_source`, so it ejects on this handle.
-    let disc = session.take_disc().ok_or("scan produced no disc")?;
+    let device = session.device_path().to_string();
     let label = if disc.volume_id.is_empty() {
         "disc".to_string()
     } else {
@@ -3196,15 +3467,27 @@ fn run_disc_scanning(
     } else {
         libfreemkv::keys::KeyScope::Titles(indices.clone())
     };
-    // KU §2.1 invariant 1: every key this rip reads with, from ONE resolve, up front.
-    let set = disc_rip_keys(
-        &disc,
-        held_source(&mut session)?,
-        scope.clone(),
-        req,
-        sink,
-        state,
-    )?;
+    // KU §2.1 invariant 1: every key this rip reads with, from ONE resolve, up front: Open's,
+    // over this same held disc, when it covers the rip; else one seeded with Open's set.
+    let set = match open_keys.filter(|k| open_keys_cover(&disc, k, &scope)) {
+        Some(set) => {
+            use freemkv_engine::Sink as _;
+            sink.log(
+                fe::Level::Info,
+                "keys: the set Open resolved covers this rip; no second resolve",
+            );
+            note_best_effort(&set, state);
+            set
+        }
+        None => disc_rip_keys(
+            &disc,
+            held_source(&mut session)?,
+            scope.clone(),
+            req,
+            sink,
+            state,
+        )?,
+    };
 
     // Decrypted folder: extract the UDF tree off the staged drive into a
     // per-disc subdir (same helper the ISO path uses).
@@ -3762,3 +4045,7 @@ mod pure_helper_tests;
 #[cfg(test)]
 #[path = "engine_ku_gui_tests.rs"]
 mod ku_gui_tests;
+
+#[cfg(test)]
+#[path = "engine_held_drive_tests.rs"]
+mod held_drive_tests;

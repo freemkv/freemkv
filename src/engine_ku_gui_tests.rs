@@ -375,7 +375,7 @@ fn disc_iso_rip_ejects_on_the_held_handle() {
     r.auto_eject = true;
     let state = Arc::new(RunState::default());
     let mut opens = 0;
-    let res = run_disc_scanning(&r, &UiSink(state.clone()), &state, |_, _, raw| {
+    let res = run_disc_scanning(&r, &UiSink(state.clone()), &state, None, |_, _, raw| {
         opens += 1;
         let drive = libfreemkv::Drive::from_transport(Box::new(t));
         let mut s = libfreemkv::DiscSession::from_drive(drive);

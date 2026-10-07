@@ -4,7 +4,15 @@
 
 ### Fixed
 
-- macOS: Stop no longer rescans the disc it stopped. The disc stays held until it is ejected, the drive is unplugged, or Scan/Rip is pressed. The scan's open drive handle hid the disc from macOS, so the poller read it as ejected and re-inserted. While the server holds a drive it now asks the drive itself, and Stop releases the drive. (server only: the drive poller and Stop belong to the Library service)
+- **Stop no longer rescans the disc it stopped** (server only: the drive poller belongs to the Library): the disc stays held until it is ejected, the drive is unplugged, or Scan/Rip is pressed.
+- **A network share that stops responding no longer hangs Library startup** (server only: Library service startup): the folder is reported as not responding after 5 s and the web UI comes up.
+- **A disc error or Stop during key lookup is no longer logged as the key service's final answer** (server only: the key-service retry belongs to the Library), so outage retries are no longer skipped.
+
+### Changed
+
+- **Start reuses the drive, scan and keys from Open** (app only: the server already reuses its session): about 8 s less per drive rip.
+- **Key-service retries no longer reread the disc** (server only: the key-service retry belongs to the Library).
+- **MKV rips that don't keep the ISO read only the titles they mux** (server only: the staging sweep belongs to the Library), not the whole disc.
 
 ## [1.8.1] — 2026-10-07
 

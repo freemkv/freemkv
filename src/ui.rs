@@ -2589,6 +2589,8 @@ impl App {
     // Forget the open source (Close, or after its disc was ejected).
     fn close_source(&mut self) {
         self.stop_opens();
+        // The drive Open held for Start is released now, not at its idle timeout.
+        crate::engine::release_held_drive();
         self.probe = None;
         self.pending = None;
         self.clear_source();
