@@ -1,0 +1,43 @@
+name: verify-release
+# Every published download of a release resolves to the right bytes, and every install
+# channel serves it. release-orchestrate runs the same checks as its last step; this
+# re-runs them daily (links rot) and whenever the checks themselves change.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: release to verify, e.g. 1.8.2 ('' = the latest release)
+        type: string
+        default: ''
+  schedule:
+    - cron: '41 7 * * *'
+  push:
+    branches: [dev]
+    paths:
+      - .github/scripts/verify-download-links.py
+      - .github/scripts/verify-channels.py
+      - .github/workflows/verify-release.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Release to verify
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT: ${{ inputs.version }}
+        run: |
+          v=${INPUT:-$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)}
+          echo "version=${v#v}" >> "$GITHUB_OUTPUT"
+      - name: Install channels serve it
+        run: python3 .github/scripts/verify-channels.py "${{ steps.v.outputs.version }}"
+      - name: Every download link, checksum and package manifest is right
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/verify-download-links.py "${{ steps.v.outputs.version }}"

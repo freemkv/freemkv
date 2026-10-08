@@ -1911,6 +1911,22 @@ jobs:
               --wait "${CHANNEL_WAIT_SECS:-3600}"
           }
 
+          # LAST step: every published download resolves to the right bytes — each asset's
+          # .sha256, every download link on every freemkv.org page, and the Homebrew and
+          # Scoop manifests. Scoop's Excavator otherwise runs only every 4 h, so dispatch it.
+          verify_download_links() {
+            say "step 9: verify every download link, checksum and package manifest for v$VERSION"
+            if $DRY_RUN; then
+              printf '  [dry-run] dispatch scoop-bucket Excavator; verify-download-links.py %s --wait %s\n' \
+                "$VERSION" "${LINK_WAIT_SECS:-1800}"
+              return 0
+            fi
+            gh workflow run excavator.yml --repo "$GIT_ORG/scoop-bucket" \
+              || err "WARN: could not dispatch the Scoop Excavator; waiting for its schedule"
+            python3 "$CANONICAL_ROOT/freemkv/.github/scripts/verify-download-links.py" "$VERSION" \
+              --wait "${LINK_WAIT_SECS:-1800}"
+          }
+
           # ───────────────────────────────── main ──────────────────────────────────
           #
           # Dependency-ordered tag cascade (nothing touches crates.io anymore):
@@ -2026,6 +2042,7 @@ jobs:
           update_website_download_version  # stage the download-page version
           commit_and_push_site            # ONE commit + ONE push → single deploy → reliable announce
           verify_website_in_sync
+          verify_download_links || die "v$VERSION is published but a download link, checksum or package manifest is wrong (above)"
           fi
 
           if $DRY_RUN; then
