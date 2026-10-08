@@ -36,8 +36,6 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# Pinned first-party firmware inspection dependency used by the Renesas unlocker.
-allow-git = ["https://github.com/MattJackson/pioneer-optical"]
 # The freemkv siblings are first-party git-tag deps; allow git sources from
 # our own org only (CI resolves them as git, not the local path override).
 [sources.allow-org]
