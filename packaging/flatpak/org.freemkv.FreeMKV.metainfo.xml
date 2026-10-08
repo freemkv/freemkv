@@ -91,6 +91,7 @@
     release date into the entry for the version it releases.
   -->
   <releases>
+    <release version="1.8.2" date="2026-10-08"/>
     <release version="1.8.1" date="2026-10-07"/>
     <release version="1.8.0" date="2026-10-05"/>
     <release version="1.7.6" date="2026-09-25">
