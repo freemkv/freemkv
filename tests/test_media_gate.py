@@ -128,6 +128,8 @@ def real(path):
 
 # The release bumps the real Cargo.toml, so edits to it name its current version.
 VERSION = re.search(r'^version = "([^"]+)"', real('Cargo.toml'), re.M).group(1)
+# A QA candidate can bump its own version before dependency tags are released.
+PIN_TAG = re.search(r'^libfreemkv = .*tag = "([^"]+)"', real('Cargo.toml'), re.M).group(1)
 
 
 def base_files():
@@ -540,7 +542,7 @@ class FingerprintTests(unittest.TestCase):
                 s.replace('v1.8.0', 'v1.8.1') if s and n in mg.FIRST_PARTY else s, d))),
             'package.version': lambda: self.ws.edit('freemkv', 'Cargo.toml', f'version = "{VERSION}"', 'version = "9.9.9"'),
             'description': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'description = ', 'description = "x" #'),
-            'first-party pins': lambda: self.ws.edit('freemkv', 'Cargo.toml', f'tag = "v{VERSION}"', 'tag = "v9.9.9"'),
+            'first-party pins': lambda: self.ws.edit('freemkv', 'Cargo.toml', f'tag = "{PIN_TAG}"', 'tag = "v9.9.9"'),
             'lib version + pins': lambda: self.ws.edit('libfreemkv', 'Cargo.toml', 'tag = "v1.8.0"', 'tag = "v9"'),
             'lib dev-dependency': lambda: self.ws.edit('libfreemkv', 'Cargo.toml', 'tempfile = "3"', 'tempfile = "4"'),
             'gui dependency': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'block2 = { version = "=0.6"',
