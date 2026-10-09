@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Enable verified Pioneer BDR-UD04 unlocking through freemkv-unlock while preserving VID retrieval (CLI, app, and server share this drive path). Include release-tooling checks for download links, checksums, and package manifests.
+- Add beta Pioneer runtime unlocking through firmware signature discovery while preserving VID retrieval (CLI, app, and server share this drive path). Include release-tooling checks for download links, checksums, and package manifests.
 
 ## [1.8.2] — 2026-10-08
 
