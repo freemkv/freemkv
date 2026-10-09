@@ -302,7 +302,7 @@ jobs:
       - name: Install GTK4 + libadwaita development headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install --no-install-recommends -y \
             libgtk-4-dev \
             libadwaita-1-dev \
             build-essential
@@ -522,7 +522,7 @@ jobs:
       - name: Install GTK4 + libadwaita development headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
+          sudo apt-get install --no-install-recommends -y libgtk-4-dev libadwaita-1-dev build-essential
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable

@@ -50,7 +50,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: media-revisions, path: revisions.json, if-no-files-found: error }
       - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg
       - name: Generate the shared master.mkv
         run: |
           ffmpeg -v error -f lavfi -i testsrc=duration=6:size=640x480:rate=24 \
@@ -105,7 +105,7 @@ jobs:
         shell: bash
         run: |
           case "${{ matrix.os }}" in
-            ubuntu-*)  sudo apt-get update && sudo apt-get install -y ffmpeg ;;
+            ubuntu-*)  sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg ;;
             macos-*)   brew install ffmpeg ;;
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
@@ -306,7 +306,7 @@ jobs:
         shell: bash
         run: |
           case "${{ matrix.os }}" in
-            ubuntu-*) sudo apt-get update && sudo apt-get install -y ffmpeg ;;
+            ubuntu-*) sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg ;;
             macos-*) brew install ffmpeg ;;
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
