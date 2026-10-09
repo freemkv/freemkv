@@ -172,8 +172,8 @@ tempfile = "3"
 # dev overrides this with a path patch in the gitignored .cargo/config.toml (a
 # config-level [patch.crates-io] wins over this manifest one).
 [patch.crates-io]
-libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.8.2" }
-freemkv-engine = { git = "https://github.com/freemkv/freemkv-engine", tag = "v1.8.2" }
-freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.8.2" }
-freemkv-unlock = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.8.2" }
-freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.8.2" }
+libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.8.3" }
+freemkv-engine = { git = "https://github.com/freemkv/freemkv-engine", tag = "v1.8.3" }
+freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.8.3" }
+freemkv-unlock = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.8.3" }
+freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.8.3" }
