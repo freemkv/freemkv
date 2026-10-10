@@ -33,6 +33,71 @@ pub use state::{
     try_claim_active, try_claim_active_checked, update_state, update_state_with,
 };
 
+/// Persist an operator title correction onto the current disc's staging entry.
+/// The mapfile remains byte-for-byte intact: its disc hash is the identity;
+/// title/routing metadata lives in state.json and staged filenames.
+pub fn retitle_staging_for_device(
+    cfg: &Arc<RwLock<Config>>,
+    device: &str,
+    title: &str,
+    year: u16,
+    media_type: &str,
+) -> Result<(), String> {
+    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let (old_title, label) = {
+        let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let row = s.get(device).ok_or_else(|| "unknown device".to_string())?;
+        (row.disc_name.clone(), row.disc_label.clone())
+    };
+    if old_title.is_empty() || old_title == title {
+        return Ok(());
+    }
+    let root = std::path::Path::new(&c.staging_dir);
+    let old_dir = root.join(staging::staging_basename(root, &old_title, &label));
+    if !old_dir.is_dir() {
+        return Ok(());
+    }
+    let new_dir = root.join(staging::staging_basename(root, title, &label));
+    if new_dir != old_dir && new_dir.exists() {
+        return Err(format!(
+            "the corrected title already has staging: {}",
+            new_dir.display()
+        ));
+    }
+    if new_dir != old_dir {
+        std::fs::rename(&old_dir, &new_dir)
+            .map_err(|e| format!("could not rename staging: {e}"))?;
+    }
+    let old_stem = crate::server::util::sanitize_path_compact(&old_title);
+    let new_stem = crate::server::util::sanitize_path_compact(title);
+    if old_stem != new_stem {
+        let entries = std::fs::read_dir(&new_dir)
+            .map_err(|e| format!("could not inspect renamed staging: {e}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("could not inspect staged file: {e}"))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(rest) = name.strip_prefix(&old_stem) else {
+                continue;
+            };
+            let target = new_dir.join(format!("{new_stem}{rest}"));
+            if target.exists() {
+                return Err(format!(
+                    "the corrected title already has staged file: {}",
+                    target.display()
+                ));
+            }
+            std::fs::rename(entry.path(), target)
+                .map_err(|e| format!("could not rename staged file: {e}"))?;
+        }
+    }
+    staging::mutate_state_if_present(&new_dir, |st| {
+        st.title = title.to_string();
+        st.year = year;
+        st.media_type = media_type.to_string();
+    });
+    Ok(())
+}
+
 // Internal-use imports for the orchestrator code that lives in this
 // file. Sub-module-private helpers (`pub(super)`) are reachable from
 // here because we are the parent of `state` / `session` / `staging`.

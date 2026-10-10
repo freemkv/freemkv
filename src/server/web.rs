@@ -496,7 +496,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         if !is_valid_device_name(&device) {
             return json_response(request, 400, r#"{"error":"invalid device name"}"#);
         }
-        handle_title_override(request, &device);
+        handle_title_override(request, cfg, &device);
     } else if url.starts_with("/api/library") {
         if let Some(request) = crate::server::library::api::handle(request, cfg) {
             json_response(request, 404, r#"{"error":"not found"}"#);
@@ -524,7 +524,7 @@ const UNKNOWN_DEVICE_BODY: &str = r#"{"ok":false,"error":"unknown or not yet ini
 // POST /api/title/<device>: operator's TMDB pick for the active disc.
 // Body: {"title","year","poster_url","overview"}. Stored as a one-shot
 // override `rip_disc` consumes; also reflected on the live card immediately.
-fn handle_title_override(request: tiny_http::Request, device: &str) {
+fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &str) {
     // An override for an untracked drive has nothing to attach to and
     // would persist orphaned; reject before reading the body, matching
     // how other per-device routes validate (404 unknown).
@@ -593,6 +593,13 @@ fn handle_title_override(request: tiny_http::Request, device: &str) {
             tmdb_id,
         },
     );
+    if let Err(e) = ripper::retitle_staging_for_device(cfg, device, &title, year, &media_type) {
+        return json_response(
+            request,
+            409,
+            &serde_json::json!({"ok": false, "error": e}).to_string(),
+        );
+    }
     // Reflect on the live card right away, exactly as the engine will use the
     // override: the previous match's poster/overview/type do not carry over.
     ripper::update_state_with(device, |s| {
