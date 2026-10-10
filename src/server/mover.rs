@@ -182,6 +182,15 @@ fn schedule_failed_delivery(path: &str, outcomes: &[MoveOutcome]) {
 pub static MOVE_ERRORS: once_cell::sync::Lazy<Mutex<BTreeMap<String, MoverError>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(BTreeMap::new()));
 
+// Stop automatic retries until the operator chooses Retry.
+fn hold_for_operator(path: &str) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(error) = errors.get_mut(path) {
+        error.retry_after = None;
+        error.retry_held = true;
+    }
+}
+
 fn record_error(path: &str, reason: &str, hint: &str) {
     record_error_with(path, reason, hint, crate::server::log::syslog);
 }
@@ -1201,14 +1210,20 @@ fn check_and_move(cfg: &Config) {
         // covers the whole file set (MKV+ISO matched); a STAT failure aborts as `uncertain`.
         if delivery.is_none() {
             let mut uncertain = false;
+            let mut residue = None;
             let variant = crate::server::util::disc_variant(|n| {
-                if uncertain {
+                if uncertain || residue.is_some() {
                     return false;
                 }
                 for (_, dest) in planned_moves.iter() {
-                    match unowned_dest_claim(&dest_with_variant(dest, n)) {
+                    let candidate = dest_with_variant(dest, n);
+                    match unowned_dest_claim(&candidate) {
                         DestClaim::Claimable => {}
                         DestClaim::OtherFile => return false,
+                        DestClaim::EmptyFile => {
+                            residue = Some(candidate);
+                            return false;
+                        }
                         DestClaim::Unknown => {
                             uncertain = true;
                             return false;
@@ -1217,6 +1232,18 @@ fn check_and_move(cfg: &Config) {
                 }
                 true
             });
+            if let Some(path) = residue {
+                record_error(
+                    &dir_str,
+                    &format!(
+                        "zero-length file at the destination, likely an interrupted publication: {}",
+                        absolute_for_log(&path)
+                    ),
+                    "Nothing was moved or deleted, and no other name was used. Inspect the empty file; delete it if it is not a library file, then choose Retry. The rip stays in staging.",
+                );
+                hold_for_operator(&dir_str);
+                continue;
+            }
             match variant {
                 Some(n) => {
                     for (_, dest) in planned_moves.iter_mut() {
@@ -1552,11 +1579,7 @@ fn check_and_move(cfg: &Config) {
                 "destination does not support a required delivery operation",
                 "Automatic retries stopped. See the operation and destination in the copy error; fix the destination, then choose Retry. Staged source files are retained.",
             );
-            let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(error) = errors.get_mut(&dir_str) {
-                error.retry_after = None;
-                error.retry_held = true;
-            }
+            hold_for_operator(&dir_str);
             continue;
         }
 
@@ -1788,6 +1811,9 @@ enum DestClaim {
     Claimable,
     /// Held by a different file. Try the next disc variant.
     OtherFile,
+    /// A zero-length regular file, likely an interrupted publication's claim:
+    /// an operator hold, never a reason to take another name.
+    EmptyFile,
     /// We could not find out. NOT a licence to try another name — see
     /// [`dest_claim`].
     Unknown,
@@ -1799,7 +1825,11 @@ fn unowned_dest_claim(dest: &str) -> DestClaim {
     match std::fs::symlink_metadata(dest) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DestClaim::Claimable,
         Err(_) => DestClaim::Unknown,
-        Ok(m) if m.is_file() && fresh_metadata(Path::new(dest)).is_err() => DestClaim::Unknown,
+        Ok(m) if m.is_file() => match fresh_metadata(Path::new(dest)) {
+            Err(_) => DestClaim::Unknown,
+            Ok(fresh) if fresh.len() == 0 => DestClaim::EmptyFile,
+            Ok(_) => DestClaim::OtherFile,
+        },
         Ok(_) => DestClaim::OtherFile,
     }
 }

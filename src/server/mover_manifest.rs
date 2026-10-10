@@ -291,7 +291,14 @@ impl Manifest {
         verify_parent(&entry.destination, entry.destination_parent_id)?;
         // Never infer ownership from pathname, size, sampled content, or valid media.
         match std::fs::symlink_metadata(&entry.destination) {
-            Ok(_) => {
+            Ok(found) => {
+                if entry.published.is_none() && found.is_file() && found.len() == 0 {
+                    return Err(io::Error::other(format!(
+                        "zero-length file at destination, likely an interrupted publication; \
+                         inspect and remove it, then Retry: {}",
+                        entry.destination.display()
+                    )));
+                }
                 if entry.prepared.is_none() {
                     return Err(io::Error::other("unowned destination blocks delivery"));
                 }

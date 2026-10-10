@@ -217,6 +217,38 @@ fn copy_pins_an_even_second_source_time_that_survives_publication() {
 }
 
 #[test]
+fn check_and_move_holds_a_zero_length_destination_instead_of_taking_a_variant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let dest_dir = movie_dir.join("Residue (2024)");
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let residue = dest_dir.join("Residue (2024).mkv");
+    std::fs::write(&residue, b"").unwrap();
+    let disc_dir = staging.join("Residue");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Residue")).unwrap();
+    let mut rip = vec![0x1A, 0x45, 0xDF, 0xA3];
+    rip.extend_from_slice(&[0x44u8; 4096]);
+    std::fs::write(disc_dir.join("Residue.mkv"), &rip).unwrap();
+
+    let _g = errors_guard();
+    check_and_move(&cfg);
+
+    assert!(!dest_dir.join("Residue (2024)_2.mkv").exists());
+    assert_eq!(std::fs::metadata(&residue).unwrap().len(), 0);
+    assert_eq!(std::fs::read(disc_dir.join("Residue.mkv")).unwrap(), rip);
+    let key = disc_dir.to_string_lossy().to_string();
+    let error = error_snapshot(&key).expect("an operator hold");
+    assert!(error.reason.contains("zero-length"), "{}", error.reason);
+    assert!(error.retry_held);
+    clear_error(&key);
+}
+
+#[test]
 fn delivery_retries_back_off_then_require_operator_retry() {
     let _guard = super::TEST_STATE_LOCK
         .lock()

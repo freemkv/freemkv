@@ -530,3 +530,14 @@ fn a_publication_whose_size_changed_is_not_rebound() {
     let saved = Manifest::load(&dir).unwrap().unwrap();
     assert!(saved.entries[0].published.is_none() && !saved.entries[0].completed);
 }
+
+#[test]
+fn a_zero_length_destination_is_held_as_interrupted_publication() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[0];
+    std::fs::write(&entry.destination, b"").unwrap();
+    let error = Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap_err();
+    assert!(error.to_string().contains("zero-length"), "{error}");
+    assert_eq!(std::fs::metadata(&entry.destination).unwrap().len(), 0);
+    assert!(entry.source.exists());
+}
