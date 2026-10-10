@@ -730,9 +730,8 @@ impl Queue {
         })
     }
 
-    /// Attach the immutable plan produced for a claimed job. The worker calls
-    /// this before the first output so a restart can resume from the same
-    /// source/output decisions instead of planning again.
+    /// [`Self::set_plan_targets`] with targets derived from `job.target` (tests).
+    #[cfg(test)]
     pub fn set_plan(&self, id: u64, plan: RemuxPlan) -> bool {
         self.set_plan_targets(id, plan, None)
     }
@@ -758,6 +757,9 @@ impl Queue {
         Ok(())
     }
 
+    /// Attach the immutable plan produced for a claimed job before its first output, so
+    /// a restart resumes the same source/output decisions instead of planning again.
+    /// `None` targets derive from `job.target` (its folder for several outputs).
     pub(crate) fn set_plan_targets(
         &self,
         id: u64,
