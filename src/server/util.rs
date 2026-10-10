@@ -108,6 +108,17 @@ pub fn sanitize_path_compact(name: &str) -> String {
     ensure_safe_segment(filtered)
 }
 
+/// A delivered file's modification time, pinned explicitly before its writer
+/// closes: `t` rounded down to an even whole second, exact on every filesystem
+/// (FAT included). SMB servers keep an explicitly set time across the deferred
+/// close and rename, which journaled delivery identities depend on.
+pub fn pinned_mtime(t: std::time::SystemTime) -> std::time::SystemTime {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => std::time::UNIX_EPOCH + std::time::Duration::from_secs(since.as_secs() & !1),
+        Err(_) => t,
+    }
+}
+
 /// How many discs may hide behind one title before we stop trying. A title
 /// with 64 distinct discs behind it is a bug, not a boxset.
 pub const MAX_DISC_VARIANTS: u32 = 64;

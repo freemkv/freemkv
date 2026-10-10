@@ -559,6 +559,16 @@ fn copy_counting_with_halt(
             total += n as u64;
             written.store(total, Ordering::Relaxed);
         }
+        // Journal rebinds compare size and this explicit time; a deferred SMB
+        // close would otherwise stamp publication time. Best effort: see rebind.
+        stage("pinning destination modification time");
+        if let Err(error) = reader
+            .metadata()
+            .and_then(|m| m.modified())
+            .and_then(|t| writer.set_modified(crate::server::util::pinned_mtime(t)))
+        {
+            tracing::warn!(%error, path = %tmp.display(), "mover: cannot pin destination time");
+        }
         stage("flushing destination temporary file");
         writer
             .flush()
@@ -2216,10 +2226,13 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
         std::sync::Arc::new(|_| Ok(())),
         false,
         src.parent().unwrap_or_else(|| Path::new("")),
+        Default::default(),
     )
 }
 
 type BeforePublish = std::sync::Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
+// Set once our own no_replace returned Ok, whatever outcome is reported later.
+type Published = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 fn move_file_journaled(
     src: &Path,
@@ -2227,8 +2240,9 @@ fn move_file_journaled(
     on_progress: &dyn Fn(u8, f64, f64, f64),
     before_publish: BeforePublish,
     job: &Path,
+    published: Published,
 ) -> MoveOutcome {
-    move_file_inner(src, dest, on_progress, before_publish, true, job)
+    move_file_inner(src, dest, on_progress, before_publish, true, job, published)
 }
 
 fn move_file_inner(
@@ -2238,6 +2252,7 @@ fn move_file_inner(
     before_publish: BeforePublish,
     journaled: bool,
     job: &Path,
+    published: Published,
 ) -> MoveOutcome {
     // Journal recovery alone may adopt an existing destination. Never infer
     // transaction ownership from its size, structure, or the source's absence.
@@ -2311,6 +2326,7 @@ fn move_file_inner(
     }
     match libfreemkv::io::publish::no_replace(src, dest) {
         Ok(()) => {
+            published.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
@@ -2358,7 +2374,7 @@ fn move_file_inner(
     let worker_activity = activity.clone();
     let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<u64>>();
     let copy_handle = match crate::server::daemon::spawn_background("mover-copy", move || {
-        let _ = tx.send(copy_counting_with_halt(
+        let result = copy_counting_with_halt(
             &src_owned,
             &dest_owned,
             &written_w,
@@ -2376,7 +2392,12 @@ fn move_file_inner(
                 before_publish(candidate)
             },
             Some(&worker_activity),
-        ));
+        );
+        // Copy returns Ok only after publication, even if the monitor stalled.
+        if result.is_ok() {
+            published.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let _ = tx.send(result);
     }) {
         Ok(handle) => handle,
         Err(e) => {

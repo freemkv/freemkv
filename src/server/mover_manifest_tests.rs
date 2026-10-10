@@ -345,8 +345,13 @@ fn changed_filesystem_identity_is_an_explicit_hold_even_with_unchanged_bytes() {
     let destination = manifest.entries[0].destination.clone();
     let bytes = std::fs::read(&destination).unwrap();
     // Simulate the identity discontinuity reported after an SMB remount.
-    let recorded = manifest.entries[0].prepared.as_mut().unwrap();
-    recorded.file_id.0 = recorded.file_id.0.wrapping_add(1);
+    let entry = &mut manifest.entries[0];
+    for recorded in [entry.prepared.as_mut(), entry.published.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        recorded.file_id.0 = recorded.file_id.0.wrapping_add(1);
+    }
     manifest.save().unwrap();
     assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
     assert_eq!(std::fs::read(&destination).unwrap(), bytes);
@@ -430,4 +435,98 @@ fn target_lock_set_excludes_a_cooperating_writer_until_released() {
     drop(locks);
     rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
     drop(other.join().unwrap());
+}
+
+// smbfs against Samba's fruit:zero_file_id=yes derives ids from the name.
+struct NameDerived(PathBuf);
+
+impl NameDerived {
+    fn register(root: &Path) -> Self {
+        let root = root.canonicalize().unwrap();
+        NAME_DERIVED.lock().unwrap().push(root.clone());
+        Self(root)
+    }
+}
+
+impl Drop for NameDerived {
+    fn drop(&mut self) {
+        NAME_DERIVED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|root| root != &self.0);
+    }
+}
+
+#[test]
+fn name_derived_ids_are_rebound_inside_the_publishing_call() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, manifest) = fixture();
+    let _ids = NameDerived::register(Path::new(&manifest.roots[0]));
+    for index in 0..3 {
+        assert!(matches!(
+            Manifest::deliver(&dir, index, &|_, _, _, _| {}).unwrap(),
+            super::super::MoveOutcome::Moved
+        ));
+    }
+    let saved = Manifest::load(&dir).unwrap().unwrap();
+    assert!(
+        saved
+            .entries
+            .iter()
+            .all(|e| e.completed && e.published.is_some())
+    );
+    saved.verify_delivered().unwrap();
+    super::super::check_and_move(&cfg);
+    assert!(!dir.exists(), "a rebound delivery links and cleans up");
+    assert!(manifest.entries.iter().all(|e| e.destination.exists()));
+}
+
+#[test]
+fn a_name_derived_mismatch_found_by_a_later_call_is_held() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let _ids = NameDerived::register(Path::new(&manifest.roots[0]));
+    let entry = &manifest.entries[0];
+    let candidate = entry.destination.with_extension("part");
+    std::fs::copy(&entry.source, &candidate).unwrap();
+    Manifest::prepare(&dir, 0, &candidate).unwrap();
+    libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
+    assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
+    assert!(entry.source.exists());
+    assert!(!Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
+}
+
+#[test]
+fn a_publication_reported_as_stalled_is_still_rebound_then_completed_on_retry() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let _ids = NameDerived::register(Path::new(&manifest.roots[0]));
+    let entry = &manifest.entries[0];
+    let candidate = entry.destination.with_extension("part");
+    std::fs::copy(&entry.source, &candidate).unwrap();
+    Manifest::prepare(&dir, 0, &candidate).unwrap();
+    libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
+    // The worker published, but the monitor reported a stall.
+    Manifest::settle(&dir, 0, true, false).unwrap();
+    let saved = Manifest::load(&dir).unwrap().unwrap();
+    assert!(saved.entries[0].published.is_some() && !saved.entries[0].completed);
+    assert!(matches!(
+        Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap(),
+        super::super::MoveOutcome::Skipped
+    ));
+    assert!(Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
+}
+
+#[test]
+fn a_publication_whose_size_changed_is_not_rebound() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[0];
+    let candidate = entry.destination.with_extension("part");
+    std::fs::copy(&entry.source, &candidate).unwrap();
+    Manifest::prepare(&dir, 0, &candidate).unwrap();
+    libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
+    std::fs::write(&entry.destination, b"shadowed").unwrap();
+    assert!(Manifest::settle(&dir, 0, true, true).is_err());
+    let saved = Manifest::load(&dir).unwrap().unwrap();
+    assert!(saved.entries[0].published.is_none() && !saved.entries[0].completed);
 }

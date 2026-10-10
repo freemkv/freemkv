@@ -3,8 +3,9 @@
 //! Automatic recovery requires stable filesystem identities (device/inode on
 //! Unix, volume/file index on Windows). Some SMB remounts change those IDs:
 //! that is an explicit operator hold, not permission to adopt equal bytes.
-//! Sources, destinations and their parent directories are never rebound by
-//! size, hashes, names, or changed output settings.
+//! The one rebind: the call whose own publication succeeded under the target
+//! lock records `published` after checking size and the pinned mtime (smbfs
+//! ids follow names). Nothing found later is rebound by size, hash or name.
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,14 +21,35 @@ struct Identity {
     modified: std::time::SystemTime,
 }
 
+// Tests register directories whose files get smbfs-like name-derived ids.
+#[cfg(test)]
+pub(super) static NAME_DERIVED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn file_id(path: &Path) -> io::Result<(u64, u64)> {
+    let id = libfreemkv::io::artifact_lock::file_identity(path)?;
+    #[cfg(test)]
+    if NAME_DERIVED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|root| path.starts_with(root))
+    {
+        use std::hash::{Hash, Hasher};
+        let mut name = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut name);
+        return Ok((id.0, name.finish()));
+    }
+    Ok(id)
+}
+
 impl Identity {
     fn read(path: &Path) -> io::Result<Self> {
         if !std::fs::symlink_metadata(path)?.is_file() {
             return Err(io::Error::other("delivery requires a regular file"));
         }
-        let file_id = libfreemkv::io::artifact_lock::file_identity(path)?;
+        let file_id = file_id(path)?;
         let metadata = std::fs::File::open(path)?.metadata()?;
-        if libfreemkv::io::artifact_lock::file_identity(path)? != file_id {
+        if self::file_id(path)? != file_id {
             return Err(io::Error::other(
                 "delivery file changed while reading identity",
             ));
@@ -57,7 +79,19 @@ struct Entry {
     destination_parent_id: (u64, u64),
     source_identity: Identity,
     prepared: Option<Identity>,
+    #[serde(default)]
+    published: Option<Identity>,
     completed: bool,
+}
+
+impl Entry {
+    // The publication this journal proved last: rebound, else as prepared.
+    fn owned(&self) -> io::Result<&Identity> {
+        self.published
+            .as_ref()
+            .or(self.prepared.as_ref())
+            .ok_or_else(|| io::Error::other("delivery identity missing"))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -172,6 +206,7 @@ impl Manifest {
                 destination_parent_id,
                 source_identity,
                 prepared: None,
+                published: None,
                 completed: false,
             });
         }
@@ -257,11 +292,10 @@ impl Manifest {
         // Never infer ownership from pathname, size, sampled content, or valid media.
         match std::fs::symlink_metadata(&entry.destination) {
             Ok(_) => {
-                entry
-                    .prepared
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("unowned destination blocks delivery"))?
-                    .verify(&entry.destination)?;
+                if entry.prepared.is_none() {
+                    return Err(io::Error::other("unowned destination blocks delivery"));
+                }
+                entry.owned()?.verify(&entry.destination)?;
                 sync_parent(&entry.destination)?;
                 manifest.entries[index].completed = true;
                 manifest.save()?;
@@ -272,30 +306,55 @@ impl Manifest {
         }
         entry.source_identity.verify(&entry.source)?;
         let owned_dir = dir.to_path_buf();
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let outcome = super::move_file_journaled(
             &entry.source,
             &entry.destination,
             progress,
             Arc::new(move |candidate| Self::prepare(&owned_dir, index, candidate)),
             dir,
+            published.clone(),
         );
-        if matches!(
+        let finished = matches!(
             outcome,
             super::MoveOutcome::Moved
                 | super::MoveOutcome::MovedDirty
                 | super::MoveOutcome::Skipped
-        ) {
-            manifest = Self::load(dir)?
-                .ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
-            manifest.entries[index]
-                .prepared
-                .as_ref()
-                .ok_or_else(|| io::Error::other("publication did not journal its identity"))?
-                .verify(&entry.destination)?;
-            manifest.entries[index].completed = true;
-            manifest.save()?;
+        );
+        let published = published.load(std::sync::atomic::Ordering::SeqCst);
+        if published || finished {
+            Self::settle(dir, index, published, finished)?;
         }
         Ok(outcome)
+    }
+
+    // `published`: our no_replace returned Ok in this call, under the target
+    // lock, even if a later step failed. Only then may a changed id rebind.
+    fn settle(dir: &Path, index: usize, published: bool, finished: bool) -> io::Result<()> {
+        let mut manifest =
+            Self::load(dir)?.ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
+        let entry = manifest
+            .entries
+            .get_mut(index)
+            .ok_or_else(|| io::Error::other("invalid delivery entry"))?;
+        let prepared = entry
+            .prepared
+            .as_ref()
+            .ok_or_else(|| io::Error::other("publication did not journal its identity"))?;
+        if published {
+            let current = Identity::read(&entry.destination)?;
+            if current.size != prepared.size || current.modified != prepared.modified {
+                return Err(io::Error::other(format!(
+                    "published file differs from its prepared size or time: {}",
+                    entry.destination.display()
+                )));
+            }
+            entry.published = Some(current);
+        } else {
+            prepared.verify(&entry.destination)?;
+        }
+        entry.completed |= finished;
+        manifest.save()
     }
 
     pub fn verify_delivered(&self) -> io::Result<()> {
@@ -304,11 +363,7 @@ impl Manifest {
             if !entry.completed {
                 return Err(io::Error::other("delivery plan is incomplete"));
             }
-            entry
-                .prepared
-                .as_ref()
-                .ok_or_else(|| io::Error::other("delivery identity missing"))?
-                .verify(&entry.destination)?;
+            entry.owned()?.verify(&entry.destination)?;
             sync_parent(&entry.destination)?;
         }
         Ok(())
@@ -387,11 +442,7 @@ impl Manifest {
         for entry in &self.cleanup {
             if let Some(delivered) = self.entries.iter().find(|e| e.source == entry.path) {
                 verify_parent(&delivered.destination, delivered.destination_parent_id)?;
-                delivered
-                    .prepared
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("delivery identity missing"))?
-                    .verify(&delivered.destination)?;
+                delivered.owned()?.verify(&delivered.destination)?;
             }
             match entry.identity.verify(&entry.path) {
                 Ok(()) => std::fs::remove_file(&entry.path)?,
