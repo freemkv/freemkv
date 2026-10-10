@@ -341,6 +341,7 @@ impl Manifest {
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?
             .clone();
         verify_parent(&entry.destination, entry.destination_parent_id)?;
+        super::sweep_temporaries(&entry.destination)?;
         // Never infer ownership from pathname, size, sampled content, or valid media.
         match std::fs::symlink_metadata(&entry.destination) {
             Ok(found) => {

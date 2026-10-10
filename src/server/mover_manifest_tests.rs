@@ -815,6 +815,43 @@ fn the_move_webhook_is_owed_until_linkage_succeeds() {
     super::super::clear_move_error(&key);
 }
 
+fn temporary(destination: &Path, pid: u32) -> PathBuf {
+    let mut name = destination.as_os_str().to_owned();
+    name.push(format!(".part-{pid}"));
+    PathBuf::from(name)
+}
+
+#[test]
+fn an_interrupted_copy_left_on_the_share_is_removed_before_the_next_attempt() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[0];
+    let residue = temporary(&entry.destination, 44447);
+    std::fs::write(&residue, b"half a copy").unwrap();
+    let unrelated = entry
+        .destination
+        .with_file_name("owned_2_episode1.mkv.part-notapid");
+    std::fs::write(&unrelated, b"not ours").unwrap();
+    assert!(matches!(
+        Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap(),
+        super::super::MoveOutcome::Moved
+    ));
+    assert!(!residue.exists(), "our own interrupted temporary is swept");
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"not ours");
+}
+
+#[test]
+fn a_residue_that_cannot_be_removed_holds_the_delivery_and_names_it() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[0];
+    let residue = temporary(&entry.destination, 51515);
+    std::fs::create_dir(&residue).unwrap();
+    std::fs::write(residue.join("inside"), b"x").unwrap();
+    let error = Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap_err();
+    assert!(error.to_string().contains(".part-51515"), "{error}");
+    assert!(residue.join("inside").exists());
+    assert!(entry.source.exists() && !entry.destination.exists());
+}
+
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
 // live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
 #[cfg(unix)]

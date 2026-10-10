@@ -586,7 +586,7 @@ fn copy_counting_with_halt(
     };
     // Remove any stale temp from a prior interrupted run before we start.
     stage("removing stale destination temporary file");
-    let _ = std::fs::remove_file(&tmp);
+    remove_temporary(&tmp);
     // The temp name embeds OUR pid, so the line above only clears our own
     // name; orphaned `.part-<other-pid>` temps from prior crashed runs
     // would otherwise linger. Scan the dest parent and remove any of them.
@@ -616,7 +616,7 @@ fn copy_counting_with_halt(
                     && name.starts_with(&prefix)
                 {
                     stage("removing stale destination temporary file");
-                    let _ = std::fs::remove_file(entry.path());
+                    remove_temporary(&entry.path());
                 }
             }
         }
@@ -699,7 +699,7 @@ fn copy_counting_with_halt(
             // Drop the partial temp so the next attempt starts clean and
             // no orphan lingers on the dest fs.
             stage("removing cancelled destination temporary file");
-            let _ = std::fs::remove_file(&tmp);
+            remove_temporary(&tmp);
             return Err(e);
         }
     };
@@ -712,7 +712,7 @@ fn copy_counting_with_halt(
         libfreemkv::io::fsync::dir(parent);
     }
     if cancel() || halt.is_some_and(|halt| halt.is_cancelled()) {
-        let _ = std::fs::remove_file(&tmp);
+        remove_temporary(&tmp);
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "copy aborted before publication",
@@ -720,11 +720,11 @@ fn copy_counting_with_halt(
     }
     stage("validating and checkpointing destination candidate");
     if let Err(e) = before_publish(&tmp) {
-        let _ = std::fs::remove_file(&tmp);
+        remove_temporary(&tmp);
         return Err(e);
     }
     if cancel() || halt.is_some_and(|halt| halt.is_cancelled()) {
-        let _ = std::fs::remove_file(&tmp);
+        remove_temporary(&tmp);
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "publication cancelled",
@@ -732,7 +732,7 @@ fn copy_counting_with_halt(
     }
     stage("publishing destination");
     if let Err(e) = libfreemkv::io::publish::no_replace(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
+        remove_temporary(&tmp);
         return Err(std::io::Error::new(
             e.kind(),
             format!("publish destination {}: {e}", dest.display()),
@@ -743,6 +743,56 @@ fn copy_counting_with_halt(
         libfreemkv::io::fsync::dir(parent);
     }
     Ok(total)
+}
+
+// Remove `<dest>.part-<pid>` temporaries of interrupted copies. Callers hold the
+// job lease and target lock, so none is live; anything not removable is returned.
+fn sweep_temporaries(dest: &Path) -> std::io::Result<()> {
+    let (Some(parent), Some(name)) = (dest.parent(), dest.file_name()) else {
+        return Ok(());
+    };
+    let mut prefix = name.to_os_string();
+    prefix.push(".part-");
+    let prefix = prefix.to_string_lossy().into_owned();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pid) = file_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let path = entry.path();
+        let removed = match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_file() => std::fs::remove_file(&path),
+            Ok(_) => Err(std::io::Error::other("not a regular file")),
+            Err(e) => Err(e),
+        };
+        match removed {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "leftover partial copy from an interrupted delivery could not be removed: {}: {e}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// A failed removal of our own temporary is retried, and surfaced, by the next sweep.
+fn remove_temporary(tmp: &Path) {
+    if let Err(error) = std::fs::remove_file(tmp)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, path = %tmp.display(), "mover: destination temporary retained");
+    }
 }
 
 // Exclusive and never through a link: the name is predictable on a shared folder,
