@@ -2905,7 +2905,7 @@ mod http {
         assert_eq!(code, 200, "{body}");
         let cleared: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(cleared["discarded"], 0);
-        assert_eq!(cleared["failed"], 0);
+        assert_eq!(cleared["failed"], 1);
         let (code, _) = roundtrip(
             &cfg,
             "GET",

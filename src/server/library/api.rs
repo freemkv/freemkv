@@ -233,26 +233,8 @@ pub fn handle(
             }
         }
         (_, true, "/api/library/staged/clear") => {
-            let stage = crate::server::health::remux_stage_dir();
-            let targets: Vec<PathBuf> = lib
-                .queue
-                .snapshot()
-                .jobs
-                .iter()
-                .filter(|j| j.staged.is_some())
-                .map(|j| j.target.clone())
-                .collect();
-            let mut discarded = 0usize;
-            let mut failed = 0usize;
-            for target in targets {
-                match discard_kept(&lib, &target, stage.as_deref()) {
-                    Ok(()) => discarded += 1,
-                    Err((_, msg)) => {
-                        failed += 1;
-                        tracing::warn!(target = %target.display(), error = %msg, "staged remux was not cleared");
-                    }
-                }
-            }
+            let root = PathBuf::from(&c.staging_dir);
+            let (discarded, failed) = clear_idle_staging(&root);
             json_response(
                 request,
                 200,
@@ -312,6 +294,41 @@ pub fn handle(
         _ => return Some(request),
     }
     None
+}
+
+/// Remove only per-disc staging directories that are not owned by a live rip
+/// or mux worker. Unknown/unreadable entries are left in place.
+fn clear_idle_staging(root: &std::path::Path) -> (usize, usize) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(path = %root.display(), error = %e, "staging root could not be listed");
+            return (0, 1);
+        }
+    };
+    let mut removed = 0;
+    let mut failed = 0;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            failed += 1;
+            continue;
+        };
+        let path = entry.path();
+        let Some(snapshot) = crate::server::ripper::staging::snapshot_staging_disc(&path) else {
+            continue;
+        };
+        if snapshot.has_sweeping || snapshot.has_ripped || snapshot.has_muxing {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(path = %path.display(), error = %e, "idle staging entry could not be cleared");
+            }
+        }
+    }
+    (removed, failed)
 }
 
 // Delete the finished file kept for `target`. Only a kept pair directly in the staging folder

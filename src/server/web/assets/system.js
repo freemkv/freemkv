@@ -34,7 +34,7 @@ export default {
       </div>
       <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Storage &amp; folders</b><span class="muted small" id="mounts-note">checked every 30 s, and before each remux and move</span></div>
         <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>Health</th><th>Space</th><th>Last good access</th><th>Last error</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>
-      <section class="card" style="margin-top:1.25rem"><div class="toolbar"><b>Remux staging</b><button class="btn btn-ghost btn-sm" id="clear-staging">Clear staging</button></div><p class="small muted" id="staged-kept" style="margin:.6rem 0 0"></p><p class="small muted" style="margin:.4rem 0 0">Removes completed remux files left behind after a stopped or retitled job. Active work and rip-recovery staging are not touched.</p></section>`;
+      <section class="card" style="margin-top:1.25rem"><div class="toolbar"><b>Staging</b><button class="btn btn-ghost btn-sm" id="clear-staging">Clear staging</button></div><p class="small muted" id="staged-kept" style="margin:.6rem 0 0"></p><p class="small muted" style="margin:.4rem 0 0">Removes idle per-disc staging entries. Active ripping and muxing entries are preserved.</p></section>`;
     let sys = null;
     const paint = () => {
       const d = sys;
@@ -70,9 +70,7 @@ export default {
       }
     });
     $('#clear-staging', view).addEventListener('click', async (e) => {
-      const count = sys?.staged_kept?.count || 0;
-      if (!count) { toast('Remux staging is already empty', 'info'); return; }
-      if (!window.confirm('Clear ' + count + ' completed remux file' + (count === 1 ? '' : 's') + ' from staging?')) return;
+      if (!window.confirm('Clear idle entries from staging? Active ripping and muxing entries will be preserved.')) return;
       const r = await act(e.currentTarget, () => api('POST', '/api/library/staged/clear'), 'Clear staging');
       if (r) {
         toast(r.discarded + ' staged remux file' + (r.discarded === 1 ? '' : 's') + ' cleared', r.failed ? 'warn' : 'info');
