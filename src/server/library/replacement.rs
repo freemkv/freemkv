@@ -32,6 +32,22 @@ impl FileIdentity {
         })
     }
 
+    /// Identity read through a fresh open and fstat, not cached path attributes.
+    pub(super) fn read_fresh(path: &Path) -> io::Result<Self> {
+        if !std::fs::symlink_metadata(path)?.is_file() {
+            return Err(io::Error::other(
+                "replacement requires a regular file, not a symlink",
+            ));
+        }
+        let metadata = std::fs::File::open(path)?.metadata()?;
+        Ok(Self {
+            canonical: path.canonicalize()?,
+            size: metadata.len(),
+            modified: metadata.modified()?,
+            filesystem_id: Some(libfreemkv::io::artifact_lock::file_identity(path)?),
+        })
+    }
+
     pub(super) fn same_file(&self, other: &Self) -> bool {
         self.canonical == other.canonical
             || self
@@ -45,6 +61,15 @@ impl FileIdentity {
                 "file changed since replacement was queued: {}",
                 path.display()
             )));
+        }
+        Ok(())
+    }
+
+    // Inside the publishing call only: ids may follow names (smbfs), so the
+    // target must match the candidate's size and explicitly pinned time.
+    fn verify_published(&self, published: &Self) -> io::Result<()> {
+        if published.size != self.size || published.modified != self.modified {
+            return Err(io::Error::other("replacement destination changed"));
         }
         Ok(())
     }
@@ -103,7 +128,34 @@ struct Prepared {
     target: PathBuf,
     candidate: PathBuf,
     identity: Option<FileIdentity>,
+    #[serde(default)]
+    published: Option<FileIdentity>,
     writing_app: Option<String>,
+}
+
+impl Prepared {
+    // The identity last proven at the target: rebound on publication, else prepared.
+    fn owned(&self) -> io::Result<&FileIdentity> {
+        self.published
+            .as_ref()
+            .or(self.identity.as_ref())
+            .ok_or_else(|| io::Error::other("unverified replacement"))
+    }
+}
+
+// Pin the engine-written candidate's time before its identity is journaled,
+// so a deferred SMB close cannot restamp it at publication. Best effort.
+fn pin_mtime(path: &Path) {
+    let pinned = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| {
+            let modified = file.metadata()?.modified()?;
+            file.set_modified(crate::server::util::pinned_mtime(modified))
+        });
+    if let Err(error) = pinned {
+        tracing::warn!(%error, path = %path.display(), "replacement: cannot pin candidate time");
+    }
 }
 
 /// Filesystem actions supplied by the worker, including cancellation and locks.
@@ -112,12 +164,13 @@ pub(crate) trait RunIo {
     fn guard_new_set(&mut self, targets: &[PathBuf]) -> io::Result<()>;
     fn reconcile_new_set(&mut self, targets: &[PathBuf]) -> io::Result<()>;
     fn prepare(&mut self, ordinal: usize, candidate: &Path) -> io::Result<Option<String>>;
+    /// Publish under the target lock; return the target identity read there.
     fn publish(
         &mut self,
         candidate: &Path,
         target: &Path,
         before: Option<&FileIdentity>,
-    ) -> io::Result<()>;
+    ) -> io::Result<FileIdentity>;
     fn retire(&mut self, path: &Path, identity: &FileIdentity) -> io::Result<()>;
     fn retire_output(&mut self, output: &OwnedOutput) -> io::Result<()> {
         self.retire(&output.path, &output.identity)
@@ -285,6 +338,7 @@ impl Replacement {
                     target: target.clone(),
                     candidate,
                     identity: None,
+                    published: None,
                     writing_app: None,
                 });
             }
@@ -302,22 +356,24 @@ impl Replacement {
                 match identity.verify(&output.candidate) {
                     Ok(()) => continue,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                        identity.verify_moved(&output.target)?;
+                        output.owned()?.verify_moved(&output.target)?;
                         continue;
                     }
                     Err(e) => return Err(e),
                 }
             }
             let writing_app = io.prepare(ordinal, &output.candidate)?;
+            pin_mtime(&output.candidate);
             let identity = FileIdentity::read(&output.candidate)?;
             self.prepared[ordinal].identity = Some(identity);
             self.prepared[ordinal].writing_app = writing_app;
             io.persist(self)?;
         }
         self.verify_source(source)?;
-        for output in &self.prepared {
+        for ordinal in 0..self.prepared.len() {
             io.checkpoint()?;
             self.verify_source(source)?;
+            let output = &self.prepared[ordinal];
             let identity = output
                 .identity
                 .as_ref()
@@ -330,33 +386,29 @@ impl Replacement {
                         .iter()
                         .find(|old| old.path == output.target)
                         .map(|old| &old.identity);
-                    io.publish(&output.candidate, &output.target, before)?;
+                    let published = io.publish(&output.candidate, &output.target, before)?;
+                    identity.verify_published(&published)?;
+                    self.prepared[ordinal].published = Some(published);
+                    io.persist(self)?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
             }
-            identity.verify_moved(&output.target)?;
+            let output = &self.prepared[ordinal];
+            output.owned()?.verify_moved(&output.target)?;
         }
         io.guard_new_set(targets)?;
         // A missing candidate after restart is accepted only when the final path
-        // still names its recorded filesystem identity (rename, not a guessed copy).
+        // still names its recorded or rebound identity (never a guessed copy).
         for output in &self.prepared {
-            output
-                .identity
-                .as_ref()
-                .ok_or_else(|| io::Error::other("unverified replacement"))?
-                .verify_moved(&output.target)?;
+            output.owned()?.verify_moved(&output.target)?;
         }
         io.reconcile_new_set(targets)?;
         for old in self.old_outputs.clone() {
             io.checkpoint()?;
             self.verify_source(source)?;
             for output in &self.prepared {
-                output
-                    .identity
-                    .as_ref()
-                    .ok_or_else(|| io::Error::other("unverified replacement"))?
-                    .verify_moved(&output.target)?;
+                output.owned()?.verify_moved(&output.target)?;
             }
             if targets.contains(&old.path) || self.retired.contains(&old.path) {
                 continue;

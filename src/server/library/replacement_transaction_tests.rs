@@ -47,6 +47,8 @@ struct TestIo {
     checkpoints: usize,
     remove_at_checkpoint: Option<(usize, PathBuf)>,
     ownership_config: Option<(PathBuf, PathBuf)>,
+    // Publish as smbfs with name-derived ids does: a new id, same size and time.
+    publish_with_new_identity: bool,
 }
 
 impl RunIo for TestIo {
@@ -81,17 +83,27 @@ impl RunIo for TestIo {
         candidate: &Path,
         target: &Path,
         before: Option<&FileIdentity>,
-    ) -> io::Result<()> {
+    ) -> io::Result<FileIdentity> {
         if let Some(before) = before {
             before.verify(target)?;
         } else if target.exists() {
             return Err(io::Error::other("target collision"));
         }
-        std::fs::rename(candidate, target)?;
+        if self.publish_with_new_identity {
+            let modified = std::fs::metadata(candidate)?.modified()?;
+            std::fs::copy(candidate, target)?;
+            std::fs::File::options()
+                .write(true)
+                .open(target)?
+                .set_modified(modified)?;
+            std::fs::remove_file(candidate)?;
+        } else {
+            std::fs::rename(candidate, target)?;
+        }
         if self.fail_publish {
             return Err(io::Error::other("crash after rename"));
         }
-        Ok(())
+        FileIdentity::read_fresh(target)
     }
     fn retire(&mut self, path: &Path, identity: &FileIdentity) -> io::Result<()> {
         if self.fail_retire {
@@ -133,6 +145,7 @@ fn fixture() -> (
         checkpoints: 0,
         remove_at_checkpoint: None,
         ownership_config: None,
+        publish_with_new_identity: false,
     };
     (dir, source, old, replacement, io)
 }
@@ -245,4 +258,48 @@ fn changed_new_or_old_file_blocks_cleanup() {
             b"someone else's changed file"
         );
     }
+}
+
+#[test]
+fn a_new_published_identity_is_rebound_inside_the_publishing_call() {
+    let (dir, source, old, mut replacement, mut io) = fixture();
+    let targets = vec![dir.path().join("movie.mkv")];
+    io.publish_with_new_identity = true;
+    replacement.run(&source, &targets, 4, &mut io).unwrap();
+    assert!(old.iter().all(|p| !p.exists()));
+    assert_eq!(std::fs::read(&targets[0]).unwrap(), b"verified new 0");
+    let published = io.saved.prepared[0].published.clone().unwrap();
+    published.verify(&targets[0]).unwrap();
+    assert_ne!(
+        io.saved.prepared[0]
+            .identity
+            .as_ref()
+            .unwrap()
+            .filesystem_id,
+        published.filesystem_id
+    );
+}
+
+#[test]
+fn a_new_identity_found_only_after_a_crash_is_held() {
+    let (dir, source, old, mut replacement, mut io) = fixture();
+    let targets = vec![dir.path().join("movie.mkv")];
+    io.publish_with_new_identity = true;
+    io.fail_publish = true;
+    assert!(replacement.run(&source, &targets, 5, &mut io).is_err());
+    io.fail_publish = false;
+    let mut restarted = io.saved.clone();
+    assert!(restarted.run(&source, &targets, 5, &mut io).is_err());
+    assert!(old.iter().all(|p| p.exists()));
+    assert!(targets[0].exists());
+}
+
+#[test]
+fn candidate_time_is_pinned_before_its_identity_is_journaled() {
+    let (dir, source, _old, mut replacement, mut io) = fixture();
+    let targets = vec![dir.path().join("movie.mkv")];
+    replacement.run(&source, &targets, 6, &mut io).unwrap();
+    let modified = io.saved.prepared[0].identity.as_ref().unwrap().modified;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).unwrap();
+    assert_eq!((since.as_secs() % 2, since.subsec_nanos()), (0, 0));
 }

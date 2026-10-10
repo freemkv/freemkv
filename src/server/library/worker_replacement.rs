@@ -182,9 +182,9 @@ impl RunIo for Runner<'_, '_> {
         candidate: &Path,
         target: &Path,
         before: Option<&FileIdentity>,
-    ) -> io::Result<()> {
+    ) -> io::Result<FileIdentity> {
         self.validate(target)?;
-        deliver::with_halt(self.sink, |halt| -> io::Result<()> {
+        deliver::with_halt(self.sink, |halt| -> io::Result<FileIdentity> {
             let lock = libfreemkv::io::ArtifactLock::acquire(target, &[candidate], halt)?;
             if halt.is_cancelled() {
                 return Err(libfreemkv::Error::Halted.into());
@@ -219,8 +219,9 @@ impl RunIo for Runner<'_, '_> {
                     Ok(())
                 },
             )?;
+            let published = FileIdentity::read_fresh(target)?;
             lock.delete()?;
-            Ok(())
+            Ok(published)
         })
     }
 
