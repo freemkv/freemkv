@@ -554,7 +554,7 @@ fn stream_preference_persistence_can_be_disabled() {
     let mut app = App::new();
     app.settings.persist_stream_preferences = false;
     let before = app.log.len();
-    assert!(app.save_pick_preferences().is_empty());
+    app.pick_audio(None);
     assert_eq!(app.log.len(), before);
 }
 
@@ -2769,4 +2769,56 @@ fn an_unknown_answer_keeps_the_disc_open() {
     tick_until_watched(&mut app);
     assert_eq!(app.page, Page::Titles);
     assert_eq!(app.source, "disc://");
+}
+
+#[test]
+fn picks_stay_out_of_settings_when_persistence_is_off() {
+    let mut app = picking(pick_disc());
+    app.settings.persist_stream_preferences = false;
+    app.pick_audio(Some("deu"));
+    app.pick_subtitles(SubPick::None);
+    assert_eq!(app.pick_prefs.audio, vec!["deu".to_string()]);
+    assert!(app.settings.audio_langs.is_empty());
+    assert_eq!(app.settings.subtitle_mode, "all");
+}
+
+#[test]
+fn settings_commit_keeps_picks_the_form_never_touched() {
+    let mut app = picking(pick_disc());
+    // The form was opened before the pick, so it still holds the old values.
+    let before = app.settings.clone();
+    app.pick_audio(Some("deu"));
+    app.pick_subtitles(SubPick::None);
+    let mut edited = before.clone();
+    edited.dest_dir = "/elsewhere".into();
+    let merged = app.commit_settings(&before, edited);
+    assert_eq!(merged.dest_dir, "/elsewhere");
+    assert_eq!(merged.audio_langs, "deu");
+    assert_eq!(merged.subtitle_mode, "none");
+    assert_eq!(
+        serde_json::to_value(&app.settings).unwrap(),
+        serde_json::to_value(&merged).unwrap()
+    );
+}
+
+#[test]
+fn settings_commit_takes_picks_the_form_did_change() {
+    let mut app = picking(pick_disc());
+    let before = app.settings.clone();
+    app.pick_audio(Some("deu"));
+    let mut edited = before.clone();
+    edited.audio_langs = "fra".into();
+    let merged = app.commit_settings(&before, edited);
+    assert_eq!(merged.audio_langs, "fra");
+}
+
+#[test]
+fn subtitle_mode_round_trips_through_lang_prefs() {
+    for mode in ["all", "forced", "none"] {
+        let s = crate::settings::Settings {
+            subtitle_mode: mode.into(),
+            ..Default::default()
+        };
+        assert_eq!(LangPrefs::from_settings(&s).subtitle_mode(), mode);
+    }
 }

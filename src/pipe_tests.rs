@@ -2358,3 +2358,11 @@ fn windows_sanitize_name_drops_reserved_punctuation() {
     let s = sanitize_name(r"C:\Movie");
     assert!(!s.contains(':') && !s.contains('\\'), "got {s}");
 }
+
+#[test]
+fn title_review_message_shows_prose_not_the_engine_key() {
+    let text = super::title_review_message("missing-episode-roster");
+    assert!(!text.contains("missing-episode-roster"), "{text}");
+    assert!(text.contains("authored episode list"), "{text}");
+    assert!(text.contains("--title"), "{text}");
+}

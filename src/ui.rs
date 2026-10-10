@@ -124,6 +124,17 @@ impl LangPrefs {
         p
     }
 
+    /// The persisted `subtitle_mode` for these flags: the inverse of the
+    /// mapping in [`LangPrefs::from_settings`]. (No regular subtitles but
+    /// forced dropped is not a state the bar produces; it reads as "all".)
+    pub fn subtitle_mode(&self) -> &'static str {
+        match (self.no_subtitles, self.no_forced) {
+            (true, true) => "none",
+            (true, false) => "forced",
+            _ => "all",
+        }
+    }
+
     /// No preference expressed at all — the tree is built exactly as before.
     pub fn is_empty(&self) -> bool {
         self.audio.is_empty()
@@ -853,6 +864,14 @@ pub fn lang_selection(stored: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Settings row label for the presentation-language field, shared by all shells.
+pub fn presentation_language_label() -> String {
+    crate::strings::get_or(
+        "gui.set.presentation_language",
+        "Presentation language (de / en; blank = audio preference)",
+    )
 }
 
 /// Codes back to the stored form. One spelling, so a round trip through the
@@ -2818,8 +2837,7 @@ impl App {
             None => self.pick_prefs.audio.clear(),
             Some(c) => toggle_code(&mut self.pick_prefs.audio, c),
         }
-        self.settings.audio_langs = lang_selection_to_string(&self.pick_prefs.audio);
-        self.repick()
+        self.persist_picks(|s, p| s.audio_langs = lang_selection_to_string(&p.audio))
     }
 
     /// The selection bar's subtitle choice.
@@ -2850,37 +2868,65 @@ impl App {
                 }
             }
         }
-        self.settings.subtitle_mode = match (p.no_subtitles, p.no_forced) {
-            (true, true) => "none",
-            (true, false) => "forced",
-            _ => "all",
-        }
-        .into();
-        self.settings.sub_langs = lang_selection_to_string(&p.subtitles);
-        self.settings.forced_sub_langs = lang_selection_to_string(&p.forced);
-        self.repick()
+        self.persist_picks(|s, p| {
+            s.subtitle_mode = p.subtitle_mode().into();
+            s.sub_langs = lang_selection_to_string(&p.subtitles);
+            s.forced_sub_langs = lang_selection_to_string(&p.forced);
+        })
     }
 
-    /// Persist the stream choices made in the title bar. Title mode is not
-    /// included: it is disc-driven and may legitimately change between discs.
-    pub fn save_pick_preferences(&mut self) -> Vec<Effect> {
+    // Re-tick for a bar pick and, when "Remember audio and subtitle choices" is
+    // on, record it in Settings and save. Off, the choice stays in `pick_prefs`
+    // only, so a later unrelated Settings save cannot write it out. Title mode
+    // is never remembered: it is disc-driven and may change between discs.
+    fn persist_picks(
+        &mut self,
+        record: impl FnOnce(&mut crate::settings::Settings, &LangPrefs),
+    ) -> Vec<Effect> {
+        let mut fx = self.repick();
         if !self.settings.persist_stream_preferences {
-            return vec![];
+            return fx;
         }
-        match self.settings.save() {
-            Ok(()) => vec![],
-            Err(e) => {
-                self.say(
-                    LogKind::Notice,
-                    &crate::strings::fmt_or(
-                        "gui.log.settings_save_error",
-                        "Could not save settings: {e}",
-                        &[("e", &e)],
-                    ),
-                );
-                vec![Effect::Redraw]
-            }
+        record(&mut self.settings, &self.pick_prefs);
+        if let Err(e) = self.settings.save() {
+            self.say(
+                LogKind::Notice,
+                &crate::strings::fmt_or(
+                    "gui.log.settings_save_error",
+                    "Could not save settings: {e}",
+                    &[("e", &e)],
+                ),
+            );
+            fx.push(Effect::Redraw);
         }
+        fx
+    }
+
+    /// Apply a committed Settings form. The form was filled in from a copy that
+    /// may predate bar picks, so each remembered-stream field it did not itself
+    /// change (`edited` equal to `before`) keeps the App's current value rather
+    /// than reverting it. Returns the merged settings for the shell to store
+    /// and save.
+    pub fn commit_settings(
+        &mut self,
+        before: &crate::settings::Settings,
+        mut edited: crate::settings::Settings,
+    ) -> crate::settings::Settings {
+        let cur = &self.settings;
+        if edited.audio_langs == before.audio_langs {
+            edited.audio_langs = cur.audio_langs.clone();
+        }
+        if edited.sub_langs == before.sub_langs {
+            edited.sub_langs = cur.sub_langs.clone();
+        }
+        if edited.forced_sub_langs == before.forced_sub_langs {
+            edited.forced_sub_langs = cur.forced_sub_langs.clone();
+        }
+        if edited.subtitle_mode == before.subtitle_mode {
+            edited.subtitle_mode = cur.subtitle_mode.clone();
+        }
+        self.settings = edited.clone();
+        edited
     }
 
     // Re-tick the tree from the scan it was built from, under the bar's current choices.

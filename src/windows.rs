@@ -1978,11 +1978,7 @@ impl Shell {
             .as_ref()
             .and_then(|v| v.audio_choice(tag));
         if let Some(code) = choice {
-            let fx = self.app_mut(|a| {
-                let mut fx = a.pick_audio(code.as_deref());
-                fx.extend(a.save_pick_preferences());
-                fx
-            });
+            let fx = self.app_mut(|a| a.pick_audio(code.as_deref()));
             self.perform(fx);
         }
     }
@@ -2003,11 +1999,7 @@ impl Shell {
             .as_ref()
             .and_then(|v| v.subs_choice(tag));
         if let Some(choice) = choice {
-            let fx = self.app_mut(|a| {
-                let mut fx = a.pick_subtitles(choice);
-                fx.extend(a.save_pick_preferences());
-                fx
-            });
+            let fx = self.app_mut(|a| a.pick_subtitles(choice));
             self.perform(fx);
         }
     }
@@ -2302,7 +2294,12 @@ impl Shell {
                         });
                     }
                 }
-                Effect::ShowSettings => self.prefs.show(&self.settings.borrow()),
+                Effect::ShowSettings => {
+                    // The App owns the live settings (bar picks land there).
+                    let live = self.app.borrow().settings.clone();
+                    *self.settings.borrow_mut() = live;
+                    self.prefs.show(&self.settings.borrow());
+                }
                 Effect::ShowAbout => self.about.show(&self.settings.borrow()),
                 Effect::StartTicking => {
                     Self::report_timer_failure(&self.wnd, TIMER_TICK, TICK_MS);
@@ -3305,7 +3302,7 @@ impl Prefs {
         fields.push((
             "presentation_language",
             r.field(
-                "Presentation language (de / en; blank = audio preference)",
+                &crate::ui::presentation_language_label(),
                 &st.presentation_language,
                 240,
             ),
@@ -3588,16 +3585,18 @@ impl Prefs {
         let changed = serde_json::to_value(&edited).ok() != before;
         let plan = lay::form_commit(why, self.wnd.hwnd().IsWindowVisible(), changed);
         if plan.save {
-            let old_dest =
-                std::mem::replace(&mut *sh.settings.borrow_mut(), edited.clone()).dest_dir;
+            let old_dest = sh.settings.borrow().dest_dir.clone();
             let new_dest = edited.dest_dir.clone();
             let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
-            sh.app_mut(|a| {
-                a.settings = edited;
+            let before = sh.settings.borrow().clone();
+            let merged = sh.app_mut(|a| {
+                let merged = a.commit_settings(&before, edited);
                 if dest_changed {
                     a.output_dir = new_dest;
                 }
+                merged
             });
+            *sh.settings.borrow_mut() = merged;
             save_settings_reporting_error(sh);
         }
         if plan.close {
