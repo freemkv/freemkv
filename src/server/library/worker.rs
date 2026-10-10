@@ -196,12 +196,7 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
                     .and_then(crate::server::tmdb::season_from_label)
             })
             .or_else(|| crate::server::tmdb::season_from_label(&job.title)),
-        disc: crate::server::tmdb::disc_from_label(&disc.volume_id)
-            .or_else(|| {
-                disc.meta_title
-                    .as_deref()
-                    .and_then(crate::server::tmdb::disc_from_label)
-            })
+        disc: disc_from_labels(&disc.volume_id, disc.meta_title.as_deref())
             .or_else(|| crate::server::tmdb::disc_from_label(&job.title)),
         kind: Some(crate::server::planner::MediaKind::Tv),
         episode_start: None,
@@ -209,6 +204,12 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     let planner = crate::server::planner::TvPlanner { cfg };
     let plan = tv_plan_result(planner.plan(&job.iso, &disc.titles, &media, &job.target))?;
     persist_auto_plan(lib, cfg, job, plan)
+}
+
+// Disc number from the ISO's own labels, volume id first.
+fn disc_from_labels(volume_id: &str, meta_title: Option<&str>) -> Option<u16> {
+    crate::server::tmdb::disc_from_label(volume_id)
+        .or_else(|| meta_title.and_then(crate::server::tmdb::disc_from_label))
 }
 
 fn persist_auto_plan(
@@ -273,6 +274,12 @@ fn attach_corrected_plan(
         "feature.mkv",
         media.season,
     ));
+    // A blank Disc number means "read it off the ISO", as the automatic path does.
+    let mut media = media.clone();
+    if media.disc.is_none() {
+        media.disc = disc_from_labels(&disc.volume_id, disc.meta_title.as_deref());
+    }
+    let media = &media;
     let plan = match media.kind {
         Some(MediaKind::Movie) => {
             MoviePlanner::from_config(cfg).plan(&job.iso, &disc.titles, media, &target)
@@ -284,7 +291,7 @@ fn attach_corrected_plan(
         }
         None => unreachable!(),
     }
-    .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e:?}")))?;
+    .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
     let targets = tv_destinations(cfg, &plan)
         .map(|(_, paths)| paths)
         .unwrap_or_else(|| vec![target]);
@@ -356,7 +363,7 @@ fn tv_plan_result(
     result.map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Title plan needs review before remux: {error:?}"),
+            format!("Title plan needs review before remux: {error}"),
         )
     })
 }

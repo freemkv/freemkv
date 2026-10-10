@@ -157,7 +157,9 @@ fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
             let media = MediaMetadata {
                 title: label.clone(),
                 season,
-                disc,
+                // Remux callers resolve the disc number from the ISO labels;
+                // the planner no longer parses the show title.
+                disc: disc.or(Some(2)),
                 kind: Some(MediaKind::Tv),
                 ..Default::default()
             };
