@@ -12,6 +12,13 @@ mod lifecycle;
 static BACKGROUND: std::sync::LazyLock<std::sync::Arc<lifecycle::Background>> =
     std::sync::LazyLock::new(Default::default);
 
+// Generation drain bounds: all services, the rip threads within it, then the web thread.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const RIP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const WEB_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+// Cadence of the KEYDB refresh and log prune threads, in one-second SHUTDOWN polls.
+const DAILY_SECS: u64 = 24 * 3600;
+
 /// Spawn a service helper which must finish before an internal restart, even
 /// when its caller times out and drops the returned handle.
 pub(crate) fn spawn_background<T: Send + 'static>(
@@ -179,41 +186,12 @@ pub fn run(argv: Vec<String>) {
                 log::syslog("KEYDB not found, downloading...");
                 // Route through the address guard (validate_fetch_url + pinned
                 // resolver): LAN hosts are fine, unreachable addresses are refused.
-                match web::guarded_get(&url) {
-                    Ok(resp) => {
-                        match web::read_capped_keydb_body(
-                            resp.into_body().into_reader(),
-                            web::KEYDB_MAX_BYTES,
-                        ) {
-                            Ok(buf) => {
-                                let saved = keysource::save_keydb(&cfg, &buf);
-                                match saved {
-                                    Ok(r) => log::syslog(&format!(
-                                        "KEYDB downloaded: {} entries -> {}",
-                                        r.entries,
-                                        r.path.display()
-                                    )),
-                                    Err(e) => log::syslog(&format!("KEYDB save failed: {e}")),
-                                }
-                            }
-                            Err(web::KeydbReadError::TooLarge) => {
-                                log::syslog("KEYDB download failed: response exceeded size limit")
-                            }
-                            Err(web::KeydbReadError::Io) => {
-                                log::syslog("KEYDB download read failed")
-                            }
-                        }
-                    }
-                    Err(e) => log::syslog(&format!(
-                        "KEYDB download failed for {}: {e}",
-                        crate::server::webhook::webhook_url_origin(&url)
-                    )),
-                }
+                fetch_keydb(&cfg, &url, true);
             }
         }
 
-        // Start mover thread. Joined on shutdown (see end of main) so an
-        // in-flight file move isn't truncated into a partial OUTPUT_DIR file.
+        // Start mover thread. Joined by the generation drain (stop_generation) so
+        // an in-flight file move isn't truncated into a partial OUTPUT_DIR file.
         let mover_handle = std::thread::spawn({
             let cfg = cfg.clone();
             move || mover::run(&cfg)
@@ -247,7 +225,7 @@ pub fn run(argv: Vec<String>) {
                 tracing::info!("keydb update thread starting (24h interval)");
                 'outer: loop {
                     // 24h sleep in 1s chunks so SHUTDOWN is observed within ~1s.
-                    for _ in 0..(24 * 3600) {
+                    for _ in 0..DAILY_SECS {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         if SHUTDOWN.load(Ordering::Relaxed) {
                             break 'outer;
@@ -266,36 +244,7 @@ pub fn run(argv: Vec<String>) {
                     // SSRF-guarded fetch (see web::guarded_get) — the daily
                     // refresh must not bypass the address allow-list that the
                     // settings save and manual update already enforce.
-                    match web::guarded_get(&url) {
-                        Ok(resp) => {
-                            match web::read_capped_keydb_body(
-                                resp.into_body().into_reader(),
-                                web::KEYDB_MAX_BYTES,
-                            ) {
-                                Ok(buf) => {
-                                    let saved = keysource::save_keydb(&cfg2, &buf);
-                                    match saved {
-                                        Ok(r) => log::syslog(&format!(
-                                            "KEYDB updated: {} entries -> {}",
-                                            r.entries,
-                                            r.path.display()
-                                        )),
-                                        Err(e) => log::syslog(&format!("KEYDB update failed: {e}")),
-                                    }
-                                }
-                                Err(web::KeydbReadError::TooLarge) => {
-                                    log::syslog("KEYDB daily update: response exceeded size limit")
-                                }
-                                Err(web::KeydbReadError::Io) => {
-                                    log::syslog("KEYDB daily update: response read failed")
-                                }
-                            }
-                        }
-                        Err(e) => log::syslog(&format!(
-                            "KEYDB update failed for {}: {e}",
-                            crate::server::webhook::webhook_url_origin(&url)
-                        )),
-                    }
+                    fetch_keydb(&cfg2, &url, false);
                 }
                 tracing::info!("keydb update thread stopping");
             }
@@ -312,7 +261,7 @@ pub fn run(argv: Vec<String>) {
                     // Prune first, then wait: a daemon restarted more often than daily
                     // would otherwise never reach a tick.
                     log_prune_tick(&cfg);
-                    for _ in 0..(24 * 3600) {
+                    for _ in 0..DAILY_SECS {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         if SHUTDOWN.load(Ordering::Relaxed) {
                             break 'outer;
@@ -348,11 +297,11 @@ pub fn run(argv: Vec<String>) {
                 &mut workers,
                 &BACKGROUND,
                 ripper::join_all_rip_threads,
-                std::time::Duration::from_secs(120),
+                DRAIN_TIMEOUT,
             );
             if drained {
                 web::stop_after_drain();
-                drained &= join_bounded(&mut web_handle, "web", std::time::Duration::from_secs(10));
+                drained &= join_bounded(&mut web_handle, "web", WEB_JOIN_TIMEOUT);
             }
             drained
         });
@@ -421,6 +370,49 @@ fn take_restart() -> bool {
     REBOOT.swap(false, Ordering::AcqRel) && !TERMINATE.load(Ordering::Acquire)
 }
 
+// Fetch KEYDB from `url` through the address guard and save it. `boot` picks the
+// first-boot download's log wording over the daily refresh's.
+fn fetch_keydb(cfg: &std::sync::RwLock<config::Config>, url: &str, boot: bool) {
+    let (saved, save_failed, too_large, read_failed, fetch_failed) = if boot {
+        (
+            "KEYDB downloaded",
+            "KEYDB save failed",
+            "KEYDB download failed: response exceeded size limit",
+            "KEYDB download read failed",
+            "KEYDB download failed",
+        )
+    } else {
+        (
+            "KEYDB updated",
+            "KEYDB update failed",
+            "KEYDB daily update: response exceeded size limit",
+            "KEYDB daily update: response read failed",
+            "KEYDB update failed",
+        )
+    };
+    match web::guarded_get(url) {
+        Ok(resp) => {
+            match web::read_capped_keydb_body(resp.into_body().into_reader(), web::KEYDB_MAX_BYTES)
+            {
+                Ok(buf) => match keysource::save_keydb(cfg, &buf) {
+                    Ok(r) => log::syslog(&format!(
+                        "{saved}: {} entries -> {}",
+                        r.entries,
+                        r.path.display()
+                    )),
+                    Err(e) => log::syslog(&format!("{save_failed}: {e}")),
+                },
+                Err(web::KeydbReadError::TooLarge) => log::syslog(too_large),
+                Err(web::KeydbReadError::Io) => log::syslog(read_failed),
+            }
+        }
+        Err(e) => log::syslog(&format!(
+            "{fetch_failed} for {}: {e}",
+            crate::server::webhook::webhook_url_origin(url)
+        )),
+    }
+}
+
 // Run the startup destination `check` over `cfg` on its own thread and warn about each
 // unusable root; returns at once, whatever the check's folders do.
 fn spawn_destination_check<F>(
@@ -486,7 +478,7 @@ fn drain_services(
     timeout: std::time::Duration,
 ) -> bool {
     let deadline = std::time::Instant::now() + timeout;
-    let mut drained = drain_rips(timeout.min(std::time::Duration::from_secs(60)));
+    let mut drained = drain_rips(timeout.min(RIP_DRAIN_TIMEOUT));
     for (name, handle) in workers {
         drained &= join_bounded(
             handle,
