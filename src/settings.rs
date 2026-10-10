@@ -539,9 +539,13 @@ fn install_keydb(buf: &[u8], dest: &str) -> Result<String, String> {
     use crate::strings::fmt_or;
     if let Some(parent) = std::path::Path::new(&dest).parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "cannot create keydb directory {}: {e} (the directory must be writable by freemkv)",
-                parent.display()
+            fmt_or(
+                "gui.log.keydb_dir_failed",
+                "cannot create keydb directory {path}: {error} (the directory must be writable by freemkv)",
+                &[
+                    ("path", &parent.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             )
         })?;
     }
@@ -563,8 +567,10 @@ fn install_keydb(buf: &[u8], dest: &str) -> Result<String, String> {
                 &[("code", &e.code().to_string())],
             );
             if matches!(e, libfreemkv::Error::KeydbWrite { .. }) {
-                Err(format!(
-                    "{message} — {dest}: cannot replace keydb.cfg; check directory write permissions and sandbox access"
+                Err(fmt_or(
+                    "gui.log.keydb_replace_failed",
+                    "{message} — {dest}: cannot replace keydb.cfg; check directory write permissions and sandbox access",
+                    &[("message", &message), ("dest", dest)],
                 ))
             } else {
                 Err(message)

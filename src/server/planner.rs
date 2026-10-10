@@ -54,6 +54,34 @@ pub enum PlanError {
     SelectionNeedsReview(String),
 }
 
+pub(crate) const REVIEW_LATER_DISC_START: &str = "later-disc-episode-start";
+pub(crate) const REVIEW_EPISODE_RANGE: &str = "episode-range";
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::strings::{fmt_or, get_or, review_reason_text};
+        let text = match self {
+            PlanError::NoTitles => get_or("error.plan.no_titles", "the disc has no usable titles"),
+            PlanError::NoOutputs => get_or("error.plan.no_outputs", "the plan has no outputs"),
+            PlanError::DuplicateOutput(name) => fmt_or(
+                "error.plan.duplicate_output",
+                "two outputs would use the same file name: {name}",
+                &[("name", name)],
+            ),
+            PlanError::SelectionNeedsReview(key) if key == REVIEW_LATER_DISC_START => get_or(
+                "error.plan.later_disc_start",
+                "Later-disc episode numbering needs a confirmed First episode; disc number and runtimes do not establish it.",
+            ),
+            PlanError::SelectionNeedsReview(key) if key == REVIEW_EPISODE_RANGE => get_or(
+                "error.plan.episode_range",
+                "Episode numbering is outside the supported range.",
+            ),
+            PlanError::SelectionNeedsReview(key) => review_reason_text(key),
+        };
+        f.write_str(&text)
+    }
+}
+
 pub trait Planner {
     fn plan(
         &self,
@@ -133,13 +161,13 @@ impl Planner for TvPlanner<'_> {
             .season
             .or_else(|| crate::server::tmdb::season_from_label(&label))
             .unwrap_or(1);
+        // The disc number is the caller's (from the ISO labels); the show
+        // title says nothing about which disc this is.
+        let disc_number = media.disc.unwrap_or(1);
+        let start = confirmed_episode_start(disc_number, indices.len(), media.episode_start)?;
+        // Validate numbering before the blocking TMDB fetch.
         let episodes =
             crate::server::tmdb::season_episodes(media.tmdb_id, season, &self.cfg.tmdb_api_key);
-        let disc_number = media
-            .disc
-            .or_else(|| crate::server::tmdb::disc_from_label(&media.title))
-            .unwrap_or(1);
-        let start = confirmed_episode_start(disc_number, indices.len(), media.episode_start)?;
         let outputs =
             episode_outputs_from_start(titles, &indices, season, start, &episodes, movie_filename);
         validate_outputs(outputs).map(|outputs| RemuxPlan {
@@ -236,18 +264,16 @@ fn confirmed_episode_start(
     count: usize,
     explicit: Option<u16>,
 ) -> Result<u16, PlanError> {
-    let start = explicit.or((disc <= 1).then_some(1)).ok_or_else(|| PlanError::SelectionNeedsReview(
-        "Later-disc episode numbering needs a confirmed First episode; disc number and runtimes do not establish it.".into()
-    ))?;
+    let start = explicit
+        .or((disc <= 1).then_some(1))
+        .ok_or_else(|| PlanError::SelectionNeedsReview(REVIEW_LATER_DISC_START.into()))?;
     if start == 0
         || count == 0
         || usize::from(start)
             .checked_add(count - 1)
             .is_none_or(|last| last > usize::from(u16::MAX))
     {
-        return Err(PlanError::SelectionNeedsReview(
-            "Episode numbering is outside the supported range.".into(),
-        ));
+        return Err(PlanError::SelectionNeedsReview(REVIEW_EPISODE_RANGE.into()));
     }
     Ok(start)
 }
@@ -321,7 +347,7 @@ fn leaf(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
         .map(str::to_owned)
-        .unwrap_or_else(|| PathBuf::from("title.mkv").to_string_lossy().into_owned())
+        .unwrap_or_else(|| "title.mkv".to_string())
 }
 
 #[cfg(test)]
@@ -630,5 +656,70 @@ mod tests {
             assert_eq!(plan.outputs[0].filename, "Show.mkv");
             assert_eq!(plan.outputs[0].episode, None);
         }
+    }
+
+    fn authored_two_episode_disc() -> Vec<DiscTitle> {
+        let mut titles = vec![title(2700.0, 100), title(2700.0, 200)];
+        for (index, t) in titles.iter_mut().enumerate() {
+            t.playlist_id = index as u16;
+            t.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
+                roster: "test-menu".into(),
+                title_count: 2,
+                member: true,
+                ordinal: Some(index),
+            };
+        }
+        titles
+    }
+
+    #[test]
+    fn show_title_never_supplies_the_disc_number() {
+        // The disc number comes from the ISO's labels (resolved by the caller),
+        // never from the TMDB show title.
+        let cfg = Config::default();
+        let media = MediaMetadata {
+            title: "Show Disc 2".into(),
+            kind: Some(MediaKind::Tv),
+            season: Some(1),
+            ..Default::default()
+        };
+        let plan = TvPlanner { cfg: &cfg }
+            .plan(
+                Path::new("disc.iso"),
+                &authored_two_episode_disc(),
+                &media,
+                Path::new("Show.mkv"),
+            )
+            .unwrap();
+        assert_eq!(plan.outputs[0].episode, Some(1));
+    }
+
+    #[test]
+    fn plan_errors_render_as_localized_prose_not_debug() {
+        for error in [
+            PlanError::NoTitles,
+            PlanError::NoOutputs,
+            PlanError::DuplicateOutput("a.mkv".into()),
+            PlanError::SelectionNeedsReview("missing-episode-roster".into()),
+            PlanError::SelectionNeedsReview(REVIEW_LATER_DISC_START.into()),
+            PlanError::SelectionNeedsReview(REVIEW_EPISODE_RANGE.into()),
+        ] {
+            let text = error.to_string();
+            assert!(!text.contains("SelectionNeedsReview"), "{text}");
+            assert!(!text.contains("error.plan"), "{text}");
+            assert!(!text.contains("missing-episode-roster"), "{text}");
+            assert!(text.contains(' '), "{text}");
+        }
+        assert!(
+            PlanError::DuplicateOutput("a.mkv".into())
+                .to_string()
+                .contains("a.mkv")
+        );
+        assert!(
+            confirmed_episode_start(2, 2, None)
+                .unwrap_err()
+                .to_string()
+                .contains("First episode")
+        );
     }
 }

@@ -273,6 +273,9 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
         p.window.present();
         return;
     }
+    // The App owns the live settings (bar picks land there).
+    let live = shell.app.borrow().settings.clone();
+    *shell.settings.borrow_mut() = live;
     let window = adw::PreferencesWindow::builder()
         .title(g("gui.win.settings"))
         .transient_for(&shell.window)
@@ -310,7 +313,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     f.entry(
         &s2,
         "presentation_language",
-        "Presentation language (de / en; blank = audio preference)",
+        &crate::ui::presentation_language_label(),
     );
     f.langs(&s2, "audio_langs", &g("gui.set.audio_langs"));
     f.langs(&s2, "sub_langs", &g("gui.set.sub_langs"));
@@ -487,8 +490,9 @@ impl Prefs {
     /// applies now), and to disk. The live output folder follows only when
     /// the DEFAULT destination actually changed, so a one-off pick survives.
     fn commit(&self, shell: &Rc<Shell>) {
-        let before = serde_json::to_value(&*shell.settings.borrow()).ok();
-        let old_dest = shell.settings.borrow().dest_dir.clone();
+        let prior = shell.settings.borrow().clone();
+        let before = serde_json::to_value(&prior).ok();
+        let old_dest = prior.dest_dir.clone();
         self.read_form(&mut shell.settings.borrow_mut());
         let edited = shell.settings.borrow().clone();
         if serde_json::to_value(&edited).ok() == before {
@@ -496,12 +500,14 @@ impl Prefs {
         }
         let new_dest = edited.dest_dir.clone();
         let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
-        shell.app_mut(|a| {
-            a.settings = edited;
+        let merged = shell.app_mut(|a| {
+            let merged = a.commit_settings(&prior, edited);
             if dest_changed {
                 a.output_dir = new_dest;
             }
+            merged
         });
+        *shell.settings.borrow_mut() = merged;
         shell.save_settings_reporting_error();
     }
 

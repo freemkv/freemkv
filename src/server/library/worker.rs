@@ -332,7 +332,7 @@ fn attach_corrected_plan(
             TvPlanner { cfg: &explicit }.plan(&job.iso, &disc.titles, media, &target)
         }
     }
-    .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e:?}")))?;
+    .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
     let targets = tv_destinations(cfg, &plan)
         .map(|(_, paths)| paths)
         .unwrap_or_else(|| vec![target]);
@@ -404,7 +404,7 @@ fn tv_plan_result(
     result.map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Title plan needs review before remux: {error:?}"),
+            format!("Title plan needs review before remux: {error}"),
         )
     })
 }

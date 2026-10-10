@@ -233,15 +233,22 @@ fn successful_or_skipped_tv_planning_enters_remux_once() {
 }
 
 #[test]
+fn disc_number_reads_volume_id_then_meta_title() {
+    assert_eq!(disc_from_labels("SHOW_S1_D2", Some("Show D3")), Some(2));
+    assert_eq!(disc_from_labels("SHOW", Some("Show D3")), Some(3));
+    assert_eq!(disc_from_labels("SHOW", None), None);
+}
+
+#[test]
 fn planner_errors_require_review_without_entering_remux_or_requeueing() {
     use crate::server::planner::PlanError;
     for error in [
         PlanError::NoTitles,
         PlanError::NoOutputs,
         PlanError::DuplicateOutput("episode.mkv".into()),
-        PlanError::SelectionNeedsReview("missing authored roster".into()),
+        PlanError::SelectionNeedsReview("missing-episode-roster".into()),
     ] {
-        let detail = format!("{error:?}");
+        let detail = error.to_string();
         let (_t, lib, dirs) = library_with(&["B"]);
         lib.queue.add(vec![NewJob {
             title: "Show".into(),

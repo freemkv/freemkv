@@ -779,17 +779,18 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
             {
                 Ok(index) => title_nums = vec![index + 1],
                 Err(reason) => {
-                    out.raw(
-                        Always,
-                        &format!(
-                            "Title selection needs review: {reason}; choose --title explicitly."
-                        ),
-                    );
+                    out.raw(Always, &title_review_message(&reason));
                     return 1;
                 }
             }
         } else if presentation_language.is_some() {
-            out.raw(Always, "Presentation-language selection requires a scanned disc; choose --title explicitly.");
+            out.raw(
+                Always,
+                &strings::get_or(
+                    "error.presentation_needs_scan",
+                    "Presentation-language selection requires a scanned disc; choose --title explicitly.",
+                ),
+            );
             return 1;
         }
     }
@@ -2854,6 +2855,14 @@ fn resolve_scanned_title<'a>(
         }
     }
     Ok(title)
+}
+
+fn title_review_message(reason: &str) -> String {
+    strings::fmt_or(
+        "error.selection_review",
+        "Title selection needs review: {reason}; choose --title explicitly.",
+        &[("reason", &strings::review_reason_text(reason))],
+    )
 }
 
 fn automatic_presentation_title(

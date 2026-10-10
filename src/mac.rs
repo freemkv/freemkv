@@ -1290,11 +1290,7 @@ define_class!(
             let tag = picked_tag(&self.ivars().pick_audio);
             let choice = self.ivars().pick_shown.borrow().as_ref().zip(tag).and_then(|(v, t)| v.audio_choice(t));
             if let Some(code) = choice {
-                self.step(|a| {
-                    let mut fx = a.pick_audio(code.as_deref());
-                    fx.extend(a.save_pick_preferences());
-                    fx
-                });
+                self.step(|a| a.pick_audio(code.as_deref()));
             }
         }
 
@@ -1303,11 +1299,7 @@ define_class!(
             let tag = picked_tag(&self.ivars().pick_subs);
             let choice = self.ivars().pick_shown.borrow().as_ref().zip(tag).and_then(|(v, t)| v.subs_choice(t));
             if let Some(choice) = choice {
-                self.step(|a| {
-                    let mut fx = a.pick_subtitles(choice);
-                    fx.extend(a.save_pick_preferences());
-                    fx
-                });
+                self.step(|a| a.pick_subtitles(choice));
             }
         }
 
@@ -1547,12 +1539,14 @@ impl Controller {
         let PrefsCommit::Save { new_dest } = prefs_commit(&before, &edited) else {
             return;
         };
-        self.app_mut(|a| {
-            a.settings = edited;
+        let merged = self.app_mut(|a| {
+            let merged = a.commit_settings(&before, edited);
             if let Some(dest) = new_dest {
                 a.output_dir = dest;
             }
+            merged
         });
+        *self.ivars().settings.borrow_mut() = merged;
         self.save_settings_reporting_error();
     }
 
@@ -1653,6 +1647,11 @@ impl Controller {
                     // Cancel or its close button shows the stored settings
                     // rather than the edits that were walked away from.
                     let open = self.ivars().win_prefs.borrow().clone();
+                    // The App owns the live settings (bar picks land there).
+                    if !open.as_ref().is_some_and(|w| w.isVisible()) {
+                        let live = self.ivars().app.borrow().settings.clone();
+                        *self.ivars().settings.borrow_mut() = live;
+                    }
                     let w = open
                         .filter(|w| w.isVisible())
                         .unwrap_or_else(|| build_prefs(mtm, self));
@@ -4086,7 +4085,7 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     t.field(
         mtm,
         "presentation_language",
-        "Presentation language (de / en; blank = audio preference)",
+        &crate::ui::presentation_language_label(),
         "",
         220.0,
     );
