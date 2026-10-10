@@ -83,6 +83,9 @@ struct Entry {
     #[serde(default)]
     published: Option<Identity>,
     completed: bool,
+    // The destination as planned from settings; links and logs use this form.
+    #[serde(default)]
+    planned: Option<String>,
 }
 
 impl Entry {
@@ -182,6 +185,7 @@ impl Manifest {
             .collect::<io::Result<Vec<_>>>()?;
         let mut entries = Vec::new();
         for (source, destination) in moves {
+            let destination_planned = destination;
             let source_identity = Identity::read(source)?;
             let source = source.canonicalize()?;
             let target = Path::new(destination);
@@ -221,6 +225,7 @@ impl Manifest {
                 prepared: None,
                 published: None,
                 completed: false,
+                planned: Some(destination_planned.clone()),
             });
         }
         let mut cleanup = Vec::new();
@@ -278,7 +283,9 @@ impl Manifest {
             .map(|e| {
                 (
                     e.source.clone(),
-                    e.destination.to_string_lossy().into_owned(),
+                    e.planned
+                        .clone()
+                        .unwrap_or_else(|| e.destination.to_string_lossy().into_owned()),
                 )
             })
             .collect()

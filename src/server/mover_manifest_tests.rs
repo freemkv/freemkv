@@ -41,6 +41,11 @@ fn fixture() -> (tempfile::TempDir, PathBuf, Config, Manifest) {
     (temp, dir, cfg, manifest)
 }
 
+// Links are keyed by the destination as planned from settings, not its canonical form.
+fn planned(entry: &Entry) -> PathBuf {
+    PathBuf::from(entry.planned.clone().unwrap())
+}
+
 #[test]
 fn partial_delivery_reuses_exact_plan_despite_changed_settings() {
     let _guard = super::super::TEST_STATE_LOCK
@@ -59,8 +64,8 @@ fn partial_delivery_reuses_exact_plan_despite_changed_settings() {
     let links = crate::server::library::links::load(Path::new(&cfg.autorip_dir));
     for entry in &manifest.entries[..2] {
         assert_eq!(
-            links.get(&entry.destination),
-            Some(&manifest.entries[2].destination)
+            links.get(&planned(entry)),
+            Some(&planned(&manifest.entries[2]))
         );
         assert!(entry.destination.exists());
     }
@@ -82,8 +87,8 @@ fn empty_media_directory_recovers_all_links_and_cleanup() {
     let links = crate::server::library::links::load(Path::new(&cfg.autorip_dir));
     assert_eq!(links.len(), 2);
     assert_eq!(
-        links.get(&manifest.entries[0].destination),
-        Some(&manifest.entries[2].destination)
+        links.get(&planned(&manifest.entries[0])),
+        Some(&planned(&manifest.entries[2]))
     );
 }
 
@@ -223,8 +228,8 @@ fn stalled_publication_retries_exact_manifest_before_linked_cleanup() {
     assert_eq!(links.len(), 2);
     for entry in &manifest.entries[..2] {
         assert_eq!(
-            links.get(&entry.destination),
-            Some(&manifest.entries[2].destination)
+            links.get(&planned(entry)),
+            Some(&planned(&manifest.entries[2]))
         );
     }
     assert_eq!(Identity::read(&entry.destination).unwrap(), prepared);
@@ -296,8 +301,8 @@ fn partial_failure_retry_links_the_whole_batch_without_variant_drift() {
     assert_eq!(links.len(), 2);
     for entry in &manifest.entries[..2] {
         assert_eq!(
-            links.get(&entry.destination),
-            Some(&manifest.entries[2].destination)
+            links.get(&planned(entry)),
+            Some(&planned(&manifest.entries[2]))
         );
     }
 }
@@ -651,6 +656,58 @@ fn a_busy_destination_lock_is_reported_instead_of_blocking_the_mover() {
     drop(held);
     let locks = manifest.lock_targets().unwrap();
     assert_eq!(locks.len(), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn links_and_moves_keep_the_configured_destination_form() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("nas/media");
+    std::fs::create_dir_all(&real).unwrap();
+    let configured = temp.path().join("media");
+    std::os::unix::fs::symlink(&real, &configured).unwrap();
+    let dir = temp.path().join("staging/job");
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = temp.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let marker = serde_json::json!({"title":"Show", "year":2024, "media_type":"movie"});
+    std::fs::write(dir.join(".done"), serde_json::to_vec(&marker).unwrap()).unwrap();
+    let mut moves = Vec::new();
+    for name in ["movie.mkv", "disc.iso"] {
+        std::fs::write(dir.join(name), b"bytes").unwrap();
+        let planned = configured.join(name).to_string_lossy().into_owned();
+        moves.push((dir.join(name), planned));
+    }
+    let manifest = Manifest::create(
+        &dir,
+        marker,
+        Vec::new(),
+        vec![configured.to_string_lossy().into_owned()],
+        &moves,
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.moves().iter().map(|m| &m.1).collect::<Vec<_>>(),
+        moves.iter().map(|m| &m.1).collect::<Vec<_>>()
+    );
+    let cfg = Config {
+        staging_dir: temp.path().join("staging").to_string_lossy().into_owned(),
+        autorip_dir: config.to_string_lossy().into_owned(),
+        output_dir: configured.to_string_lossy().into_owned(),
+        keep_iso: true,
+        ..Default::default()
+    };
+    super::super::check_and_move(&cfg);
+    assert!(!dir.exists());
+    let links = crate::server::library::links::load(&config);
+    assert_eq!(
+        links.get(&configured.join("movie.mkv")),
+        Some(&configured.join("disc.iso")),
+        "{links:?}"
+    );
 }
 
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
