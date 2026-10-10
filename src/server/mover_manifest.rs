@@ -110,6 +110,18 @@ pub(super) struct Manifest {
     pub roots: Vec<String>,
     entries: Vec<Entry>,
     cleanup: Vec<Cleanup>,
+    #[serde(default)]
+    retry: Option<RetryState>,
+}
+
+/// A delivery's retry budget or operator hold, mirrored from the mover's error row so a
+/// restart cannot buy another full copy. `not_before: None` means held for Retry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct RetryState {
+    pub attempts: u32,
+    pub not_before: Option<std::time::SystemTime>,
+    pub reason: String,
+    pub hint: String,
 }
 
 impl Manifest {
@@ -230,6 +242,7 @@ impl Manifest {
             roots,
             entries,
             cleanup,
+            retry: None,
         };
         manifest.save()?;
         Ok(manifest)
@@ -240,6 +253,22 @@ impl Manifest {
         // An error may follow a successful rename. Never roll back or assume
         // the old journal survived: every next operation reloads from disk.
         crate::server::ripper::staging::write_marker_durable(&self.directory.join(FILE), &bytes)
+    }
+
+    pub fn retry(&self) -> Option<&RetryState> {
+        self.retry.as_ref()
+    }
+
+    /// Persist (or clear) the retry state of the plan in `dir`; no journal, nothing to do.
+    pub fn record_retry(dir: &Path, state: Option<RetryState>) -> io::Result<()> {
+        let Some(mut manifest) = Self::load(dir)? else {
+            return Ok(());
+        };
+        if manifest.retry != state {
+            manifest.retry = state;
+            manifest.save()?;
+        }
+        Ok(())
     }
 
     pub fn moves(&self) -> Vec<(PathBuf, String)> {

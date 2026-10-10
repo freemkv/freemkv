@@ -160,12 +160,15 @@ fn move_retry_ready(path: &str, now: std::time::Instant) -> bool {
 // Only an attempted delivery consumes the retry budget. A health probe waiting
 // for a mount must remain able to recover as soon as that mount responds.
 fn schedule_move_retry(path: &str) {
-    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(error) = errors.get_mut(path) {
-        error.attempts = error.attempts.saturating_add(1);
-        error.retry_after = retry_deadline(error.attempts, std::time::Instant::now());
-        error.retry_held = error.retry_after.is_none();
+    {
+        let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(error) = errors.get_mut(path) {
+            error.attempts = error.attempts.saturating_add(1);
+            error.retry_after = retry_deadline(error.attempts, std::time::Instant::now());
+            error.retry_held = error.retry_after.is_none();
+        }
     }
+    persist_retry(path);
 }
 
 fn schedule_failed_delivery(path: &str, outcomes: &[MoveOutcome]) {
@@ -184,11 +187,90 @@ pub static MOVE_ERRORS: once_cell::sync::Lazy<Mutex<BTreeMap<String, MoverError>
 
 // Stop automatic retries until the operator chooses Retry.
 fn hold_for_operator(path: &str) {
-    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(error) = errors.get_mut(path) {
-        error.retry_after = None;
-        error.retry_held = true;
+    {
+        let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(error) = errors.get_mut(path) {
+            error.retry_after = None;
+            error.retry_held = true;
+        }
     }
+    persist_retry(path);
+}
+
+// Operator Retry requests not yet applied to a delivery journal's retry state.
+static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
+    once_cell::sync::Lazy::new(Default::default);
+
+// Mirror a staging dir's budget or hold into its delivery journal, if it has one,
+// so neither a restart nor an internal reboot buys another full-file copy.
+fn persist_retry(path: &str) {
+    let Some(row) = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .cloned()
+    else {
+        return;
+    };
+    let now = (std::time::Instant::now(), std::time::SystemTime::now());
+    let state = manifest::RetryState {
+        attempts: row.attempts,
+        not_before: row
+            .retry_after
+            .map(|deadline| now.1 + deadline.saturating_duration_since(now.0)),
+        reason: row.reason,
+        hint: row.hint,
+    };
+    if let Err(error) = manifest::Manifest::record_retry(Path::new(path), Some(state)) {
+        tracing::warn!(%error, dir = path, "mover: retry state not persisted");
+    }
+}
+
+// Rebuild a missing error row from the journal, or apply a pending operator Retry.
+// Returns whether this dir may attempt delivery now.
+fn restore_retry(path: &str, saved: &manifest::Manifest) -> bool {
+    let requested = RETRY_REQUESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(path);
+    if requested {
+        if let Err(error) = manifest::Manifest::record_retry(Path::new(path), None) {
+            record_error(
+                path,
+                &format!("cannot clear the delivery retry state: {error}"),
+                "Repair the staging storage, then choose Retry; nothing was copied.",
+            );
+            return false;
+        }
+        return true;
+    }
+    let Some(state) = saved.retry() else {
+        return true;
+    };
+    let now = std::time::Instant::now();
+    MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(path.to_string())
+        .or_insert_with(|| {
+            let retry_after = state.not_before.map(|t| {
+                now + t
+                    .duration_since(std::time::SystemTime::now())
+                    .unwrap_or_default()
+            });
+            MoverError {
+                path: path.to_string(),
+                reason: state.reason.clone(),
+                hint: state.hint.clone(),
+                attempts: state.attempts,
+                retry_held: retry_after.is_none(),
+                waiting_for_folder: false,
+                worker_active: false,
+                copy_stalled: false,
+                retry_after,
+            }
+        });
+    move_retry_ready(path, now)
 }
 
 fn record_error(path: &str, reason: &str, hint: &str) {
@@ -267,6 +349,10 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
     // the map untouched is the unbounded growth this exists to stop.
     let mut m = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
     m.retain(|key, _| Path::new(key).parent() != Some(root) || seen.contains(key));
+    RETRY_REQUESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|key| Path::new(key).parent() != Some(root) || seen.contains(key));
 }
 
 fn prune_after_listing(
@@ -285,15 +371,25 @@ pub fn clear_move_error(path: &str) {
     let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
     if errors.get(path).is_none_or(|e| !e.worker_active) {
         errors.remove(path);
+        RETRY_REQUESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_string());
     }
 }
 
 /// Operator-initiated Retry all: reset errors and their retry budgets.
 pub fn clear_all_move_errors() {
+    let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
     MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|_, e| e.worker_active);
+        .retain(|path, e| {
+            if !e.worker_active {
+                requests.insert(path.clone());
+            }
+            e.worker_active
+        });
 }
 
 /// Outcome of moving a single file. Distinguishes between an active move
@@ -860,6 +956,10 @@ pub(crate) fn reset_after_drain() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    RETRY_REQUESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     STRANDED_WARNED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -982,6 +1082,11 @@ fn check_and_move(cfg: &Config) {
                 continue;
             }
         };
+        if let Some(saved) = &delivery
+            && !restore_retry(&dir.to_string_lossy(), saved)
+        {
+            continue;
+        }
 
         let marker_path = dir.join(".done");
 
@@ -1571,6 +1676,7 @@ fn check_and_move(cfg: &Config) {
             .any(|o| matches!(o, MoveOutcome::Moved | MoveOutcome::MovedDirty));
 
         if outcomes.iter().any(|o| matches!(o, MoveOutcome::Stalled)) {
+            hold_for_operator(&dir_str);
             continue;
         }
         if any_unsupported {

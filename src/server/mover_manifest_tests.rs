@@ -542,6 +542,93 @@ fn a_zero_length_destination_is_held_as_interrupted_publication() {
     assert!(entry.source.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_failed_delivery_keeps_its_backoff_across_a_restart() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, manifest) = fixture();
+    let key = dir.to_string_lossy().into_owned();
+    let source = &manifest.entries[0].source;
+    // prepare() opens the candidate read-write: a read-only source fails it.
+    std::fs::set_permissions(source, std::fs::Permissions::from_mode(0o444)).unwrap();
+    super::super::check_and_move(&cfg);
+    assert!(source.exists() && !manifest.entries[0].destination.exists());
+    assert_eq!(
+        Manifest::load(&dir)
+            .unwrap()
+            .unwrap()
+            .retry()
+            .unwrap()
+            .attempts,
+        1
+    );
+    std::fs::set_permissions(source, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    super::super::reset_after_drain();
+    super::super::check_and_move(&cfg);
+    assert!(
+        source.exists() && !manifest.entries[0].destination.exists(),
+        "a restart must not buy another copy before the backoff expires"
+    );
+    let row = super::super::MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get(&key)
+        .cloned()
+        .unwrap();
+    assert_eq!(row.attempts, 1);
+    assert!(row.retry_after.is_some() && !row.retry_held);
+
+    super::super::clear_all_move_errors();
+    super::super::check_and_move(&cfg);
+    assert!(!dir.exists(), "an operator Retry delivers and cleans up");
+}
+
+#[test]
+fn a_held_delivery_stays_held_across_a_restart_until_retry() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, manifest) = fixture();
+    let key = dir.to_string_lossy().into_owned();
+    let held = RetryState {
+        attempts: 3,
+        not_before: None,
+        reason: "destination does not support a required delivery operation".into(),
+        hint: "fix the destination, then choose Retry".into(),
+    };
+    Manifest::record_retry(&dir, Some(held.clone())).unwrap();
+    super::super::reset_after_drain();
+    super::super::check_and_move(&cfg);
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .all(|e| e.source.exists() && !e.destination.exists())
+    );
+    let row = super::super::MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get(&key)
+        .cloned()
+        .unwrap();
+    assert!(row.retry_held && row.retry_after.is_none());
+    assert_eq!(
+        (row.reason.as_str(), row.attempts),
+        (held.reason.as_str(), 3)
+    );
+    // Without Retry, later ticks stay held.
+    super::super::check_and_move(&cfg);
+    assert!(manifest.entries[0].source.exists());
+
+    super::super::clear_move_error(&key);
+    super::super::check_and_move(&cfg);
+    assert!(!dir.exists(), "Retry clears the durable hold and delivers");
+}
+
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
 // live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
 #[cfg(unix)]
