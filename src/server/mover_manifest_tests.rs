@@ -629,6 +629,30 @@ fn a_held_delivery_stays_held_across_a_restart_until_retry() {
     assert!(!dir.exists(), "Retry clears the durable hold and delivers");
 }
 
+#[test]
+fn a_busy_destination_lock_is_reported_instead_of_blocking_the_mover() {
+    let (_temp, _dir, _cfg, manifest) = fixture();
+    let held = libfreemkv::io::ArtifactLock::acquire(
+        &manifest.entries[1].destination,
+        &[],
+        &libfreemkv::Halt::new(),
+    )
+    .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = manifest.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(waiter.lock_targets_within(std::time::Duration::from_millis(200)));
+    });
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("lock_targets must give up and report a busy lock");
+    let error = result.err().expect("the held lock is reported");
+    assert_eq!(error.kind(), io::ErrorKind::ResourceBusy, "{error}");
+    drop(held);
+    let locks = manifest.lock_targets().unwrap();
+    assert_eq!(locks.len(), 3);
+}
+
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
 // live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
 #[cfg(unix)]

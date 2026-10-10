@@ -13,6 +13,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 pub(super) const FILE: &str = ".delivery.json";
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Identity {
@@ -408,6 +409,16 @@ impl Manifest {
     /// Cooperating library writers use these same sidecars. Hold the complete
     /// set in deterministic order through verification, linkage and cleanup.
     pub fn lock_targets(&self) -> io::Result<Vec<libfreemkv::io::ArtifactLock>> {
+        self.lock_targets_within(LOCK_WAIT)
+    }
+
+    // Give up after `wait` with ResourceBusy so one busy target cannot starve every other
+    // finished rip on the single mover thread; the next tick tries again.
+    pub fn lock_targets_within(
+        &self,
+        wait: std::time::Duration,
+    ) -> io::Result<Vec<libfreemkv::io::ArtifactLock>> {
+        let started = std::time::Instant::now();
         let mut targets = Vec::new();
         for entry in &self.entries {
             verify_parent(&entry.destination, entry.destination_parent_id)?;
@@ -437,6 +448,13 @@ impl Manifest {
                     return Err(io::Error::other("delivery lock worker stopped"));
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if started.elapsed() >= wait {
+                        halt.cancel();
+                        return Err(io::Error::new(
+                            io::ErrorKind::ResourceBusy,
+                            "another library operation holds a destination lock",
+                        ));
+                    }
                     if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                         halt.cancel();
                         // The tracked worker releases any partial lock set on
