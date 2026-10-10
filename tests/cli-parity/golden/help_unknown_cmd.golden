@@ -59,6 +59,7 @@ Examples:
 Flags:
   -t, --title N       Select title (1-based, repeatable). Default: the main title (title 1); use -t all for every title.
   -a, --audio LANGS   Keep only these audio languages (names or ISO codes, comma-separated, case-insensitive), or all/none. Default: keep all.
+      --presentation-language de  Choose an authored language presentation; independent of --audio all
   -s, --subtitles LANGS  Keep only these subtitle languages (names or ISO codes, comma-separated, case-insensitive), or all/none. Default: keep all.
       --keydb PATH    KEYDB.cfg path (local key source)
       --key-url URL   Online key-service base URL (https only).

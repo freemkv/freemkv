@@ -59,6 +59,7 @@ Beispiele:
 Optionen:
   -t, --title N       Titel auswählen (1-basiert, wiederholbar). Standard: der Hauptfilm (Titel 1); -t all für alle Titel.
   -a, --audio SPR     Nur diese Audiosprachen behalten (Namen oder ISO-Codes, kommagetrennt, Groß-/Kleinschreibung egal), oder all/none. Standard: alle behalten.
+      --presentation-language de  Eine vom Autor erstellte Sprachfassung wählen; unabhängig von --audio all
   -s, --subtitles SPR    Nur diese Untertitelsprachen behalten (Namen oder ISO-Codes, kommagetrennt, Groß-/Kleinschreibung egal), oder all/none. Standard: alle behalten.
       --keydb PFAD    KEYDB.cfg-Pfad (lokale Schlüsselquelle)
       --key-url URL   Basis-URL des Online-Schlüsseldienstes (nur https).

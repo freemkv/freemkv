@@ -825,7 +825,8 @@ fn usage() {
     println!("{}", crate::strings::get("usage.flag.title"));
     println!("{}", crate::strings::get("usage.flag.audio"));
     println!(
-        "  --presentation-language de  Choose an authored language presentation; independent of --audio all"
+        "{}",
+        crate::strings::get("usage.flag.presentation_language")
     );
     println!("{}", crate::strings::get("usage.flag.subtitles"));
     println!("{}", crate::strings::get("usage.flag.keydb"));

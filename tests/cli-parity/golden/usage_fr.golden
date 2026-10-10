@@ -59,6 +59,7 @@ Exemples :
 Options :
   -t, --title N       Sélectionner le titre (base 1, répétable). Défaut : le titre principal (titre 1) ; -t all pour tous.
   -a, --audio LANGUES Ne garder que ces langues audio (noms ou codes ISO, séparés par des virgules, insensible à la casse), ou all/none. Défaut : tout garder.
+      --presentation-language de  Choisir une présentation linguistique prévue par l'auteur ; indépendant de --audio all
   -s, --subtitles LANGUES  Ne garder que ces langues de sous-titres (noms ou codes ISO, séparés par des virgules, insensible à la casse), ou all/none. Défaut : tout garder.
       --keydb CHEMIN  Chemin vers KEYDB.cfg (source de clés locale)
       --key-url URL   URL de base du service de clés en ligne (https uniquement).
