@@ -1,7 +1,8 @@
 //! The daemon entry: `freemkv server [--bootstrap | --healthcheck | serve]`.
 
 use super::{
-    REBOOT, SHUTDOWN, VERSION_LABEL, config, keysource, log, mover, muxer, observe, ripper, web,
+    REBOOT, SHUTDOWN, TERMINATE, VERSION_LABEL, config, keysource, log, mover, muxer, observe,
+    ripper, web,
 };
 
 use std::sync::atomic::Ordering;
@@ -334,7 +335,12 @@ pub fn run(argv: Vec<String>) {
             ("log-prune", Some(log_prune_handle)),
         ];
         let mut web_handle = Some(web_handle);
-        loop {
+        let staging = cfg
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .staging_dir
+            .clone();
+        let drained = stop_generation(std::path::Path::new(&staging), || {
             // HTTP admission is closed by SHUTDOWN. Existing requests may still
             // spawn rips, so drain their tracked helpers BEFORE the final rip
             // registry check. No short-circuit: every worker gets a drain attempt.
@@ -348,36 +354,71 @@ pub fn run(argv: Vec<String>) {
                 web::stop_after_drain();
                 drained &= join_bounded(&mut web_handle, "web", std::time::Duration::from_secs(10));
             }
-            if drained {
-                break;
-            }
-            log::syslog(
-                "Restart refused while old services are still draining; cancellation remains set",
-            );
-            if !REBOOT.load(Ordering::Acquire) {
-                // Process shutdown may remain bounded. Internal restart must not
-                // detach a survivor and clear its cancellation underneath it.
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-
-        // Cleanup is safe only after all writers have relinquished artifacts.
-        {
-            let c = cfg.read().unwrap_or_else(|e| e.into_inner());
-            ripper::staging::clear_inprogress_markers(std::path::Path::new(&c.staging_dir));
-        }
-        log::syslog("autorip stopped");
-        if REBOOT.swap(false, Ordering::AcqRel) {
+            drained
+        });
+        if drained && take_restart() {
             reset_after_drain();
             BACKGROUND.reopen();
-            SHUTDOWN.store(false, Ordering::Release);
+            reopen_admission();
             restarting = true;
             log::syslog("autorip soft reboot: starting fresh instance");
             continue;
         }
         break;
     }
+}
+
+// Drain this generation's services; false when they did not all finish. A process stop
+// clears in-progress markers first, so a SIGKILL at the stop grace or a timed-out drain
+// still leaves resumable dirs; a reboot clears them only once every old writer is gone.
+fn stop_generation(staging: &std::path::Path, mut drain: impl FnMut() -> bool) -> bool {
+    let mut cleared = false;
+    loop {
+        let reboot = rebooting();
+        if !reboot && !cleared {
+            ripper::staging::clear_inprogress_markers(staging);
+            cleared = true;
+        }
+        if drain() {
+            break;
+        }
+        if !reboot {
+            log::syslog(
+                "autorip stopped before every service drained; unfinished work is interrupted",
+            );
+            return false;
+        }
+        // Internal restart must not detach a survivor and clear its cancellation
+        // underneath it. A stop request instead gets one bounded shutdown attempt.
+        log::syslog(
+            "Restart refused while old services are still draining; cancellation remains set",
+        );
+        if rebooting() {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+    ripper::staging::clear_inprogress_markers(staging);
+    log::syslog("autorip stopped");
+    true
+}
+
+// A soft reboot is pending and no stop signal has overridden it.
+fn rebooting() -> bool {
+    REBOOT.load(Ordering::Acquire) && !TERMINATE.load(Ordering::Acquire)
+}
+
+// Reopen admission for the fresh generation. A signal that landed while it was being
+// reset re-raises SHUTDOWN, so the new generation stops instead of losing the request.
+fn reopen_admission() {
+    SHUTDOWN.store(false, Ordering::Release);
+    if TERMINATE.load(Ordering::Acquire) {
+        SHUTDOWN.store(true, Ordering::Release);
+    }
+}
+
+// Whether a drained generation should be replaced in-process.
+fn take_restart() -> bool {
+    REBOOT.swap(false, Ordering::AcqRel) && !TERMINATE.load(Ordering::Acquire)
 }
 
 // Run the startup destination `check` over `cfg` on its own thread and warn about each
@@ -465,8 +506,8 @@ fn drain_services(
 
 #[cfg(unix)]
 extern "C" fn handle_signal(_sig: libc::c_int) {
-    if SHUTDOWN.load(Ordering::Acquire) {
-        // Second signal — force exit
+    // A soft reboot also sets SHUTDOWN, so only a prior stop signal means "second signal".
+    if TERMINATE.swap(true, Ordering::AcqRel) {
         unsafe { libc::_exit(1) };
     }
     // Release on the store / Acquire on the load so the flag is reliably

@@ -158,7 +158,8 @@ pub(crate) fn reset_after_drain() {
 fn stop_listener() -> bool {
     STOP_LISTENER.load(std::sync::atomic::Ordering::Acquire)
         || (crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
-            && !crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire))
+            && (!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire)
+                || crate::server::TERMINATE.load(std::sync::atomic::Ordering::Acquire)))
 }
 
 pub fn run(cfg: &Arc<RwLock<Config>>) {
