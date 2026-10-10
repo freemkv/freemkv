@@ -1078,15 +1078,41 @@ impl Queue {
         });
     }
 
-    /// Drop done and failed jobs from the list; their per-title results stay.
+    /// Drop done and failed jobs from the list; their per-title results stay. A failed
+    /// replacement goes too once it provably published nothing; its candidates are deleted.
     pub fn clear_finished(&self) -> usize {
-        self.mutate(|f| {
+        let abandonable = |j: &Job| {
+            j.state == JobState::Failed
+                && j.has_replacement_work()
+                && j.replacement
+                    .as_ref()
+                    .is_some_and(|r| r.unpublished_candidates().is_ok())
+        };
+        // Candidate identities are read from the library share: never under the queue lock.
+        let releasable: Vec<Job> = self
+            .snapshot()
+            .jobs
+            .into_iter()
+            .filter(|j| abandonable(j))
+            .collect();
+        let (cleared, released) = self.mutate(|f| {
             let before = f.jobs.len();
+            let mut released = Vec::new();
             f.jobs.retain(|j| {
+                if releasable.contains(j) {
+                    released.extend(j.replacement.clone());
+                    return false;
+                }
                 matches!(j.state, JobState::Queued | JobState::Running) || j.has_replacement_work()
             });
-            before - f.jobs.len()
-        })
+            (before - f.jobs.len(), released)
+        });
+        for replacement in released {
+            if let Err(e) = replacement.abandon() {
+                tracing::warn!(error = %e, "abandoned replacement candidate could not be removed");
+            }
+        }
+        cleared
     }
 
     /// Drop the queued (not running) job for `target`. Returns how many went. A job with a

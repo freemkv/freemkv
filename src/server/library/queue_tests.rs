@@ -928,3 +928,55 @@ fn stop_all_and_unqueue_keep_a_kept_file_offered() {
     assert_eq!(q.take_staged(&a.target), Err(false));
     assert_eq!(q.staged_total(), (0, 0));
 }
+
+fn failed_replacement_with_candidate(t: &Path, q: &Queue, record_identity: bool) -> (Job, PathBuf) {
+    let item = job(t, "old");
+    std::fs::write(&item.iso, b"source").unwrap();
+    q.add_corrected(item, corrected_match()).unwrap();
+    let claimed = q.claim_next().unwrap();
+    let candidate = t.join("old-candidate.mkv");
+    std::fs::write(&candidate, b"prepared multi-GB candidate").unwrap();
+    let identity = super::super::replacement::FileIdentity::read(&candidate).unwrap();
+    let mut journal = serde_json::to_value(claimed.replacement.as_ref().unwrap()).unwrap();
+    journal["prepared"] = serde_json::json!([{
+        "target": claimed.target,
+        "candidate": candidate,
+        "identity": if record_identity { serde_json::to_value(identity).unwrap() } else { serde_json::Value::Null },
+        "writing_app": null
+    }]);
+    q.save_replacement(claimed.id, serde_json::from_value(journal).unwrap())
+        .unwrap();
+    q.drop_job(claimed.id);
+    (claimed, candidate)
+}
+
+#[test]
+fn clearing_a_failed_unpublished_replacement_reclaims_its_candidates() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (claimed, candidate) = failed_replacement_with_candidate(t.path(), &q, true);
+    assert_eq!(q.snapshot().jobs[0].state, JobState::Failed);
+    assert_eq!(q.clear_finished(), 1);
+    assert!(!candidate.exists(), "the verified candidate is reclaimed");
+    assert!(q.snapshot().jobs.is_empty());
+    assert!(q.with_idle_source(&claimed.iso, || Ok(())).is_ok());
+}
+
+#[test]
+fn clearing_keeps_a_replacement_whose_candidate_cannot_be_proven_ours() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (_, candidate) = failed_replacement_with_candidate(t.path(), &q, false);
+    assert_eq!(q.clear_finished(), 0);
+    assert!(candidate.exists());
+    // A recorded candidate that changed, or vanished (possibly published), stays too.
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (_, candidate) = failed_replacement_with_candidate(t.path(), &q, true);
+    std::fs::write(&candidate, b"something else entirely, longer").unwrap();
+    assert_eq!(q.clear_finished(), 0);
+    assert!(candidate.exists());
+    std::fs::remove_file(&candidate).unwrap();
+    assert_eq!(q.clear_finished(), 0);
+    assert_eq!(q.snapshot().jobs.len(), 1);
+}
