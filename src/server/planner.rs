@@ -54,6 +54,17 @@ pub enum PlanError {
     SelectionNeedsReview(String),
 }
 
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoTitles => f.write_str("the source has no usable title"),
+            Self::NoOutputs => f.write_str("the plan produced no outputs"),
+            Self::DuplicateOutput(name) => write!(f, "two outputs would both be named {name}"),
+            Self::SelectionNeedsReview(reason) => f.write_str(reason.trim_end_matches('.')),
+        }
+    }
+}
+
 pub trait Planner {
     fn plan(
         &self,

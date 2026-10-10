@@ -356,7 +356,7 @@ fn tv_plan_result(
     result.map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Title plan needs review before remux: {error:?}"),
+            format!("Title plan needs review before remux: {error}"),
         )
     })
 }

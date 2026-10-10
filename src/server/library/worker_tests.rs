@@ -241,7 +241,7 @@ fn planner_errors_require_review_without_entering_remux_or_requeueing() {
         PlanError::DuplicateOutput("episode.mkv".into()),
         PlanError::SelectionNeedsReview("missing authored roster".into()),
     ] {
-        let detail = format!("{error:?}");
+        let detail = format!("{error}");
         let (_t, lib, dirs) = library_with(&["B"]);
         lib.queue.add(vec![NewJob {
             title: "Show".into(),

@@ -366,3 +366,27 @@ fn tv_auto_off_does_not_fan_out() {
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].filename, "Endeavour.mkv");
 }
+
+#[test]
+fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
+    use crate::server::planner::PlanError;
+    let ambiguous = selection_review_message(&PlanError::SelectionNeedsReview(
+        "ambiguous-presentation-language".into(),
+    ));
+    assert_eq!(
+        ambiguous,
+        "Title selection needs review before muxing: ambiguous-presentation-language. No fallback title was selected."
+    );
+    let numbering = selection_review_message(&PlanError::SelectionNeedsReview(
+        "Episode numbering is outside the supported range.".into(),
+    ));
+    assert!(!numbering.contains(".."), "{numbering}");
+    for error in [
+        PlanError::NoTitles,
+        PlanError::NoOutputs,
+        PlanError::DuplicateOutput("Show_S01E01.mkv".into()),
+    ] {
+        let text = selection_review_message(&error);
+        assert!(!text.contains(&format!("{error:?}")), "{text}");
+    }
+}
