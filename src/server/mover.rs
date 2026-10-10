@@ -632,7 +632,7 @@ fn copy_counting_with_halt(
         stage("opening staged source");
         let mut reader = std::fs::File::open(src).map_err(|e| context("open source", src, e))?;
         stage("creating destination temporary file");
-        let mut writer = std::fs::File::create(&tmp)
+        let mut writer = create_temporary(&tmp)
             .map_err(|e| context("create destination temporary file", &tmp, e))?;
         let mut buf = vec![0u8; 4 * 1024 * 1024];
         let mut total = 0u64;
@@ -743,6 +743,16 @@ fn copy_counting_with_halt(
         libfreemkv::io::fsync::dir(parent);
     }
     Ok(total)
+}
+
+// Exclusive and never through a link: the name is predictable on a shared folder,
+// and the stale copy was just removed, so anything there now is not ours.
+fn create_temporary(tmp: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    options.open(tmp)
 }
 
 // Some Rust/platform combinations classify ENOTSUP as Uncategorized. Preserve

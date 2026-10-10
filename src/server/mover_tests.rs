@@ -307,6 +307,18 @@ fn candidate_validation_failures_keep_their_specific_outcome() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn the_copy_temporary_never_follows_a_planted_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, b"precious").unwrap();
+    let tmp = dir.path().join("Title (2024).mkv.part-1");
+    std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+    assert!(super::create_temporary(&tmp).is_err());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+}
+
 #[test]
 fn delivery_retries_back_off_then_require_operator_retry() {
     let _guard = super::TEST_STATE_LOCK
