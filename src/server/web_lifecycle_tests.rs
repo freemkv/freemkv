@@ -170,3 +170,29 @@ fn stuck_sse_write_releases_handler_on_shutdown() {
         .expect("SSE must observe shutdown while its socket write is stuck");
     worker.join().unwrap();
 }
+
+// tiny_http's accept thread exits after reporting an accept error, so the port
+// is dead for good: like a failed bind, that must stop the daemon visibly
+// (container restart policy) rather than leave workers running with no UI.
+#[test]
+fn dead_listener_signals_shutdown() {
+    const CHILD: &str = "FREEMKV_TEST_DEAD_LISTENER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "server::web::lifecycle_tests::dead_listener_signals_shutdown",
+                    "--nocapture"
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap()
+                .success()
+        );
+        return;
+    }
+    let cfg = Arc::new(RwLock::new(Config::default()));
+    serve(&cfg, |_| Err(std::io::Error::other("Too many open files")));
+    assert!(crate::server::SHUTDOWN.load(Ordering::Acquire));
+}

@@ -41,23 +41,27 @@ pub fn retitle_staging_for_device(
     device: &str,
     expected_job: &str,
     metadata: staging::UserMetadata,
-) -> Result<u64, String> {
+) -> std::io::Result<u64> {
     let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
     let row = STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(device)
         .cloned()
-        .ok_or("unknown device")?;
+        .ok_or_else(|| std::io::Error::other("unknown device"))?;
     if row.job_id.is_empty()
         || row.job_id != expected_job
         || !row.disc_present
         || row.status == "scanning"
     {
-        return Err("the disc changed or is not identified yet; refresh and try again".into());
+        return Err(std::io::Error::other(
+            "the disc changed or is not identified yet; refresh and try again",
+        ));
     }
-    let dir = jobs::path(std::path::Path::new(&c.staging_dir), &row.job_id)?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create staging: {e}"))?;
+    let dir = jobs::path(std::path::Path::new(&c.staging_dir), &row.job_id)
+        .map_err(std::io::Error::other)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create staging: {e}")))?;
     staging::save_user_metadata_for_device(
         &dir,
         metadata,
@@ -65,7 +69,6 @@ pub fn retitle_staging_for_device(
         &row.disc_label,
         device,
     )
-    .map_err(|e| e.to_string())
 }
 
 // Internal-use imports for the orchestrator code that lives in this

@@ -3755,6 +3755,152 @@ mod http {
         assert_eq!(std::fs::read(&saved.iso_path).unwrap(), b"capture");
     }
 
+    // A review retitle picks a new TMDB entry; the old match's poster and overview
+    // must not ride along into delivery (the live title override drops them too).
+    #[test]
+    fn review_retitle_replaces_the_previous_match_poster_and_overview() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let held = |name: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut saved = ripper::staging::DiscState::new(ripper::staging::StagingState::Review);
+            saved.title = "The Office".into();
+            saved.tmdb_id = 1;
+            saved.tmdb_poster = "https://image.tmdb.org/t/p/w500/uk.jpg".into();
+            saved.tmdb_overview = "UK".into();
+            ripper::staging::write_state(&dir, &saved);
+            dir
+        };
+        let picked = held("picked");
+        let body = r#"{"dir":"picked","action":"retitle","title":"The Office","year":2005,"tmdb_id":2,"poster_url":"https://image.tmdb.org/t/p/w500/us.jpg","overview":"US"}"#;
+        assert_eq!(
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[]).0,
+            200
+        );
+        let current = ripper::staging::read_state(&picked).unwrap();
+        assert_eq!(current.tmdb_id, 2);
+        assert_eq!(
+            current.tmdb_poster,
+            "https://image.tmdb.org/t/p/w500/us.jpg"
+        );
+        assert_eq!(current.tmdb_overview, "US");
+
+        let typed = held("typed");
+        let body = r#"{"dir":"typed","action":"retitle","title":"Something Else","year":0}"#;
+        assert_eq!(
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[]).0,
+            200
+        );
+        let current = ripper::staging::read_state(&typed).unwrap();
+        assert_eq!(
+            (current.tmdb_poster.as_str(), current.tmdb_overview.as_str()),
+            ("", "")
+        );
+
+        let bad = held("bad");
+        let body =
+            r#"{"dir":"bad","action":"retitle","title":"X","poster_url":"javascript:alert(1)"}"#;
+        assert_eq!(
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[]).0,
+            400
+        );
+
+        let kept = held("kept");
+        let body = r#"{"dir":"kept","action":"proceed"}"#;
+        assert_eq!(
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[]).0,
+            200
+        );
+        let current = ripper::staging::read_state(&kept).unwrap();
+        assert_eq!(
+            current.tmdb_poster,
+            "https://image.tmdb.org/t/p/w500/uk.jpg"
+        );
+    }
+
+    // A refusal (not a held rip) is a conflict; storage failing to take the write is
+    // a server error, so the client does not mistake it for a stale request.
+    #[cfg(unix)]
+    #[test]
+    fn review_resolve_reports_storage_failure_as_server_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let dir = tmp.path().join("held");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = ripper::staging::DiscState::new(ripper::staging::StagingState::Stopped);
+        saved.title = "Film".into();
+        ripper::staging::write_state(&dir, &saved);
+        let body = r#"{"dir":"held","action":"proceed"}"#;
+        assert_eq!(
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[]).0,
+            409
+        );
+
+        saved.state = ripper::staging::StagingState::Review;
+        ripper::staging::write_state(&dir, &saved);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let writable = std::fs::write(dir.join("probe"), b"").is_ok(); // root ignores modes
+        let status = roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[]).0;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !writable {
+            assert_eq!(status, 500);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn title_override_reports_storage_failure_as_server_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let device = "sgtitlestorage";
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let dir = tmp.path().join("job");
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = ripper::staging::DiscState::new(ripper::staging::StagingState::Stopped);
+        ripper::staging::write_state(&dir, &saved);
+        ripper::update_state(
+            device,
+            ripper::RipState {
+                device: device.to_string(),
+                status: "idle".into(),
+                disc_present: true,
+                job_id: "job".into(),
+                ..Default::default()
+            },
+        );
+        let post = |job: &str| {
+            let body = format!(r#"{{"title":"Film","year":2000,"job_id":"{job}"}}"#);
+            roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/title/{device}"),
+                Some(&body),
+                &[],
+            )
+            .0
+        };
+        assert_eq!(post("other-job"), 409);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let writable = std::fs::write(dir.join("probe"), b"").is_ok(); // root ignores modes
+        let status = post("job");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ripper::STATE.lock().unwrap().remove(device);
+        if !writable {
+            assert_eq!(status, 500);
+        }
+    }
+
     #[test]
     fn single_pass_title_override_guards_persisted_mode_after_settings_change() {
         let run = |device: &str, current_type: &str, current_id: u64, body: &str| {

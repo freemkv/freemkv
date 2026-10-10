@@ -186,9 +186,16 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
     };
     crate::server::log::syslog(&format!("Web server listening on {}", addr));
     tracing::info!(address = %addr, "web server listening");
+    serve(cfg, |timeout| server.recv_timeout(timeout));
+    tracing::info!("web server stopping");
+}
 
+fn serve(
+    cfg: &Arc<RwLock<Config>>,
+    mut recv: impl FnMut(std::time::Duration) -> std::io::Result<Option<tiny_http::Request>>,
+) {
     loop {
-        let request = match server.recv_timeout(std::time::Duration::from_secs(1)) {
+        let request = match recv(std::time::Duration::from_secs(1)) {
             Ok(Some(request)) => request,
             Ok(None) => {
                 if stop_listener() {
@@ -197,7 +204,13 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
                 continue;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "web listener stopped receiving requests");
+                // tiny_http's accept thread has exited: the port is dead for good. As
+                // with a failed bind, stop so the container restart policy recovers us.
+                crate::server::log::syslog(&format!(
+                    "FATAL: web server stopped accepting connections: {e} — signalling shutdown"
+                ));
+                tracing::error!(error = %e, "web listener stopped receiving requests; signalling shutdown");
+                crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
                 break;
             }
         };
@@ -241,7 +254,6 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
             // guard drops here, freeing the reserved slot.
         }
     }
-    tracing::info!("web server stopping");
 }
 
 /// Extract a header value by case-insensitive field name.
@@ -644,8 +656,8 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
         Err(e) => {
             return json_response(
                 request,
-                409,
-                &serde_json::json!({"ok": false, "error": e}).to_string(),
+                metadata_error_status(&e),
+                &serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
             );
         }
     };
@@ -667,6 +679,16 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
         );
     });
     json_response(request, 200, r#"{"ok":true}"#);
+}
+
+// Metadata refusals are plain `io::Error::other` messages (a conflict with the job's
+// state); any other kind is storage failing to take the write, a server error.
+fn metadata_error_status(e: &std::io::Error) -> u16 {
+    if e.kind() == std::io::ErrorKind::Other {
+        409
+    } else {
+        500
+    }
 }
 
 fn capture_episode_start(
@@ -740,6 +762,24 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
                 }
             };
             let retitle = v["action"] == "retitle";
+            // A retitle is a new match: its poster/overview replace the old ones, as
+            // the live title override does; proceed keeps the saved match whole.
+            let (poster_url, overview) = if retitle {
+                let poster = v["poster_url"].as_str().unwrap_or("");
+                if !poster.is_empty() && !is_valid_poster_url(poster) {
+                    return json_response(
+                        request,
+                        400,
+                        r#"{"ok":false,"error":"invalid poster_url"}"#,
+                    );
+                }
+                (
+                    clamp_chars(poster, 1000),
+                    clamp_chars(v["overview"].as_str().unwrap_or(""), 2000),
+                )
+            } else {
+                (saved.tmdb_poster, saved.tmdb_overview)
+            };
             let title = if retitle {
                 clamp_chars(v["title"].as_str().unwrap_or("").trim(), 300)
             } else {
@@ -761,14 +801,14 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
                 media_type,
                 episode_start,
                 tmdb_id: v["tmdb_id"].as_u64().unwrap_or(saved.tmdb_id),
-                poster_url: saved.tmdb_poster,
-                overview: saved.tmdb_overview,
+                poster_url,
+                overview,
             };
             return match ripper::staging::save_review_metadata(&path, metadata) {
                 Ok(_) => json_response(request, 200, r#"{"ok":true}"#),
                 Err(e) => json_response(
                     request,
-                    409,
+                    metadata_error_status(&e),
                     &serde_json::json!({"ok":false,"error":e.to_string()}).to_string(),
                 ),
             };
