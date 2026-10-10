@@ -2324,36 +2324,135 @@ fn quarantine_restart_loop(path: &Path, reason: &str) {
     );
 }
 
+// Files the ripper itself writes that carry no capture or delivery (lifecycle
+// state, markers, label, counters); their `.tmp` siblings count too.
+const RIPPER_BOOKKEEPING: &[&str] = &[
+    STATE_FILE,
+    UNREADABLE_STATE_ASIDE,
+    DONE_MARKER,
+    REVIEW_MARKER,
+    COMPLETED_MARKER,
+    FAILED_MARKER,
+    ABORTED_LOSS_MARKER,
+    RIPPED_MARKER,
+    SWEEPING_MARKER,
+    MUXING_MARKER,
+    ACCEPT_LOSS_MARKER,
+    RESTART_COUNT_FILE,
+    DISC_LABEL_FILE,
+];
+
+fn is_ripper_bookkeeping(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    RIPPER_BOOKKEEPING.contains(&name.strip_suffix(".tmp").unwrap_or(&name))
+}
+
 // Whether every entry in `dir` is a file the ripper itself writes with no
-// artifact (lifecycle state, markers, label, counters, and their `.tmp`s).
-// A listing error reads as `false`, so the caller keeps the dir.
+// artifact. A listing error reads as `false`, so the caller keeps the dir.
 fn holds_only_ripper_bookkeeping(dir: &Path) -> bool {
-    const OWN: &[&str] = &[
-        STATE_FILE,
-        UNREADABLE_STATE_ASIDE,
-        DONE_MARKER,
-        REVIEW_MARKER,
-        COMPLETED_MARKER,
-        FAILED_MARKER,
-        ABORTED_LOSS_MARKER,
-        RIPPED_MARKER,
-        SWEEPING_MARKER,
-        MUXING_MARKER,
-        ACCEPT_LOSS_MARKER,
-        RESTART_COUNT_FILE,
-        DISC_LABEL_FILE,
-    ];
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
-    entries.into_iter().all(|e| {
-        e.is_ok_and(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            let name = name.strip_suffix(".tmp").unwrap_or(&name);
-            OWN.contains(&name)
-        })
-    })
+    entries
+        .into_iter()
+        .all(|e| e.is_ok_and(|e| is_ripper_bookkeeping(&e.file_name())))
+}
+
+/// The mover's delivery journal. It exists from the moment a delivery is frozen
+/// until verified cleanup removes the whole job, so its presence means a delivery
+/// is in flight, held, or partly published.
+pub const DELIVERY_JOURNAL: &str = ".delivery.json";
+
+// Absent is the only answer that permits deleting the job; a probe error keeps it.
+fn delivery_journal_absent(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(DELIVERY_JOURNAL))
+        .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+}
+
+/// Clear staging: delete only per-disc jobs that hold nothing undelivered. That is a
+/// terminal `Failed` capture (clearing is the operator abandoning it) or a leftover of
+/// ripper bookkeeping only. Owned, unreadable, journaled, corrected, resumable and
+/// finished-but-undelivered jobs are kept. Returns `(removed, failed)`.
+pub(crate) fn clear_abandoned_staging(root: &Path) -> (usize, usize) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(path = %root.display(), error = %e, "staging root could not be listed");
+            return (0, 1);
+        }
+    };
+    let (mut removed, mut failed) = (0, 0);
+    for entry in entries {
+        let Ok(entry) = entry else {
+            failed += 1;
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let dir = entry.path();
+        let lease = job_lease(&dir);
+        let Ok(_idle) = lease.try_lock() else {
+            continue;
+        };
+        match clear_if_abandoned(&dir) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(path = %dir.display(), error = %e, "abandoned staging entry could not be cleared");
+            }
+        }
+    }
+    (removed, failed)
+}
+
+// Caller owns the job lease. The decision and the deletion share the state lock,
+// so a concurrent correction or Accept damage either lands first (kept) or fails.
+fn clear_if_abandoned(dir: &Path) -> io::Result<bool> {
+    // Snapshot first: it may upgrade a legacy dir, which takes the state lock itself.
+    let Some(snap) = snapshot_staging_disc(dir) else {
+        return Ok(false);
+    };
+    if snap.had_entry_error || snap.state_unreadable.is_some() {
+        return Ok(false);
+    }
+    let lock = state_lock(dir);
+    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if !delivery_journal_absent(dir) {
+        return Ok(false);
+    }
+    let st = match read_state_checked(dir) {
+        StateRead::Valid(st) if st.reset_in_progress || st.muxing => return Ok(false),
+        StateRead::Valid(st) => Some(*st),
+        StateRead::Absent => None,
+        StateRead::Unreadable(_) => return Ok(false),
+    };
+    if st.as_ref().is_some_and(|s| s.state == StagingState::Failed) {
+        std::fs::remove_dir_all(dir)?;
+        return Ok(true);
+    }
+    let idle = st.as_ref().is_none_or(|s| {
+        matches!(s.state, StagingState::Stopped | StagingState::Completed)
+            && s.user_metadata.is_none()
+    });
+    if !idle || snap.has_partial_state() || !holds_only_ripper_bookkeeping(dir) {
+        return Ok(false);
+    }
+    // Name by name, state last, then a non-recursive rmdir: a listing that hid a
+    // capture file leaves the dir (and that file) in place.
+    let mut names: Vec<_> = std::fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<io::Result<_>>()?;
+    names.sort_by_key(|name| name == STATE_FILE);
+    for name in names {
+        if !is_ripper_bookkeeping(&name) {
+            return Err(io::Error::other("staging entry changed while clearing"));
+        }
+        std::fs::remove_file(dir.join(name))?;
+    }
+    std::fs::remove_dir(dir)?;
+    Ok(true)
 }
 
 /// Outcome of inspecting a single per-disc staging directory at

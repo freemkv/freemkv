@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-pub(super) const FILE: &str = ".delivery.json";
+pub(super) const FILE: &str = crate::server::ripper::staging::DELIVERY_JOURNAL;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Identity {
