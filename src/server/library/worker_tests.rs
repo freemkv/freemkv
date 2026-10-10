@@ -234,9 +234,12 @@ fn successful_or_skipped_tv_planning_enters_remux_once() {
 
 #[test]
 fn disc_number_reads_volume_id_then_meta_title() {
-    assert_eq!(disc_from_labels("SHOW_S1_D2", Some("Show D3")), Some(2));
-    assert_eq!(disc_from_labels("SHOW", Some("Show D3")), Some(3));
-    assert_eq!(disc_from_labels("SHOW", None), None);
+    assert_eq!(
+        label_numbers("SHOW_S1_D2", Some("Show D3"), "Show").1,
+        Some(2)
+    );
+    assert_eq!(label_numbers("SHOW", Some("Show D3"), "Show").1, Some(3));
+    assert_eq!(label_numbers("SHOW", None, "Show").1, None);
 }
 
 #[test]
