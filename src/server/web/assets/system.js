@@ -3,14 +3,18 @@
 
 import { esc, $, put, api, act, toast, bytes, ago } from './ui.js';
 import { openDeviceTerminal } from './ripper.js';
-import { folderHealthRow, stagedLine } from './folders.js';
+import { stagedLine } from './folders.js';
 
-function mountRow(m) {
+function storageFolderRow(m) {
   const used = m.total_bytes ? 100 - (m.free_bytes / m.total_bytes) * 100 : null;
-  const tone = !m.ok ? 'bad' : used != null && used > 95 ? 'warn' : 'ok';
+  const state = m.state || (m.ok ? 'ok' : 'unhealthy');
+  const tone = state === 'ok' ? 'ok' : state === 'unresponsive' ? 'warn' : 'bad';
+  const health = state === 'ok' ? 'ok' : (m.message || state);
   return '<tr><td class="title"><b>' + esc(m.role) + '</b><span class="path mono" title="' + esc(m.path) + '">' + esc(m.path) + '</span></td>'
-    + '<td class="nowrap"><span class="dot dot-' + tone + '"></span> ' + (m.ok ? (m.writable === false ? 'read-only' : 'ok') : '<span style="color:var(--bad)">' + esc(m.problem || 'problem') + '</span>') + '</td>'
-    + '<td style="min-width:10rem">' + (used != null ? '<div class="bar"><i style="width:' + used.toFixed(1) + '%;' + (tone === 'warn' ? 'background:#d97706' : '') + '"></i></div><span class="note">' + bytes(m.free_bytes) + ' free of ' + bytes(m.total_bytes) + '</span>' : '<span class="muted small">–</span>') + '</td>'
+    + '<td><span class="dot dot-' + tone + '"></span> ' + esc(health) + '</td>'
+    + '<td>' + (used != null ? '<div class="bar"><i style="width:' + used.toFixed(1) + '%;' + (tone === 'warn' ? 'background:#d97706' : '') + '"></i></div><span class="note">' + bytes(m.free_bytes) + ' free of ' + bytes(m.total_bytes) + '</span>' : '<span class="muted small">–</span>') + '</td>'
+    + '<td class="nowrap"><span class="muted small">' + esc(m.last_ok ? ago(m.last_ok) : 'never') + '</span></td>'
+    + '<td>' + (m.last_error ? '<span class="small">' + esc(m.last_error) + '</span><span class="note">' + esc(ago(m.last_error_at)) + '</span>' : '<span class="muted small">–</span>') + '</td>'
     + '<td class="num"><span class="muted small">' + (m.latency_ms != null ? m.latency_ms + ' ms' : '') + '</span></td></tr>';
 }
 
@@ -28,10 +32,8 @@ export default {
           <div class="actions"><button class="btn btn-ghost btn-sm" id="syslog">System log</button><a class="btn btn-ghost btn-sm" href="/api/debug?n=5000" target="_blank">Event log (JSON lines)</a><a class="btn btn-ghost btn-sm" href="/api/state" target="_blank">Live state (JSON)</a></div>
           <p class="small muted" id="logdir" style="margin:.9rem 0 0"></p></section>
       </div>
-      <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Storage</b><span class="muted small" id="mounts-note"></span></div>
-        <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>State</th><th>Space</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>
-      <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Folders</b><span class="muted small">checked every 30 s, and before each remux and move</span></div>
-        <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>Health</th><th>Last good access</th><th>Last error</th></tr></thead><tbody id="folder-health"></tbody></table></div></section>
+      <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Storage &amp; folders</b><span class="muted small" id="mounts-note">checked every 30 s, and before each remux and move</span></div>
+        <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>Health</th><th>Space</th><th>Last good access</th><th>Last error</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>
       <section class="card" style="margin-top:1.25rem"><div class="toolbar"><b>Remux staging</b><button class="btn btn-ghost btn-sm" id="clear-staging">Clear staging</button></div><p class="small muted" id="staged-kept" style="margin:.6rem 0 0"></p><p class="small muted" style="margin:.4rem 0 0">Removes completed remux files left behind after a stopped or retitled job. Active work and rip-recovery staging are not touched.</p></section>`;
     let sys = null;
     const paint = () => {
@@ -42,11 +44,8 @@ export default {
       put($('#about', view), '<dt>freemkv</dt><dd class="mono">' + esc(d.version_label) + '</dd>'
         + '<dt>Rip library</dt><dd class="mono">' + esc(d.libfreemkv) + '</dd>'
         + '<dt>Debug logging</dt><dd>' + (d.debug_enabled ? 'on' : 'off') + '</dd>');
-      put($('#mounts', view), (d.mounts || []).map(mountRow).join('') || '<tr><td colspan="4" class="muted">Checking the folders…</td></tr>');
-      put($('#folder-health', view), (d.mounts || []).map(folderHealthRow).join('') || '<tr><td colspan="4" class="muted">Checking the folders…</td></tr>');
+      put($('#mounts', view), (d.mounts || []).map(storageFolderRow).join('') || '<tr><td colspan="6" class="muted">Checking the folders…</td></tr>');
       put($('#staged-kept', view), stagedLine(d.staged_kept));
-      const checked = (d.mounts || []).map(m => m.checked_at).sort()[0];
-      put($('#mounts-note', view), checked ? 'checked ' + ago(checked) : '');
       const dbg = $('#debug', view);
       if (document.activeElement !== dbg) { dbg.checked = !!d.debug_enabled; dbg.nextElementSibling.textContent = d.debug_enabled ? 'On' : 'Off'; }
       put($('#logdir', view), 'Logs live in <span class="mono">' + esc(d.log_dir) + '</span>. The download bundles every one of them.');
