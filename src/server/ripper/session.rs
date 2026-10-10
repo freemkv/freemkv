@@ -548,6 +548,15 @@ pub(super) fn session_is_scanned(device: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub(super) fn session_disc_hash(device: &str) -> Option<String> {
+    let sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    sessions
+        .get(device)
+        .and_then(|sess| sess.disc.as_ref())
+        .and_then(|disc| disc.aacs.as_ref())
+        .map(|a| libfreemkv::hex::strip_hex_prefix(&a.disc_hash).to_ascii_lowercase())
+}
+
 /// The key set and Volume ID the scan of `device`'s disc resolved (memory only): what an
 /// inserted disc lends its staged image's resume.
 pub(super) fn session_rip_keys(

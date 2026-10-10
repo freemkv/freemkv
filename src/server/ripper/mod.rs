@@ -821,7 +821,8 @@ fn keyless_not_ripping_error(msg: &str) -> String {
 }
 
 use session::{
-    DriveSession, drop_session, rip_thread_running, session_is_scanned, store_session, take_session,
+    DriveSession, drop_session, rip_thread_running, session_disc_hash, session_is_scanned,
+    store_session, take_session,
 };
 use staging::staging_free_bytes;
 use state::{PassContext, PassProgressState, is_in_cooldown, push_pass_state};
@@ -1812,6 +1813,11 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         .unwrap_or_default();
     let codecs = disc.titles.first().map(format_codecs).unwrap_or_default();
 
+    let disc_hash = disc
+        .aacs
+        .as_ref()
+        .map(|a| libfreemkv::hex::strip_hex_prefix(&a.disc_hash).to_ascii_lowercase());
+
     // Store session — drive stays open for rip
     store_session(
         device,
@@ -1845,7 +1851,8 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
 
     // Does this disc have resumable partial staging? Drives the dashboard's
     // Resume-vs-Rip choice. Computed before `display_name` moves into the state.
-    let resumable = resumable_for_disc(&cfg_read, &display_name, &id_name);
+    let resumable =
+        resumable_for_disc_with_hash(&cfg_read, &display_name, &id_name, disc_hash.as_deref());
 
     update_state(
         device,
@@ -2404,6 +2411,7 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
     // would fail to resume a valid staged ISO). Matches disc_staging_hold.
     let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
     let sanitized = staging_basename_for_device(&cfg_read, device)?;
+    let disc_hash = session_disc_hash(device);
     // NFS-resilient listing, not `read_dir(...).flatten()`, which would
     // silently drop the disc's dir on a cold-cache error and fall through
     // to a fresh sweep instead of resuming the existing ISO.
@@ -2413,7 +2421,7 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
         let path = staging_root.join(&basename);
         // EXACT name match: a prefix match would collide (e.g. "Feature" vs
         // "Feature_2") and resume onto a different title's partial ISO.
-        if staging_dir_matches_disc(&basename, &sanitized) {
+        if staging_dir_matches_disc(&basename, &sanitized) || disc_hash.is_some() {
             // User-initiated resume goes straight to the remux-eligibility
             // check, still refusing OWNED (.ripped/.muxing), HELD (.review),
             // or TERMINAL (.failed) dirs — see resumable_dir_blocked above.
@@ -2431,6 +2439,16 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
                 Ok(m) => m,
                 Err(_) => continue,
             };
+            let hash_match = disc_hash.as_deref().is_some_and(|expected| {
+                map.disc_hash()
+                    .map(|found| found.eq_ignore_ascii_case(expected))
+                    .unwrap_or(false)
+            });
+            if (disc_hash.is_some() && !hash_match)
+                || (disc_hash.is_none() && !staging_dir_matches_disc(&basename, &sanitized))
+            {
+                continue;
+            }
             let stats = map.stats();
             if stats.bytes_pending != 0 {
                 continue;
@@ -2530,7 +2548,17 @@ fn wipe_staging_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) {
 
 // Detect whether `display_name`'s disc has resumable staging state and of what kind: Remux
 // only when the mapfile is 100% Finished (no pending, no unreadable bytes), else Sweep.
+#[cfg(test)]
 fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Option<Resumable> {
+    resumable_for_disc_with_hash(cfg, display_name, disc_label, None)
+}
+
+fn resumable_for_disc_with_hash(
+    cfg: &Config,
+    display_name: &str,
+    disc_label: &str,
+    disc_hash: Option<&str>,
+) -> Option<Resumable> {
     if display_name.is_empty() {
         return None;
     }
@@ -2548,11 +2576,10 @@ fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Opt
     let basenames = list_staging_basenames(staging_root)?;
     for basename in basenames {
         let path = staging_root.join(&basename);
-        // EXACT match only — a prefix match invites the collision class
-        // (`Redshift` prefixing `Redshift_2`) staging_dir_matches_disc fixes.
-        if basename != sanitized {
-            continue;
-        }
+        // A title may have been corrected between runs, so the basename is
+        // only a fallback. When the live scan has a disc hash, let the
+        // mapfile identity decide below.
+        let name_match = basename == sanitized;
         // A terminal `.failed` (or held `.review`) dir is NOT resumable: a
         // re-rip wouldn't clear stale `.failed`, and the mux worker would
         // skip it forever. Mirrors resumable_dir_blocked; forces a Wipe.
@@ -2576,6 +2603,14 @@ fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Opt
             Ok(m) => m,
             Err(_) => continue,
         };
+        let hash_match = disc_hash.is_some_and(|expected| {
+            map.disc_hash()
+                .map(|found| found.eq_ignore_ascii_case(expected))
+                .unwrap_or(false)
+        });
+        if (disc_hash.is_some() && !hash_match) || (disc_hash.is_none() && !name_match) {
+            continue;
+        }
         let st = map.stats();
         // Any not-good data (pending or previously Unreadable) is retryable —
         // there is NO terminal "won't retry" state. Only a mapfile that is
@@ -2598,7 +2633,12 @@ fn resumable_for_device(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<Resum
         let rs = s.get(device)?;
         (rs.disc_name.clone(), rs.disc_label.clone())
     };
-    resumable_for_disc(&cfg_read, &display_name, &disc_label)
+    resumable_for_disc_with_hash(
+        &cfg_read,
+        &display_name,
+        &disc_label,
+        session_disc_hash(device).as_deref(),
+    )
 }
 
 // RAII guard that unregisters a device's halt-map entry on drop, so

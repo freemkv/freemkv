@@ -1021,7 +1021,25 @@ fn check_and_move(cfg: &Config) {
             let seeded: Vec<MoveState> = planned_moves
                 .iter()
                 .map(|(src, _)| MoveState {
-                    name: display_name.clone(),
+                    name: {
+                        let artifact = artifact_label(src);
+                        if artifact == "mkv" {
+                            let filename = src
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
+                            tv_episode_leaf(&tmdb_result, &state_outputs, &filename, season)
+                                .and_then(|leaf| {
+                                    std::path::Path::new(&leaf)
+                                        .file_stem()
+                                        .map(|stem| stem.to_string_lossy().into_owned())
+                                })
+                                .unwrap_or_else(|| display_name.clone())
+                        } else {
+                            display_name.clone()
+                        }
+                    },
                     artifact: artifact_label(src),
                     progress_pct: 0,
                     progress_gb: 0.0,
