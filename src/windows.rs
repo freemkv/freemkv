@@ -1243,10 +1243,6 @@ impl Shell {
     // `cw`/`ch` and the returned rects are physical pixels, as `WM_SIZE` reports.
     fn relayout(&self, cw: i32, ch: i32) {
         let v = self.app.borrow().view();
-        let _ = self
-            .lbl_empty_sub
-            .hwnd()
-            .SetWindowText(&crate::ui::empty_description(v.disc_present));
         let hidden = v.log_hidden;
         let dpi = window_dpi(self.wnd.hwnd());
         let label_w = |i: usize| {
