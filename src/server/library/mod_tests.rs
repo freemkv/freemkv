@@ -18,7 +18,7 @@ fn aggregate_handle_waits_for_every_library_service() {
             }),
         ));
     }
-    let group = start_tasks(tasks);
+    let group = start_tasks(tasks).unwrap();
     for _ in 0..4 {
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }

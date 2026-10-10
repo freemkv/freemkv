@@ -341,7 +341,8 @@ pub fn wake() {
 }
 
 /// Start the remux worker, the background indexer and both audit lanes.
-pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
+/// `None` when the service group thread could not be started; shutdown is then requested.
+pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
     let lib = instance(&cfg.read().unwrap_or_else(|e| e.into_inner()));
     let mut tasks: Vec<LibraryTask> = Vec::new();
     type Run = fn(&Arc<Library>, &Arc<RwLock<Config>>);
@@ -364,7 +365,7 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
 
 type LibraryTask = (&'static str, Box<dyn FnOnce() + Send>);
 
-fn start_tasks(tasks: Vec<LibraryTask>) -> std::thread::JoinHandle<()> {
+fn start_tasks(tasks: Vec<LibraryTask>) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("library-services".into())
         .spawn(move || {
@@ -379,9 +380,15 @@ fn start_tasks(tasks: Vec<LibraryTask>) -> std::thread::JoinHandle<()> {
                     }
                 }
             }
-            for handle in handles { let _ = handle.join(); }
+            for handle in handles {
+                let _ = handle.join();
+            }
         })
-        .expect("spawn the library service group")
+        .inspect_err(|e| {
+            tracing::error!(error = %e, "library services could not start");
+            crate::server::SHUTDOWN.store(true, Ordering::Release);
+        })
+        .ok()
 }
 
 /// One row of `GET /api/library`.

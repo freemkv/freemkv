@@ -265,16 +265,18 @@ fn attach_corrected_plan(
     media: &crate::server::planner::MediaMetadata,
 ) -> std::io::Result<()> {
     use crate::server::planner::{MediaKind, MoviePlanner, TvPlanner};
+    let Some(kind) = media.kind else {
+        return Err(std::io::Error::other("saved match has no media type"));
+    };
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
     let metadata = Some(crate::server::tmdb::TmdbResult {
         title: media.title.clone(),
         year: media.year,
         tmdb_id: media.tmdb_id,
-        media_type: match media.kind {
-            Some(MediaKind::Movie) => "movie",
-            Some(MediaKind::Tv) => "tv",
-            None => return Err(std::io::Error::other("saved match has no media type")),
+        media_type: match kind {
+            MediaKind::Movie => "movie",
+            MediaKind::Tv => "tv",
         }
         .into(),
         poster_url: String::new(),
@@ -286,16 +288,15 @@ fn attach_corrected_plan(
         "feature.mkv",
         media.season,
     ));
-    let plan = match media.kind {
-        Some(MediaKind::Movie) => {
+    let plan = match kind {
+        MediaKind::Movie => {
             MoviePlanner::from_config(cfg).plan(&job.iso, &disc.titles, media, &target)
         }
-        Some(MediaKind::Tv) => {
+        MediaKind::Tv => {
             let mut explicit = cfg.clone();
             explicit.tv_auto = true;
             TvPlanner { cfg: &explicit }.plan(&job.iso, &disc.titles, media, &target)
         }
-        None => unreachable!(),
     }
     .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e:?}")))?;
     let targets = tv_destinations(cfg, &plan)
@@ -672,22 +673,23 @@ fn remux_planned_with(
                 running.target = target.clone();
             }
         });
-        let result = execute(&request, staged, ordinal);
-        if let Err(e) = result {
-            if let Some(kept) = deliver::kept_of(&e) {
+        writing_app = match execute(&request, staged, ordinal) {
+            Ok(app) => app,
+            Err(e) => {
+                if let Some(kept) = deliver::kept_of(&e) {
+                    sink.lib
+                        .queue
+                        .set_output_staged(job.id, &output.id, Some(kept.path.clone()));
+                    sink.lib
+                        .queue
+                        .set_staged(job.id, still_kept(Some(&kept.path)));
+                }
                 sink.lib
                     .queue
-                    .set_output_staged(job.id, &output.id, Some(kept.path.clone()));
-                sink.lib
-                    .queue
-                    .set_staged(job.id, still_kept(Some(&kept.path)));
+                    .finish_output(job.id, &output.id, OutputState::Failed);
+                return cancelled_ending(sink).unwrap_or(Ending::Failed(e));
             }
-            sink.lib
-                .queue
-                .finish_output(job.id, &output.id, OutputState::Failed);
-            return cancelled_ending(sink).unwrap_or(Ending::Failed(e));
-        }
-        writing_app = result.unwrap();
+        };
         sink.lib.note_landed(&target, writing_app.clone());
         sink.lib.queue.set_output_staged(job.id, &output.id, None);
         sink.lib.queue.set_staged(job.id, None);
