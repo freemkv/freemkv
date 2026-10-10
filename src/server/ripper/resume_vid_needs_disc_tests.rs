@@ -188,6 +188,13 @@ fn resume_ripped(
         keyserver_url,
         ..Config::default()
     };
+    let mut saved = staging::DiscState::new(staging::StagingState::Ripped);
+    saved.outputs = vec![staging::Output {
+        filename: marker.mkv_filename.clone(),
+        title_identity: Some(crate::title_identity::TitleIdentity::of(&fx.disc.titles[0])),
+        ..Default::default()
+    }];
+    staging::write_state(&staging, &saved);
     setup(&staging, &mut marker, &mut cfg);
     crate::server::muxer::write_marker(&staging, &marker).unwrap();
     let cfg = Arc::new(RwLock::new(cfg));
@@ -198,6 +205,122 @@ fn resume_ripped(
 
 // An unreadable staged image is a failure the worker can name: the hand-off reports
 // its reason (the System card), not a bare "did not complete".
+#[test]
+fn unproved_identity_holds_before_partial_cleanup_or_mux() {
+    for missing in [true, false] {
+        let (staging, outcome, _t, iso, mapfile, before) =
+            resume_ripped(Keys::UnitKey, |dir, _, _| {
+                staging::mutate_state_if_present(dir, |state| {
+                    state.outputs[0].title_identity = if missing {
+                        None
+                    } else {
+                        let mut different = bd_image().disc.titles[0].clone();
+                        different.playlist_id += 1;
+                        Some(crate::title_identity::TitleIdentity::of(&different))
+                    };
+                });
+                std::fs::write(dir.join("KU_Disc.mkv"), b"keep existing output").unwrap();
+            });
+        assert!(!outcome.success);
+        assert!(
+            outcome
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("identity"))
+        );
+        assert_eq!(
+            std::fs::read(staging.join("KU_Disc.mkv")).unwrap(),
+            b"keep existing output"
+        );
+        assert_eq!(
+            (std::fs::read(iso).unwrap(), std::fs::read(mapfile).unwrap()),
+            before
+        );
+    }
+}
+
+#[test]
+fn legacy_identity_review_confirmation_replans_saved_iso_without_disc() {
+    let (dir, held, temp, iso, mapfile, before) = resume_ripped(Keys::UnitKey, |dir, _, _| {
+        staging::mutate_state_if_present(dir, |state| {
+            state.outputs[0].title_identity = None;
+            state.user_metadata = Some(staging::UserMetadata {
+                title: "KU_Disc".into(),
+                year: 0,
+                media_type: "movie".into(),
+                tmdb_id: 0,
+                episode_start: None,
+                poster_url: String::new(),
+                overview: String::new(),
+            });
+        });
+    });
+    assert!(!held.success);
+    let _guard = crate::server::log::env_guard();
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: serialized with the other environment-dependent capture fixtures.
+    unsafe {
+        std::env::set_var("AUTORIP_DIR", temp.path());
+    }
+    let state = staging::read_state(&dir).unwrap();
+    assert_eq!(state.state, staging::StagingState::Review);
+    assert!(state.title_identity_review);
+    assert!(
+        held.failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("Review queue")
+    );
+    // Replaying an older worker snapshot or correction cannot approve this hold.
+    let mut stale = state.clone();
+    stale.state = staging::StagingState::Ripped;
+    stale.title_identity_review = false;
+    staging::try_write_state(&dir, &stale).unwrap();
+    assert_eq!(
+        staging::read_state(&dir).unwrap().state,
+        staging::StagingState::Review
+    );
+    staging::save_review_metadata(
+        &dir,
+        staging::UserMetadata {
+            title: "KU_Disc".into(),
+            year: 0,
+            media_type: "movie".into(),
+            tmdb_id: 0,
+            episode_start: None,
+            poster_url: String::new(),
+            overview: String::new(),
+        },
+    )
+    .unwrap();
+    let corrected = staging::read_state(&dir).unwrap();
+    assert!(corrected.replan_required);
+    assert!(!corrected.title_identity_review);
+    assert_eq!(corrected.state, staging::StagingState::Ripped);
+    let marker = corrected.to_ripped_marker();
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: dir.parent().unwrap().to_string_lossy().into_owned(),
+        keep_iso: true,
+        keydb_path: Some(temp.path().join("keydb.cfg").to_string_lossy().into_owned()),
+        ..Default::default()
+    }));
+    let result = remux_from_ripped_marker(&cfg, &dir, &marker);
+    assert!(result.success, "{:?}", result.failure_reason);
+    assert!(
+        staging::read_state(&dir)
+            .unwrap()
+            .outputs
+            .iter()
+            .all(|output| output.title_identity.is_some())
+    );
+    assert_eq!(
+        (std::fs::read(iso).unwrap(), std::fs::read(mapfile).unwrap()),
+        before
+    );
+}
+
 #[test]
 fn an_unreadable_staged_image_reports_why() {
     let (_staging, outcome, ..) = resume_ripped(Keys::None, |staging, _, _| {

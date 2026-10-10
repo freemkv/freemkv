@@ -307,6 +307,11 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     f.combo(&s1, "selection", &g("gui.set.default_selection"));
     f.entry(&s1, "min_title_secs", &g("gui.set.min_length"));
     let s2 = group(Some(&g("gui.set.lang_prefs_note")));
+    f.entry(
+        &s2,
+        "presentation_language",
+        "Presentation language (de / en; blank = audio preference)",
+    );
     f.langs(&s2, "audio_langs", &g("gui.set.audio_langs"));
     f.langs(&s2, "sub_langs", &g("gui.set.sub_langs"));
     f.langs(&s2, "forced_sub_langs", &g("gui.set.forced_sub_langs"));

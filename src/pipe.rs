@@ -381,6 +381,7 @@ fn parse_error_code(s: &str) -> Option<(&str, &str)> {
 /// Flags parsed from the rip argument list.
 #[derive(Default, Debug)]
 struct ParsedFlags {
+    presentation_language: Option<String>,
     verbose: bool,
     quiet: bool,
     raw: bool,
@@ -523,6 +524,21 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     }
                 }
             }
+            "--presentation-language" => match args.get(i + 1) {
+                Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
+                    i += 1;
+                    f.presentation_language = Some(v.clone());
+                }
+                _ => {
+                    return Err(strings::fmt(
+                        "error.flag_needs_value",
+                        &[
+                            ("flag", "--presentation-language"),
+                            ("example", "--presentation-language de"),
+                        ],
+                    ));
+                }
+            },
             "-a" | "--audio" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
@@ -655,6 +671,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         }
     };
     let ParsedFlags {
+        presentation_language,
         verbose,
         quiet,
         raw,
@@ -675,7 +692,11 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // Whether the user EXPLICITLY narrowed the rip — captured BEFORE the `-t`
     // default below normalizes an empty selection to `[1]`, so a plain rip with
     // no flags reads as "no selection". `-t all` (all_titles) counts as explicit.
-    let selection_flags_used = stream_sel_active || !title_nums.is_empty() || all_titles;
+    let automatic_title = title_nums.is_empty() && !all_titles;
+    let selection_flags_used = stream_sel_active
+        || !title_nums.is_empty()
+        || all_titles
+        || presentation_language.is_some();
 
     // `-t` DEFAULT (1.6.0): with no `-t N`/`-t all`, rip the MAIN TITLE only.
     // Pre-1.6 the empty case meant all-titles, which on an obfuscated disc
@@ -748,6 +769,30 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // `preflight_validate`. A disc source skips the upfront `scan_iso` but
     // still honors multiple `-t` flags, building jobs from `title_nums`.
     let iso_disc = if is_disc { None } else { scan_iso(source) };
+    if automatic_title {
+        let scanned = disc_scan
+            .as_ref()
+            .map(|(disc, _, _)| disc)
+            .or_else(|| iso_disc.as_ref().map(|(disc, _)| disc));
+        if let Some(disc) = scanned {
+            match automatic_presentation_title(&disc.titles, &streams.audio, presentation_language)
+            {
+                Ok(index) => title_nums = vec![index + 1],
+                Err(reason) => {
+                    out.raw(
+                        Always,
+                        &format!(
+                            "Title selection needs review: {reason}; choose --title explicitly."
+                        ),
+                    );
+                    return 1;
+                }
+            }
+        } else if presentation_language.is_some() {
+            out.raw(Always, "Presentation-language selection requires a scanned disc; choose --title explicitly.");
+            return 1;
+        }
+    }
     let titles = iso_disc.as_ref().map(|(d, _)| d.titles.clone());
     let is_dir_dest = dest_is_directory(dest, &parsed_dest);
 
@@ -765,7 +810,15 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
             }
         }
     } else {
-        (title_nums, Vec::new())
+        let identities = if automatic_title {
+            disc_scan
+                .as_ref()
+                .map(|(disc, _, _)| disc.titles.iter().map(TitleIdentity::of).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        (title_nums, identities)
     };
     let jobs = match build_jobs(
         &titles,
@@ -2801,6 +2854,28 @@ fn resolve_scanned_title<'a>(
         }
     }
     Ok(title)
+}
+
+fn automatic_presentation_title(
+    titles: &[libfreemkv::DiscTitle],
+    audio: &freemkv_engine::StreamFilter,
+    presentation_language: Option<String>,
+) -> Result<usize, String> {
+    let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
+        &freemkv_engine::Selection::MainMovie,
+        audio,
+        &freemkv_engine::SelectionPreferences {
+            presentation_language,
+        },
+    );
+    if let Some(reason) = report.review_reason {
+        return Err(reason.key().into());
+    }
+    report
+        .indices
+        .first()
+        .copied()
+        .ok_or_else(|| "no-titles".into())
 }
 
 fn normalize_title_nums(title_nums: &mut Vec<usize>, all_titles: bool) {

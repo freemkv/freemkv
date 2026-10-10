@@ -1,15 +1,21 @@
 // System: versions, the folders and their space, and
 // the diagnostics (debug logging, logs, the bundle). Keys live in Settings.
 
-import { esc, $, put, api, act, toast, bytes, ago } from './ui.js';
+import { esc, $, put, api, act, toast, bytes, ago, twoStep } from './ui.js';
 import { openDeviceTerminal } from './ripper.js';
 import { stagedLine } from './folders.js';
+
+function storageSummary(d) {
+  if ((d.move_errors || []).length) return '<span style="color:var(--bad)">file delivery needs attention — see <a href="/drives">Drives</a></span>';
+  if (!(d.mounts || []).length) return 'checking folders';
+  return d.mounts.every(m => m.ok) ? 'every folder answering' : '<span style="color:var(--bad)">a folder needs attention</span>';
+}
 
 function storageFolderRow(m) {
   const used = m.total_bytes ? 100 - (m.free_bytes / m.total_bytes) * 100 : null;
   const state = m.state || (m.ok ? 'ok' : 'unhealthy');
   const tone = state === 'ok' ? 'ok' : state === 'unresponsive' ? 'warn' : 'bad';
-  const health = state === 'ok' ? 'ok' : (m.message || state);
+  const health = state === 'ok' ? 'Accessible' : (m.message || state);
   return '<tr><td class="title"><b>' + esc(m.role) + '</b><span class="path mono" title="' + esc(m.path) + '">' + esc(m.path) + '</span></td>'
     + '<td><span class="dot dot-' + tone + '"></span> ' + esc(health) + '</td>'
     + '<td>' + (used != null ? '<div class="bar"><i style="width:' + used.toFixed(1) + '%;' + (tone === 'warn' ? 'background:#d97706' : '') + '"></i></div><span class="note">' + bytes(m.free_bytes) + ' free of ' + bytes(m.total_bytes) + '</span>' : '<span class="muted small">–</span>') + '</td>'
@@ -32,7 +38,7 @@ export default {
           <div class="actions"><button class="btn btn-ghost btn-sm" id="syslog">System log</button><a class="btn btn-ghost btn-sm" href="/api/debug?n=5000" target="_blank">Event log (JSON lines)</a><a class="btn btn-ghost btn-sm" href="/api/state" target="_blank">Live state (JSON)</a></div>
           <p class="small muted" id="logdir" style="margin:.9rem 0 0"></p></section>
       </div>
-      <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Storage &amp; folders</b><span class="muted small" id="mounts-note">checked every 30 s, and before each remux and move</span></div>
+      <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Storage &amp; folders</b><span class="muted small" id="mounts-note">Access checked every 30 s. Access alone does not confirm successful file delivery.</span></div>
         <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>Health</th><th>Space</th><th>Last good access</th><th>Last error</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>
       <section class="card" style="margin-top:1.25rem"><div class="toolbar"><b>Staging</b><button class="btn btn-ghost btn-sm" id="clear-staging">Clear staging</button></div><p class="small muted" id="staged-kept" style="margin:.6rem 0 0"></p><p class="small muted" style="margin:.4rem 0 0">Removes idle per-disc staging entries. Active ripping and muxing entries are preserved.</p></section>`;
     let sys = null;
@@ -40,7 +46,7 @@ export default {
       const d = sys;
       if (!d || ctx.stale()) return;
       put($('#lede', view), 'freemkv <b>' + esc(d.version_label) + '</b> · '
-        + ((d.mounts || []).every(m => m.ok) ? 'every folder answering' : '<span style="color:var(--bad)">a folder needs attention</span>'));
+        + storageSummary(d));
       put($('#about', view), '<dt>freemkv</dt><dd class="mono">' + esc(d.version_label) + '</dd>'
         + '<dt>Rip library</dt><dd class="mono">' + esc(d.libfreemkv) + '</dd>'
         + '<dt>Debug logging</dt><dd>' + (d.debug_enabled ? 'on' : 'off') + '</dd>');
@@ -61,21 +67,19 @@ export default {
     });
     $('#syslog', view).addEventListener('click', () => openDeviceTerminal('system', false));
     $('#bundle', view).addEventListener('click', () => toast('Preparing the log bundle…', 'info'));
-    $('#reboot', view).addEventListener('click', async (e) => {
-      if (!window.confirm('Reboot the library? Active work will finish its current safe boundary; queued jobs and audit state are preserved.')) return;
-      const r = await act(e.currentTarget, () => api('POST', '/api/system/reboot'), 'Reboot library');
+    $('#reboot', view).addEventListener('click', (e) => twoStep(e.currentTarget, async (btn) => {
+      const r = await act(btn, () => api('POST', '/api/system/reboot'), 'Reboot library');
       if (r) {
         put($('#lede', view), '<span class="muted">Library restarting… reconnecting shortly.</span>');
-        e.currentTarget.disabled = true;
+        btn.disabled = true;
       }
-    });
-    $('#clear-staging', view).addEventListener('click', async (e) => {
-      if (!window.confirm('Clear idle entries from staging? Active ripping and muxing entries will be preserved.')) return;
-      const r = await act(e.currentTarget, () => api('POST', '/api/library/staged/clear'), 'Clear staging');
+    }, 'Confirm reboot'));
+    $('#clear-staging', view).addEventListener('click', (e) => twoStep(e.currentTarget, async (btn) => {
+      const r = await act(btn, () => api('POST', '/api/library/staged/clear'), 'Clear staging');
       if (r) {
-        toast(r.discarded + ' staged remux file' + (r.discarded === 1 ? '' : 's') + ' cleared', r.failed ? 'warn' : 'info');
+        toast(r.discarded + ' staging item' + (r.discarded === 1 ? '' : 's') + ' cleared', r.failed ? 'warn' : 'info');
         load();
       }
-    });
+    }, 'Confirm clear idle staging'));
   },
 };

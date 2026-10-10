@@ -200,17 +200,15 @@ fn fire(cfg: &Config, payload: &serde_json::Value, event: WebhookEvent) {
     // spawn fails, a guard built inside would leave the slot claimed
     // forever. See `web.rs`'s `ConnGuard`, reshaped for the same reason.
     let guard = InflightGuard;
-    let spawned = std::thread::Builder::new()
-        .name("webhook".into())
-        .spawn(move || {
-            let _guard = guard;
-            for hook in &hooks {
-                // Deliberately NOT SSRF-guarded: aiming a webhook at a LAN
-                // service (Home Assistant, a NAS) is intended use. Goes
-                // through un-pinned `web::webhook_agent`; see its doc comment.
-                let _ = deliver_authenticated(&hook.url, &body, &hook.headers);
-            }
-        });
+    let spawned = crate::server::daemon::spawn_background("webhook", move || {
+        let _guard = guard;
+        for hook in &hooks {
+            // Deliberately NOT SSRF-guarded: aiming a webhook at a LAN
+            // service (Home Assistant, a NAS) is intended use. Goes
+            // through un-pinned `web::webhook_agent`; see its doc comment.
+            let _ = deliver_authenticated(&hook.url, &body, &hook.headers);
+        }
+    });
     if spawned.is_err() {
         // The guard was moved into the closure that never ran, so the slot is
         // already released by the failed spawn's drop — nothing leaks. Say so

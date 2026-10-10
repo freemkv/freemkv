@@ -700,77 +700,6 @@ fn runtime_plausible_tolerates_broadcast_drift_but_rejects_gross() {
     assert!(!runtime_plausible(180.0 * 60.0, 45)); // play-all vs episode
 }
 
-// A season whose episodes each run `mins[i]` minutes, numbered from 1.
-fn season(mins: &[u16]) -> Vec<Episode> {
-    mins.iter()
-        .enumerate()
-        .map(|(i, &m)| Episode {
-            number: (i + 1) as u16,
-            name: format!("E{:02}", i + 1),
-            runtime_min: m,
-        })
-        .collect()
-}
-
-#[test]
-fn align_repairs_uneven_split_via_distinctive_finale() {
-    // 10-ep season, 90-min finale (E10), disc 2 holds E07-10. Uniform-split
-    // guess is (2-1)*4+1 = 5, WRONG — alignment must pin it to 7 via the finale.
-    let eps = season(&[45, 45, 45, 45, 45, 45, 45, 45, 45, 90]);
-    let disc2 = [45.0 * 60.0, 45.0 * 60.0, 45.0 * 60.0, 90.0 * 60.0];
-    assert_eq!(align_disc_offset(&disc2, &eps, 5), 7);
-}
-
-#[test]
-fn align_falls_back_when_runtimes_are_uniform() {
-    // No distinguishing signal: every episode ~45 min. Every offset fits
-    // equally, so the tie must resolve to the caller's fallback (which is the
-    // correct answer for a genuinely uniform-split season anyway).
-    let eps = season(&[45, 45, 45, 45, 45, 45, 45, 45, 45, 45]);
-    let disc2 = [45.0 * 60.0, 45.0 * 60.0, 45.0 * 60.0, 45.0 * 60.0];
-    assert_eq!(align_disc_offset(&disc2, &eps, 5), 5);
-}
-
-#[test]
-fn align_returns_fallback_without_tmdb_data() {
-    // No episode list at all → nothing to align against → fallback verbatim.
-    assert_eq!(align_disc_offset(&[2700.0, 2700.0], &[], 5), 5);
-    // Episodes present but all runtimes unknown (0) → no signal → fallback.
-    let eps = season(&[0, 0, 0, 0, 0, 0]);
-    assert_eq!(align_disc_offset(&[2700.0, 2700.0], &eps, 3), 3);
-}
-
-#[test]
-fn align_pins_first_disc_from_a_distinctive_pilot() {
-    // Feature-length pilot (E01, 75 min), the rest 45. Disc 1's fallback is 1
-    // and alignment agrees; a stray guess of 3 would still be corrected to 1.
-    let eps = season(&[75, 45, 45, 45, 45, 45]);
-    let disc1 = [75.0 * 60.0, 45.0 * 60.0, 45.0 * 60.0];
-    assert_eq!(align_disc_offset(&disc1, &eps, 1), 1);
-    assert_eq!(align_disc_offset(&disc1, &eps, 3), 1);
-}
-
-#[test]
-fn align_returns_fallback_when_disc_cannot_fit_the_season() {
-    // A 4-title disc against a 3-episode season can't align honestly.
-    let eps = season(&[45, 45, 45]);
-    let disc = [2700.0, 2700.0, 2700.0, 2700.0];
-    assert_eq!(align_disc_offset(&disc, &eps, 1), 1);
-}
-
-#[test]
-fn align_tie_breaks_to_the_fallback_not_the_lowest_number() {
-    // Two equally-good positions for a distinctive pair (a 45/60 shape that
-    // repeats): the one nearest the fallback must win, so a disc-2 guess is
-    // not yanked back to the season's start.
-    let eps = season(&[45, 60, 45, 60, 45, 60]);
-    let disc = [45.0 * 60.0, 60.0 * 60.0];
-    // Fallback 3 sits on the [45,60] at E03/E04 — keep it there.
-    assert_eq!(align_disc_offset(&disc, &eps, 3), 3);
-    // Fallback 1 sits on E01/E02 — keep it there.
-    assert_eq!(align_disc_offset(&disc, &eps, 1), 1);
-}
-
 #[test]
 fn strip_trailing_season_unit() {
     assert_eq!(
@@ -933,14 +862,6 @@ fn a_season_word_inside_a_longer_word_is_not_a_season_marker() {
     assert_eq!(strip_trailing_season("postseason 3"), None);
     assert_eq!(strip_trailing_season("off season 2"), Some("off"));
     assert_eq!(strip_trailing_season("season 2"), Some(""));
-}
-
-#[test]
-fn align_keeps_the_fallback_unless_another_offset_is_clearly_better() {
-    // Runtimes differ by under a minute: noise, not a reason to renumber disc 2.
-    let eps = season(&[22, 23, 22, 22]);
-    let disc2 = [22.8 * 60.0, 22.8 * 60.0];
-    assert_eq!(align_disc_offset(&disc2, &eps, 3), 3);
 }
 
 fn results_for(title: &str, year: &str, kind: &str) -> serde_json::Value {

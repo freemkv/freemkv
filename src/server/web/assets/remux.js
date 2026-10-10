@@ -2,7 +2,7 @@
 // and the queue that remuxes out-of-date titles through the engine. The MKV
 // Remux prototype's page, in the brand.
 
-import { esc, $, put, fill, api, act, toast, twoStep, confirmDialog, bytes, runtime, when, hms, speed, plural, ICON, menu, updated } from './ui.js';
+import { esc, $, put, fill, api, act, toast, twoStep, confirmDialog, modal, bytes, runtime, when, hms, speed, plural, ICON, menu, updated } from './ui.js';
 import { watch, refreshNow } from './libdata.js';
 import { mediaList } from './medialist.js';
 import { chipFilter } from './chips.js';
@@ -47,7 +47,8 @@ function statePills(r, hold) {
 function rowPills(r, hold) {
   const lead = r.mkv ? '<span class="mux-pill" data-keep="1">' + muxedHtml(r) + '</span>'
     : r.kind === 'iso_only' && !active(r) ? '<span class="pill warn" data-keep="1">no MKV yet</span>' : '';
-  const state = statePills(r, hold);
+  const match = r.source_match ? '<span class="pill info">Matched: ' + esc(r.source_match.media.kind === 'movie' ? 'Movie' : 'TV') + '</span>' : '';
+  const state = match + statePills(r, hold);
   return r.job && r.job.staged && r.job.state !== 'running' ? state + lead : lead + state;
 }
 
@@ -56,11 +57,95 @@ function actHtml(r) {
   if (r.job && r.job.state === 'queued') {
     return '<button class="btn btn-ghost btn-sm" data-unqueue title="Take it out of the queue" aria-label="Take ' + esc(r.title) + ' out of the queue">× Unqueue</button>';
   }
-  if (!can(r) || active(r)) return '';
+  if (active(r)) return '';
+  if (!can(r)) return r.iso ? '<button class="btn btn-ghost btn-sm" data-match>Change match</button>' : '';
   const failed = r.result && r.result.outcome === 'failed';
   const label = failed ? 'Retry' : r.kind === 'iso_only' ? 'Create' : 'Remux';
   const tone = failed || r.needs_remux ? 'btn-primary' : 'btn-ghost';
-  return '<button class="btn btn-sm ' + tone + '" data-remux>' + label + '</button>';
+  return '<button class="btn btn-ghost btn-sm" data-match>Change match</button><button class="btn btn-sm ' + tone + '" data-remux>' + label + '</button>';
+}
+
+async function changeMatch(row, button) {
+  const current = await act(button, () => api('GET', '/api/library/match?source=' + encodeURIComponent(row.iso)), 'Load match');
+  if (!current) return;
+  let saved = current.saved;
+  const owned = current.owned_outputs || [];
+  const candidates = current.candidates || [];
+  const m = modal({ title: 'Change movie or TV match', wide: true,
+    body: '<p class="small muted">Choose the correct TMDB entry and remux this ISO. The complete new output set is verified before the old files are replaced or removed. The ISO is kept.</p>'
+      + '<p class="mono small">' + esc(row.iso) + '</p>'
+      + (owned.length ? '<p>Source-linked MKVs to replace:</p><ul>' + owned.map(path => '<li class="mono small">' + esc(path) + '</li>').join('') + '</ul>' : '<p>No existing MKVs have proven source links.</p>')
+      + '<p>Unlinked files are left alone unless you explicitly confirm them below. Names are suggestions, not source proof.</p>'
+      + (current.omitted_candidates ? '<p>Some indexed files are unavailable, unsafe, or aliases and were omitted. They cannot be authorized here and will be left alone.</p>' : '')
+      + (candidates.length ? '<details><summary>Confirm legacy outputs belonging to this ISO</summary><p>Select only files you know came from this ISO. All start unchecked.</p>'
+        + candidates.map(c => '<label class="hook"><input type="checkbox" data-legacy-output="' + c.id + '"><span class="mono small">' + esc(c.path) + '</span><span>' + bytes(c.size_bytes) + '</span></label>').join('')
+        + '<label><input type="checkbox" data-confirm-ownership> I confirm the selected files belong to this ISO and may be removed after all replacement outputs are verified.</label></details>' : '')
+      + '<div class="hook"><input class="txt" data-query aria-label="Search TMDB" value="' + esc(saved?.media.title || row.title) + '"><button class="btn btn-secondary" data-search>Search TMDB</button></div>'
+      + '<label>Show <select data-kind><option value="">Movies and TV</option><option value="movie">Movies</option><option value="tv">TV</option></select></label>'
+      + '<div data-results class="stack"></div>'
+      + '<div class="hook"><label>TV season <input type="number" min="1" max="65535" data-season value="' + (saved?.media.season || 1) + '"></label>'
+      + '<label>Disc number (optional) <input type="number" min="1" max="65535" data-disc value="' + (saved?.media.disc || '') + '"></label>'
+      + '<label>TV First episode (optional) <input type="number" min="1" max="65535" step="1" data-episode-start value="' + esc(saved?.media.episode_start ?? '') + '"></label></div>',
+  });
+  let found = [], closed = false, searchRevision = 0;
+  m.onClose(() => { closed = true; });
+  const results = m.el.querySelector('[data-results]');
+  const filter = m.el.querySelector('[data-kind]');
+  const render = () => {
+    results.innerHTML = found.map((c, i) => !filter.value || c.media_type === filter.value
+      ? '<div class="pipe-row"><div class="grow">' + esc(c.title) + ' (' + esc(c.year || '') + ') <span class="badge">' + esc(c.media_type) + '</span></div><button class="btn btn-secondary" data-pick="' + i + '">Remux as ' + (c.media_type === 'tv' ? 'TV' : 'movie') + '</button></div>' : '').join('') || '<p>No matching results. Try a more specific search.</p>';
+  };
+  filter.onchange = render;
+  const search = async () => {
+    const revision = ++searchRevision;
+    const value = m.el.querySelector('[data-query]').value.trim();
+    found = [];
+    results.innerHTML = '';
+    if (!value) return;
+    const response = await act(m.el.querySelector('[data-search]'), () => api('GET', '/api/tmdb/search?q=' + encodeURIComponent(value)), 'Search TMDB');
+    if (closed || revision !== searchRevision || !Array.isArray(response)) return;
+    found = response.filter(c => c.media_type === 'movie' || c.media_type === 'tv');
+    render();
+  };
+  m.el.querySelector('[data-search]').onclick = search;
+  m.el.querySelector('[data-query]').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); search(); } };
+  results.onclick = async e => {
+    if (closed) return;
+    const pick = e.target.closest('[data-pick]');
+    if (!pick) return;
+    const choice = found[Number(pick.dataset.pick)];
+    if (!choice) return;
+    const season = choice.media_type === 'tv' ? Number(m.el.querySelector('[data-season]').value) : null;
+    const discValue = m.el.querySelector('[data-disc]').value;
+    const disc = choice.media_type === 'tv' && discValue ? Number(discValue) : null;
+    if ([season, disc].some(n => n !== null && (!Number.isInteger(n) || n < 1 || n > 65535))) { toast('Use valid season and disc numbers', 'info'); return; }
+    const episodeInput = m.el.querySelector('[data-episode-start]');
+    const episodeValue = episodeInput.value.trim();
+    const episode_start = choice.media_type === 'tv' && episodeValue ? Number(episodeValue) : null;
+    if (choice.media_type === 'tv' && (episodeInput.validity?.badInput || (episode_start !== null && (!Number.isInteger(episode_start) || episode_start < 1 || episode_start > 65535)))) {
+      toast('First episode must be a whole number from 1 to 65535, or blank', 'info'); return;
+    }
+    const selected_candidates = [...m.el.querySelectorAll('[data-legacy-output]:checked')].map(node => Number(node.dataset.legacyOutput));
+    const confirm_ownership = !!m.el.querySelector('[data-confirm-ownership]')?.checked;
+    if (selected_candidates.length && !confirm_ownership) {
+      toast('Confirm ownership of the selected legacy files before remuxing.', 'info'); return;
+    }
+    const response = await act(pick, () => api('POST', '/api/library/match/remux', {
+      source: row.iso, expected_revision: saved?.revision || 0,
+      media: { title: choice.title, year: choice.year || 0, tmdb_id: choice.tmdb_id, kind: choice.media_type, season, disc, episode_start },
+      ownership: { preview_token: current.preview_token, selected_candidates, confirm_ownership },
+    }), 'Save match');
+    if (!response) { m.close(); refreshNow(); return; }
+    saved = response.saved;
+    if (response.queued !== 1) {
+      toast('Match saved, but no remux was queued. Refresh the Library to check its status.', 'info');
+      m.close();
+      refreshNow();
+      return;
+    }
+    toast('Queued remux as ' + choice.title, 'ok');
+    m.close(); refreshNow();
+  };
 }
 
 function liveText(p) {
@@ -158,6 +243,8 @@ export default {
       const tr = e.target.closest('.mrow');
       const r = tr && tr._row;
       if (!r) return;
+      const match = e.target.closest('button[data-match]');
+      if (match) { e.stopPropagation(); await changeMatch(r, match); return; }
       const sr = e.target.closest('button[data-staged-retry]');
       if (sr) {
         e.stopPropagation();

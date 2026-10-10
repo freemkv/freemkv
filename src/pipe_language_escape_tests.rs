@@ -2,6 +2,7 @@ use super::render_stream_sel_error;
 
 fn title_with_language(lang: &str) -> libfreemkv::DiscTitle {
     libfreemkv::DiscTitle {
+        selection_evidence: Default::default(),
         playlist: "00800.mpls".into(),
         playlist_id: 800,
         duration_secs: 60.0,

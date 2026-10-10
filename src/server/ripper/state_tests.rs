@@ -11,6 +11,150 @@ use super::*;
 
 use freemkv_engine::{Mapfile, SectorStatus};
 
+fn scan_metadata(title: &str) -> super::super::staging::UserMetadata {
+    super::super::staging::UserMetadata {
+        episode_start: None,
+        title: title.into(),
+        year: 2020,
+        media_type: "movie".into(),
+        tmdb_id: 1,
+        poster_url: String::new(),
+        overview: String::new(),
+    }
+}
+
+#[test]
+fn scan_restore_resets_revision_for_a_different_job() {
+    let mut row = RipState {
+        job_id: "old".into(),
+        ..Default::default()
+    };
+    row.publish_user_metadata("old", 20, scan_metadata("Old"));
+    row.restore_job_metadata("new", "identity-new", None, 0);
+    assert_eq!(row.metadata_revision, 0);
+    assert!(row.user_metadata.is_none());
+    assert_eq!(row.disc_identity, "identity-new");
+    row.publish_user_metadata("new", 1, scan_metadata("New"));
+    assert_eq!(row.tmdb_title, "New");
+}
+
+#[test]
+fn scan_restore_keeps_newer_same_job_publication() {
+    let device = "scan_restore_keeps_newer_same_job_publication";
+    update_state(
+        device,
+        RipState {
+            job_id: "job".into(),
+            ..Default::default()
+        },
+    );
+    let read_snapshot = std::sync::Barrier::new(2);
+    let publish_scan = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let scan = scope.spawn(|| {
+            let older = scan_metadata("Older snapshot");
+            read_snapshot.wait();
+            publish_scan.wait();
+            update_state_with(device, |s| {
+                s.restore_job_metadata("job", "identity", Some(older), 3)
+            });
+        });
+        read_snapshot.wait();
+        update_state_with(device, |s| {
+            s.publish_user_metadata("job", 4, scan_metadata("Newest"))
+        });
+        publish_scan.wait();
+        scan.join().unwrap();
+    });
+    let row = STATE.lock().unwrap().remove(device).unwrap();
+    assert_eq!(row.metadata_revision, 4);
+    assert_eq!(row.user_metadata.unwrap().title, "Newest");
+}
+
+#[test]
+fn scan_restore_installs_durable_revision_before_delayed_publication() {
+    let mut row = RipState::default();
+    row.restore_job_metadata("job", "identity", Some(scan_metadata("Saved")), 9);
+    assert_eq!(row.metadata_revision, 9);
+    row.publish_user_metadata("job", 8, scan_metadata("Delayed"));
+    assert_eq!(row.user_metadata.unwrap().title, "Saved");
+}
+
+#[test]
+fn metadata_publication_cannot_reverse_commit_order() {
+    let dir = tempfile::tempdir().unwrap();
+    super::super::staging::try_write_state(
+        dir.path(),
+        &super::super::staging::DiscState::new(super::super::staging::StagingState::Stopped),
+    )
+    .unwrap();
+    let device = "metadata_publication_cannot_reverse_commit_order";
+    update_state(
+        device,
+        RipState {
+            job_id: "job".into(),
+            disc_present: true,
+            ..Default::default()
+        },
+    );
+    let metadata = |title: &str| super::super::staging::UserMetadata {
+        episode_start: None,
+        title: title.into(),
+        year: 2020,
+        media_type: "movie".into(),
+        tmdb_id: 1,
+        poster_url: String::new(),
+        overview: String::new(),
+    };
+    let committed = std::sync::Barrier::new(2);
+    let publish_old = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let older = scope.spawn(|| {
+            let first = metadata("First");
+            let revision =
+                super::super::staging::save_user_metadata(dir.path(), first.clone()).unwrap();
+            committed.wait();
+            publish_old.wait();
+            update_state_with(device, |s| s.publish_user_metadata("job", revision, first));
+        });
+        committed.wait();
+        let second = metadata("Second");
+        let revision =
+            super::super::staging::save_user_metadata(dir.path(), second.clone()).unwrap();
+        update_state_with(device, |s| s.publish_user_metadata("job", revision, second));
+        // Progress may correct the label, but a stable job's revision must not
+        // reset and let the delayed first publisher become current again.
+        update_state(
+            device,
+            RipState {
+                job_id: "job".into(),
+                disc_present: true,
+                disc_label: "updated label".into(),
+                ..Default::default()
+            },
+        );
+        publish_old.wait();
+        older.join().unwrap();
+    });
+    // A later progress snapshot must also retain the winning publication.
+    update_state(
+        device,
+        RipState {
+            job_id: "job".into(),
+            disc_present: true,
+            ..Default::default()
+        },
+    );
+    let row = STATE.lock().unwrap().remove(device).unwrap();
+    assert_eq!(row.tmdb_title, "Second");
+    assert_eq!(row.metadata_revision, 2);
+    assert_eq!(row.user_metadata.unwrap().title, "Second");
+    assert_eq!(
+        super::super::staging::read_state(dir.path()).unwrap().title,
+        "Second"
+    );
+}
+
 #[test]
 fn row_is_busy_matches_scanning_and_ripping_only() {
     let row = |st: &str| RipState {
@@ -22,6 +166,30 @@ fn row_is_busy_matches_scanning_and_ripping_only() {
     for st in ["idle", "done", "error", "", "waiting"] {
         assert!(!row_is_busy(&row(st)), "{st} must not count as busy");
     }
+}
+
+#[test]
+fn metadata_publication_rejects_another_job() {
+    let mut row = RipState {
+        job_id: "replacement".into(),
+        tmdb_title: "Replacement".into(),
+        ..Default::default()
+    };
+    row.publish_user_metadata(
+        "removed",
+        99,
+        super::super::staging::UserMetadata {
+            episode_start: None,
+            title: "Old disc".into(),
+            year: 2020,
+            media_type: "movie".into(),
+            tmdb_id: 1,
+            poster_url: String::new(),
+            overview: String::new(),
+        },
+    );
+    assert_eq!(row.tmdb_title, "Replacement");
+    assert!(row.user_metadata.is_none());
 }
 
 /// Create a throwaway mapfile inside a fresh `TempDir`. Caller must hold
@@ -98,6 +266,7 @@ fn minimal_title() -> libfreemkv::DiscTitle {
     // Build an almost-empty DiscTitle — enough for the helpers that
     // only touch extents, chapters, duration_secs, size_bytes.
     libfreemkv::DiscTitle {
+        selection_evidence: Default::default(),
         playlist: String::new(),
         playlist_id: 0,
         duration_secs: 0.0,
@@ -615,45 +784,18 @@ fn spawn_failure_reset_to_idle_clears_busy() {
 }
 
 #[test]
-fn forget_device_state_clears_title_override_and_cooldown() {
-    // Regression: on hot-unplug, TITLE_OVERRIDES and STOP_COOLDOWNS were
-    // the only per-device maps not evicted, so stale entries accumulated
-    // as device paths churned. forget_device_state must drop both.
+fn forget_device_state_clears_cooldown() {
     let dev = "/dev/sg-forget-test";
-    set_title_override(
-        dev,
-        crate::server::tmdb::TmdbResult {
-            title: "Test".to_string(),
-            year: 2000,
-            poster_url: String::new(),
-            overview: String::new(),
-            media_type: "movie".to_string(),
-            tmdb_id: 0,
-        },
-    );
     set_stop_cooldown(dev);
-    assert!(is_in_cooldown(dev), "cooldown must be set before eviction");
-
+    assert!(is_in_cooldown(dev));
     forget_device_state(dev);
-
-    assert!(
-        !TITLE_OVERRIDES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(dev),
-        "title override must be gone after forget_device_state"
-    );
     assert!(
         !STOP_COOLDOWNS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .contains_key(dev),
-        "stop cooldown must be gone after forget_device_state"
+            .contains_key(dev)
     );
-    assert!(
-        !is_in_cooldown(dev),
-        "device must not read as in cooldown after eviction"
-    );
+    assert!(!is_in_cooldown(dev));
 }
 
 #[test]
@@ -918,32 +1060,6 @@ fn update_state_does_not_clobber_explicit_nonzero_claim_gen() {
     assert_eq!(
         snap.claim_gen, 99,
         "an explicit nonzero claim_gen must not be overwritten by the carried-forward value"
-    );
-}
-
-#[test]
-fn take_title_override_returns_and_clears_the_override() {
-    // Otherwise only exercised via forget_device_state's eviction test,
-    // which never calls take_title_override, so a body->None mutant on
-    // either function would pass the whole suite today.
-    let dev = format!("/dev/test-override-{}", std::process::id());
-    assert!(take_title_override(&dev).is_none(), "no override set yet");
-    let picked = crate::server::tmdb::TmdbResult {
-        title: "Override Title".to_string(),
-        year: 1999,
-        poster_url: String::new(),
-        overview: String::new(),
-        media_type: "movie".to_string(),
-        tmdb_id: 0,
-    };
-    set_title_override(&dev, picked.clone());
-    let taken = take_title_override(&dev).expect("override must be present after set");
-    assert_eq!(taken.title, "Override Title");
-    assert_eq!(taken.year, 1999);
-    // take clears it — a second take must come back empty.
-    assert!(
-        take_title_override(&dev).is_none(),
-        "take_title_override must remove the entry, not just read it"
     );
 }
 

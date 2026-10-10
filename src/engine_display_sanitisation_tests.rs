@@ -56,6 +56,7 @@ fn hostile_disc() -> Disc {
         capacity_bytes: 0,
         layers: 1,
         titles: vec![DiscTitle {
+            selection_evidence: Default::default(),
             playlist: HOSTILE.to_string(),
             playlist_id: 800,
             duration_secs: 60.0,

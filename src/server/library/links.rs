@@ -18,7 +18,7 @@ pub fn load(config_dir: &Path) -> HashMap<PathBuf, PathBuf> {
     })
 }
 
-fn read(config_dir: &Path) -> std::io::Result<HashMap<PathBuf, PathBuf>> {
+pub(super) fn read(config_dir: &Path) -> std::io::Result<HashMap<PathBuf, PathBuf>> {
     match std::fs::read(config_dir.join(LINKS_FILE)) {
         Ok(b) => serde_json::from_slice(&b).map_err(std::io::Error::other),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
@@ -28,21 +28,122 @@ fn read(config_dir: &Path) -> std::io::Result<HashMap<PathBuf, PathBuf>> {
 
 /// Remember that `mkv` was muxed from `iso`.
 pub fn record(config_dir: &Path, mkv: &Path, iso: &Path) -> std::io::Result<()> {
-    let _g = WRITE.lock().unwrap_or_else(|e| e.into_inner());
-    let mut links = read(config_dir).unwrap_or_else(|e| {
-        // Keep what cannot be read: writing over it would erase every earlier link.
-        tracing::warn!(error = %e, "library links unreadable; keeping the file aside");
-        let file = config_dir.join(LINKS_FILE);
-        let _ = std::fs::rename(&file, file.with_extension("json.unreadable"));
-        HashMap::new()
-    });
+    record_many(config_dir, &[mkv], iso)
+}
+
+pub(super) fn publish_replacement(
+    config_dir: &Path,
+    mkv: &Path,
+    iso: &Path,
+    require_link: bool,
+    publish: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut links = read(config_dir)?;
+    if links.get(mkv).is_some_and(|owner| owner != iso)
+        || (require_link && links.get(mkv).map(PathBuf::as_path) != Some(iso))
+    {
+        return Err(std::io::Error::other(
+            "replacement output ownership changed before publication",
+        ));
+    }
+    publish()?;
     links.insert(mkv.to_path_buf(), iso.to_path_buf());
+    let bytes = serde_json::to_vec_pretty(&links).map_err(std::io::Error::other)?;
+    crate::server::ripper::staging::write_marker_durable(&config_dir.join(LINKS_FILE), &bytes)
+}
+
+#[cfg(test)]
+pub(super) fn retire_owned(
+    config_dir: &Path,
+    mkv: &Path,
+    iso: &Path,
+    remove: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    retire_replacement(config_dir, mkv, iso, false, &[], remove)
+}
+
+#[cfg(test)]
+pub(super) fn retire_confirmed(
+    config_dir: &Path,
+    mkv: &Path,
+    iso: &Path,
+    remove: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    retire_replacement(config_dir, mkv, iso, true, &[], remove)
+}
+
+pub(super) fn reconcile_replacement(
+    config_dir: &Path,
+    targets: &[PathBuf],
+    iso: &Path,
+) -> std::io::Result<()> {
+    let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut links = read(config_dir)?;
+    if targets
+        .iter()
+        .any(|target| links.get(target).is_some_and(|owner| owner != iso))
+    {
+        return Err(std::io::Error::other("replacement final ownership changed"));
+    }
+    for target in targets {
+        links.insert(target.clone(), iso.to_owned());
+    }
+    let bytes = serde_json::to_vec_pretty(&links).map_err(std::io::Error::other)?;
+    crate::server::ripper::staging::write_marker_durable(&config_dir.join(LINKS_FILE), &bytes)
+}
+
+pub(super) fn retire_replacement(
+    config_dir: &Path,
+    mkv: &Path,
+    iso: &Path,
+    confirmed: bool,
+    targets: &[PathBuf],
+    remove: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut links = read(config_dir)?;
+    if targets
+        .iter()
+        .any(|target| links.get(target).map(PathBuf::as_path) != Some(iso))
+    {
+        return Err(std::io::Error::other(
+            "replacement final ownership changed before cleanup",
+        ));
+    }
+    if links.get(mkv).is_some_and(|owner| owner != iso) {
+        return Err(std::io::Error::other(
+            "replacement output ownership changed",
+        ));
+    }
+    if !confirmed && !links.contains_key(mkv) && mkv.try_exists()? {
+        return Err(std::io::Error::other(
+            "replacement output no longer has source provenance",
+        ));
+    }
+    remove()?;
+    links.remove(mkv);
+    let bytes = serde_json::to_vec_pretty(&links).map_err(std::io::Error::other)?;
+    crate::server::ripper::staging::write_marker_durable(&config_dir.join(LINKS_FILE), &bytes)
+}
+
+fn record_many(config_dir: &Path, mkvs: &[&Path], iso: &Path) -> std::io::Result<()> {
+    let _g = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    // Source provenance authorizes replacement cleanup. An unreadable map
+    // cannot safely be replaced with a new, incomplete one.
+    let mut links = read(config_dir)?;
+    for mkv in mkvs {
+        links.insert(mkv.to_path_buf(), iso.to_path_buf());
+    }
     let json = serde_json::to_vec_pretty(&links).map_err(std::io::Error::other)?;
     crate::server::ripper::staging::write_marker_durable(&config_dir.join(LINKS_FILE), &json)
 }
 
-/// The mover's hook: a disc delivered as exactly one MKV and one ISO is a link.
-pub fn record_delivery<'a>(config_dir: &str, delivered: impl IntoIterator<Item = &'a str>) {
+/// Link every MKV in one completed delivery batch to its sole source ISO.
+pub fn record_delivery<'a>(
+    config_dir: &str,
+    delivered: impl IntoIterator<Item = &'a str>,
+) -> std::io::Result<()> {
     super::wake();
     let (mut mkvs, mut isos) = (Vec::new(), Vec::new());
     for d in delivered {
@@ -57,11 +158,12 @@ pub fn record_delivery<'a>(config_dir: &str, delivered: impl IntoIterator<Item =
             _ => {}
         }
     }
-    if let ([mkv], [iso]) = (&mkvs[..], &isos[..])
-        && let Err(e) = record(Path::new(config_dir), mkv, iso)
+    if let [iso] = &isos[..]
+        && !mkvs.is_empty()
     {
-        tracing::warn!(error = %e, "could not record the library link for a delivered rip");
+        record_many(Path::new(config_dir), &mkvs, iso)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

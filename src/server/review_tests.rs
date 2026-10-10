@@ -263,6 +263,7 @@ fn write_review_state(dir: &Path, media_type: &str) {
         Output {
             filename: "ep1.mkv".into(),
             title_index: 0,
+            title_identity: None,
             episode: Some(1),
             episode_name: String::new(),
             moved: false,
@@ -270,6 +271,7 @@ fn write_review_state(dir: &Path, media_type: &str) {
         Output {
             filename: "ep2.mkv".into(),
             title_index: 1,
+            title_identity: None,
             episode: Some(2),
             episode_name: String::new(),
             moved: false,
@@ -277,6 +279,7 @@ fn write_review_state(dir: &Path, media_type: &str) {
         Output {
             filename: "ep3.mkv".into(),
             title_index: 2,
+            title_identity: None,
             episode: Some(3),
             episode_name: String::new(),
             moved: false,

@@ -144,6 +144,14 @@ pub static MUX_ERRORS: once_cell::sync::Lazy<Mutex<BTreeMap<String, MuxerError>>
 pub static MUX_DISMISSED: once_cell::sync::Lazy<Mutex<std::collections::BTreeSet<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(std::collections::BTreeSet::new()));
 
+pub(crate) fn reset_after_drain() {
+    MUX_ERRORS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    MUX_DISMISSED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
 // Operator hint for a loss-abort error card: deterministic media damage
 // that won't clear on its own, so point at the two real resolutions
 // instead of implying a retry will help.

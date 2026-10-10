@@ -1,5 +1,209 @@
 use super::*;
 
+#[test]
+fn timed_out_mux_join_retains_handle_and_cancellation_until_drained() {
+    use std::sync::{Arc, Barrier, atomic::AtomicBool};
+    use std::time::Duration;
+    let blocked = Arc::new(Barrier::new(2));
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let wrote = Arc::new(AtomicBool::new(false));
+    let mut handle = Some(std::thread::spawn({
+        let (blocked, cancelled, wrote) = (blocked.clone(), cancelled.clone(), wrote.clone());
+        move || {
+            blocked.wait();
+            if !cancelled.load(Ordering::Acquire) {
+                wrote.store(true, Ordering::Release);
+            }
+        }
+    }));
+    assert!(!join_bounded(&mut handle, "mux", Duration::ZERO));
+    assert!(
+        handle.is_some(),
+        "timeout must not detach the old generation"
+    );
+    assert!(cancelled.load(Ordering::Acquire));
+    blocked.wait();
+    assert!(join_bounded(&mut handle, "mux", Duration::from_secs(5)));
+    assert!(handle.is_none());
+    assert!(!wrote.load(Ordering::Acquire));
+    cancelled.store(false, Ordering::Release);
+    assert!(join_bounded(&mut handle, "already joined", Duration::ZERO));
+}
+
+#[test]
+fn reboot_drain_includes_children_admitted_by_an_old_http_handler() {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+    let background = Arc::new(lifecycle::Background::default());
+    let enter = Arc::new(Barrier::new(2));
+    let child_started = Arc::new(Barrier::new(2));
+    let leave = Arc::new(Barrier::new(2));
+    let http = background
+        .spawn("old-http", {
+            let (background, enter, child_started, leave) = (
+                background.clone(),
+                enter.clone(),
+                child_started.clone(),
+                leave.clone(),
+            );
+            move || {
+                enter.wait();
+                // This happens after the daemon's initial rip-registry snapshot.
+                drop(
+                    background
+                        .spawn("late-rip", move || {
+                            child_started.wait();
+                            leave.wait();
+                        })
+                        .unwrap(),
+                );
+            }
+        })
+        .unwrap();
+    let mut checks = 0;
+    assert!(!drain_services(
+        &mut [],
+        &background,
+        |_| {
+            checks += 1;
+            true
+        },
+        Duration::ZERO
+    ));
+    assert_eq!(
+        checks, 1,
+        "cannot reach final drain/restart while HTTP is live"
+    );
+    enter.wait();
+    http.join().unwrap();
+    child_started.wait();
+    assert!(!drain_services(
+        &mut [],
+        &background,
+        |_| true,
+        Duration::ZERO
+    ));
+    leave.wait();
+    assert!(drain_services(
+        &mut [],
+        &background,
+        |_| true,
+        Duration::from_secs(5)
+    ));
+    assert!(background.spawn("old-generation", || ()).is_err());
+    background.reopen();
+    background
+        .spawn("replacement", || ())
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn reboot_drain_requires_final_rip_registry_check_even_with_no_helpers() {
+    let background = lifecycle::Background::default();
+    let mut checks = 0;
+    assert!(!drain_services(
+        &mut [],
+        &background,
+        |_| {
+            checks += 1;
+            checks == 1
+        },
+        std::time::Duration::ZERO
+    ));
+    assert_eq!(checks, 2);
+}
+
+#[test]
+fn timed_out_rip_drain_reports_failure_and_preserves_registration() {
+    // The rip registry and cancellation tokens are process-global. Isolate this
+    // regression from unrelated parallel tests; execute only this test, never
+    // the daemon or any media/drive operation.
+    const CHILD: &str = "FREEMKV_TEST_RIP_DRAIN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "server::daemon::tests::timed_out_rip_drain_reports_failure_and_preserves_registration", "--nocapture"])
+            .env(CHILD, "1")
+            .status().unwrap();
+        assert!(status.success());
+        return;
+    }
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+    let blocked = Arc::new(Barrier::new(2));
+    let h = std::thread::spawn({
+        let blocked = blocked.clone();
+        move || {
+            blocked.wait();
+        }
+    });
+    ripper::register_rip_thread("test-reboot-rip", h).unwrap();
+    assert!(!ripper::join_all_rip_threads(Duration::ZERO));
+    assert!(ripper::join_rip_thread("test-reboot-rip", Duration::ZERO).is_err());
+    blocked.wait();
+    assert!(ripper::join_all_rip_threads(Duration::from_secs(5)));
+    assert!(ripper::take_rip_thread("test-reboot-rip").is_none());
+
+    // Exercise the actual HTTP/helper -> registered-rip wiring, including a
+    // child admitted AFTER the daemon took its first registry snapshot.
+    SHUTDOWN.store(true, Ordering::Release);
+    let admit = Arc::new(Barrier::new(2));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let http = spawn_background("old-http", {
+        let (admit, entered, release) = (admit.clone(), entered.clone(), release.clone());
+        move || {
+            admit.wait();
+            ripper::spawn_rip_thread("late-http-rip", "test", move || {
+                entered.wait();
+                release.wait();
+                assert!(SHUTDOWN.load(Ordering::Acquire));
+            })
+            .unwrap();
+        }
+    })
+    .unwrap();
+    let mut snapshot = false;
+    assert!(!drain_services(
+        &mut [],
+        &BACKGROUND,
+        |timeout| {
+            let drained = ripper::join_all_rip_threads(timeout);
+            if !snapshot {
+                snapshot = true;
+                admit.wait();
+                entered.wait();
+            }
+            drained
+        },
+        Duration::ZERO
+    ));
+    http.join().unwrap();
+    assert!(SHUTDOWN.load(Ordering::Acquire));
+    assert!(!drain_services(
+        &mut [],
+        &BACKGROUND,
+        ripper::join_all_rip_threads,
+        Duration::ZERO
+    ));
+    release.wait();
+    assert!(drain_services(
+        &mut [],
+        &BACKGROUND,
+        ripper::join_all_rip_threads,
+        Duration::from_secs(5)
+    ));
+    assert!(spawn_background("late-old-request", || ()).is_err());
+    reset_after_drain();
+    BACKGROUND.reopen();
+    SHUTDOWN.store(false, Ordering::Release);
+    spawn_background("replacement", || assert!(!SHUTDOWN.load(Ordering::Acquire)))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 // On a long-uptime daemon the system log only shrank at boot; the prune tick must
 // also rotate an oversized one.
 #[test]
@@ -291,7 +495,7 @@ fn filetime_set(path: &std::path::Path, t: std::time::SystemTime) {
 // Covers a wedged mover/muxer thread: shutdown must neither hang forever nor abandon an
 // in-flight move too early.
 #[test]
-fn join_bounded_waits_for_a_healthy_worker_but_abandons_a_wedged_one() {
+fn join_bounded_waits_for_a_healthy_worker_but_retains_a_wedged_one() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -305,7 +509,12 @@ fn join_bounded_waits_for_a_healthy_worker_but_abandons_a_wedged_one() {
         d.store(true, Ordering::SeqCst);
     });
     let t0 = Instant::now();
-    super::join_bounded(h, "healthy", Duration::from_secs(5));
+    let mut h = Some(h);
+    assert!(super::join_bounded(
+        &mut h,
+        "healthy",
+        Duration::from_secs(5)
+    ));
     assert!(
         done.load(Ordering::SeqCst),
         "a worker that finished must have been joined, not abandoned"
@@ -315,11 +524,17 @@ fn join_bounded_waits_for_a_healthy_worker_but_abandons_a_wedged_one() {
         "must return as soon as the worker finishes, not sit out the timeout"
     );
 
-    // A worker that outlives its deadline must be abandoned at roughly the
-    // timeout — NOT waited on until it happens to finish.
-    let h = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(30)));
+    // A timeout returns without detaching; release and join it afterwards.
+    let (release, wait) = std::sync::mpsc::channel();
+    let mut h = Some(std::thread::spawn(move || {
+        wait.recv().unwrap();
+    }));
     let t0 = Instant::now();
-    super::join_bounded(h, "wedged", Duration::from_millis(150));
+    assert!(!super::join_bounded(
+        &mut h,
+        "wedged",
+        Duration::from_millis(150)
+    ));
     let waited = t0.elapsed();
     assert!(
         waited < Duration::from_secs(5),
@@ -329,6 +544,13 @@ fn join_bounded_waits_for_a_healthy_worker_but_abandons_a_wedged_one() {
         waited >= Duration::from_millis(100),
         "must actually give the worker its timeout: waited {waited:?}"
     );
+    assert!(h.is_some());
+    release.send(()).unwrap();
+    assert!(super::join_bounded(
+        &mut h,
+        "wedged",
+        Duration::from_secs(5)
+    ));
 }
 
 // Reject fail-open lock-poison handling throughout production source.

@@ -11,6 +11,59 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+// Serializes operator metadata commits with worker state writes. Kept separate
+type JobMutex = std::sync::Arc<std::sync::Mutex<()>>;
+type LockPool =
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<std::sync::Mutex<()>>>>;
+
+static STATE_LOCKS: std::sync::LazyLock<LockPool> = std::sync::LazyLock::new(Default::default);
+static JOB_LEASES: std::sync::LazyLock<LockPool> = std::sync::LazyLock::new(Default::default);
+
+fn pooled_lock(pool: &LockPool, dir: &Path) -> JobMutex {
+    let mut locks = pool.lock().unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, v| v.strong_count() > 0);
+    if let Some(lock) = locks.get(dir).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+    locks.insert(dir.to_path_buf(), std::sync::Arc::downgrade(&lock));
+    lock
+}
+
+fn state_lock(dir: &Path) -> JobMutex {
+    pooled_lock(&STATE_LOCKS, dir)
+}
+
+/// Excludes cleanup while a rip, mux or delivery owns this job's files.
+pub(crate) fn job_lease(dir: &Path) -> JobMutex {
+    pooled_lock(&JOB_LEASES, dir)
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UserMetadata {
+    pub title: String,
+    pub year: u16,
+    pub media_type: String,
+    #[serde(default)]
+    pub episode_start: Option<u16>,
+    pub tmdb_id: u64,
+    pub poster_url: String,
+    pub overview: String,
+}
+
+impl UserMetadata {
+    fn apply(&self, st: &mut DiscState) {
+        st.title = self.title.clone();
+        st.year = self.year;
+        st.media_type = self.media_type.clone();
+        st.episode_start = self.episode_start;
+        st.tmdb_id = self.tmdb_id;
+        st.tmdb_poster = self.poster_url.clone();
+        st.tmdb_overview = self.overview.clone();
+        st.title_confident = true;
+    }
+}
+
 /// Restart-loop attempt cap. After this many consecutive container
 /// restarts that find a partial staging dir for the same disc with no
 /// completion / failed marker, write `.failed` and stop trying.
@@ -73,11 +126,14 @@ pub const DISC_STATE_SCHEMA: u32 = 2;
 pub enum StagingState {
     /// was `.sweeping` — owned by the ripper, sweep+patch running/crashed.
     Sweeping,
+    /// Capture stopped cleanly; identity, metadata and recovery paths are retained.
+    Stopped,
     /// was `.ripped` — handed off; the mux worker should pick it up.
     Ripped,
     /// was `.done` — muxed, title confident, ready for the mover.
     Done,
-    /// was `.review` — muxed, held for operator confirmation.
+    /// Held for operator confirmation, before mux for an unproved title identity
+    /// or after mux for an uncertain metadata match (formerly `.review`).
     Review,
     /// was `.completed` — mover finished / process-level clean completion.
     Completed,
@@ -97,6 +153,10 @@ pub struct Output {
     /// Index into the disc's full `titles[]` this output was muxed from.
     #[serde(default)]
     pub title_index: usize,
+    /// Stable source identity; numeric indices are only scan-local hints.
+    /// Older plans without this proof require review before remuxing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_identity: Option<crate::title_identity::TitleIdentity>,
     /// Episode number for a TV output (`None` for a movie / single feature).
     #[serde(default)]
     pub episode: Option<u16>,
@@ -144,6 +204,21 @@ pub struct RipStats {
 pub struct DiscState {
     pub schema: u32,
     pub state: StagingState,
+    /// Durable operator selection; worker snapshots cannot replace it.
+    #[serde(default)]
+    pub user_metadata: Option<UserMetadata>,
+    #[serde(default)]
+    pub disc_identity: String,
+    #[serde(default)]
+    pub metadata_revision: u64,
+    #[serde(default)]
+    pub replan_required: bool,
+    /// Requires a new operator confirmation, not replay of saved metadata.
+    #[serde(default)]
+    pub title_identity_review: bool,
+    /// An interrupted Start over must finish deleting old artifacts before reuse.
+    #[serde(default)]
+    pub reset_in_progress: bool,
 
     // --- orthogonal lifecycle annotations ---------------------------------
     #[serde(default)]
@@ -194,6 +269,8 @@ pub struct DiscState {
     #[serde(default)]
     pub disc_number: Option<u16>,
     #[serde(default)]
+    pub episode_start: Option<u16>,
+    #[serde(default)]
     pub title_confident: bool,
 
     // --- capture handles + mux-reconstruction knobs (was RippedMarker) -----
@@ -228,6 +305,12 @@ impl DiscState {
         DiscState {
             schema: DISC_STATE_SCHEMA,
             state,
+            user_metadata: None,
+            disc_identity: String::new(),
+            metadata_revision: 0,
+            replan_required: false,
+            title_identity_review: false,
+            reset_in_progress: false,
             restart_count: 0,
             muxing: false,
             accept_loss: false,
@@ -245,6 +328,7 @@ impl DiscState {
             tmdb_overview: String::new(),
             season: None,
             disc_number: None,
+            episode_start: None,
             title_confident: false,
             iso_path: String::new(),
             mapfile_path: String::new(),
@@ -364,6 +448,9 @@ pub(crate) fn state_for_write(
     default: StagingState,
 ) -> io::Result<DiscState> {
     match read_state_checked(staging_disc_dir) {
+        StateRead::Valid(st) if st.reset_in_progress => Err(io::Error::other(
+            "capture reset was interrupted; choose Start over to finish cleanup",
+        )),
         StateRead::Valid(st) => Ok(*st),
         StateRead::Absent => Ok(DiscState::new(default)),
         StateRead::Unreadable(u) => {
@@ -395,6 +482,209 @@ pub fn write_state(staging_disc_dir: &Path, st: &DiscState) {
 /// the fresh-rip hand-off gating auto-eject on a durable marker) can refuse to
 /// proceed when the write did not land.
 pub fn try_write_state(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
+    let lock = state_lock(staging_disc_dir);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = st.clone();
+    match read_state_checked(staging_disc_dir) {
+        StateRead::Valid(saved) if saved.reset_in_progress => {
+            return Err(io::Error::other(
+                "capture reset must finish before writing job state",
+            ));
+        }
+        StateRead::Valid(saved) => {
+            st.user_metadata = saved.user_metadata;
+            st.metadata_revision = saved.metadata_revision;
+            st.replan_required = saved.replan_required;
+            st.title_identity_review = saved.title_identity_review;
+            if !saved.disc_identity.is_empty() {
+                st.disc_identity = saved.disc_identity;
+            }
+        }
+        StateRead::Unreadable(u) => return Err(io::Error::other(u.log_text())),
+        StateRead::Absent => (),
+    }
+    apply_user_metadata(&mut st);
+    write_state_unlocked(staging_disc_dir, &st)
+}
+
+fn metadata_changes_plan(st: &DiscState, metadata: &UserMetadata) -> bool {
+    // Unknown detected type follows the movie capture path. All callers must
+    // use the same normalization for validation and lifecycle transitions.
+    let current_type = if st.media_type.is_empty() {
+        "movie"
+    } else {
+        &st.media_type
+    };
+    current_type != metadata.media_type
+        || (metadata.media_type == "tv" && st.tmdb_id != metadata.tmdb_id)
+        || st.episode_start != metadata.episode_start
+}
+
+fn apply_user_metadata(st: &mut DiscState) {
+    if st.title_identity_review {
+        st.state = StagingState::Review;
+        return;
+    }
+    if let Some(metadata) = st.user_metadata.clone() {
+        if !st.outputs.is_empty() && metadata_changes_plan(st, &metadata) {
+            st.replan_required = true;
+        }
+        metadata.apply(st);
+        if st.state == StagingState::Review
+            && (!st.outputs.is_empty() || st.iso_path.is_empty() || st.replan_required)
+        {
+            st.state = StagingState::Done;
+        }
+    }
+    if st.replan_required && matches!(st.state, StagingState::Done | StagingState::Completed) {
+        st.state = StagingState::Ripped;
+    }
+}
+
+/// Acknowledge a correction only after its durable write. Existing capture
+/// filenames and recovery data stay attached to the same staging entry.
+pub fn save_user_metadata(dir: &Path, metadata: UserMetadata) -> io::Result<u64> {
+    save_user_metadata_inner(dir, metadata, None, false)
+}
+
+/// Resolve a durable review without requiring its original drive to be present.
+pub fn save_review_metadata(dir: &Path, metadata: UserMetadata) -> io::Result<u64> {
+    save_user_metadata_inner(dir, metadata, None, true)
+}
+
+/// Hold an unproved legacy plan without discarding its captured image or outputs.
+pub(super) fn hold_title_identity_review(
+    dir: &Path,
+    iso: &Path,
+    mapfile: &Path,
+    reason: &str,
+) -> io::Result<()> {
+    let lock = state_lock(dir);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = state_for_write(dir, StagingState::Review)?;
+    st.state = StagingState::Review;
+    st.title_identity_review = true;
+    st.failure_reason = Some(reason.to_string());
+    st.needs_disc = false;
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.mapfile_path = mapfile.to_string_lossy().into_owned();
+    write_state_unlocked(dir, &st)
+}
+
+/// Initialize a newly identified job and commit its correction in the same
+/// transaction. Refusals must not apply an older correction or change identity.
+pub(super) fn save_user_metadata_for_device(
+    dir: &Path,
+    metadata: UserMetadata,
+    identity: &str,
+    label: &str,
+    device: &str,
+) -> io::Result<u64> {
+    save_user_metadata_inner(dir, metadata, Some((identity, label, device)), false)
+}
+
+fn save_user_metadata_inner(
+    dir: &Path,
+    mut metadata: UserMetadata,
+    origin: Option<(&str, &str, &str)>,
+    require_review: bool,
+) -> io::Result<u64> {
+    if metadata.media_type != "tv" {
+        metadata.episode_start = None;
+    } else if metadata.episode_start == Some(0) {
+        return Err(io::Error::other(
+            "First episode must be between 1 and 65535",
+        ));
+    }
+    let lock = state_lock(dir);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = match read_state_checked(dir) {
+        StateRead::Valid(st) => *st,
+        StateRead::Absent if origin.is_some() => DiscState::new(StagingState::Stopped),
+        _ => {
+            return Err(io::Error::other(
+                "staging state unavailable; retry after scan",
+            ));
+        }
+    };
+    if st.reset_in_progress {
+        return Err(io::Error::other(
+            "capture reset is incomplete; finish Start over before editing metadata",
+        ));
+    }
+    if require_review && st.state != StagingState::Review {
+        return Err(io::Error::other("not a held rip"));
+    }
+    if matches!(st.state, StagingState::Done | StagingState::Completed) {
+        return Err(io::Error::other(
+            "delivery has started; the staged job can no longer be retitled",
+        ));
+    }
+    if st.title_identity_review {
+        if st.iso_path.is_empty() {
+            return Err(io::Error::other(
+                "review needs the retained ISO to rebuild the title plan",
+            ));
+        }
+        st.title_identity_review = false;
+        st.replan_required = true;
+    }
+    // Use the persisted execution mode, not settings which may have changed
+    // since capture began.
+    let plan_changes = metadata_changes_plan(&st, &metadata);
+    if plan_changes
+        && st.max_retries == 0
+        && st.iso_path.is_empty()
+        && (st.state == StagingState::Sweeping || !st.outputs.is_empty())
+    {
+        return Err(io::Error::other(
+            "changing the episode plan needs a saved ISO; stop this single-pass rip first",
+        ));
+    }
+    if (plan_changes && !st.outputs.is_empty())
+        || (st.state == StagingState::Review && st.outputs.is_empty() && !st.iso_path.is_empty())
+    {
+        st.replan_required = true;
+    }
+    st.metadata_revision = st
+        .metadata_revision
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("metadata revision exhausted"))?;
+    if let Some((identity, label, device)) = origin {
+        st.disc_identity = identity.to_string();
+        st.disc_label = label.to_string();
+        st.origin_device = device.to_string();
+    }
+    st.user_metadata = Some(metadata);
+    // Apply the NEW correction and its Review -> Done/Ripped transition before
+    // the sole durable write, never in a preliminary transaction using old data.
+    apply_user_metadata(&mut st);
+    if st.state == StagingState::Ripped && st.replan_required {
+        st.failure_reason = None;
+        st.needs_disc = false;
+    }
+    write_state_unlocked(dir, &st)?;
+    // Return this commit's revision while still holding the state lock: a
+    // subsequent read could instead observe another request's commit.
+    Ok(st.metadata_revision)
+}
+
+/// Commit a rebuilt plan only if its metadata is still current.
+pub fn save_replanned_outputs(dir: &Path, revision: u64, outputs: Vec<Output>) -> io::Result<()> {
+    let lock = state_lock(dir);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = state_for_write(dir, StagingState::Ripped)?;
+    if st.metadata_revision != revision {
+        return Err(io::Error::other(
+            "title changed while planning; retrying with the latest selection",
+        ));
+    }
+    st.outputs = outputs;
+    st.replan_required = false;
+    write_state_unlocked(dir, &st)
+}
+
+fn write_state_unlocked(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
     let p = state_path(staging_disc_dir);
     let serialized = serde_json::to_string_pretty(st).map_err(|e| {
         io::Error::new(
@@ -412,15 +702,18 @@ pub fn try_write_state(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()
 /// one writer owns a staging dir at a time (the sweeping/muxing
 /// ownership rules, now fields).
 ///
-/// Lock-free. Errs (writing nothing) on an unreadable state.json or a failed write.
+/// Serialized per job. Errs on unreadable state or a failed durable write.
 pub fn mutate_state(
     staging_disc_dir: &Path,
     default_state: StagingState,
     f: impl FnOnce(&mut DiscState),
 ) -> io::Result<()> {
+    let lock = state_lock(staging_disc_dir);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut st = state_for_write(staging_disc_dir, default_state)?;
     f(&mut st);
-    try_write_state(staging_disc_dir, &st)
+    apply_user_metadata(&mut st);
+    write_state_unlocked(staging_disc_dir, &st)
 }
 
 /// The one-shot accept-loss REOPEN transition: move a terminal/abort dir back to
@@ -442,9 +735,17 @@ pub fn apply_accept_loss_reopen(s: &mut DiscState) {
 /// conjure a state file for a dir that has none (e.g. clearing `.muxing` on a
 /// legacy dir, consuming `.accept-loss`).
 pub fn mutate_state_if_present(staging_disc_dir: &Path, f: impl FnOnce(&mut DiscState)) {
+    let lock = state_lock(staging_disc_dir);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(mut st) = read_state(staging_disc_dir) {
+        if st.reset_in_progress {
+            return;
+        }
         f(&mut st);
-        write_state(staging_disc_dir, &st);
+        apply_user_metadata(&mut st);
+        if let Err(e) = write_state_unlocked(staging_disc_dir, &st) {
+            tracing::error!(path = %staging_disc_dir.display(), error = %e, "failed to update staging state");
+        }
     }
 }
 
@@ -660,6 +961,33 @@ pub fn increment_restart_count(staging_disc_dir: &Path) -> io::Result<u64> {
 // Durably write a marker: tmp write + sync_all + rename + dir fsync, so a
 // crash mid-write never leaves a torn marker. Mirrors `increment_restart_count`.
 pub(crate) fn write_marker_durable(path: &Path, contents: &[u8]) -> io::Result<()> {
+    write_marker_with_directory_sync(path, contents, libfreemkv::io::fsync::dir_checked)
+}
+
+fn write_marker_with_directory_sync(
+    path: &Path,
+    contents: &[u8],
+    sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    write_marker_phased(path, contents, sync_directory).map_err(|failure| match failure {
+        MarkerWriteError::BeforePublish(error) | MarkerWriteError::AfterPublish(error) => error,
+    })
+}
+
+/// Whether a failed marker write has already replaced the destination.
+#[derive(Debug)]
+pub(crate) enum MarkerWriteError {
+    BeforePublish(io::Error),
+    AfterPublish(io::Error),
+}
+
+/// Same fixed temporary path and durability contract, with publication status
+/// retained for callers that must reconcile live memory after a sync failure.
+pub(crate) fn write_marker_phased(
+    path: &Path,
+    contents: &[u8],
+    sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), MarkerWriteError> {
     let tmp = match path.file_name() {
         Some(name) => {
             let mut t = name.to_os_string();
@@ -667,10 +995,10 @@ pub(crate) fn write_marker_durable(path: &Path, contents: &[u8]) -> io::Result<(
             path.with_file_name(t)
         }
         None => {
-            return Err(io::Error::new(
+            return Err(MarkerWriteError::BeforePublish(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "marker has no file name",
-            ));
+            )));
         }
     };
     (|| -> io::Result<()> {
@@ -680,16 +1008,17 @@ pub(crate) fn write_marker_durable(path: &Path, contents: &[u8]) -> io::Result<(
     })()
     .inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
-    })?;
+    })
+    .map_err(MarkerWriteError::BeforePublish)?;
     if let Err(e) = std::fs::rename(&tmp, path) {
         // Clean up the `.tmp` sibling on a permanent rename failure
         // (cross-device move, ESTALE, full directory) so it is not
         // leaked. Best-effort, then propagate the real error.
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+        return Err(MarkerWriteError::BeforePublish(e));
     }
     if let Some(parent) = path.parent() {
-        libfreemkv::io::fsync::dir(parent);
+        sync_directory(parent).map_err(MarkerWriteError::AfterPublish)?;
     }
     Ok(())
 }
@@ -988,11 +1317,11 @@ pub fn clear_muxing_marker(staging_disc_dir: &Path) {
 /// supersede a sweep. Safe to call unconditionally: a no-op once the sweep has already
 /// advanced.
 pub fn clear_sweeping_marker(staging_disc_dir: &Path) {
-    if let Some(st) = read_state(staging_disc_dir)
-        && st.state == StagingState::Sweeping
-    {
-        let _ = std::fs::remove_file(state_path(staging_disc_dir));
-    }
+    mutate_state_if_present(staging_disc_dir, |s| {
+        if s.state == StagingState::Sweeping {
+            s.state = StagingState::Stopped;
+        }
+    });
     remove_legacy_marker(staging_disc_dir, SWEEPING_MARKER);
 }
 
@@ -1707,6 +2036,10 @@ pub fn snapshot_staging_disc(dir: &Path) -> Option<StagingSnapshot> {
         // A corrupt/torn `state.json` falls back to the legacy view rather than
         // crashing, and is flagged so the mux worker holds instead of guessing.
         match read_state_checked(dir) {
+            StateRead::Valid(st) if st.reset_in_progress => {
+                tracing::warn!(path = %dir.display(), "capture reset incomplete; Start over must finish cleanup before reuse");
+                return None;
+            }
             StateRead::Valid(st) => Lifecycle::from_state(&st),
             StateRead::Absent => Lifecycle::from_legacy(dir, &obs),
             StateRead::Unreadable(u) => {
@@ -1777,6 +2110,10 @@ pub fn resume_or_quarantine_staging(staging_dir: &str) -> Vec<StagingResumeHint>
         let Some(snap) = snapshot_staging_disc(&path) else {
             continue;
         };
+
+        if !snap.has_iso && read_state(&path).is_some_and(|s| s.state == StagingState::Stopped) {
+            continue;
+        }
 
         if snap.completed {
             tracing::info!(path = %path.display(), "staging entry has .completed — leaving for mover/ack");
@@ -2072,6 +2409,113 @@ pub enum ResumeAction {
         has_mapfile: bool,
         has_mkv: bool,
     },
+}
+
+/// Reset capture artifacts while retaining disc identity and operator metadata.
+/// The caller must own the job lease throughout reset and capture startup.
+pub(super) fn reset_capture_preserving_metadata(
+    dir: &Path,
+    verified_identity: &str,
+) -> io::Result<()> {
+    reset_capture_with(dir, verified_identity, || Ok(()))
+}
+
+fn reset_capture_with(
+    dir: &Path,
+    verified_identity: &str,
+    after_prepare: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let lock = state_lock(dir);
+    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+        Ok(meta) if !meta.is_dir() => {
+            return Err(io::Error::other("staging reset requires a real directory"));
+        }
+        Ok(_) => {}
+    }
+    let old = match read_state_checked(dir) {
+        StateRead::Valid(st) => Some(*st),
+        StateRead::Absent => None,
+        _ => return Err(io::Error::other("cannot reset unreadable staging metadata")),
+    };
+    let keep = !verified_identity.is_empty()
+        || old.as_ref().is_some_and(|s| {
+            !s.disc_identity.is_empty() || s.user_metadata.is_some() || !s.title.is_empty()
+        });
+    let old = old.unwrap_or_else(|| DiscState::new(StagingState::Stopped));
+    if !verified_identity.is_empty()
+        && !old.disc_identity.is_empty()
+        && old.disc_identity != verified_identity
+    {
+        return Err(io::Error::other(
+            "staging identity changed; nothing was reset",
+        ));
+    }
+    let mut fresh = DiscState::new(StagingState::Stopped);
+    UserMetadata {
+        title: old.title,
+        year: old.year,
+        media_type: old.media_type,
+        episode_start: old.episode_start,
+        tmdb_id: old.tmdb_id,
+        poster_url: old.tmdb_poster,
+        overview: old.tmdb_overview,
+    }
+    .apply(&mut fresh);
+    fresh.title_confident = old.title_confident;
+    fresh.user_metadata = old.user_metadata;
+    fresh.metadata_revision = old.metadata_revision;
+    // Legacy adoption may know identity only through the soon-to-be-deleted map.
+    // Preserve the scan's verified identity before removing that recovery link.
+    fresh.disc_identity = if verified_identity.is_empty() {
+        old.disc_identity
+    } else {
+        verified_identity.to_owned()
+    };
+    fresh.disc_label = old.disc_label;
+    fresh.disc_name = old.disc_name;
+    fresh.disc_format = old.disc_format;
+    fresh.origin_device = old.origin_device;
+    fresh.season = old.season;
+    fresh.disc_number = old.disc_number;
+    fresh.reset_in_progress = true;
+    // Persist the reset state first: interruption cannot expose half-deleted
+    // outputs as completed, and never loses an acknowledged title correction.
+    write_state_unlocked(dir, &fresh)?;
+    after_prepare()?;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name() == STATE_FILE {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    fresh.reset_in_progress = false;
+    if keep {
+        write_state_unlocked(dir, &fresh)
+    } else {
+        std::fs::remove_file(state_path(dir))?;
+        std::fs::remove_dir(dir)
+    }
+}
+
+/// Freeze execution mode and read planning metadata in one state transaction.
+/// The caller owns the job lease and clears Sweeping when capture exits.
+pub(super) fn begin_capture(dir: &Path, max_retries: u8) -> io::Result<DiscState> {
+    let lock = state_lock(dir);
+    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = state_for_write(dir, StagingState::Sweeping)?;
+    st.state = StagingState::Sweeping;
+    st.max_retries = max_retries;
+    apply_user_metadata(&mut st);
+    write_state_unlocked(dir, &st)?;
+    Ok(st)
 }
 
 #[cfg(test)]

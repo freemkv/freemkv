@@ -88,6 +88,7 @@ fn sample_units_are_all_aacs_scrambled() {
     let mut reader = libfreemkv::FileSectorSource::open(tmp.path()).unwrap();
 
     let title = libfreemkv::DiscTitle {
+        selection_evidence: Default::default(),
         playlist: "00800.mpls".into(),
         playlist_id: 800,
         duration_secs: 0.0,

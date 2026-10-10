@@ -58,6 +58,7 @@ fn only_a_discarded_iso_is_scoped_to_its_titles() {
 #[test]
 fn the_staged_titles_are_every_title_the_mux_reads() {
     let title = |playlist: &str, secs: f64| libfreemkv::DiscTitle {
+        selection_evidence: Default::default(),
         playlist: playlist.into(),
         duration_secs: secs,
         ..libfreemkv::DiscTitle::empty()

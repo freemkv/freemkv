@@ -201,7 +201,7 @@ async function driveAction(btn, dev, label, url) {
 function actionsHtml(dev, s) {
   const btns = actionsFor(dev, s).map(([label, url, kind, two]) =>
     '<button class="btn btn-' + kind + ' btn-sm" data-url="' + esc(url) + '" data-label="' + esc(label) + '"' + (two ? ' data-two' : '') + '>' + esc(label) + '</button>').join('');
-  const edit = s.status === 'idle' && (s.tmdb_title || s.disc_name) ? '<button class="btn btn-ghost btn-sm" data-title>Change title</button>' : '';
+  const edit = s.job_id && ['idle', 'ripping', 'error'].includes(s.status) && (s.tmdb_title || s.disc_name) ? '<button class="btn btn-ghost btn-sm" data-title>Change title</button>' : '';
   const elapsed = ACTIVE.includes(s.status) ? '<span class="elapsed" data-started="' + (s.started_epoch_secs || 0) + '"></span>' : '';
   return btns + edit + elapsed;
 }
@@ -269,10 +269,11 @@ function queueRows(list) {
 function errorRows(list, kind) {
   if (!list || !list.length) return '';
   return '<div class="card-head" style="margin:1rem 0 .25rem"><span class="small muted" style="text-transform:uppercase;letter-spacing:.05em;font-weight:700">Needs action</span>'
-    + '<span class="actions"><button class="btn btn-ghost btn-sm" data-refresh>Refresh</button><button class="btn btn-ghost btn-sm" data-clearall="' + kind + '">Clear all</button></span></div>'
+    + '<span class="actions"><button class="btn btn-ghost btn-sm" data-refresh>Refresh</button><button class="btn btn-ghost btn-sm" data-clearall="' + kind + '">' + (kind === 'move' ? 'Retry all' : 'Clear all') + '</button></span></div>'
     + list.map(e => '<div class="pipe-row pipe-err"><span class="dot dot-bad"></span><div class="grow"><div class="name mono">' + esc(e.path) + '</div>'
       + '<div class="sub">' + esc(e.reason || '') + '</div>' + (e.hint ? '<div class="sub">' + esc(e.hint) + '</div>' : '') + '</div>'
-      + '<button class="x" data-clear="' + kind + '" data-path="' + esc(e.path) + '" title="Clear this error" aria-label="Clear this error">×</button></div>').join('');
+      + (kind === 'move' ? '<span class="sub">' + (e.worker_active ? 'Waiting for filesystem — retry unavailable.' : e.retry_held ? 'Automatic retries stopped.' : 'Waiting before retry.') + '</span>' : '')
+      + '<button class="btn btn-ghost btn-sm"' + (e.worker_active ? ' disabled' : '') + ' data-clear="' + kind + '" data-path="' + esc(e.path) + '">' + (kind === 'move' ? 'Retry' : 'Clear') + '</button></div>').join('');
 }
 
 function muxHtml(state, sys, empty = true) {
@@ -287,8 +288,16 @@ function muxHtml(state, sys, empty = true) {
 }
 function moveHtml(state, sys, empty = true) {
   const moves = Array.isArray(state._move) ? state._move : (state._move && state._move.name ? [state._move] : []);
-  let h = moves.filter(m => m && m.name).map(m => barRow(m.name + (m.artifact ? ' (' + m.artifact + ')' : ''),
-    [m.progress_pct + '%', m.speed_mbs > 0 ? fmtSpeed(m.speed_mbs) : '', m.eta ? m.eta + ' remaining' : ''].filter(Boolean).join(' · '), m.progress_pct)).join('');
+  const delivered = moves.filter(m => m && m.phase === 'delivered').length;
+  let h = moves.filter(m => m && m.name && m.phase !== 'delivered').map(m => {
+    const labels = {queued: 'Waiting', finalizing: 'Finalizing…', cleanup_needed: 'Delivered — staging cleanup needed', blocked: 'Blocked — see delivery error'};
+    const finishing = m.progress_pct >= 100;
+    const label = labels[m.phase] || (finishing ? 'Finalizing…' : m.progress_pct + '%');
+    const copying = (!m.phase || m.phase === 'copying') && !finishing;
+    return barRow(m.name + (m.artifact ? ' (' + m.artifact + ')' : ''),
+      [label, copying && m.speed_mbs > 0 ? fmtSpeed(m.speed_mbs) : '', copying && m.eta ? m.eta + ' remaining' : ''].filter(Boolean).join(' · '), m.progress_pct);
+  }).join('');
+  if (delivered) h += '<div class="muted small">' + delivered + ' file' + (delivered === 1 ? '' : 's') + ' delivered.</div>';
   h += queueRows(state._move_queue != null ? state._move_queue : sys.move_queue);
   if (!h && empty) h = '<div class="muted small">Nothing waiting.</div>';
   return h + errorRows(sys.move_errors, 'move');
@@ -311,23 +320,39 @@ function parseName(raw, fallbackYear) {
 }
 
 /** Search TMDB or type a name. `onPick({title, year, ...})` files it. */
-function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, owner = '' }) {
+function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, owner = '', mediaType = '', episodeStart = null }) {
   const m = modal({
     title: esc(heading), wide: true,
     body: (sub ? '<p class="small muted" style="margin:0 0 .9rem">' + sub + '</p>' : '')
       + '<div class="hook"><input class="txt" id="tp-q" placeholder="Type an exact name, or a search term" value="' + esc(initial || '') + '">'
       + '<button class="btn btn-secondary btn-sm" id="tp-search">Search TMDB</button></div>'
+      + '<label>First episode (TV only, optional)<input class="txt" id="tp-episode" type="number" min="1" max="65535" step="1" value="' + esc(episodeStart ?? '') + '"></label>'
       + '<div id="tp-res" class="stack" style="margin-top:.5rem"></div>',
     foot: extraFoot + '<button class="btn btn-primary btn-sm" id="tp-manual">Use this exact name</button>',
   });
   const qi = m.el.querySelector('#tp-q');
   const res = m.el.querySelector('#tp-res');
   let found = [];
+  let searchRevision = 0;
+  const selection = (c) => {
+    const media_type = c.media_type || mediaType;
+    const episodeInput = m.el.querySelector('#tp-episode');
+    const raw = episodeInput.value.trim();
+    const start = raw === '' ? null : Number(raw);
+    if (media_type === 'tv' && (episodeInput.validity?.badInput || (start !== null && (!Number.isInteger(start) || start < 1 || start > 65535)))) {
+      toast('First episode must be an integer between 1 and 65535', 'info');
+      return null;
+    }
+    return { ...c, media_type, episode_start: media_type === 'tv' ? start : null };
+  };
   const search = async (btn) => {
     const q = qi.value.trim();
     if (!q) { toast('Type something to search for', 'info'); return; }
+    const revision = ++searchRevision;
+    found = [];
     res.innerHTML = '<div class="muted small">Searching…</div>';
     const cs = await act(btn, () => api('GET', ownerUrl(owner, '/api/tmdb/search?q=' + encodeURIComponent(q))), 'TMDB search');
+    if (revision !== searchRevision) return;
     if (!cs) { res.innerHTML = '<div class="muted small">Search failed.</div>'; return; }
     found = cs;
     res.innerHTML = cs.length ? cs.map((c, i) => '<div class="pipe-row">' + (c.poster_url ? '<img src="' + esc(c.poster_url) + '" alt="" style="width:40px;height:60px;object-fit:cover;border-radius:6px">' : '')
@@ -339,14 +364,16 @@ function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, o
   qi.addEventListener('keydown', (e) => { if (e.key === 'Enter') search(m.el.querySelector('#tp-search')); });
   res.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-pick]');
-    if (b && await onPick(found[+b.dataset.pick], b)) m.close();
+    const c = b && selection(found[+b.dataset.pick]);
+    if (c && await onPick(c, b)) m.close();
   });
   m.el.querySelector('#tp-manual').onclick = async (e) => {
     const p = parseName(qi.value, 0);
     if (!p) { toast('Type a name first', 'info'); qi.focus(); return; }
-    if (await onPick({ ...p, tmdb_id: 0 }, e.currentTarget)) m.close();
+    const c = selection({ ...p, tmdb_id: 0 });
+    if (c && await onPick(c, e.currentTarget)) m.close();
   };
-  if (onExtra) onExtra(m);
+  if (onExtra) onExtra(m, selection);
   qi.select();
   return m;
 }
@@ -356,9 +383,10 @@ function changeTitle(dev, s) {
     heading: 'Title for the disc in ' + (s._owner ? s._owner + ' · ' : '') + ownDevice(dev),
     owner: deviceOwner(dev),
     initial: s.tmdb_title || s.disc_name,
-    sub: 'Fix the name before ripping. Pick a TMDB match or type a name; "(YYYY)" at the end is the year. It applies to this rip only.',
+    mediaType: s.tmdb_media_type || s.media_type, episodeStart: s.episode_start,
+    sub: 'Pick a TMDB match or type a name; "(YYYY)" at the end is the year. The correction is saved with this disc, including across interrupted rips. Capture files stay in place.',
     onPick: async (c, btn) => {
-      const r = await act(btn, () => api('POST', '/api/title/' + dev, { ...c, year: c.year || 0 }), 'Change title');
+      const r = await act(btn, () => api('POST', '/api/title/' + dev, { ...c, year: c.year || 0, job_id: s.job_id }), 'Change title');
       if (r === undefined) return false;
       toast('The disc in ' + dev + ' will be filed as ' + c.title + (c.year ? ' (' + c.year + ')' : ''), 'ok');
       return true;
@@ -371,11 +399,12 @@ function reviewDialog(it, reload, owner = '') {
     owner,
     heading: 'Which title is this? ' + (it.title || it.dir) + (it.year ? ' (' + it.year + ')' : ''),
     initial: it.title || '',
+    mediaType: it.media_type, episodeStart: it.episode_start,
     sub: esc(it.reason || '') + (it.file ? '<br><span class="mono">' + esc(it.file) + '</span>' : ''),
     extraFoot: '<button class="btn btn-ghost btn-sm" id="rv-cancel">Delete this rip</button><button class="btn btn-secondary btn-sm" id="rv-proceed">Keep this name</button>',
-    onPick: async (c, btn) => resolve(btn, { action: 'retitle', title: c.title, year: c.year || 0 }),
-    onExtra: (m) => {
-      m.el.querySelector('#rv-proceed').onclick = async (e) => { if (await resolve(e.currentTarget, { action: 'proceed' })) m.close(); };
+    onPick: async (c, btn) => resolve(btn, { ...c, action: 'retitle', year: c.year || 0 }),
+    onExtra: (m, selection) => {
+      m.el.querySelector('#rv-proceed').onclick = async (e) => { const c = selection({ action: 'proceed' }); if (c && await resolve(e.currentTarget, c)) m.close(); };
       const cb = m.el.querySelector('#rv-cancel');
       cb.onclick = (e) => twoStep(e.currentTarget, async (b) => { if (await resolve(b, { action: 'cancel' })) m.close(); }, 'Confirm delete');
       void cb;
@@ -580,16 +609,16 @@ export default {
       const c = e.target.closest('[data-clear]');
       if (c) {
         const kind = c.dataset.clear;
-        if (await act(c, () => api('POST', ownedUrl('/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path))), 'Clear') !== undefined) {
-          toast('Cleared. It comes back if the problem is still there.', 'info');
+        if (await act(c, () => api('POST', ownedUrl('/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path))), kind === 'move' ? 'Retry' : 'Clear') !== undefined) {
+          toast(kind === 'move' ? 'Delivery retry requested.' : 'Cleared. It comes back if the problem is still there.', 'info');
         }
         reload();
         return;
       }
       const ca = e.target.closest('[data-clearall]');
       if (ca) {
-        if (await act(ca, () => api('POST', ownedUrl('/api/' + ca.dataset.clearall + '-errors/clear-all')), 'Clear all') !== undefined) {
-          toast('Cleared all', 'info');
+        if (await act(ca, () => api('POST', ownedUrl('/api/' + ca.dataset.clearall + '-errors/clear-all')), ca.dataset.clearall === 'move' ? 'Retry all' : 'Clear all') !== undefined) {
+          toast(ca.dataset.clearall === 'move' ? 'Delivery retries requested.' : 'Cleared all', 'info');
         }
         reload();
         return;

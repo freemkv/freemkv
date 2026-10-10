@@ -218,6 +218,27 @@ Titles
                  Spanish
 ```
 
+## Presentation language and retained audio
+
+To request the German authored presentation while retaining all of its audio:
+
+```sh
+freemkv iso://disc.iso mkv://movie.mkv --presentation-language de --audio all
+```
+
+The desktop **Presentation language** preference and server/Library
+`presentation_language` setting express the same content preference. Set the desktop
+preference before opening the disc. It is independent of **Audio All** and of the
+interface-language setting (`--language`); UI locale never chooses disc content.
+With no explicit presentation preference, requested audio languages remain the
+selection fallback. Audio All keeps every track in the selected title, not tracks
+from other presentations. Explicit title choices take precedence.
+
+Supported DVD root menus provide bounded, register-aware full-title launch evidence,
+including logical-to-physical audio routing. Missing, unmatched or ambiguous proof
+requires review and explicit title selection; duration similarity is not proof.
+This does not establish a universal TV episode roster or support every DVD menu VM.
+
 ## Stream Labels
 
 freemkv reads BD-J authoring files on the disc — metadata that other tools can't see. Standard tools only read MPLS data (language code + codec). freemkv identifies:

@@ -526,6 +526,7 @@ fn staging_segment_guard_rejects_traversal() {
 /// `bytes_bad_in_title` / the abort-loss scoping.
 fn test_title(start_lba: u32, sector_count: u32) -> libfreemkv::DiscTitle {
     libfreemkv::DiscTitle {
+        selection_evidence: Default::default(),
         playlist: "00800.mpls".to_string(),
         playlist_id: 800,
         duration_secs: 7200.0,
@@ -543,19 +544,40 @@ fn test_title(start_lba: u32, sector_count: u32) -> libfreemkv::DiscTitle {
 }
 
 // The staged image is muxed at the drive title's playlist, wherever the
-// image scan lists it; an unknown playlist falls back to the first title.
+// image scan lists it; an unknown playlist must not substitute another title.
 #[test]
 fn image_title_index_follows_the_drive_titles_playlist() {
     let mut image = disc_with_main_streams(vec![]);
     let mut other = test_title(0, 10);
     other.playlist = "00001.mpls".into();
     image.titles = vec![other, test_title(0, 10)];
-    assert_eq!(super::image_title_index(&image, &test_title(0, 10)), 1);
+    assert_eq!(
+        super::image_title_index(&image, &test_title(0, 10)).unwrap(),
+        1
+    );
     let mut unknown = test_title(0, 10);
     unknown.playlist = "00999.mpls".into();
-    assert_eq!(super::image_title_index(&image, &unknown), 0);
+    assert!(super::image_title_index(&image, &unknown).is_err());
     unknown.playlist.clear();
-    assert_eq!(super::image_title_index(&image, &unknown), 0);
+    assert!(super::image_title_index(&image, &unknown).is_err());
+    image.titles.push(test_title(0, 10));
+    assert!(super::image_title_index(&image, &test_title(0, 10)).is_err());
+}
+
+#[test]
+fn presentation_preference_key_scope_tracks_selected_title_not_index_zero() {
+    let mut disc = disc_with_main_streams(vec![]);
+    disc.titles = crate::selection_test_fixtures::launch_titles();
+    for (language, expected) in [("de", vec![1]), ("en", vec![0]), ("fr", vec![])] {
+        let cfg = super::Config {
+            presentation_language: language.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::rip_key_scope(&disc, &cfg, "movie", ""),
+            libfreemkv::keys::KeyScope::Titles(expected)
+        );
+    }
 }
 
 /// The scoped loss is the TOTAL of all in-title gaps, not the single
@@ -2833,6 +2855,10 @@ fn resumable_for_disc_detects_partial_sweep() {
         resumable_for_disc(&cfg, display_name, ""),
         Some(Resumable::Sweep),
     );
+    let mut reset = staging::DiscState::new(staging::StagingState::Stopped);
+    reset.reset_in_progress = true;
+    staging::try_write_state(&disc_dir, &reset).unwrap();
+    assert_eq!(resumable_for_disc(&cfg, display_name, ""), None);
 }
 
 // R3 finding 1 regression: `resumable_for_disc` must return None when the dir carries a
@@ -3917,6 +3943,73 @@ fn dispatch_over_staged_disc(
         .unwrap_or_default();
     forget_device(device);
     (tmp, dir, st)
+}
+
+#[test]
+fn fresh_wipe_cannot_delete_artifacts_while_job_lease_is_held() {
+    let mode = crate::server::web::ResumeMode::Wipe;
+    let release = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let release_for_arm = release.clone();
+    let join = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let join_for_arm = join.clone();
+    let (_tmp, dir, st) = dispatch_over_staged_disc(
+        "sg_insert_wipe_job_lease_test",
+        "Leased Disc",
+        mode,
+        move |d| {
+            let lease = staging::job_lease(d);
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *release_for_arm.lock().unwrap() = Some(release_tx);
+            let handle = std::thread::spawn(move || {
+                let _owner = lease.lock().unwrap_or_else(|e| e.into_inner());
+                ready_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            ready_rx.recv().unwrap();
+            *join_for_arm.lock().unwrap() = Some(handle);
+        },
+    );
+    release.lock().unwrap().take().unwrap().send(()).unwrap();
+    join.lock().unwrap().take().unwrap().join().unwrap();
+    assert!(
+        dir.join("Sentinel.iso").exists(),
+        "leased staging was wiped"
+    );
+    assert_eq!(
+        st.status, "error",
+        "fresh dispatch should stand down: {st:?}"
+    );
+}
+
+#[test]
+fn ordinary_wipe_preserves_cast_away_metadata() {
+    let mode = crate::server::web::ResumeMode::Wipe;
+    let (_tmp, dir, _st) =
+        dispatch_over_staged_disc("sg_insert_wipe_metadata_test", "Castaway", mode, |d| {
+            let mut state = staging::DiscState::new(staging::StagingState::Sweeping);
+            state.title = "Castaway".into();
+            staging::write_state(d, &state);
+            staging::save_user_metadata(
+                d,
+                staging::UserMetadata {
+                    episode_start: None,
+                    title: "Cast Away".into(),
+                    year: 2000,
+                    media_type: "movie".into(),
+                    tmdb_id: 8358,
+                    poster_url: String::new(),
+                    overview: "Selected by the operator".into(),
+                },
+            )
+            .unwrap();
+        });
+    let state = staging::read_state(&dir).expect("metadata state survives wipe");
+    assert_eq!(
+        state.user_metadata.as_ref().map(|m| m.title.as_str()),
+        Some("Cast Away")
+    );
+    assert_eq!(state.title, "Cast Away");
 }
 
 type Arm = fn(&std::path::Path);

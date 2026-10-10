@@ -135,6 +135,32 @@ const PAGES: &[&str] = &[
     "/system",
 ];
 
+static STOP_LISTENER: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn stop_after_drain() {
+    STOP_LISTENER.store(true, std::sync::atomic::Ordering::Release);
+}
+
+pub(crate) fn reset_after_drain() {
+    STOP_LISTENER.store(false, std::sync::atomic::Ordering::Release);
+    QUEUE_VIEW_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    SSE_STREAMS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    *DEBUG_ENABLED.write().unwrap_or_else(|e| e.into_inner()) = false;
+    crate::server::observe::set_debug(false);
+}
+
+fn stop_listener() -> bool {
+    STOP_LISTENER.load(std::sync::atomic::Ordering::Acquire)
+        || (crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
+            && !crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire))
+}
+
 pub fn run(cfg: &Arc<RwLock<Config>>) {
     let port = cfg.read().unwrap_or_else(|e| e.into_inner()).port;
     let addr = format!("0.0.0.0:{}", port);
@@ -164,7 +190,7 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
         let request = match server.recv_timeout(std::time::Duration::from_secs(1)) {
             Ok(Some(request)) => request,
             Ok(None) => {
-                if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                if stop_listener() {
                     break;
                 }
                 continue;
@@ -174,8 +200,18 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
                 break;
             }
         };
-        if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        if stop_listener() {
             break;
+        }
+        if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+            // Keep a status surface while a reboot is refused/deferred. Never
+            // dispatch application handlers or read mutable service state here.
+            json_response(
+                request,
+                503,
+                r#"{"ok":false,"rebooting":true,"status":"draining","message":"Restart is waiting for old services to drain. No replacement services will start until all workers finish."}"#,
+            );
+            continue;
         }
         // Bound concurrent handlers so a flood can't fork the container.
         // Body-carrying requests get a lower cap: tiny_http 0.12 has no
@@ -194,15 +230,12 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
             }
         };
         let cfg = Arc::clone(cfg);
-        if let Err(e) = std::thread::Builder::new()
-            .name("autorip-http".into())
-            .spawn(move || {
-                // Hold the admission token for the handler's lifetime;
-                // dropped here on return/unwind, freeing the slot.
-                let _guard = guard;
-                handle_request(request, &cfg);
-            })
-        {
+        if let Err(e) = crate::server::daemon::spawn_background("autorip-http", move || {
+            // Hold the admission token for the handler's lifetime;
+            // dropped here on return/unwind, freeing the slot.
+            let _guard = guard;
+            handle_request(request, &cfg);
+        }) {
             tracing::error!(error = %e, "failed to spawn request handler thread");
             // guard drops here, freeing the reserved slot.
         }
@@ -522,8 +555,7 @@ fn is_valid_poster_url(url: &str) -> bool {
 const UNKNOWN_DEVICE_BODY: &str = r#"{"ok":false,"error":"unknown or not yet initialized device"}"#;
 
 // POST /api/title/<device>: operator's TMDB pick for the active disc.
-// Body: {"title","year","poster_url","overview"}. Stored as a one-shot
-// override `rip_disc` consumes; also reflected on the live card immediately.
+// Body includes job_id and TMDB metadata. Persist before updating the live card.
 fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &str) {
     // An override for an untracked drive has nothing to attach to and
     // would persist orphaned; reject before reading the body, matching
@@ -582,34 +614,73 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
     // typed a free-form title with no pick); carry it so the override matches
     // what a `lookup` match would have provided.
     let tmdb_id = v["tmdb_id"].as_u64().unwrap_or(0);
-    ripper::set_title_override(
+    let episode_start = match capture_episode_start(&v["episode_start"], &media_type) {
+        Ok(start) => start,
+        Err(error) => {
+            return json_response(
+                request,
+                400,
+                &serde_json::json!({"ok": false, "error": error}).to_string(),
+            );
+        }
+    };
+    let expected_job = v["job_id"].as_str().unwrap_or("");
+    let revision = match ripper::retitle_staging_for_device(
+        cfg,
         device,
-        crate::server::tmdb::TmdbResult {
+        expected_job,
+        ripper::staging::UserMetadata {
             title: title.clone(),
             year,
+            media_type: media_type.clone(),
+            episode_start,
+            tmdb_id,
             poster_url: poster.clone(),
             overview: overview.clone(),
-            media_type: media_type.clone(),
-            tmdb_id,
         },
-    );
-    if let Err(e) = ripper::retitle_staging_for_device(cfg, device, &title, year, &media_type) {
-        return json_response(
-            request,
-            409,
-            &serde_json::json!({"ok": false, "error": e}).to_string(),
-        );
-    }
+    ) {
+        Ok(revision) => revision,
+        Err(e) => {
+            return json_response(
+                request,
+                409,
+                &serde_json::json!({"ok": false, "error": e}).to_string(),
+            );
+        }
+    };
     // Reflect on the live card right away, exactly as the engine will use the
     // override: the previous match's poster/overview/type do not carry over.
     ripper::update_state_with(device, |s| {
-        s.tmdb_title = title.clone();
-        s.tmdb_year = year;
-        s.tmdb_poster = poster.clone();
-        s.tmdb_overview = overview.clone();
-        s.tmdb_media_type = media_type.clone();
+        s.publish_user_metadata(
+            expected_job,
+            revision,
+            ripper::staging::UserMetadata {
+                title: title.clone(),
+                year,
+                poster_url: poster.clone(),
+                overview: overview.clone(),
+                media_type: media_type.clone(),
+                episode_start,
+                tmdb_id,
+            },
+        );
     });
     json_response(request, 200, r#"{"ok":true}"#);
+}
+
+fn capture_episode_start(
+    value: &serde_json::Value,
+    media_type: &str,
+) -> Result<Option<u16>, &'static str> {
+    if media_type != "tv" || value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .and_then(|n| u16::try_from(n).ok())
+        .filter(|n| *n > 0)
+        .map(Some)
+        .ok_or("First episode must be an integer between 1 and 65535")
 }
 
 /// `POST /api/review/resolve` — resolve a held rip. Body:
@@ -631,6 +702,77 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
         .unwrap_or_else(|e| e.into_inner())
         .staging_dir
         .clone();
+    // Unified held captures can replan their saved ISO without the drive. Use
+    // the same atomic correction transaction as the live title picker.
+    if matches!(v["action"].as_str(), Some("retitle" | "proceed")) {
+        let path = std::path::Path::new(&dir);
+        if dir.is_empty()
+            || path.components().count() != 1
+            || !path
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            return json_response(request, 400, r#"{"ok":false,"error":"invalid dir"}"#);
+        }
+        let path = std::path::Path::new(&staging).join(&dir);
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return json_response(request, 400, r#"{"ok":false,"error":"invalid dir"}"#);
+        }
+        if let Some(saved) = ripper::staging::read_state(&path) {
+            let media_type = v["media_type"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(normalize_media_type)
+                .unwrap_or_else(|| normalize_media_type(&saved.media_type));
+            let start_value = v
+                .get("episode_start")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(saved.episode_start));
+            let episode_start = match capture_episode_start(&start_value, &media_type) {
+                Ok(start) => start,
+                Err(error) => {
+                    return json_response(
+                        request,
+                        400,
+                        &serde_json::json!({"ok":false,"error":error}).to_string(),
+                    );
+                }
+            };
+            let retitle = v["action"] == "retitle";
+            let title = if retitle {
+                clamp_chars(v["title"].as_str().unwrap_or("").trim(), 300)
+            } else {
+                saved.title
+            };
+            if title.is_empty() {
+                return json_response(request, 400, r#"{"ok":false,"error":"title required"}"#);
+            }
+            let metadata = ripper::staging::UserMetadata {
+                title,
+                year: if retitle {
+                    v["year"]
+                        .as_u64()
+                        .and_then(|n| u16::try_from(n).ok())
+                        .unwrap_or(0)
+                } else {
+                    saved.year
+                },
+                media_type,
+                episode_start,
+                tmdb_id: v["tmdb_id"].as_u64().unwrap_or(saved.tmdb_id),
+                poster_url: saved.tmdb_poster,
+                overview: saved.tmdb_overview,
+            };
+            return match ripper::staging::save_review_metadata(&path, metadata) {
+                Ok(_) => json_response(request, 200, r#"{"ok":true}"#),
+                Err(e) => json_response(
+                    request,
+                    409,
+                    &serde_json::json!({"ok":false,"error":e.to_string()}).to_string(),
+                ),
+            };
+        }
+    }
     let action = match v["action"].as_str().unwrap_or("") {
         "proceed" => crate::server::review::Resolve::Proceed,
         "cancel" => crate::server::review::Resolve::Cancel,
@@ -1067,7 +1209,7 @@ pub(crate) fn resolve_with_timeout(host: &str, port: u16) -> Result<Vec<SocketAd
     let (tx, rx) = mpsc::sync_channel::<Result<Vec<SocketAddr>, std::io::Error>>(1);
     // A refused thread (pid/thread exhaustion) is a resolve failure, not a
     // panic; the closure, and the guard in it, drop on the Err.
-    if let Err(e) = std::thread::Builder::new().spawn(move || {
+    if let Err(e) = crate::server::daemon::spawn_background("dns-resolver", move || {
         let _g = guard;
         let res = (host.as_str(), port)
             .to_socket_addrs()
@@ -2567,6 +2709,9 @@ fn roll_back_settings(
 }
 
 fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
+    if crate::server::SHUTDOWN.load(Ordering::Acquire) {
+        return json_response(request, 503, r#"{"ok":false,"status":"draining"}"#);
+    }
     // /events holds its thread for the whole client session (1s poll
     // loop). At most MAX_SSE_CLIENTS stay open: the oldest gives way.
     let (id, stop) = sse_admit();
@@ -2603,6 +2748,9 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
             .clone()
     };
 
+    if crate::server::SHUTDOWN.load(Ordering::Acquire) {
+        return;
+    }
     let initial = format!("data: {}\n\n", get_state_json(&staging_dir()));
     if stream.write_all(initial.as_bytes()).is_err() {
         return;
@@ -2612,7 +2760,10 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     let mut library = crate::server::library::api::SseCursor::default();
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        if stop.load(Ordering::SeqCst) || opened.elapsed() > SSE_MAX_LIFETIME {
+        if crate::server::SHUTDOWN.load(Ordering::Acquire)
+            || stop.load(Ordering::SeqCst)
+            || opened.elapsed() > SSE_MAX_LIFETIME
+        {
             break;
         }
         let mut frame = format!("data: {}\n\n", get_state_json(&staging_dir()));
@@ -2628,6 +2779,10 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "web_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 fn handle_scan(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &str) {
     if !ripper::device_known(device) {

@@ -370,6 +370,8 @@ impl MainView {
     pub(super) fn render(&self, v: &View, memo: &mut Memo) {
         self.stack.set_visible_child_name(glue::page_name(v.page));
         self.empty
+            .set_title(&crate::ui::empty_heading(v.disc_present));
+        self.empty
             .set_description(Some(&crate::ui::empty_description(v.disc_present)));
         let log_fills = glue::log_fills(v.page) && !v.log_hidden;
         self.stack.set_vexpand(!log_fills);
@@ -450,11 +452,8 @@ impl MainView {
             first: log_first,
             len: log.len(),
         };
-        // A freshly constructed/relocalized GTK text buffer can be empty even
-        // when the model memo still describes the same log. In that case the
-        // normal delta says `Same` and the launch line never gets painted.
-        // The buffer is the renderer's actual state; repair it from the model
-        // whenever it is empty but the model has lines.
+        // Rebuilding/relocalizing the GTK buffer can empty it without changing
+        // the model memo. Repaint then, even when the normal delta is Same.
         let buffer_empty = self.log_view.buffer().char_count() == 0;
         let delta = if buffer_empty && !log.is_empty() {
             LogDelta::Rewrite

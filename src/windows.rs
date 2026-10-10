@@ -1755,6 +1755,10 @@ impl Shell {
     fn render(&self) {
         let v = self.app.borrow().view();
         let _ = self
+            .lbl_empty_head
+            .hwnd()
+            .SetWindowText(&crate::ui::empty_heading(v.disc_present));
+        let _ = self
             .lbl_empty_sub
             .hwnd()
             .SetWindowText(&crate::ui::empty_description(v.disc_present));
@@ -3298,6 +3302,14 @@ impl Prefs {
         // Three INDEPENDENT language sets (see `ui::LangPrefs`) decide which
         // stream rows start ticked. Checklists, not text boxes: free text like
         // "German" could silently fail to match a `deu` stream, unlike a code list.
+        fields.push((
+            "presentation_language",
+            r.field(
+                "Presentation language (de / en; blank = audio preference)",
+                &st.presentation_language,
+                240,
+            ),
+        ));
         langs.push((
             "audio_langs",
             r.lang(&g("gui.set.audio_langs"), &st.audio_langs, 240),

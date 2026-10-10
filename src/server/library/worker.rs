@@ -96,7 +96,7 @@ pub(crate) enum Ending {
 
 fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job) {
     let mut job = job;
-    maybe_attach_tv_plan(lib, cfg, &mut job);
+    let planning = maybe_attach_tv_plan(lib, cfg, &mut job);
     let debug = lib.queue.snapshot().debug_log;
     let log = JobLog::create(&lib.log_path(&job.title));
     lib.stall_cancel.store(false, Ordering::SeqCst);
@@ -142,65 +142,299 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
     sink.emit(LineKind::Out, String::new());
     let started = Instant::now();
     let done = AtomicBool::new(false);
-    let ending = std::thread::scope(|scope| {
-        let _ = std::thread::Builder::new()
-            .name("library-watchdog".into())
-            .spawn_scoped(scope, || watchdog(lib, job.id, &sink, &done));
-        let ending = remux(&job, cfg, &sink);
-        done.store(true, Ordering::SeqCst);
-        ending
+    let ending = after_tv_planning(planning, || {
+        std::thread::scope(|scope| {
+            let _ = std::thread::Builder::new()
+                .name("library-watchdog".into())
+                .spawn_scoped(scope, || watchdog(lib, job.id, &sink, &done));
+            let ending = remux(&job, cfg, &sink);
+            done.store(true, Ordering::SeqCst);
+            ending
+        })
     });
     sink.close_open_line();
     finish(lib, &job, ending, started.elapsed(), &sink);
     lib.set_running(|r| *r = None);
 }
 
-/// Resolve and persist TV fan-out exactly once, before execution. A non-TV,
-/// non-confident, disabled, or unscannable source deliberately remains a
-/// legacy single-output job.
-fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) {
-    if job.plan.is_some() || !cfg.tv_auto || cfg.tmdb_api_key.is_empty() {
-        return;
+/// Freeze automatic title selection before execution, including single outputs.
+/// Existing plans and retained media keep their original selection on restart.
+fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
+    if let Some(replacement) = &job.replacement {
+        replacement.verify_source(&job.iso)?;
+    }
+    if job.plan.is_some() || job.staged.is_some() {
+        return Ok(());
+    }
+    if let Some(saved) = job.selected_match.clone() {
+        return attach_corrected_plan(lib, cfg, job, &saved.media);
+    }
+    if let Some(saved) = lib.source_match(&job.iso).map_err(std::io::Error::other)? {
+        return attach_corrected_plan(lib, cfg, job, &saved.media);
+    }
+    if !cfg.tv_auto || cfg.tmdb_api_key.is_empty() {
+        return attach_automatic_movie_plan(lib, cfg, job);
     }
     let Some(match_) = crate::server::tmdb::lookup(&job.title, &cfg.tmdb_api_key) else {
-        return;
+        return attach_automatic_movie_plan(lib, cfg, job);
     };
     if match_.media_type != "tv"
         || !crate::server::tmdb::is_confident_match(&job.title, &match_.title, match_.year)
     {
-        return;
+        return attach_automatic_movie_plan(lib, cfg, job);
     }
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
-    let Ok((disc, _reader)) = freemkv_engine::scan_image(&source) else {
-        return;
-    };
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
     let media = crate::server::planner::MediaMetadata {
         title: match_.title,
         year: match_.year,
         tmdb_id: match_.tmdb_id,
-        season: crate::server::tmdb::season_from_label(&job.title),
-        disc: crate::server::tmdb::disc_from_label(&job.title),
+        season: crate::server::tmdb::season_from_label(&disc.volume_id)
+            .or_else(|| {
+                disc.meta_title
+                    .as_deref()
+                    .and_then(crate::server::tmdb::season_from_label)
+            })
+            .or_else(|| crate::server::tmdb::season_from_label(&job.title)),
+        disc: crate::server::tmdb::disc_from_label(&disc.volume_id)
+            .or_else(|| {
+                disc.meta_title
+                    .as_deref()
+                    .and_then(crate::server::tmdb::disc_from_label)
+            })
+            .or_else(|| crate::server::tmdb::disc_from_label(&job.title)),
         kind: Some(crate::server::planner::MediaKind::Tv),
+        episode_start: None,
     };
     let planner = crate::server::planner::TvPlanner { cfg };
-    let Ok(plan) = planner.plan(&job.iso, &disc.titles, &media, &job.target) else {
-        return;
-    };
-    if plan.outputs.len() <= 1 {
-        return;
+    let plan = tv_plan_result(planner.plan(&job.iso, &disc.titles, &media, &job.target))?;
+    persist_auto_plan(lib, cfg, job, plan)
+}
+
+fn persist_auto_plan(
+    lib: &Library,
+    cfg: &Config,
+    job: &mut Job,
+    plan: crate::server::planner::RemuxPlan,
+) -> std::io::Result<()> {
+    let targets = tv_destinations(cfg, &plan).map(|(_, targets)| targets);
+    if !lib.queue.set_plan_targets(job.id, plan, targets) {
+        return Err(std::io::Error::other(
+            "job changed while freezing title selection",
+        ));
     }
-    if lib.queue.set_plan(job.id, plan.clone()) {
-        job.plan = Some(plan);
+    *job = lib
+        .queue
+        .snapshot()
+        .jobs
+        .into_iter()
+        .find(|j| j.id == job.id)
+        .ok_or_else(|| std::io::Error::other("job disappeared while freezing title selection"))?;
+    Ok(())
+}
+
+fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
+    let source = freemkv_engine::ImageSource::from_path(&job.iso);
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let plan = crate::server::planner::MoviePlanner::from_config(cfg).plan(
+        &job.iso,
+        &disc.titles,
+        &crate::server::planner::MediaMetadata::default(),
+        &job.target,
+    );
+    persist_auto_plan(lib, cfg, job, tv_plan_result(plan)?)
+}
+
+fn attach_corrected_plan(
+    lib: &Library,
+    cfg: &Config,
+    job: &mut Job,
+    media: &crate::server::planner::MediaMetadata,
+) -> std::io::Result<()> {
+    use crate::server::planner::{MediaKind, MoviePlanner, TvPlanner};
+    let source = freemkv_engine::ImageSource::from_path(&job.iso);
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let metadata = Some(crate::server::tmdb::TmdbResult {
+        title: media.title.clone(),
+        year: media.year,
+        tmdb_id: media.tmdb_id,
+        media_type: match media.kind {
+            Some(MediaKind::Movie) => "movie",
+            Some(MediaKind::Tv) => "tv",
+            None => return Err(std::io::Error::other("saved match has no media type")),
+        }
+        .into(),
+        poster_url: String::new(),
+        overview: String::new(),
+    });
+    let target = std::path::PathBuf::from(crate::server::mover::build_destination(
+        cfg,
+        &metadata,
+        "feature.mkv",
+        media.season,
+    ));
+    let plan = match media.kind {
+        Some(MediaKind::Movie) => {
+            MoviePlanner::from_config(cfg).plan(&job.iso, &disc.titles, media, &target)
+        }
+        Some(MediaKind::Tv) => {
+            let mut explicit = cfg.clone();
+            explicit.tv_auto = true;
+            TvPlanner { cfg: &explicit }.plan(&job.iso, &disc.titles, media, &target)
+        }
+        None => unreachable!(),
+    }
+    .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e:?}")))?;
+    let targets = tv_destinations(cfg, &plan)
+        .map(|(_, paths)| paths)
+        .unwrap_or_else(|| vec![target]);
+    validate_corrected_targets_with_authorization(
+        &job.iso,
+        &targets,
+        &super::links::load(&lib.config_dir),
+        job.replacement.as_ref(),
+    )?;
+    if !lib.queue.set_plan_targets(job.id, plan, Some(targets)) {
+        return Err(std::io::Error::other(
+            "job changed while preparing corrected match",
+        ));
+    }
+    *job = lib
+        .queue
+        .snapshot()
+        .jobs
+        .into_iter()
+        .find(|j| j.id == job.id)
+        .ok_or_else(|| std::io::Error::other("corrected remux job disappeared"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_corrected_targets(
+    source: &Path,
+    targets: &[std::path::PathBuf],
+    links: &std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
+) -> std::io::Result<()> {
+    validate_corrected_targets_with_authorization(source, targets, links, None)
+}
+
+fn validate_corrected_targets_with_authorization(
+    source: &Path,
+    targets: &[std::path::PathBuf],
+    links: &std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
+    authorization: Option<&super::replacement::Replacement>,
+) -> std::io::Result<()> {
+    if let Some(authorization) = authorization {
+        authorization.verify_source(source)?;
+    }
+    for target in targets {
+        match std::fs::symlink_metadata(target) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && (links.get(target).is_some_and(|iso| iso == source)
+                        || (!links.contains_key(target)
+                            && authorization.is_some_and(|a| a.authorizes_existing(target)))) => {}
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "corrected destination is not an owned output: {}",
+                        target.display()
+                    ),
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn tv_plan_result(
+    result: Result<crate::server::planner::RemuxPlan, crate::server::planner::PlanError>,
+) -> std::io::Result<crate::server::planner::RemuxPlan> {
+    result.map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Title plan needs review before remux: {error:?}"),
+        )
+    })
+}
+
+fn after_tv_planning(planning: std::io::Result<()>, remux: impl FnOnce() -> Ending) -> Ending {
+    match planning {
+        Ok(()) => remux(),
+        Err(error) => Ending::Failed(error),
     }
 }
 
+fn tv_destinations(
+    cfg: &Config,
+    plan: &crate::server::planner::RemuxPlan,
+) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+    if plan.media.kind != Some(crate::server::planner::MediaKind::Tv)
+        || plan.outputs.is_empty()
+        || plan.outputs.iter().any(|o| o.episode.is_none())
+    {
+        return None;
+    }
+    let metadata = Some(crate::server::tmdb::TmdbResult {
+        title: plan.media.title.clone(),
+        year: plan.media.year,
+        media_type: "tv".into(),
+        tmdb_id: plan.media.tmdb_id,
+        poster_url: String::new(),
+        overview: String::new(),
+    });
+    let outputs: Vec<_> = plan
+        .outputs
+        .iter()
+        .map(|o| crate::server::ripper::staging::Output {
+            filename: o.filename.clone(),
+            title_index: o.title_index,
+            title_identity: None,
+            episode: o.episode,
+            episode_name: o.episode_name.clone(),
+            moved: false,
+        })
+        .collect();
+    let targets = outputs
+        .iter()
+        .map(|o| {
+            let leaf = crate::server::mover::tv_episode_leaf(
+                &metadata,
+                &outputs,
+                &o.filename,
+                plan.media.season,
+            )
+            .unwrap_or_else(|| o.filename.clone());
+            std::path::PathBuf::from(crate::server::mover::build_destination(
+                cfg,
+                &metadata,
+                &leaf,
+                plan.media.season,
+            ))
+        })
+        .collect();
+    Some((
+        crate::server::mover::destination_root(cfg, &metadata).into(),
+        targets,
+    ))
+}
+
 fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
+    if let Some(ending) = cancelled_ending(sink) {
+        return ending;
+    }
+    if let Some(replacement) = &job.replacement
+        && let Err(error) = replacement.verify_source(&job.iso)
+    {
+        return Ending::Failed(error);
+    }
     if let Some(plan) = &job.plan {
         return remux_planned(job, plan, cfg, sink);
     }
-    if !job.replace
-        && let Err(why) = safe_to_create(&super::dirs(cfg), &job.target)
-    {
+    if let Err(why) = safe_to_create(&super::dirs(cfg), &job.target) {
         return Ending::Failed(std::io::Error::other(why));
     }
     if !job.replace
@@ -219,7 +453,7 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     let keys = crate::server::keysource::key_params(cfg);
     let result = if let Some(kept) = &job.staged {
         // Only the copy, its sync and verify, and the replacement run again.
-        deliver::resume(kept, sink, &libfreemkv::Halt::new(), &deliver::OsIo).map(|d| d.writing_app)
+        resume_kept(kept, &job.target, sink)
     } else if let Some(dir) = remux_stage_dir() {
         deliver::remux_via_stage(&request, &keys, sink, &dir, job.id).map(|r| r.writing_app)
     } else {
@@ -244,6 +478,67 @@ fn remux_planned(
     cfg: &Config,
     sink: &JobSink<'_>,
 ) -> Ending {
+    if job.replacement.is_some() {
+        return replacement_run::run(job, plan, cfg, sink);
+    }
+    let keys = crate::server::keysource::key_params(cfg);
+    let stage = remux_stage_dir();
+    remux_planned_with(job, plan, cfg, sink, |request, kept, ordinal| {
+        if let Some(kept) = kept {
+            resume_kept(kept, &request.target, sink)
+        } else if let Some(dir) = &stage {
+            deliver::remux_via_stage(
+                request,
+                &keys,
+                sink,
+                dir,
+                job.id.saturating_mul(1000).saturating_add(ordinal as u64),
+            )
+            .map(|r| r.writing_app)
+        } else {
+            freemkv_engine::remux_iso(request, &keys, sink).map(|r| r.writing_app)
+        }
+    })
+}
+
+#[path = "worker_replacement.rs"]
+mod replacement_run;
+
+fn cancelled_ending(sink: &JobSink<'_>) -> Option<Ending> {
+    if sink.lib.cancelled(sink.job_id) {
+        Some(Ending::Stopped(JobNote::Cancelled))
+    } else if sink.preempted() {
+        Some(Ending::Stopped(JobNote::Preempted))
+    } else if shutting_down() {
+        Some(Ending::Stopped(JobNote::Interrupted))
+    } else if sink.lib.stall_cancel.load(Ordering::SeqCst) {
+        Some(Ending::Stopped(JobNote::Stalled))
+    } else {
+        None
+    }
+}
+
+fn resume_kept(kept: &Path, target: &Path, sink: &JobSink<'_>) -> std::io::Result<Option<String>> {
+    if deliver::read(kept)?.target != target {
+        return Err(std::io::Error::other(
+            "retained output destination differs from the queued target",
+        ));
+    }
+    deliver::resume(kept, sink, &libfreemkv::Halt::new(), &deliver::OsIo).map(|d| d.writing_app)
+}
+
+// The lifecycle is shared with tests; only media execution/delivery is substituted.
+fn remux_planned_with(
+    job: &Job,
+    plan: &crate::server::planner::RemuxPlan,
+    cfg: &Config,
+    sink: &JobSink<'_>,
+    mut execute: impl FnMut(
+        &freemkv_engine::RemuxJob,
+        Option<&Path>,
+        usize,
+    ) -> std::io::Result<Option<String>>,
+) -> Ending {
     if plan.version != crate::server::planner::PLAN_VERSION {
         return Ending::Failed(std::io::Error::other(format!(
             "unsupported remux plan version {}",
@@ -255,20 +550,81 @@ fn remux_planned(
             "remux plan source ISO does not match queued job",
         ));
     }
-    let keys = crate::server::keysource::key_params(cfg);
-    let stage = remux_stage_dir();
+    if plan.outputs.is_empty()
+        || plan.outputs.iter().any(|o| {
+            let p = Path::new(&o.filename);
+            p.components().count() != 1
+                || !matches!(p.components().next(), Some(std::path::Component::Normal(_)))
+                || o.filename.contains('\\')
+        })
+    {
+        return Ending::Failed(std::io::Error::other("invalid remux output plan"));
+    }
+    let targets = job.output_targets();
+    if targets.len() != plan.outputs.len() {
+        return Ending::Failed(std::io::Error::other(
+            "remux output count does not match its plan",
+        ));
+    }
+    let tv = tv_destinations(cfg, plan);
+    if tv
+        .as_ref()
+        .is_some_and(|(_, expected)| expected != &targets)
+    {
+        return Ending::Failed(std::io::Error::other(
+            "TV destinations changed; preserve this plan and queue a new job with the current TV folder",
+        ));
+    }
+    let validate = |target: &Path| match &tv {
+        Some((root, _)) => safe_destination(root, target, true),
+        None => safe_to_create(&super::dirs(cfg), target),
+    };
+    let saved = sink.lib.queue.snapshot();
+    let Some(current) = saved.jobs.iter().find(|j| j.id == job.id) else {
+        return Ending::Failed(std::io::Error::other("remux job no longer exists"));
+    };
+    if current.outputs.len() != plan.outputs.len() {
+        return Ending::Failed(std::io::Error::other(
+            "remux output progress count does not match its plan",
+        ));
+    }
+    let mut ids = std::collections::HashSet::new();
+    if plan.outputs.iter().zip(&targets).any(|(o, target)| {
+        !ids.insert(&o.id)
+            || !current
+                .outputs
+                .iter()
+                .any(|p| p.id == o.id && p.target == *target)
+    }) {
+        return Ending::Failed(std::io::Error::other(
+            "remux output progress does not match its plan",
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for target in &targets {
+        if !seen.insert(target) {
+            return Ending::Failed(std::io::Error::other("duplicate remux output target"));
+        }
+        if let Err(why) = validate(target) {
+            return Ending::Failed(std::io::Error::other(why));
+        }
+    }
+    let mut writing_app = None;
     for (ordinal, output) in plan.outputs.iter().enumerate() {
+        if let Some(ending) = cancelled_ending(sink) {
+            return ending;
+        }
         if !sink.lib.queue.begin_output(job.id, &output.id) {
+            if let Err(e) = super::links::record(&sink.lib.config_dir, &targets[ordinal], &job.iso)
+            {
+                return Ending::Failed(e);
+            }
             continue;
         }
-        let target = if plan.outputs.len() == 1 {
-            job.target.clone()
-        } else {
-            job.target
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(&output.filename)
-        };
+        let target = targets[ordinal].clone();
+        if let Err(why) = validate(&target) {
+            return Ending::Failed(std::io::Error::other(why));
+        }
         if !job.replace && target.exists() {
             return Ending::Failed(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -280,73 +636,50 @@ fn remux_planned(
         {
             return Ending::Failed(e);
         }
-        if let Some(staged) = job
+        let staged = job
             .outputs
             .iter()
             .find(|p| p.id == output.id)
-            .and_then(|p| p.staged.as_deref())
-            .filter(|p| deliver::is_kept(p))
-        {
-            match deliver::resume(staged, sink, &libfreemkv::Halt::new(), &deliver::OsIo) {
-                Ok(_) => {
-                    sink.lib.queue.set_output_staged(job.id, &output.id, None);
-                    sink.lib
-                        .queue
-                        .finish_output(job.id, &output.id, OutputState::Done);
-                    continue;
-                }
-                Err(e) => {
-                    sink.lib
-                        .queue
-                        .finish_output(job.id, &output.id, OutputState::Failed);
-                    return Ending::Failed(e);
-                }
-            }
-        }
+            .and_then(|p| p.staged.as_deref());
         let request = freemkv_engine::RemuxJob {
             iso: freemkv_engine::ImageSource::from_path(&job.iso),
             title: Some(output.title_index),
             streams: freemkv_engine::StreamChoice::default(),
-            target,
+            target: target.clone(),
             replace: job.replace,
         };
-        let result = if let Some(dir) = &stage {
-            deliver::remux_via_stage(
-                &request,
-                &keys,
-                sink,
-                dir,
-                job.id.saturating_mul(1000).saturating_add(ordinal as u64),
-            )
-        } else {
-            freemkv_engine::remux_iso(&request, &keys, sink)
-        };
+        sink.lib.set_running(|running| {
+            if let Some(running) = running.as_mut().filter(|r| r.job_id == job.id) {
+                running.target = target.clone();
+            }
+        });
+        let result = execute(&request, staged, ordinal);
         if let Err(e) = result {
             if let Some(kept) = deliver::kept_of(&e) {
                 sink.lib
                     .queue
                     .set_output_staged(job.id, &output.id, Some(kept.path.clone()));
+                sink.lib
+                    .queue
+                    .set_staged(job.id, still_kept(Some(&kept.path)));
             }
             sink.lib
                 .queue
                 .finish_output(job.id, &output.id, OutputState::Failed);
-            return if sink.lib.cancelled(job.id) {
-                Ending::Stopped(JobNote::Cancelled)
-            } else if sink.preempted() {
-                Ending::Stopped(JobNote::Preempted)
-            } else if shutting_down() {
-                Ending::Stopped(JobNote::Interrupted)
-            } else if sink.lib.stall_cancel.load(Ordering::SeqCst) {
-                Ending::Stopped(JobNote::Stalled)
-            } else {
-                Ending::Failed(e)
-            };
+            return cancelled_ending(sink).unwrap_or(Ending::Failed(e));
         }
+        writing_app = result.unwrap();
+        sink.lib.note_landed(&target, writing_app.clone());
+        sink.lib.queue.set_output_staged(job.id, &output.id, None);
+        sink.lib.queue.set_staged(job.id, None);
         sink.lib
             .queue
             .finish_output(job.id, &output.id, OutputState::Done);
+        if let Err(e) = super::links::record(&sink.lib.config_dir, &target, &job.iso) {
+            return Ending::Failed(e);
+        }
     }
-    Ending::Done { writing_app: None }
+    Ending::Done { writing_app }
 }
 
 fn remux_stage_dir() -> Option<std::path::PathBuf> {
@@ -493,21 +826,51 @@ mod staged_cleanup_tests;
 /// the library folder, and that folder must be listable and not empty (an
 /// unmounted share is an empty mountpoint on the local disk).
 pub(crate) fn safe_to_create(d: &super::Dirs, target: &std::path::Path) -> Result<(), String> {
-    if !target.starts_with(&d.library) {
+    safe_destination(&d.library, target, false)
+}
+
+fn safe_destination(root: &Path, target: &Path, allow_empty: bool) -> Result<(), String> {
+    if !target.starts_with(root)
+        || target
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(format!(
             "{} is not under the library folder",
             target.display()
         ));
     }
-    match std::fs::read_dir(&d.library).map(|mut r| r.next().is_some()) {
+    if crate::server::health::share_unmounted(root) {
+        return Err("the output share is not mounted".into());
+    }
+    if let Ok(root) = root.canonicalize() {
+        let mut ancestor = target;
+        loop {
+            match ancestor.canonicalize() {
+                Ok(path) => {
+                    if !path.starts_with(&root) {
+                        return Err("output escapes the library folder".into());
+                    }
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    ancestor = ancestor
+                        .parent()
+                        .ok_or_else(|| "output has no existing parent".to_string())?;
+                }
+                Err(e) => return Err(format!("cannot resolve output destination: {e}")),
+            }
+        }
+    }
+    match std::fs::read_dir(root).map(|mut r| r.next().is_some() || allow_empty) {
         Ok(true) => Ok(()),
         Ok(false) => Err(format!(
             "the library folder {} is empty (is the share mounted?); nothing was written",
-            d.library.display()
+            root.display()
         )),
         Err(e) => Err(format!(
             "the library folder {} cannot be read ({e}); nothing was written",
-            d.library.display()
+            root.display()
         )),
     }
 }
@@ -523,10 +886,23 @@ pub(crate) fn finish(
     sink: &dyn LineSink,
 ) {
     let now = crate::server::util::epoch_secs();
+    let snapshot = lib.queue.snapshot();
+    let job = snapshot
+        .jobs
+        .iter()
+        .find(|j| j.id == job.id && j.plan.is_some())
+        .unwrap_or(job);
     match ending {
         Ending::Done { writing_app } => {
-            lib.note_landed(&job.target, writing_app.clone());
-            let size = lib.snapshot().sigs.get(&job.target).map_or(0, |s| s.size);
+            let size = if job.plan.is_some() {
+                job.output_targets()
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).ok())
+                    .fold(0u64, |n, m| n.saturating_add(m.len()))
+            } else {
+                lib.note_landed(&job.target, writing_app.clone());
+                lib.snapshot().sigs.get(&job.target).map_or(0, |s| s.size)
+            };
             lib.queue.finish(
                 job.id,
                 JobResult::Done {
@@ -578,7 +954,7 @@ pub(crate) fn finish(
             );
             sink.line(
                 LineKind::Err,
-                "Stopped: no progress. The old MKV is unchanged.".into(),
+                format!("Stopped: no progress. {}", safe_text(job)),
             );
         }
         Ending::Stopped(JobNote::Cancelled) if job.staged.is_some() => {
@@ -605,10 +981,7 @@ pub(crate) fn finish(
             lib.queue.drop_job(job.id);
             // The engine/delivery owns partial cleanup and its artifact lock. A second
             // unlink here could block on NFS or race a later delivery's partial.
-            sink.line(
-                LineKind::Warn,
-                "Stopped. The existing MKV is unchanged.".into(),
-            );
+            sink.line(LineKind::Warn, format!("Stopped. {}", safe_text(job)));
         }
         Ending::Stopped(note) => {
             lib.queue.requeue(job.id, note);
@@ -869,7 +1242,11 @@ fn retry_storage_fault(
 }
 
 fn safe_text(job: &Job) -> &'static str {
-    if job.replace {
+    if job.replacement.is_some() {
+        "The source ISO is retained. Replacement progress is saved for retry; already delivered files are not rolled back."
+    } else if job.plan.as_ref().is_some_and(|plan| plan.outputs.len() > 1) {
+        "The source ISO is retained. Completed outputs remain in the library; unfinished outputs can be retried."
+    } else if job.replace {
         "Your existing MKV is unchanged."
     } else {
         "No MKV was written to the library."

@@ -13,9 +13,13 @@ pub mod deep;
 mod deliver;
 pub mod index;
 pub mod links;
+pub mod matches;
 pub mod media;
+mod ownership;
+mod ownership_api;
 pub mod probe;
 pub mod queue;
+pub mod replacement;
 pub mod transcript;
 pub mod worker;
 
@@ -27,12 +31,14 @@ use queue::{Job, JobResult, NewJob, Queue};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 /// Where the Library looks, resolved from the settings.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Dirs {
     pub library: PathBuf,
+    /// Additional TV output root; never an ISO-only row's default movie target.
+    pub tv: Option<PathBuf>,
     /// `None` when no ISO folder is configured: every row is then MKV-only.
     pub isos: Option<PathBuf>,
     pub iso_subfolders: bool,
@@ -57,8 +63,11 @@ pub fn dirs(cfg: &Config) -> Dirs {
     } else {
         None
     };
+    let tv = under_output(&cfg.output_dir, &cfg.tv_dir);
+    let tv = (!cfg.output_dir.is_empty() && tv != library).then_some(tv);
     Dirs {
         library,
+        tv,
         isos,
         iso_subfolders: cfg.library_iso_subfolders,
     }
@@ -265,6 +274,9 @@ impl Snapshot {
 /// The Library's state: the queue, the probe cache, the index and the console.
 pub struct Library {
     pub queue: Queue,
+    source_matches: Result<matches::MatchStore, String>,
+    match_gate: Mutex<()>,
+    ownership_previews: Mutex<ownership::Previews>,
     pub probes: ProbeCache,
     pub audits: audit::Audits,
     // The deep_audit setting as the quick-lane loop last read it.
@@ -287,12 +299,14 @@ pub struct Library {
     hold: Mutex<Option<Hold>>,
 }
 
-static INSTANCE: OnceLock<Arc<Library>> = OnceLock::new();
+static INSTANCE: Mutex<Option<Arc<Library>>> = Mutex::new(None);
 
 /// The daemon's Library, opened on first use from the settings' config folder.
 pub fn instance(cfg: &Config) -> Arc<Library> {
     INSTANCE
-        .get_or_init(|| {
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| {
             Arc::new(Library::open(
                 Path::new(&cfg.autorip_dir),
                 &Path::new(&cfg.log_dir()).join("library"),
@@ -303,7 +317,20 @@ pub fn instance(cfg: &Config) -> Arc<Library> {
 
 /// The Library if something has opened it.
 pub fn get() -> Option<Arc<Library>> {
-    INSTANCE.get().cloned()
+    INSTANCE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The caller must drain every service and HTTP handler before replacing state.
+pub fn reload_after_drain(cfg: &Config) {
+    reload_instance(&INSTANCE, cfg);
+}
+
+fn reload_instance(instance: &Mutex<Option<Arc<Library>>>, cfg: &Config) {
+    let fresh = Arc::new(Library::open(
+        Path::new(&cfg.autorip_dir),
+        &Path::new(&cfg.log_dir()).join("library"),
+    ));
+    *instance.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh);
 }
 
 /// Ask the indexer to rescan now (settings changed, a rip landed, a button).
@@ -316,35 +343,52 @@ pub fn wake() {
 /// Start the remux worker, the background indexer and both audit lanes.
 pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
     let lib = instance(&cfg.read().unwrap_or_else(|e| e.into_inner()));
-    {
+    let mut tasks: Vec<LibraryTask> = Vec::new();
+    type Run = fn(&Arc<Library>, &Arc<RwLock<Config>>);
+    let workers: [(&str, Run); 4] = [
+        ("library-index", worker::index_loop),
+        ("library-audit", |l, c| {
+            worker::audit_loop(l, c, &arbiter::ARBITER)
+        }),
+        ("library-deep-audit", |l, c| {
+            worker::deep_audit_loop(l, c, &arbiter::ARBITER)
+        }),
+        ("library-remux", |l, c| worker::run(l, c, &arbiter::ARBITER)),
+    ];
+    for (name, run) in workers {
         let (lib, cfg) = (lib.clone(), cfg.clone());
-        let _ = std::thread::Builder::new()
-            .name("library-index".into())
-            .spawn(move || worker::index_loop(&lib, &cfg));
+        tasks.push((name, Box::new(move || run(&lib, &cfg))));
     }
-    {
-        let (lib, cfg) = (lib.clone(), cfg.clone());
-        let _ = std::thread::Builder::new()
-            .name("library-audit".into())
-            .spawn(move || worker::audit_loop(&lib, &cfg, &arbiter::ARBITER));
-    }
-    {
-        let (lib, cfg) = (lib.clone(), cfg.clone());
-        let _ = std::thread::Builder::new()
-            .name("library-deep-audit".into())
-            .spawn(move || worker::deep_audit_loop(&lib, &cfg, &arbiter::ARBITER));
-    }
-    let cfg = cfg.clone();
+    start_tasks(tasks)
+}
+
+type LibraryTask = (&'static str, Box<dyn FnOnce() + Send>);
+
+fn start_tasks(tasks: Vec<LibraryTask>) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
-        .name("library-remux".into())
-        .spawn(move || worker::run(&lib, &cfg, &arbiter::ARBITER))
-        .expect("spawn the library worker")
+        .name("library-services".into())
+        .spawn(move || {
+            let mut handles = Vec::new();
+            for (name, task) in tasks {
+                match std::thread::Builder::new().name(name.into()).spawn(task) {
+                    Ok(handle) => handles.push(handle),
+                    Err(e) => {
+                        tracing::error!(service = name, error = %e, "library service could not start");
+                        crate::server::SHUTDOWN.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+            for handle in handles { let _ = handle.join(); }
+        })
+        .expect("spawn the library service group")
 }
 
 /// One row of `GET /api/library`.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct RowView {
     pub title: String,
+    pub source_match: Option<matches::SavedMatch>,
     pub key: String,
     pub kind: RowKind,
     pub note: Option<RowNote>,
@@ -395,6 +439,9 @@ impl Library {
     pub fn open(config_dir: &Path, log_dir: &Path) -> Self {
         Self {
             queue: Queue::open(config_dir),
+            source_matches: matches::MatchStore::open(config_dir).map_err(|e| e.to_string()),
+            match_gate: Mutex::new(()),
+            ownership_previews: Mutex::new(ownership::Previews::default()),
             probes: ProbeCache::default(),
             audits: audit::Audits::open(config_dir),
             deep_on: AtomicBool::new(false),
@@ -411,6 +458,46 @@ impl Library {
             busy: AtomicBool::new(false),
             hold: Mutex::new(None),
         }
+    }
+
+    /// Unreadable saved corrections are an error, never an automatic lookup.
+    pub fn source_match(&self, source: &Path) -> Result<Option<matches::SavedMatch>, String> {
+        self.source_matches
+            .as_ref()
+            .map(|store| store.get(source))
+            .map_err(Clone::clone)
+    }
+
+    /// Save an explicit identity only for an indexed, idle ISO.
+    pub fn change_source_match(
+        &self,
+        d: &Dirs,
+        source: &Path,
+        expected_revision: u64,
+        media: crate::server::planner::MediaMetadata,
+    ) -> std::io::Result<matches::SavedMatch> {
+        let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
+        let listing = self.listing(d);
+        if listing.scanning
+            || !listing
+                .rows
+                .iter()
+                .any(|row| row.iso.as_deref() == Some(source))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "source ISO is not in the current library",
+            ));
+        }
+        let store = self
+            .source_matches
+            .as_ref()
+            .map_err(|e| std::io::Error::other(e.clone()))?;
+        let saved = self
+            .queue
+            .with_idle_source(source, || store.save(source, expected_revision, media))?;
+        self.touch_index();
+        Ok(saved)
     }
 
     /// The last scan. Cheap: an `Arc` clone under a read lock.
@@ -493,6 +580,60 @@ impl Library {
     fn scan(&self, d: &Dirs) -> Snapshot {
         let started = std::time::Instant::now();
         let mut mkvs = index::list_mkvs(&d.library);
+        if let Some(tv) = &d.tv
+            && !tv.starts_with(&d.library)
+        {
+            // A not-yet-created TV directory is empty, not an inaccessible scan.
+            if !matches!(std::fs::symlink_metadata(tv), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+            {
+                let extra = index::list_mkvs(tv);
+                mkvs.incomplete |= extra.incomplete;
+                let mut seen: HashSet<_> =
+                    mkvs.files.iter().map(|file| file.path.clone()).collect();
+                mkvs.files.extend(
+                    extra
+                        .files
+                        .into_iter()
+                        .filter(|file| seen.insert(file.path.clone())),
+                );
+            }
+        }
+        let links = links::load(&self.config_dir);
+        for target in links.keys() {
+            if !mkvs.files.iter().any(|m| m.path == *target) {
+                mkvs.files.push(index::MkvFile {
+                    path: target.clone(),
+                    title: target
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                });
+            }
+        }
+        // Delivered TV episodes may live in a separate configured TV root.
+        for job in self.queue.snapshot().jobs {
+            for output in job
+                .outputs
+                .iter()
+                .filter(|o| o.state == queue::OutputState::Done)
+            {
+                let title = output
+                    .target
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                if let Some(existing) = mkvs.files.iter_mut().find(|m| m.path == output.target) {
+                    existing.title = title;
+                } else {
+                    mkvs.files.push(index::MkvFile {
+                        path: output.target.clone(),
+                        title,
+                    });
+                }
+            }
+        }
         let mut isos = match &d.isos {
             Some(dir) => index::list_isos(dir, d.iso_subfolders),
             None => index::Listing::default(),
@@ -533,7 +674,6 @@ impl Library {
                 true
             }
         });
-        let links = links::load(&self.config_dir);
         let rows = index::classify(&d.library, &mkvs.files, &isos.files, &links);
         let library_empty = std::fs::read_dir(&d.library).is_ok_and(|mut r| r.next().is_none());
         Snapshot {
@@ -684,16 +824,37 @@ impl Library {
         let mut latest: HashMap<&Path, &Job> = HashMap::new();
         for j in &q.jobs {
             latest.insert(j.target.as_path(), j);
+            for output in &j.outputs {
+                latest.insert(output.target.as_path(), j);
+            }
         }
         let running = probe::running_version();
         let (mut probing, mut auditing) = (0, 0);
         let deep_on = self.deep_enabled();
         let queued = self.audits.queued_set();
         let running_audits = self.audits.running_set();
-        let rows = snap
-            .rows
-            .iter()
-            .cloned()
+        let mut source_rows = snap.rows.clone();
+        for iso in &snap.isos {
+            if !source_rows
+                .iter()
+                .any(|row| row.iso.as_ref() == Some(&iso.path))
+            {
+                source_rows.push(Row {
+                    key: format!("source:{}", iso.path.display()),
+                    title: iso.title.clone(),
+                    kind: RowKind::Ambiguous,
+                    note: Some(RowNote::SeveralIsos {
+                        count: snap.isos.len(),
+                    }),
+                    mkv: None,
+                    iso: Some(iso.path.clone()),
+                    target: None,
+                    linked: false,
+                });
+            }
+        }
+        let rows = source_rows
+            .into_iter()
             .map(|r| {
                 let sig = r.mkv.as_ref().and_then(|m| snap.sigs.get(m).copied());
                 let stamp = r
@@ -725,12 +886,34 @@ impl Library {
                 let (job, result) = match &r.target {
                     Some(t) => (
                         latest.get(t.as_path()).map(|j| (*j).clone()),
-                        q.results.get(&*t.to_string_lossy()).cloned(),
+                        q.results
+                            .get(&*t.to_string_lossy())
+                            .or_else(|| {
+                                latest
+                                    .get(t.as_path())
+                                    .and_then(|j| q.results.get(&*j.target.to_string_lossy()))
+                            })
+                            .cloned(),
                     ),
                     None => (None, None),
                 };
+                let source_match = r
+                    .iso
+                    .as_deref()
+                    .and_then(|iso| self.source_match(iso).ok().flatten());
+                let title = source_match
+                    .as_ref()
+                    .map(|m| {
+                        if m.media.year == 0 {
+                            m.media.title.clone()
+                        } else {
+                            format!("{} ({})", m.media.title, m.media.year)
+                        }
+                    })
+                    .unwrap_or(r.title);
                 RowView {
-                    title: r.title,
+                    title,
+                    source_match,
                     key: r.key,
                     kind: r.kind,
                     note: r.note,
@@ -851,19 +1034,20 @@ impl Library {
         id != 0 && self.cancel_job.load(Ordering::SeqCst) == id
     }
 
-    /// Delete `.mkv.partial` files under the library's title folders that no
-    /// running job owns: leftovers from a crash or a failed or cleared job.
+    /// Delete unowned movie partials and known output partials, including TV
+    /// destinations outside the movie root.
     /// Returns how many went.
     pub fn sweep_partials(&self, d: &Dirs) -> usize {
-        let owned = self
+        let mut candidates: HashSet<PathBuf> = self
             .queue
             .snapshot()
-            .running()
-            .map(|j| queue::partial_path(&j.target));
-        let Ok(titles) = std::fs::read_dir(&d.library) else {
-            return 0;
-        };
-        let mut n = 0;
+            .jobs
+            .iter()
+            .flat_map(|j| std::iter::once(j.target.clone()).chain(j.output_targets()))
+            .chain(links::load(&self.config_dir).into_keys())
+            .map(|p| queue::partial_path(&p))
+            .collect();
+        let titles = std::fs::read_dir(&d.library).into_iter().flatten();
         for dir in titles.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
             let Ok(files) = std::fs::read_dir(&dir) else {
                 continue;
@@ -873,21 +1057,36 @@ impl Library {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.to_ascii_lowercase().ends_with(".mkv.partial"));
-                if partial
-                    && owned.as_deref() != Some(f.as_path())
-                    && std::fs::remove_file(&f).is_ok()
-                {
-                    tracing::info!(path = %f.display(), "removed an orphaned remux partial");
-                    n += 1;
+                if partial {
+                    candidates.insert(f);
                 }
             }
         }
-        n
+        candidates
+            .into_iter()
+            .filter(|path| {
+                if !self.queue.remove_orphan_partial(path) {
+                    return false;
+                }
+                tracing::info!(path = %path.display(), "removed an orphaned remux partial");
+                true
+            })
+            .count()
     }
 
-    /// Queue the remuxable rows `pick` selects, from memory. Returns how many
-    /// were added.
+    #[cfg(test)]
     pub fn enqueue(&self, d: &Dirs, pick: impl Fn(&RowView) -> bool) -> usize {
+        self.enqueue_checked(d, pick).expect("test queue admission")
+    }
+
+    /// Admit selected rows, reporting durable-admission failures to the caller
+    /// instead of making an unavailable match store look like an empty selection.
+    pub fn enqueue_checked(
+        &self,
+        d: &Dirs,
+        pick: impl Fn(&RowView) -> bool,
+    ) -> Result<usize, String> {
+        let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
         let jobs: Vec<NewJob> = self
             .listing(d)
             .rows
@@ -903,7 +1102,19 @@ impl Library {
                 })
             })
             .collect();
-        self.queue.add(jobs)
+        let mut added = 0;
+        for job in jobs {
+            let selected = self.source_match(&job.iso).map_err(|error| {
+                format!("{added} jobs queued; saved source matches unavailable: {error}")
+            })?;
+            added += match selected {
+                Some(selected) => self.queue.add_corrected(job, selected).map_err(|error| {
+                    format!("{added} jobs queued; corrected remux could not be saved: {error}")
+                })?,
+                None => self.queue.add(vec![job]),
+            };
+        }
+        Ok(added)
     }
 
     /// Per-title log file. The title is reduced to one safe path segment.

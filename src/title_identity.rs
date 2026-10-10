@@ -15,7 +15,7 @@
 ///   the bytes.
 ///
 /// Deliberately NOT used: the index, or duration/size.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TitleIdentity {
     playlist: String,
     playlist_id: u16,

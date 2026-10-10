@@ -211,6 +211,7 @@ fn unreadable_state_json_is_held_once_not_redispatched() {
     );
 
     // Repaired state.json → the held card clears on the next tick.
+    std::fs::remove_file(bare.join(crate::server::ripper::staging::STATE_FILE)).unwrap();
     crate::server::ripper::staging::write_state(
         &bare,
         &crate::server::ripper::staging::DiscState::new(

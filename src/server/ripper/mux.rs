@@ -63,16 +63,67 @@ fn watchdog_may_mark_stalled(status: &str) -> bool {
 /// Deadline for the hard watchdog's pre-exit `.restart_count` bump.
 pub const WATCHDOG_BUMP_DEADLINE: Duration = Duration::from_secs(5);
 
+// The counter write can block. A reboot or completed mux during that wait
+// supersedes escalation, so decide again after the write before exiting.
+fn watchdog_exit_after_counter(
+    active: &AtomicBool,
+    shutdown: &AtomicBool,
+    bump: impl FnOnce(),
+) -> bool {
+    if !active.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
+        return false;
+    }
+    bump();
+    active.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+#[test]
+fn reboot_during_watchdog_counter_wait_suppresses_exit() {
+    use std::sync::{Arc, Barrier};
+    for completed in [false, true] {
+        let active = Arc::new(AtomicBool::new(true));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker = std::thread::spawn({
+            let (active, shutdown, entered, release) = (
+                active.clone(),
+                shutdown.clone(),
+                entered.clone(),
+                release.clone(),
+            );
+            move || {
+                watchdog_exit_after_counter(&active, &shutdown, || {
+                    entered.wait();
+                    release.wait();
+                })
+            }
+        });
+        entered.wait();
+        if completed {
+            active.store(false, Ordering::Release);
+        } else {
+            shutdown.store(true, Ordering::Release);
+        }
+        release.wait();
+        assert!(!worker.join().unwrap());
+    }
+    assert!(watchdog_exit_after_counter(
+        &AtomicBool::new(true),
+        &AtomicBool::new(false),
+        || {}
+    ));
+}
+
 /// Run `op` on a named helper thread and wait at most `deadline` for it.
 /// Returns `true` if it finished in time; `false` on timeout or spawn failure.
 pub fn bounded_call(name: &str, deadline: Duration, op: impl FnOnce() + Send + 'static) -> bool {
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(0);
-    let _ = std::thread::Builder::new()
-        .name(name.to_string())
-        .spawn(move || {
-            op();
-            let _ = tx.send(());
-        });
+    let _ = crate::server::daemon::spawn_background(name, move || {
+        op();
+        let _ = tx.send(());
+    });
     rx.recv_timeout(deadline).is_ok()
 }
 
@@ -449,10 +500,8 @@ fn spawn_mux_watchdog(
     let wd_tmdb_year = inputs.tmdb_year;
     let wd_filename = inputs.filename.clone();
     let wd_staging_disc_dir = inputs.staging_disc_dir.clone();
-    // Intentionally detached (no JoinHandle): holds only Arc<Atomic*> clones,
-    // self-terminates when `active` goes false (WatchdogGuard drop), and hard
-    // escalation just calls exit(1) directly — nothing left to join anyway.
-    std::thread::spawn(move || {
+    // Internal reboot must wait for WatchdogGuard's cancellation to be observed.
+    let _ = crate::server::daemon::spawn_background("mux-watchdog", move || {
         let mut was_stalled = false;
         let mut last_log_secs: u64 = 0;
         let mut clock = StallClock::new(
@@ -462,7 +511,7 @@ fn spawn_mux_watchdog(
         );
         while active.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_secs(15));
-            if !active.load(Ordering::Relaxed) {
+            if !active.load(Ordering::Relaxed) || crate::server::SHUTDOWN.load(Ordering::Acquire) {
                 break;
             }
             let stall_secs = clock.observe(
@@ -496,7 +545,11 @@ fn spawn_mux_watchdog(
                 // Best-effort: bump the restart counter (errors ignored, exiting
                 // anyway) so RESTART_LIMIT can engage, bounded so a wedged NFS
                 // mount still lets us `exit(1)`.
-                watchdog_bump_restart_count(&wd_device, &wd_staging_disc_dir);
+                if !watchdog_exit_after_counter(&active, &crate::server::SHUTDOWN, || {
+                    watchdog_bump_restart_count(&wd_device, &wd_staging_disc_dir);
+                }) {
+                    break;
+                }
                 // No `drop(_wd_guard)` — that's the producer's
                 // local; we're a detached watchdog thread. The
                 // OS will tear down every thread on exit(1).

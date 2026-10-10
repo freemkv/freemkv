@@ -99,3 +99,5 @@ pub mod windows;
 pub mod linux;
 #[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]
 pub mod linux_app;
+#[cfg(test)]
+mod selection_test_fixtures;

@@ -25,6 +25,7 @@ fn a_failed_all_titles_scan_aborts_instead_of_ripping_title_one() {
 
 fn title(playlist_id: u16, start_lba: u32) -> libfreemkv::DiscTitle {
     libfreemkv::DiscTitle {
+        selection_evidence: Default::default(),
         playlist: format!("{:05}.mpls", playlist_id),
         playlist_id,
         duration_secs: 3600.0,

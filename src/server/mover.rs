@@ -4,6 +4,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
+#[path = "mover_copy_monitor.rs"]
+mod copy_monitor;
+#[path = "mover_manifest.rs"]
+mod manifest;
+
 /// Progress for ONE artifact being moved (e.g. the `.mkv` movie, or its
 /// companion `.iso`). Read by the System page's renderMoves() via SSE.
 ///
@@ -19,11 +24,32 @@ pub struct MoveState {
     /// from the source file extension. Empty if unknown. The UI labels the bar
     /// `"{name} ({artifact})"`.
     pub artifact: String,
+    pub phase: MovePhase,
     pub progress_pct: u8,
     pub progress_gb: f64,
     pub total_gb: f64,
     pub speed_mbs: f64,
     pub eta: String,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovePhase {
+    Queued,
+    Copying,
+    Finalizing,
+    Delivered,
+    CleanupNeeded,
+    Blocked,
+}
+
+fn block_move(index: usize) {
+    let mut states = MOVE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = states.get_mut(index) {
+        entry.phase = MovePhase::Blocked;
+        entry.speed_mbs = 0.0;
+        entry.eta.clear();
+    }
 }
 
 /// Live per-artifact move bars for the staging dir currently being moved.
@@ -105,6 +131,52 @@ pub struct MoverError {
     pub path: String,
     pub reason: String,
     pub hint: String,
+    pub attempts: u32,
+    pub retry_held: bool,
+    pub waiting_for_folder: bool,
+    pub worker_active: bool,
+    #[serde(skip)]
+    copy_stalled: bool,
+    #[serde(skip)]
+    retry_after: Option<std::time::Instant>,
+}
+
+fn retry_deadline(attempts: u32, now: std::time::Instant) -> Option<std::time::Instant> {
+    match attempts {
+        1 => Some(now + std::time::Duration::from_secs(30)),
+        2 => Some(now + std::time::Duration::from_secs(120)),
+        _ => None,
+    }
+}
+
+fn move_retry_ready(path: &str, now: std::time::Instant) -> bool {
+    MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .is_none_or(|error| error.retry_after.is_some_and(|deadline| now >= deadline))
+}
+
+// Only an attempted delivery consumes the retry budget. A health probe waiting
+// for a mount must remain able to recover as soon as that mount responds.
+fn schedule_move_retry(path: &str) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(error) = errors.get_mut(path) {
+        error.attempts = error.attempts.saturating_add(1);
+        error.retry_after = retry_deadline(error.attempts, std::time::Instant::now());
+        error.retry_held = error.retry_after.is_none();
+    }
+}
+
+fn schedule_failed_delivery(path: &str, outcomes: &[MoveOutcome]) {
+    if outcomes.iter().any(|outcome| {
+        matches!(
+            outcome,
+            MoveOutcome::Failed | MoveOutcome::SizeMismatch | MoveOutcome::PostCopyInvalid
+        )
+    }) {
+        schedule_move_retry(path);
+    }
 }
 
 pub static MOVE_ERRORS: once_cell::sync::Lazy<Mutex<BTreeMap<String, MoverError>>> =
@@ -117,21 +189,51 @@ fn record_error(path: &str, reason: &str, hint: &str) {
 // record_error with the log sink injected. The MOVE_ERRORS guard is dropped
 // before `log` runs: syslog does blocking (NFS) I/O, mirroring muxer::record_error.
 fn record_error_with(path: &str, reason: &str, hint: &str, log: impl FnOnce(&str)) {
+    record_error_at_stage(path, reason, hint, false, log);
+}
+
+fn record_error_at_stage(
+    path: &str,
+    reason: &str,
+    hint: &str,
+    waiting_for_folder: bool,
+    log: impl FnOnce(&str),
+) {
     let same_reason = {
         let mut m = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
         let same_reason = m.get(path).map(|e| e.reason == reason).unwrap_or(false);
+        let attempts = m.get(path).map_or(0, |e| e.attempts);
+        let retry_after = m
+            .get(path)
+            .map_or(Some(std::time::Instant::now()), |e| e.retry_after);
         m.insert(
             path.to_string(),
             MoverError {
                 path: path.to_string(),
                 reason: reason.to_string(),
                 hint: hint.to_string(),
+                attempts,
+                retry_held: retry_after.is_none(),
+                waiting_for_folder,
+                worker_active: false,
+                copy_stalled: false,
+                retry_after,
             },
         );
         same_reason
     };
     if !same_reason {
         log(&format!("Move blocked: {} — {}", path, reason));
+    }
+}
+
+fn clear_recovered_folder_wait(path: &str) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    if errors
+        .get(path)
+        .is_some_and(|error| error.waiting_for_folder && error.attempts == 0)
+    {
+        errors.remove(path);
     }
 }
 
@@ -158,21 +260,31 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
     m.retain(|key, _| Path::new(key).parent() != Some(root) || seen.contains(key));
 }
 
-/// Operator-initiated clear of a single move error (the System-tab ✕). Removes
-/// it from the in-memory map; if the underlying block is still real, the next
-/// mover tick re-records it, so dismissing a genuinely-solved error makes it
-/// stay gone while a still-stuck one reappears within a tick.
-pub fn clear_move_error(path: &str) {
-    clear_error(path);
+fn prune_after_listing(
+    staging_root: &str,
+    seen: &std::collections::HashSet<String>,
+    complete: bool,
+) {
+    if complete {
+        prune_move_errors(staging_root, seen);
+    }
 }
 
-/// Operator-initiated clear of ALL move errors (the System-tab "Clear all").
-/// Same self-healing semantics: still-real blocks re-record on the next tick.
+/// Operator-initiated Retry: clear this error and its retry budget. The next
+/// mover tick may attempt delivery again; no media is removed by this action.
+pub fn clear_move_error(path: &str) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    if errors.get(path).is_none_or(|e| !e.worker_active) {
+        errors.remove(path);
+    }
+}
+
+/// Operator-initiated Retry all: reset errors and their retry budgets.
 pub fn clear_all_move_errors() {
     MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clear();
+        .retain(|_, e| e.worker_active);
 }
 
 /// Outcome of moving a single file. Distinguishes between an active move
@@ -191,6 +303,12 @@ enum MoveOutcome {
     MovedDirty,
     /// Copy itself failed. Caller can retry on the next tick.
     Failed,
+    /// This attempt stalled and drained. Immutable even if the operator
+    /// clears its UI error before the enclosing batch processes the result.
+    Stalled,
+    /// A required destination operation is unsupported; operator action is
+    /// needed, not another automatic full-file copy.
+    Unsupported,
     /// Post-copy size check found dst != src even though the copy returned
     /// success. Surfaces distinctly so a half-copied destination (e.g. NFS
     /// server ran out of space mid-copy without surfacing an error) isn't
@@ -207,8 +325,7 @@ enum MoveOutcome {
     PostCopyInvalid,
     /// Destination already exists as a DIFFERENT file (present, non-empty, and a
     /// different size than src, or the same size with different content). The
-    /// different-size case is refused by `check_and_move`'s guard; `move_file`
-    /// itself refuses only the same-size case and replaces a different-size dest. A wrong title match can resolve two distinct
+    /// destination is never overwritten by publication. A wrong title match can resolve two distinct
     /// discs to the same `Title (Year)/Title (Year).ext` path; overwriting would
     /// destroy a good prior rip. We refuse the move, leave the new file in
     /// staging, and surface a collision error for the operator to resolve.
@@ -298,26 +415,59 @@ fn same_head_and_tail(a: &Path, b: &Path) -> bool {
 
 // Copy src -> dest in 4 MiB chunks, publishing the running bytes-written count into `written`
 // as we go, so the move loop can show real progress without stat()-ing the destination.
+#[cfg(test)]
 fn copy_counting(
     src: &Path,
     dest: &Path,
     written: &std::sync::atomic::AtomicU64,
+    halt: &libfreemkv::halt::Halt,
 ) -> std::io::Result<u64> {
-    copy_counting_cancellable(src, dest, written, &|| {
-        crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
-    })
+    copy_counting_with_halt(
+        src,
+        dest,
+        written,
+        &|| crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
+        Some(halt),
+        &|_| Ok(()),
+        None,
+    )
 }
 
 // copy_counting with the abort signal injected, for testability without touching the
 // process-global crate::server::SHUTDOWN (which every mover test shares).
+#[cfg(test)]
 fn copy_counting_cancellable(
     src: &Path,
     dest: &Path,
     written: &std::sync::atomic::AtomicU64,
     cancel: &dyn Fn() -> bool,
 ) -> std::io::Result<u64> {
+    copy_counting_with_halt(src, dest, written, cancel, None, &|_| Ok(()), None)
+}
+
+fn copy_counting_with_halt(
+    src: &Path,
+    dest: &Path,
+    written: &std::sync::atomic::AtomicU64,
+    cancel: &dyn Fn() -> bool,
+    halt: Option<&libfreemkv::halt::Halt>,
+    before_publish: &dyn Fn(&Path) -> std::io::Result<()>,
+    activity: Option<&copy_monitor::Activity>,
+) -> std::io::Result<u64> {
     use std::io::{Read, Write};
     use std::sync::atomic::Ordering;
+    let stage = |operation| {
+        if let Some(activity) = activity {
+            activity.set(operation);
+        }
+    };
+    let cancelled = || cancel() || halt.is_some_and(|halt| halt.is_cancelled());
+    if cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "copy cancelled before start",
+        ));
+    }
 
     // Write to a sibling temp on the DEST filesystem, fsync it, then rename(2)
     // over the final name. Writing directly risks a truncated file at the
@@ -328,6 +478,7 @@ fn copy_counting_cancellable(
         dest.with_file_name(name)
     };
     // Remove any stale temp from a prior interrupted run before we start.
+    stage("removing stale destination temporary file");
     let _ = std::fs::remove_file(&tmp);
     // The temp name embeds OUR pid, so the line above only clears our own
     // name; orphaned `.part-<other-pid>` temps from prior crashed runs
@@ -336,6 +487,7 @@ fn copy_counting_cancellable(
         && let Some(stem) = dest.file_name().and_then(|n| n.to_str())
     {
         let prefix = format!("{stem}.part-");
+        stage("listing destination temporary files");
         if let Ok(entries) = std::fs::read_dir(parent) {
             for entry in entries {
                 // Don't `.flatten()` away per-entry errors: a partial NFS
@@ -356,6 +508,7 @@ fn copy_counting_cancellable(
                 if let Some(name) = entry.file_name().to_str()
                     && name.starts_with(&prefix)
                 {
+                    stage("removing stale destination temporary file");
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -363,33 +516,59 @@ fn copy_counting_cancellable(
     }
 
     let copy_to_tmp = || -> std::io::Result<u64> {
-        let mut reader = std::fs::File::open(src)?;
-        let mut writer = std::fs::File::create(&tmp)?;
+        let context = |operation: &str, path: &Path, error: std::io::Error| {
+            std::io::Error::new(
+                copy_error_kind(&error),
+                format!("{operation} {}: {error}", path.display()),
+            )
+        };
+        stage("opening staged source");
+        let mut reader = std::fs::File::open(src).map_err(|e| context("open source", src, e))?;
+        stage("creating destination temporary file");
+        let mut writer = std::fs::File::create(&tmp)
+            .map_err(|e| context("create destination temporary file", &tmp, e))?;
         let mut buf = vec![0u8; 4 * 1024 * 1024];
         let mut total = 0u64;
         loop {
             // Honour SIGTERM between chunks: without this the shutdown join
             // blocks for the whole remaining copy until docker stop's grace
             // expires and SIGKILL lands mid-write; Interrupted unlinks the temp.
-            if cancel() {
+            if cancelled() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "copy aborted: shutdown requested",
                 ));
             }
-            let n = reader.read(&mut buf)?;
+            stage("reading staged source");
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| context("read source", src, e))?;
             if n == 0 {
                 break;
             }
-            writer.write_all(&buf[..n])?;
+            if cancelled() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "copy cancelled after read",
+                ));
+            }
+            stage("writing destination temporary file");
+            writer
+                .write_all(&buf[..n])
+                .map_err(|e| context("write destination", &tmp, e))?;
             total += n as u64;
             written.store(total, Ordering::Relaxed);
         }
-        writer.flush()?;
-        // fsync the temp before rename: move_file unlinks the source once
-        // this returns Ok, so the dest must be durable first. flush() is a
-        // no-op on NFS; without sync_all a crash here loses the only copy.
-        writer.sync_all()?;
+        stage("flushing destination temporary file");
+        writer
+            .flush()
+            .map_err(|e| context("flush destination", &tmp, e))?;
+        // Flush before publication and source removal. The shared primitive
+        // handles macOS network volumes which reject F_FULLFSYNC but support
+        // fsync, and bounds a flush that stops making progress.
+        stage("syncing destination temporary file");
+        libfreemkv::io::durable_sync_file(&writer, halt, |_, _| {})
+            .map_err(|e| context("sync destination", &tmp, e))?;
         Ok(total)
     };
 
@@ -398,6 +577,7 @@ fn copy_counting_cancellable(
         Err(e) => {
             // Drop the partial temp so the next attempt starts clean and
             // no orphan lingers on the dest fs.
+            stage("removing cancelled destination temporary file");
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
@@ -407,16 +587,58 @@ fn copy_counting_cancellable(
     // over the final name, then fsync again so the rename is durable before
     // move_file unlinks the source: a crash never leaves a truncated file.
     if let Some(parent) = dest.parent() {
+        stage("syncing destination directory before publication");
         libfreemkv::io::fsync::dir(parent);
     }
-    if let Err(e) = std::fs::rename(&tmp, dest) {
+    if cancel() || halt.is_some_and(|halt| halt.is_cancelled()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "copy aborted before publication",
+        ));
+    }
+    stage("validating and checkpointing destination candidate");
+    if let Err(e) = before_publish(&tmp) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    if cancel() || halt.is_some_and(|halt| halt.is_cancelled()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "publication cancelled",
+        ));
+    }
+    stage("publishing destination");
+    if let Err(e) = libfreemkv::io::publish::no_replace(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(std::io::Error::new(
+            e.kind(),
+            format!("publish destination {}: {e}", dest.display()),
+        ));
+    }
     if let Some(parent) = dest.parent() {
+        stage("syncing published destination directory");
         libfreemkv::io::fsync::dir(parent);
     }
     Ok(total)
+}
+
+// Some Rust/platform combinations classify ENOTSUP as Uncategorized. Preserve
+// that distinction before wrapping the OS error with operation/path context.
+#[cfg(unix)]
+fn copy_error_kind(error: &std::io::Error) -> std::io::ErrorKind {
+    match error.raw_os_error() {
+        Some(code) if code == libc::ENOTSUP || code == libc::EOPNOTSUPP => {
+            std::io::ErrorKind::Unsupported
+        }
+        _ => error.kind(),
+    }
+}
+
+#[cfg(not(unix))]
+fn copy_error_kind(error: &std::io::Error) -> std::io::ErrorKind {
+    error.kind()
 }
 
 // Verify a destination MKV via the EBML head magic (1A 45 DF A3) and
@@ -612,6 +834,19 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
 static STRANDED_WARNED: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
+pub(crate) fn reset_after_drain() {
+    MOVE_STATE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    *ACTIVE_MOVE_DIR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    STRANDED_WARNED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
 // Drop STRANDED_WARNED entries whose staging dir is gone. Mirrors prune_move_errors, same
 // liveness guarantee.
 fn prune_stranded_warned(seen: &std::collections::HashSet<String>) {
@@ -685,6 +920,7 @@ fn check_and_move(cfg: &Config) {
     // below, including skipped dirs — a still-ripping dir is present but
     // not ready, and must keep any error row it already has.
     let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut root_listing_complete = true;
 
     for entry in entries {
         // Don't silently drop a per-entry error (e.g. NFS ESTALE on a
@@ -693,6 +929,7 @@ fn check_and_move(cfg: &Config) {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
+                root_listing_complete = false;
                 tracing::warn!(
                     staging = %staging_root,
                     error = %e,
@@ -702,10 +939,30 @@ fn check_and_move(cfg: &Config) {
             }
         };
         let dir = entry.path();
-        if !dir.is_dir() {
+        // An entry observed before a failed stat is not confirmed absent.
+        seen_dirs.insert(dir.to_string_lossy().to_string());
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
             continue;
         }
-        seen_dirs.insert(dir.to_string_lossy().to_string());
+        if !move_retry_ready(&dir.to_string_lossy(), std::time::Instant::now()) {
+            continue;
+        }
+        let job_lease = crate::server::ripper::staging::job_lease(&dir);
+        let Ok(_job_owner) = job_lease.try_lock() else {
+            continue;
+        };
+
+        let delivery = match manifest::Manifest::load(&dir) {
+            Ok(delivery) => delivery,
+            Err(e) => {
+                record_error(
+                    &dir.to_string_lossy(),
+                    &format!("delivery journal unreadable: {e}"),
+                    "Repair the journal or staging storage; no files have been adopted or discarded.",
+                );
+                continue;
+            }
+        };
 
         let marker_path = dir.join(".done");
 
@@ -715,71 +972,75 @@ fn check_and_move(cfg: &Config) {
         let (marker, state_outputs): (
             serde_json::Value,
             Vec<crate::server::ripper::staging::Output>,
-        ) = match crate::server::ripper::staging::read_state(&dir) {
-            Some(st) => {
-                if st.state != crate::server::ripper::staging::StagingState::Done {
-                    // Not handed off to the mover (in progress, held for
-                    // review, terminal, or completed) — by-design "not
-                    // ready", so keep it quiet: no per-tick WARN spam.
-                    tracing::debug!(
-                        dir = %dir.display(),
-                        state = ?st.state,
-                        "mover: staging dir not in Done state; skipping"
-                    );
-                    continue;
-                }
-                (mover_marker_value(&st), st.outputs.clone())
-            }
-            None => {
-                // Legacy `.done` file path. No pre-flight exists() check: it
-                // races with the read (the file can appear/disappear between
-                // syscalls); the read arms are the atomic gate.
-                match std::fs::read_to_string(&marker_path) {
-                    Ok(data) => match serde_json::from_str(&data) {
-                        Ok(v) => (v, Vec::new()),
-                        Err(e) => {
-                            // Empty/torn `.done` → NOT READY: skip rather than
-                            // blind-move under a garbage name.
-                            tracing::warn!(
-                                marker = %marker_path.display(),
-                                error = %e,
-                                "mover: .done marker is empty/unparsable; skipping staging dir (not ready)"
-                            );
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        // An ABSENT `.done` on a governed dir is expected
-                        // in-progress state — quiet debug, skip (the
-                        // 182-warn bug). Only a stranded dir is a fault.
-                        if classify_done_absence(e.kind(), &dir) == DoneAbsence::InProgress {
-                            tracing::debug!(
-                                dir = %dir.display(),
-                                "mover: staging dir in progress (no .done yet); skipping"
-                            );
-                            continue;
-                        }
-                        // Stranded/unreadable dir (Fault). WARN ONCE per
-                        // dir — the mover rescans every ~10s and would
-                        // otherwise re-WARN forever. First → WARN, then debug.
-                        let first = STRANDED_WARNED
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(dir.to_string_lossy().to_string());
-                        if first {
-                            tracing::warn!(
-                                marker = %marker_path.display(),
-                                error = %e,
-                                "mover: failed to read .done marker; skipping staging dir (stranded: no state.json/.done; further per-tick warns for this dir suppressed)"
-                            );
-                        } else {
-                            tracing::debug!(
-                                marker = %marker_path.display(),
-                                error = %e,
-                                "mover: stranded staging dir (no state.json/.done); still skipping"
-                            );
-                        }
+        ) = if let Some(saved) = &delivery {
+            (saved.marker.clone(), saved.outputs.clone())
+        } else {
+            match crate::server::ripper::staging::read_state(&dir) {
+                Some(st) => {
+                    if st.state != crate::server::ripper::staging::StagingState::Done {
+                        // Not handed off to the mover (in progress, held for
+                        // review, terminal, or completed) — by-design "not
+                        // ready", so keep it quiet: no per-tick WARN spam.
+                        tracing::debug!(
+                            dir = %dir.display(),
+                            state = ?st.state,
+                            "mover: staging dir not in Done state; skipping"
+                        );
                         continue;
+                    }
+                    (mover_marker_value(&st), st.outputs.clone())
+                }
+                None => {
+                    // Legacy `.done` file path. No pre-flight exists() check: it
+                    // races with the read (the file can appear/disappear between
+                    // syscalls); the read arms are the atomic gate.
+                    match std::fs::read_to_string(&marker_path) {
+                        Ok(data) => match serde_json::from_str(&data) {
+                            Ok(v) => (v, Vec::new()),
+                            Err(e) => {
+                                // Empty/torn `.done` → NOT READY: skip rather than
+                                // blind-move under a garbage name.
+                                tracing::warn!(
+                                    marker = %marker_path.display(),
+                                    error = %e,
+                                    "mover: .done marker is empty/unparsable; skipping staging dir (not ready)"
+                                );
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            // An ABSENT `.done` on a governed dir is expected
+                            // in-progress state — quiet debug, skip (the
+                            // 182-warn bug). Only a stranded dir is a fault.
+                            if classify_done_absence(e.kind(), &dir) == DoneAbsence::InProgress {
+                                tracing::debug!(
+                                    dir = %dir.display(),
+                                    "mover: staging dir in progress (no .done yet); skipping"
+                                );
+                                continue;
+                            }
+                            // Stranded/unreadable dir (Fault). WARN ONCE per
+                            // dir — the mover rescans every ~10s and would
+                            // otherwise re-WARN forever. First → WARN, then debug.
+                            let first = STRANDED_WARNED
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(dir.to_string_lossy().to_string());
+                            if first {
+                                tracing::warn!(
+                                    marker = %marker_path.display(),
+                                    error = %e,
+                                    "mover: failed to read .done marker; skipping staging dir (stranded: no state.json/.done; further per-tick warns for this dir suppressed)"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    marker = %marker_path.display(),
+                                    error = %e,
+                                    "mover: stranded staging dir (no state.json/.done); still skipping"
+                                );
+                            }
+                            continue;
+                        }
                     }
                 }
             }
@@ -848,8 +1109,7 @@ fn check_and_move(cfg: &Config) {
         // For a TV rip, `state_outputs` is the AUTHORITATIVE deliverable
         // list — file exactly those episodes. The dir scan can also surface a
         // leftover partial from a failed mux; unfiltered it'd promote as complete.
-        let is_tv_plan = state_outputs.iter().any(|o| o.episode.is_some());
-        if is_tv_plan {
+        if !state_outputs.is_empty() {
             let allowed: std::collections::HashSet<&str> =
                 state_outputs.iter().map(|o| o.filename.as_str()).collect();
             ripped_files.retain(|p| {
@@ -861,7 +1121,7 @@ fn check_and_move(cfg: &Config) {
             });
         }
 
-        if ripped_files.is_empty() {
+        if ripped_files.is_empty() && delivery.is_none() {
             // Nothing the mover should promote. Skip; the dir's lifetime
             // is governed by the ripper (which owns the state.json transition
             // and its own ISO-prune in the keep_iso=false multipass path).
@@ -895,11 +1155,22 @@ fn check_and_move(cfg: &Config) {
             let dest = build_destination(cfg, &tmdb_result, leaf, season);
             planned_moves.push((file_path.clone(), dest));
         }
+        if let Some(saved) = &delivery {
+            planned_moves = saved.moves();
+        }
 
         // Nothing below touches a destination root before it passes a bounded write test:
         // a stale or hung share holds the move (output kept in staging) and never blocks here.
-        if let Some(p) = unreachable_root(cfg, &tmdb_result, &planned_moves) {
-            record_error(
+        let unavailable = if let Some(saved) = &delivery {
+            saved
+                .roots
+                .iter()
+                .find_map(|root| crate::server::health::preflight("output", Path::new(root)).err())
+        } else {
+            unreachable_root(cfg, &tmdb_result, &planned_moves)
+        };
+        if let Some(p) = unavailable {
+            record_error_at_stage(
                 &dir_str,
                 &format!(
                     "waiting for the output folder: {} ({}: {})",
@@ -908,49 +1179,54 @@ fn check_and_move(cfg: &Config) {
                     p.detail
                 ),
                 &format!("{} The rip stays in staging until then.", p.hint),
+                true,
+                crate::server::log::syslog,
             );
             continue;
         }
+        clear_recovered_folder_wait(&dir_str);
 
         // Two discs of one boxset share a TMDB title/filename; `disc_variant`
         // gives disc 2 `Title (Year)_2.mkv` instead of a collision. ONE variant
         // covers the whole file set (MKV+ISO matched); a STAT failure aborts as `uncertain`.
-        let mut uncertain = false;
-        let variant = crate::server::util::disc_variant(|n| {
-            if uncertain {
-                return false;
-            }
-            for (src, dest) in planned_moves.iter() {
-                match dest_claim(src, &dest_with_variant(dest, n)) {
-                    DestClaim::Claimable => {}
-                    DestClaim::OtherFile => return false,
-                    DestClaim::Unknown => {
-                        uncertain = true;
-                        return false;
+        if delivery.is_none() {
+            let mut uncertain = false;
+            let variant = crate::server::util::disc_variant(|n| {
+                if uncertain {
+                    return false;
+                }
+                for (_, dest) in planned_moves.iter() {
+                    match unowned_dest_claim(&dest_with_variant(dest, n)) {
+                        DestClaim::Claimable => {}
+                        DestClaim::OtherFile => return false,
+                        DestClaim::Unknown => {
+                            uncertain = true;
+                            return false;
+                        }
                     }
                 }
-            }
-            true
-        });
-        match variant {
-            Some(n) => {
-                for (_, dest) in planned_moves.iter_mut() {
-                    *dest = dest_with_variant(dest, n);
+                true
+            });
+            match variant {
+                Some(n) => {
+                    for (_, dest) in planned_moves.iter_mut() {
+                        *dest = dest_with_variant(dest, n);
+                    }
                 }
-            }
-            None if uncertain => {
-                // Left to the collision guard's stat-error branch, which logs
-                // the deferral and retries next tick.
-            }
-            None => {
-                // Every one of the 64 variants is held by a DIFFERENT file.
-                // Leave base names in place: the collision guard below then
-                // refuses the move and surfaces the error. Never overwrite.
-                crate::server::log::syslog(&format!(
-                    "Move blocked ({}): every disc-variant destination name is taken by a \
+                None if uncertain => {
+                    // Left to the collision guard's stat-error branch, which logs
+                    // the deferral and retries next tick.
+                }
+                None => {
+                    // Every one of the 64 variants is held by a DIFFERENT file.
+                    // Leave base names in place: the collision guard below then
+                    // refuses the move and surfaces the error. Never overwrite.
+                    crate::server::log::syslog(&format!(
+                        "Move blocked ({}): every disc-variant destination name is taken by a \
                      different file — resolve the library conflict manually",
-                    display_name
-                ));
+                        display_name
+                    ));
+                }
             }
         }
 
@@ -964,6 +1240,9 @@ fn check_and_move(cfg: &Config) {
             if !dest_roots.iter().any(|existing| existing == &r) {
                 dest_roots.push(r);
             }
+        }
+        if let Some(saved) = &delivery {
+            dest_roots = saved.roots.clone();
         }
         let blocked_root = dest_roots.iter().find_map(|r| {
             validate_destination_root(r)
@@ -1014,6 +1293,63 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
 
+        if delivery.is_none() {
+            if !listing_complete {
+                record_error(
+                    &dir_str,
+                    "cannot freeze delivery after an incomplete staging listing",
+                    "Retry after staging storage recovers; no files have been moved.",
+                );
+                continue;
+            }
+            if state_outputs.iter().any(|output| {
+                !ripped_files
+                    .iter()
+                    .any(|p| p.file_name().is_some_and(|n| n == output.filename.as_str()))
+            }) {
+                record_error(
+                    &dir_str,
+                    "a planned output is missing before delivery",
+                    "Restore the staged output; existing library files cannot establish ownership without a delivery journal.",
+                );
+                continue;
+            }
+            match manifest::Manifest::create(
+                &dir,
+                marker.clone(),
+                state_outputs.clone(),
+                dest_roots,
+                &planned_moves,
+            ) {
+                Ok(saved) => {
+                    planned_moves = saved.moves();
+                }
+                Err(e) => {
+                    record_error(
+                        &dir_str,
+                        &format!("cannot persist delivery plan: {e}"),
+                        "Staged sources are retained; repair storage or the conflicting destination and retry.",
+                    );
+                    continue;
+                }
+            }
+        }
+
+        let target_locks = match manifest::Manifest::load(&dir).and_then(|m| {
+            m.ok_or_else(|| std::io::Error::other("delivery manifest disappeared"))?
+                .lock_targets()
+        }) {
+            Ok(locks) => locks,
+            Err(e) => {
+                record_error(
+                    &dir_str,
+                    &format!("delivery ownership lock unavailable: {e}"),
+                    "Retry after the other library operation finishes; source files and journal are retained.",
+                );
+                continue;
+            }
+        };
+
         // Move files. Each artifact (movie file, and with keep_iso its ISO)
         // gets its OWN progress bar, not one aggregate. Seed one MOVE_STATE
         // entry per file up front (0%) so all bars appear immediately.
@@ -1041,6 +1377,7 @@ fn check_and_move(cfg: &Config) {
                         }
                     },
                     artifact: artifact_label(src),
+                    phase: MovePhase::Queued,
                     progress_pct: 0,
                     progress_gb: 0.0,
                     total_gb: fresh_metadata(src).map(|m| m.len()).unwrap_or(0) as f64
@@ -1065,66 +1402,44 @@ fn check_and_move(cfg: &Config) {
                 };
                 let mut ms = MOVE_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(entry) = ms.get_mut(i) {
+                    entry.phase = if pct >= 100 {
+                        MovePhase::Finalizing
+                    } else {
+                        MovePhase::Copying
+                    };
                     entry.progress_pct = pct;
                     entry.progress_gb = gb;
                     entry.total_gb = total_gb;
-                    entry.speed_mbs = speed;
-                    entry.eta = eta;
+                    entry.speed_mbs = if pct >= 100 { 0.0 } else { speed };
+                    entry.eta = if pct >= 100 { String::new() } else { eta };
                 }
             };
-            // Overwrite guard (defence in depth): never clobber a DIFFERENT dest. Same-size
-            // dest is content-probed (head+tail) to distinguish idempotent re-move from a real
-            // collision; non-NotFound stat errors defer instead of risking move_file.
-            let dest_meta = match fresh_metadata(Path::new(dest)) {
-                Ok(d) => Some(d),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            let outcome = match manifest::Manifest::deliver(&dir, i, &on_progress) {
+                Ok(outcome) => outcome,
                 Err(e) => {
-                    crate::server::log::syslog(&format!(
-                        "Move deferred (could not stat destination {}): {} — will retry next tick",
-                        dest, e
-                    ));
-                    outcomes.push(MoveOutcome::Failed);
-                    continue;
+                    crate::server::log::syslog(&format!("Delivery journal held {}: {e}", dest));
+                    block_move(i);
+                    MoveOutcome::Failed
                 }
             };
-            if let Some(d) = dest_meta {
-                // Dest exists. We need a fresh stat of the source too; a
-                // transient src-stat error here is likewise conservative —
-                // defer rather than risk clobbering an existing dest.
-                let s = match fresh_metadata(src) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        crate::server::log::syslog(&format!(
-                            "Move deferred (destination {} exists but could not stat source {:?}): {} — will retry next tick",
-                            dest, src, e
-                        ));
-                        outcomes.push(MoveOutcome::Failed);
-                        continue;
-                    }
-                };
-                if s.is_file() && d.is_file() && d.len() > 0 {
-                    let collision = if s.len() != d.len() {
-                        true
-                    } else {
-                        // Equal sizes: only a confirmed content match is the
-                        // idempotent re-move. Anything else is a collision.
-                        !same_head_and_tail(src, Path::new(dest))
+            outcomes.push(outcome);
+            {
+                let mut ms = MOVE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(entry) = ms.get_mut(i) {
+                    entry.phase = match outcome {
+                        MoveOutcome::Moved | MoveOutcome::Skipped => MovePhase::Delivered,
+                        MoveOutcome::MovedDirty => MovePhase::CleanupNeeded,
+                        _ => MovePhase::Blocked,
                     };
-                    if collision {
-                        crate::server::log::syslog(&format!(
-                            "Move blocked (destination exists, different file): {} ({} B) vs existing {} ({} B)",
-                            src.display(),
-                            s.len(),
-                            dest,
-                            d.len()
-                        ));
-                        outcomes.push(MoveOutcome::Collision);
-                        continue;
-                    }
+                    entry.speed_mbs = 0.0;
+                    entry.eta.clear();
                 }
             }
-            let outcome = move_file(src, Path::new(dest), &on_progress);
-            outcomes.push(outcome);
+            if matches!(outcome, MoveOutcome::Stalled) {
+                // The worker has drained, but this batch remains explicitly
+                // held until Retry; do not publish another artifact this tick.
+                break;
+            }
             // Peg this artifact's bar to 100% on success. Skipped (idempotent
             // re-move) reports no progress, so it'd sit at 0% otherwise;
             // Moved/MovedDirty may stop short of 100. Failed/Collision stay stalled.
@@ -1178,7 +1493,7 @@ fn check_and_move(cfg: &Config) {
                         absolute_for_log(dest)
                     ));
                 }
-                MoveOutcome::Failed => {
+                MoveOutcome::Failed | MoveOutcome::Unsupported | MoveOutcome::Stalled => {
                     crate::server::log::syslog(&format!(
                         "Failed to move {} → {}",
                         src.display(),
@@ -1202,6 +1517,9 @@ fn check_and_move(cfg: &Config) {
 
         let any_collision = outcomes.iter().any(|o| matches!(o, MoveOutcome::Collision));
         let any_failed = outcomes.iter().any(|o| matches!(o, MoveOutcome::Failed));
+        let any_unsupported = outcomes
+            .iter()
+            .any(|o| matches!(o, MoveOutcome::Unsupported));
         let any_size_mismatch = outcomes
             .iter()
             .any(|o| matches!(o, MoveOutcome::SizeMismatch));
@@ -1215,12 +1533,30 @@ fn check_and_move(cfg: &Config) {
             .iter()
             .any(|o| matches!(o, MoveOutcome::Moved | MoveOutcome::MovedDirty));
 
+        if outcomes.iter().any(|o| matches!(o, MoveOutcome::Stalled)) {
+            continue;
+        }
+        if any_unsupported {
+            record_error(
+                &dir_str,
+                "destination does not support a required delivery operation",
+                "Automatic retries stopped. See the operation and destination in the copy error; fix the destination, then choose Retry. Staged source files are retained.",
+            );
+            let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(error) = errors.get_mut(&dir_str) {
+                error.retry_after = None;
+                error.retry_held = true;
+            }
+            continue;
+        }
+
         if any_collision {
             record_error(
                 &dir_str,
                 "destination already exists as a different file — not overwriting",
                 "another disc of the same title is normally filed alongside as `_2`, `_3`, ... — reaching this means that could not be done: every variant name is taken, or the destination changed mid-move. Verify/rename the existing library file, or correct the title, then re-run; the new rip is preserved in staging.",
             );
+            schedule_failed_delivery(&dir_str, &outcomes);
             continue;
         }
 
@@ -1233,6 +1569,7 @@ fn check_and_move(cfg: &Config) {
                 "post-cp validation failed: destination size does not match source",
                 "check the destination filesystem for ENOSPC / short writes; the mover removes a broken copy it made and retries next tick (if a dst file remains, remove it)",
             );
+            schedule_failed_delivery(&dir_str, &outcomes);
             continue;
         }
 
@@ -1242,6 +1579,7 @@ fn check_and_move(cfg: &Config) {
                 "post-cp validation failed: destination is structurally invalid or unreadable",
                 "the copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); the mover removes a broken copy it made and retries next tick (if a dst file remains, remove it) — see device_system.log for the specific check",
             );
+            schedule_failed_delivery(&dir_str, &outcomes);
             continue;
         }
 
@@ -1253,14 +1591,38 @@ fn check_and_move(cfg: &Config) {
                 "copy to destination failed",
                 "see device_system.log for the underlying error",
             );
+            schedule_failed_delivery(&dir_str, &outcomes);
             continue;
         }
 
-        // A rip filed as one MKV plus its ISO: remember the pair for the Library.
-        crate::server::library::links::record_delivery(
+        let delivered = match manifest::Manifest::load(&dir).and_then(|m| {
+            let m = m.ok_or_else(|| std::io::Error::other("delivery manifest disappeared"))?;
+            m.verify_delivered()?;
+            Ok(m)
+        }) {
+            Ok(m) => m,
+            Err(e) => {
+                record_error(
+                    &dir_str,
+                    &format!("cannot verify delivered ownership: {e}"),
+                    "Staging metadata is retained; restore the exact delivered files before retrying.",
+                );
+                continue;
+            }
+        };
+        // Remember the entire frozen output set, including earlier passes.
+        if let Err(error) = crate::server::library::links::record_delivery(
             &cfg.autorip_dir,
             planned_moves.iter().map(|(_, d)| d.as_str()),
-        );
+        ) {
+            record_error(
+                &dir_str,
+                &format!("files delivered, but source linkage could not be saved: {error}"),
+                "The delivered files and staging metadata are retained. Repair library-links.json or its folder permissions, then choose Retry.",
+            );
+            schedule_move_retry(&dir_str);
+            continue;
+        }
 
         // Webhook: only fire on cycles where we actually moved bits, and before
         // the teardown gates — a later tick sees only Skipped files and can't.
@@ -1286,22 +1648,27 @@ fn check_and_move(cfg: &Config) {
         // Try to tear down the staging dir; if it can't be removed (typically
         // because the orphan source files can't be unlinked), surface the
         // dir on the UI with a remediation hint.
-        let cleanup_err = std::fs::remove_dir_all(&dir).err();
+        let cleanup_err = delivered.cleanup().err();
 
         if cleanup_err.is_none() {
+            for lock in target_locks {
+                if let Err(e) = lock.delete() {
+                    tracing::warn!(error = %e, "delivered file lock sidecar retained");
+                }
+            }
             clear_error(&dir_str);
             crate::server::log::syslog(&format!("Move complete: {}", display_name));
         } else if any_dirty {
             record_error(
                 &dir_str,
                 "destination has the file but source could not be removed",
-                "manually `rm -rf` the staging dir from a host that can write to the staging share, or fix the NFS export so the container can unlink files there",
+                "Fix staging permissions and retry; the delivery journal is retained until verified cleanup completes.",
             );
         } else if let Some(e) = cleanup_err {
             record_error(
                 &dir_str,
                 &format!("staging cleanup failed: {}", e),
-                "manually `rm -rf` the staging dir",
+                "Inspect changed or unplanned staging artifacts and retry; they are not automatically deleted.",
             );
         }
 
@@ -1309,7 +1676,7 @@ fn check_and_move(cfg: &Config) {
         // ends — including via every `continue` above.
     }
 
-    prune_move_errors(staging_root, &seen_dirs);
+    prune_after_listing(staging_root, &seen_dirs, root_listing_complete);
     // Same unbounded-growth prune for the stranded-dir one-time-warn dedup set.
     prune_stranded_warned(&seen_dirs);
 }
@@ -1416,29 +1783,14 @@ enum DestClaim {
     Unknown,
 }
 
-// Can this move claim `dest` — is it free, or already THIS rip's own output? Uses the same
-// size+content-probe evidence as the collision guard so a retried move is idempotent.
-fn dest_claim(src: &Path, dest: &str) -> DestClaim {
-    let d = match fresh_metadata(Path::new(dest)) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DestClaim::Claimable,
-        Err(_) => return DestClaim::Unknown,
-    };
-    if !d.is_file() || d.len() == 0 {
-        return DestClaim::Claimable;
-    }
-    // Dest exists and is a real file. A source we cannot stat leaves us unable
-    // to compare — unknown, not "someone else's".
-    let Ok(s) = fresh_metadata(src) else {
-        return DestClaim::Unknown;
-    };
-    if !s.is_file() {
-        return DestClaim::Unknown;
-    }
-    if s.len() == d.len() && same_head_and_tail(src, Path::new(dest)) {
-        DestClaim::Claimable
-    } else {
-        DestClaim::OtherFile
+// A new plan owns no existing files, even when their bytes happen to match.
+// Retries use the frozen manifest's exact pre-publication identity instead.
+fn unowned_dest_claim(dest: &str) -> DestClaim {
+    match std::fs::symlink_metadata(dest) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DestClaim::Claimable,
+        Err(_) => DestClaim::Unknown,
+        Ok(m) if m.is_file() && fresh_metadata(Path::new(dest)).is_err() => DestClaim::Unknown,
+        Ok(_) => DestClaim::OtherFile,
     }
 }
 
@@ -1473,7 +1825,7 @@ fn mover_marker_value(st: &crate::server::ripper::staging::DiscState) -> serde_j
 // The TV-episode leaf name for a staging `filename`, or None when this is
 // not a TV episode output. Names as "Show S{NN}E{MM}[ - Episode Name].ext";
 // build_destination folders it under "Show (Year)/Season NN/".
-fn tv_episode_leaf(
+pub(crate) fn tv_episode_leaf(
     tmdb: &Option<tmdb::TmdbResult>,
     outputs: &[crate::server::ripper::staging::Output],
     filename: &str,
@@ -1504,7 +1856,7 @@ fn tv_episode_leaf(
     }
 }
 
-fn build_destination(
+pub(crate) fn build_destination(
     cfg: &Config,
     tmdb: &Option<tmdb::TmdbResult>,
     filename: &str,
@@ -1624,7 +1976,7 @@ fn resolve_media_root(output_dir: &str, sub: &str) -> String {
 // The configured destination ROOT directory that governs a planned move, mirroring
 // build_destination's root selection exactly. Validated present+writable BEFORE creating any
 // subdir tree.
-fn destination_root(cfg: &Config, tmdb: &Option<tmdb::TmdbResult>) -> String {
+pub(crate) fn destination_root(cfg: &Config, tmdb: &Option<tmdb::TmdbResult>) -> String {
     if let Some(result) = tmdb {
         match routing_media_type(result) {
             "movie" if !cfg.movie_dir.is_empty() => {
@@ -1855,7 +2207,47 @@ fn absolute_for_log(dest: &str) -> String {
 
 // Move a file with idempotent retry semantics: pre-flight Skipped/Collision check, then an
 // atomic rename(2), falling back to a worker-thread copy_counting + unlink.
+#[cfg(test)]
 fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -> MoveOutcome {
+    move_file_inner(
+        src,
+        dest,
+        on_progress,
+        std::sync::Arc::new(|_| Ok(())),
+        false,
+        src.parent().unwrap_or_else(|| Path::new("")),
+    )
+}
+
+type BeforePublish = std::sync::Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
+
+fn move_file_journaled(
+    src: &Path,
+    dest: &Path,
+    on_progress: &dyn Fn(u8, f64, f64, f64),
+    before_publish: BeforePublish,
+    job: &Path,
+) -> MoveOutcome {
+    move_file_inner(src, dest, on_progress, before_publish, true, job)
+}
+
+fn move_file_inner(
+    src: &Path,
+    dest: &Path,
+    on_progress: &dyn Fn(u8, f64, f64, f64),
+    before_publish: BeforePublish,
+    journaled: bool,
+    job: &Path,
+) -> MoveOutcome {
+    // Journal recovery alone may adopt an existing destination. Never infer
+    // transaction ownership from its size, structure, or the source's absence.
+    if journaled {
+        match std::fs::symlink_metadata(dest) {
+            Ok(_) => return MoveOutcome::Collision,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return MoveOutcome::Failed,
+        }
+    }
     // Fresh-FD stat on both sides: a cache-served stat on NFS can mis-size
     // either side, spuriously tripping the Skipped or src-missing Moved
     // pre-flights below.
@@ -1864,8 +2256,9 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
 
     // Pre-flight: dest already matches, stopping the infinite re-copy loop when src can't
     // unlink. Equal LENGTH alone doesn't prove equal CONTENT, so a same-size different file is
-    // refused here too; a different-size dest is replaced (the caller's guard refuses it).
+    // refused here too; different-size destinations are also never overwritten.
     if let (Ok(s), Ok(d)) = (&src_meta, &dest_meta)
+        && !journaled
         && s.is_file()
         && d.is_file()
         && s.len() == d.len()
@@ -1896,6 +2289,7 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
     // error leaves src's fate UNKNOWN, so treating it as gone could report Moved for garbage
     // and destroy the real src. Non-NotFound falls through to the copy path instead.
     if let (Err(e), Ok(d)) = (&src_meta, &dest_meta)
+        && !journaled
         && e.kind() == std::io::ErrorKind::NotFound
         && d.is_file()
         && d.len() > 0
@@ -1907,17 +2301,47 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
         return MoveOutcome::Moved;
     }
 
-    if std::fs::rename(src, dest).is_ok() {
-        clear_stale_dest_error(dest);
-        return MoveOutcome::Moved;
+    if let Err(e) = before_publish(src) {
+        record_error(
+            &dest.to_string_lossy(),
+            "publication checkpoint failed",
+            &e.to_string(),
+        );
+        return MoveOutcome::Failed;
+    }
+    match libfreemkv::io::publish::no_replace(src, dest) {
+        Ok(()) => {
+            if let Some(parent) = dest.parent()
+                && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
+            {
+                record_error(
+                    &dest.to_string_lossy(),
+                    "publication directory sync failed",
+                    &e.to_string(),
+                );
+                return MoveOutcome::Failed;
+            }
+            clear_stale_dest_error(dest);
+            return MoveOutcome::Moved;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return MoveOutcome::Collision,
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {}
+        Err(e) => {
+            record_error(
+                &dest.to_string_lossy(),
+                "publication failed",
+                &e.to_string(),
+            );
+            return if e.kind() == std::io::ErrorKind::Unsupported {
+                MoveOutcome::Unsupported
+            } else {
+                MoveOutcome::Failed
+            };
+        }
     }
 
     let dest_str = dest.to_string_lossy().to_string();
-    // Did `dest` positively NOT exist before this attempt? Failure-cleanup below may only
-    // delete dest when true — anything else pre-dates us, routinely a valid MovedDirty
-    // leftover. Only genuine NotFound counts; any other stat error leaves prior state UNKNOWN.
-    let dest_absent_before =
-        matches!(&dest_meta, Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    // Never delete a final pathname based on an earlier absence check.
     let src_size = src_meta.as_ref().map(|m| m.len()).unwrap_or(0);
     let total_gb = src_size as f64 / crate::server::util::BYTES_PER_GIB;
 
@@ -1928,127 +2352,98 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
     let dest_owned = dest.to_path_buf();
     let written = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let written_w = std::sync::Arc::clone(&written);
+    let flush_halt = libfreemkv::halt::Halt::new();
+    let worker_halt = flush_halt.clone();
+    let activity = Arc::new(copy_monitor::Activity::default());
+    let worker_activity = activity.clone();
     let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<u64>>();
-    let copy_handle = std::thread::spawn(move || {
-        let _ = tx.send(copy_counting(&src_owned, &dest_owned, &written_w));
-    });
+    let copy_handle = match crate::server::daemon::spawn_background("mover-copy", move || {
+        let _ = tx.send(copy_counting_with_halt(
+            &src_owned,
+            &dest_owned,
+            &written_w,
+            &|| crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
+            Some(&worker_halt),
+            &|candidate| {
+                if journaled {
+                    // The candidate ends in .part-PID, not the media extension.
+                    if let Some(check) = structural_check(&dest_owned) {
+                        check(candidate).map_err(|e| std::io::Error::other(e.to_string()))?;
+                    }
+                    check_post_copy(&src_owned, candidate)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                }
+                before_publish(candidate)
+            },
+            Some(&worker_activity),
+        ));
+    }) {
+        Ok(handle) => handle,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not start mover copy");
+            return MoveOutcome::Failed;
+        }
+    };
 
-    // Match ripping's progressively smoothed display window (10–60 seconds).
-    // on_progress derives move ETA from this same recent rate, so a slow start
-    // does not keep depressing speed and inflating ETA throughout a long copy.
-    let mut speed = freemkv_engine::SpeedEstimator::new();
-    speed.observe(std::time::Instant::now(), 0);
-    loop {
-        match rx.try_recv() {
-            Ok(Ok(_bytes)) => {
-                let _ = copy_handle.join();
-                on_progress(100, total_gb, total_gb, 0.0);
-                // Post-copy validation is format-aware (EBML head+tail for
-                // mkv, TS-sync for m2ts, fresh-FD stat for iso) so the NFS
-                // attribute cache can't phantom-fail it. Runs before unlink.
-                if let Err(e) = check_post_copy(src, Path::new(&dest_str)) {
-                    crate::server::log::syslog(&format!(
-                        "Post-cp validation failed for {}: {}",
-                        dest_str, e
-                    ));
-                    // A broken copy this attempt made must not stay at the library
-                    // name: the next tick's disc-variant search would file around it.
-                    if dest_absent_before && let Err(rm) = std::fs::remove_file(&dest_str) {
-                        crate::server::log::syslog(&format!(
-                            "Could not remove the broken copy {dest_str}: {rm}"
-                        ));
-                    }
-                    // Map failure KIND to outcome for an accurate operator
-                    // hint: only a length disagreement is SizeMismatch;
-                    // structural/readability failures get PostCopyInvalid.
-                    return match e {
-                        MoveError::SizeDoesNotMatch { .. } => MoveOutcome::SizeMismatch,
-                        MoveError::MkvBadHead
-                        | MoveError::MkvBadTail
-                        | MoveError::M2tsBadSync
-                        | MoveError::Unreadable(_) => MoveOutcome::PostCopyInvalid,
-                    };
-                }
-                clear_stale_dest_error(dest);
-                return match std::fs::remove_file(src) {
-                    Ok(_) => MoveOutcome::Moved,
+    let result = copy_monitor::Monitor {
+        job,
+        destination: dest,
+        written: &written,
+        activity: &activity,
+        halt: &flush_halt,
+        progress: on_progress,
+        source_size: src_size,
+        stall_window: std::time::Duration::from_secs(60),
+        poll_interval: std::time::Duration::from_millis(250),
+    }
+    .wait(rx, copy_handle);
+    match result {
+        Ok(_bytes) => {
+            on_progress(100, total_gb, total_gb, 0.0);
+            if let Err(e) = check_post_copy(src, Path::new(&dest_str)) {
+                return match e {
+                    MoveError::SizeDoesNotMatch { .. } => MoveOutcome::SizeMismatch,
+                    _ => MoveOutcome::PostCopyInvalid,
+                };
+            }
+            if let Some(parent) = dest.parent()
+                && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
+            {
+                record_error(
+                    &dest.to_string_lossy(),
+                    "publication directory sync failed",
+                    &e.to_string(),
+                );
+                return MoveOutcome::Failed;
+            }
+            clear_stale_dest_error(dest);
+            if journaled {
+                // Retire sources only after exact identities and durable links.
+                MoveOutcome::Moved
+            } else {
+                match std::fs::remove_file(src) {
+                    Ok(()) => MoveOutcome::Moved,
                     Err(_) => MoveOutcome::MovedDirty,
-                };
-            }
-            Ok(Err(e)) => {
-                let _ = copy_handle.join();
-                // Remove the partial destination so the next tick retries cleanly instead of a
-                // phantom size-mismatch Collision. Only when dest was positively absent before
-                // (dest_absent_before) — else it's typically a valid MovedDirty copy.
-                if dest_absent_before {
-                    match std::fs::remove_file(&dest_str) {
-                        Ok(()) => {}
-                        // Record ONLY a leftover that is really there: unlink in a dir the
-                        // container cannot write reports EACCES, not ENOENT, even with no file
-                        // there. Ask the filesystem instead.
-                        Err(rm) => {
-                            if Path::new(&dest_str).exists() {
-                                record_error(
-                                    &dest_str,
-                                    "partial copy could not be removed",
-                                    &format!(
-                                        "partial copy could not be removed from {dest_str}; delete manually to unblock ({rm})"
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    crate::server::log::syslog(&format!(
-                        "Copy failed; leaving pre-existing destination in place: {}",
-                        dest_str
-                    ));
                 }
-                crate::server::log::syslog(&format!("Copy failed for {}: {}", dest_str, e));
-                return MoveOutcome::Failed;
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // Sender dropped without sending — worker panicked. Same
-                // ownership rule as the Ok(Err) arm: only clean up a dest
-                // this attempt could have created.
-                if dest_absent_before {
-                    let _ = std::fs::remove_file(&dest_str);
-                }
-                crate::server::log::syslog(&format!("Copy thread panicked for {}", dest_str));
-                return MoveOutcome::Failed;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Honor SIGTERM mid-copy: run()'s shutdown sleep only gates BETWEEN ticks, so
-                // a copy would otherwise run until docker stop's grace expires and SIGKILL
-                // lands mid-write. Join is bounded to one chunk.
-                if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = copy_handle.join();
-                    // Drop the partial destination so a restart's first tick doesn't wedge on
-                    // a size-mismatch Collision — but only if this attempt could have created
-                    // it; a pre-existing dest is not ours to delete.
-                    if dest_absent_before {
-                        let _ = std::fs::remove_file(&dest_str);
-                    }
-                    crate::server::log::syslog(&format!(
-                        "Move aborted (shutdown) mid-copy: {}",
-                        dest_str
-                    ));
-                    return MoveOutcome::Failed;
-                }
-                // Progress straight from the bytes we've written — no network stat,
-                // so sampling cannot stall on the destination or read stale metadata.
-                let done = written.load(std::sync::atomic::Ordering::Relaxed);
-                let pct = if let Some(p) = done.saturating_mul(100).checked_div(src_size) {
-                    p.min(100) as u8
-                } else {
-                    0
-                };
-                let gb = done as f64 / crate::server::util::BYTES_PER_GIB;
-                let speed_mbs = speed.observe(std::time::Instant::now(), done);
-                on_progress(pct, gb, total_gb, speed_mbs);
-                std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
+        Err(e) => {
+            if !copy_monitor::was_stalled(&e) {
+                crate::server::log::syslog(&format!("Copy failed for {dest_str}: {e}"));
+            }
+            copy_failure_outcome(&e)
+        }
+    }
+}
+
+fn copy_failure_outcome(error: &std::io::Error) -> MoveOutcome {
+    if copy_monitor::was_stalled(error) {
+        return MoveOutcome::Stalled;
+    }
+    match error.kind() {
+        std::io::ErrorKind::AlreadyExists => MoveOutcome::Collision,
+        std::io::ErrorKind::Unsupported => MoveOutcome::Unsupported,
+        _ => MoveOutcome::Failed,
     }
 }
 

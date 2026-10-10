@@ -158,6 +158,7 @@ fn synthetic_disc() -> Disc {
     });
 
     let title = DiscTitle {
+        selection_evidence: Default::default(),
         playlist: "00800.mpls".to_string(),
         playlist_id: 800,
         duration_secs: 7530.0, // 2h 05m

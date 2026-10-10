@@ -122,7 +122,9 @@ where
                 .entered();
         f();
     };
-    let handle = std::thread::Builder::new().name(name).spawn(wrapped)?;
+    // Also cover a rip spawned by an already-admitted HTTP handler during
+    // shutdown: the daemon's helper drain must see it before sealing admission.
+    let handle = crate::server::daemon::spawn_background(&name, wrapped)?;
     match register_rip_thread(device, handle) {
         Ok(()) => {
             // Release the worker. A send error is impossible in practice (the
@@ -224,7 +226,7 @@ pub fn join_rip_thread(device: &str, timeout: Duration) -> Result<(), ()> {
 /// N×`timeout`. Compute one deadline up front and hand each join the
 /// time remaining against it, so a 4-drive shutdown is capped at 1×
 /// `timeout` total.
-pub fn join_all_rip_threads(timeout: Duration) {
+pub fn join_all_rip_threads(timeout: Duration) -> bool {
     let devices: Vec<String> = RIP_THREADS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -240,12 +242,24 @@ pub fn join_all_rip_threads(timeout: Duration) {
         }
     }
     let deadline = std::time::Instant::now() + timeout;
+    let mut drained = true;
     for device in devices {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if join_rip_thread(&device, remaining).is_err() {
+            drained = false;
             tracing::warn!(device = %device, "rip thread did not drain within timeout");
         }
     }
+    drained
+}
+
+pub(super) fn reset_after_drain() {
+    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    DISC_IDENTITY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    HALTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 // Per-device cooperative-cancel tokens; the rip thread spawn site allocates one Halt per rip
@@ -549,6 +563,15 @@ pub(super) fn session_is_scanned(device: &str) -> bool {
 }
 
 pub(super) fn session_disc_hash(device: &str) -> Option<String> {
+    if let Some(identity) = super::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .map(|s| s.disc_identity.clone())
+        .filter(|id| !id.is_empty())
+    {
+        return Some(identity);
+    }
     let sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
     sessions
         .get(device)

@@ -14,7 +14,6 @@ fn synthetic_disc() -> Scanned {
             item: type_s.into(),
             format: desc.into(),
             notes: String::new(),
-            role: None,
             desc: desc.into(),
             depth,
             checkable,
@@ -45,6 +44,13 @@ fn synthetic_disc() -> Scanned {
         }
     }
     Scanned {
+        selection_model: freemkv_engine::SelectionModel::from_titles(&[5400.0, 600.0].map(
+            |secs| {
+                let mut title = libfreemkv::DiscTitle::empty();
+                title.duration_secs = secs;
+                title
+            },
+        )),
         label: "TEST_DISC".into(),
         volume_id: "TEST_DISC".into(),
         rows,

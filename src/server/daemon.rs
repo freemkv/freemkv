@@ -6,6 +6,20 @@ use super::{
 
 use std::sync::atomic::Ordering;
 
+#[path = "daemon_lifecycle.rs"]
+mod lifecycle;
+static BACKGROUND: std::sync::LazyLock<std::sync::Arc<lifecycle::Background>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Spawn a service helper which must finish before an internal restart, even
+/// when its caller times out and drops the returned handle.
+pub(crate) fn spawn_background<T: Send + 'static>(
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<T>> {
+    BACKGROUND.spawn(name, f)
+}
+
 /// Run the server shell. `argv` is everything after `freemkv server`.
 ///
 /// Every terminal path either exits the process (`--healthcheck`,
@@ -55,6 +69,7 @@ pub fn run(argv: Vec<String>) {
         None => {}
     }
 
+    let mut restarting = false;
     loop {
         // Panic hook FIRST — before observe::init, so a panic during tracing
         // setup still hits post-mortem handling. tracing::error! is a no-op
@@ -114,6 +129,11 @@ pub fn run(argv: Vec<String>) {
 
         // Load config
         let cfg = config::load();
+        if restarting {
+            crate::server::library::reload_after_drain(
+                &cfg.read().unwrap_or_else(|e| e.into_inner()),
+            );
+        }
 
         // Warn at boot if a configured movie/tv/output dir is missing or not writable
         // (finished rips stay in staging meanwhile). Own thread: a hung network mount
@@ -210,7 +230,7 @@ pub fn run(argv: Vec<String>) {
         // Start KEYDB auto-update thread — single source of truth for periodic
         // refresh. Pre-0.13 a cron entry also spawned a second binary that raced
         // this thread for /dev/sg* and port 8080; that path was removed.
-        let _keydb_handle = std::thread::spawn({
+        let keydb_handle = std::thread::spawn({
             let cfg2 = cfg.clone();
             move || {
                 tracing::info!("keydb update thread starting (24h interval)");
@@ -273,7 +293,7 @@ pub fn run(argv: Vec<String>) {
         // Log prune thread — replaces the v0.25.5 cron-based cleanup. retention_days
         // comes from the Settings UI and is re-read each tick so a saved update
         // takes effect on the next run without a restart.
-        let _log_prune_handle = std::thread::spawn({
+        let log_prune_handle = std::thread::spawn({
             let cfg = cfg.clone();
             move || {
                 tracing::info!("log prune thread starting (24h interval)");
@@ -295,35 +315,54 @@ pub fn run(argv: Vec<String>) {
         // Main loop: poll drives (checks SHUTDOWN flag internally)
         ripper::drive_poll_loop(&cfg);
 
-        // Graceful shutdown is NOT a failure: clear in-progress markers up front
-        // so the next start resumes cleanly. Robust even if the drain below is
-        // SIGKILLed mid-drain by docker's stop-grace — markers are gone by then.
+        SHUTDOWN.store(true, Ordering::Release);
+        let mut workers = vec![
+            ("mover", Some(mover_handle)),
+            ("muxer", Some(muxer_handle)),
+            ("library", Some(library_handle)),
+            ("keydb", Some(keydb_handle)),
+            ("log-prune", Some(log_prune_handle)),
+        ];
+        let mut web_handle = Some(web_handle);
+        loop {
+            // HTTP admission is closed by SHUTDOWN. Existing requests may still
+            // spawn rips, so drain their tracked helpers BEFORE the final rip
+            // registry check. No short-circuit: every worker gets a drain attempt.
+            let mut drained = drain_services(
+                &mut workers,
+                &BACKGROUND,
+                ripper::join_all_rip_threads,
+                std::time::Duration::from_secs(120),
+            );
+            if drained {
+                web::stop_after_drain();
+                drained &= join_bounded(&mut web_handle, "web", std::time::Duration::from_secs(10));
+            }
+            if drained {
+                break;
+            }
+            log::syslog(
+                "Restart refused while old services are still draining; cancellation remains set",
+            );
+            if !REBOOT.load(Ordering::Acquire) {
+                // Process shutdown may remain bounded. Internal restart must not
+                // detach a survivor and clear its cancellation underneath it.
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+
+        // Cleanup is safe only after all writers have relinquished artifacts.
         {
             let c = cfg.read().unwrap_or_else(|e| e.into_inner());
             ripper::staging::clear_inprogress_markers(std::path::Path::new(&c.staging_dir));
         }
-
-        // Drain any rip threads still mid-flight so we don't exit while
-        // libfreemkv holds a SCSI session. Bounded so a stuck drive can't
-        // pin shutdown indefinitely.
-        ripper::join_all_rip_threads(std::time::Duration::from_secs(60));
-
-        // Drain the mover and muxer too: both loop on SHUTDOWN and return after
-        // the current unit, so joining avoids a truncated file or partial MKV.
-        // Bounded so a wedged NFS write or stuck mux can't pin shutdown forever.
-        join_bounded(mover_handle, "mover", std::time::Duration::from_secs(120));
-        join_bounded(muxer_handle, "muxer", std::time::Duration::from_secs(120));
-        join_bounded(
-            library_handle,
-            "library",
-            std::time::Duration::from_secs(120),
-        );
-
-        join_bounded(web_handle, "web", std::time::Duration::from_secs(10));
-
         log::syslog("autorip stopped");
         if REBOOT.swap(false, Ordering::AcqRel) {
+            reset_after_drain();
+            BACKGROUND.reopen();
             SHUTDOWN.store(false, Ordering::Release);
+            restarting = true;
             log::syslog("autorip soft reboot: starting fresh instance");
             continue;
         }
@@ -340,35 +379,78 @@ fn spawn_destination_check<F>(
 where
     F: FnOnce(&config::Config) -> Vec<(String, String)> + Send + 'static,
 {
-    std::thread::Builder::new()
-        .name("destination-check".into())
-        .spawn(move || {
-            for (root, reason) in check(&cfg) {
-                log::syslog(&format!(
-                    "WARNING: configured destination '{root}' is not usable at startup: {reason}. \
+    spawn_background("destination-check", move || {
+        for (root, reason) in check(&cfg) {
+            log::syslog(&format!(
+                "WARNING: configured destination '{root}' is not usable at startup: {reason}. \
                      Finished rips will be PRESERVED in staging (not moved) until this is fixed \
                      (check the directory exists and its bind-mount/NAS share is present and writable)."
-                ));
-            }
-        })
+            ));
+        }
+    })
 }
 
 // Join `handle`, giving up after `timeout` so a wedged worker can't pin
 // shutdown. Polls `is_finished` (no join-with-timeout in std); worker is
 // expected to observe SHUTDOWN, with the timeout as a stuck-I/O backstop.
-fn join_bounded(handle: std::thread::JoinHandle<()>, name: &str, timeout: std::time::Duration) {
+fn join_bounded(
+    handle: &mut Option<std::thread::JoinHandle<()>>,
+    name: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let Some(worker) = handle.as_ref() else {
+        return true;
+    };
     let deadline = std::time::Instant::now() + timeout;
-    while !handle.is_finished() {
+    while !worker.is_finished() {
         if std::time::Instant::now() >= deadline {
             tracing::warn!(
                 thread = name,
-                "did not drain within timeout; exiting anyway"
+                "did not drain within timeout; restart is not safe"
             );
-            return;
+            return false;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    let _ = handle.join();
+    if let Some(worker) = handle.take() {
+        let _ = worker.join();
+    }
+    true
+}
+
+fn reset_after_drain() {
+    ripper::reset_after_drain();
+    config::reset_after_drain();
+    crate::server::health::reset_after_drain();
+    keysource::reset_after_drain();
+    mover::reset_after_drain();
+    muxer::reset_after_drain();
+    web::reset_after_drain();
+}
+
+fn drain_services(
+    workers: &mut [(&str, Option<std::thread::JoinHandle<()>>)],
+    background: &lifecycle::Background,
+    mut drain_rips: impl FnMut(std::time::Duration) -> bool,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut drained = drain_rips(timeout.min(std::time::Duration::from_secs(60)));
+    for (name, handle) in workers {
+        drained &= join_bounded(
+            handle,
+            name,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        );
+    }
+    // Keep helper admission available to cancellation cleanup until the primary
+    // workers have finished. Tracked HTTP handlers and their newly spawned rips
+    // then drain together before admission is sealed atomically at zero.
+    if !drained || !background.drain(deadline.saturating_duration_since(std::time::Instant::now()))
+    {
+        return false;
+    }
+    drain_rips(std::time::Duration::ZERO)
 }
 
 #[cfg(unix)]

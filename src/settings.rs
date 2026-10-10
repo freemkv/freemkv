@@ -27,6 +27,8 @@ pub struct Settings {
     /// them starts ticked. Empty (the default) = today's behaviour, every
     /// track ticked.
     pub audio_langs: String,
+    /// Content presentation language; independent of retained audio and UI locale.
+    pub presentation_language: String,
     /// Preferred NON-FORCED subtitle languages, same shape as `audio_langs`.
     pub sub_langs: String,
     /// Preferred FORCED-subtitle languages — its own independent set, NOT a
@@ -86,6 +88,7 @@ impl Default for Settings {
             // Empty = no preference = exactly the pre-1.6.2 behaviour: a
             // ticked title ticks every one of its streams.
             audio_langs: String::new(),
+            presentation_language: String::new(),
             sub_langs: String::new(),
             forced_sub_langs: String::new(),
             subtitle_mode: "all".into(),
@@ -240,6 +243,7 @@ impl Settings {
             "selection" => self.selection.clone(),
             "min_title_secs" => self.min_title_secs.clone(),
             "audio_langs" => self.audio_langs.clone(),
+            "presentation_language" => self.presentation_language.clone(),
             "sub_langs" => self.sub_langs.clone(),
             "forced_sub_langs" => self.forced_sub_langs.clone(),
             "subtitle_mode" => self.subtitle_mode.clone(),
@@ -278,6 +282,7 @@ impl Settings {
             "selection" => self.selection = v,
             "min_title_secs" => self.min_title_secs = v,
             "audio_langs" => self.audio_langs = v,
+            "presentation_language" => self.presentation_language = v,
             "sub_langs" => self.sub_langs = v,
             "forced_sub_langs" => self.forced_sub_langs = v,
             "subtitle_mode" => self.subtitle_mode = v,
@@ -527,6 +532,11 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
     if buf.is_empty() {
         return Err(get_or("gui.log.keydb_download_empty", "Download was empty"));
     }
+    install_keydb(&buf, &dest)
+}
+
+fn install_keydb(buf: &[u8], dest: &str) -> Result<String, String> {
+    use crate::strings::fmt_or;
     if let Some(parent) = std::path::Path::new(&dest).parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             format!(
@@ -535,8 +545,8 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
             )
         })?;
     }
-    let src = freemkv_keysources::KeydbSource::new(&dest);
-    match src.save(&buf) {
+    let src = freemkv_keysources::KeydbSource::new(dest);
+    match src.save(buf) {
         Ok(r) => Ok(fmt_or(
             "gui.log.keydb_updated",
             "keydb updated — {entries} entries ({kb} KB) written to {path}",
@@ -546,15 +556,20 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
                 ("path", &r.path.display().to_string()),
             ],
         )),
-        Err(e) => Err(fmt_or(
-            "gui.log.keydb_rejected",
-            &format!(
-                "keydb could not be written to {}: E{} (check that its directory is writable)",
-                dest,
-                e.code()
-            ),
-            &[("code", &e.code().to_string())],
-        )),
+        Err(e) => {
+            let message = fmt_or(
+                "gui.log.keydb_rejected",
+                "keydb rejected: E{code}",
+                &[("code", &e.code().to_string())],
+            );
+            if matches!(e, libfreemkv::Error::KeydbWrite { .. }) {
+                Err(format!(
+                    "{message} — {dest}: cannot replace keydb.cfg; check directory write permissions and sandbox access"
+                ))
+            } else {
+                Err(message)
+            }
+        }
     }
 }
 
@@ -689,3 +704,7 @@ mod normalize_tests;
 #[cfg(test)]
 #[path = "settings_update_check_tests.rs"]
 mod update_check_tests;
+
+#[cfg(test)]
+#[path = "settings_keydb_tests.rs"]
+mod keydb_tests;

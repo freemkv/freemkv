@@ -3,7 +3,6 @@ use crate::engine::Row;
 
 fn row(depth: u8, duration_secs: f64, size_bytes: Option<u64>) -> Row {
     Row {
-        role: None,
         item: String::new(),
         format: String::new(),
         notes: String::new(),

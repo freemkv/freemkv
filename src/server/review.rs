@@ -18,6 +18,8 @@ pub struct HeldRip {
     pub title: String,
     /// Year the ripper resolved (0 = none — a common reason it's held).
     pub year: u16,
+    pub media_type: String,
+    pub episode_start: Option<u16>,
     /// The ripped media file inside the dir (for display).
     pub file: String,
     /// Why it's held (human-readable).
@@ -30,6 +32,8 @@ fn state_marker(st: &crate::server::ripper::staging::DiscState) -> serde_json::V
         "title": st.title,
         "year": st.year,
         "media_type": st.media_type,
+        "episode_start": st.episode_start,
+        "failure_reason": st.failure_reason,
         "disc_name": st.disc_name,
     })
 }
@@ -111,8 +115,14 @@ pub fn list_held(staging_root: &str) -> Vec<HeldRip> {
                 .to_string(),
             title,
             year,
+            media_type: m["media_type"].as_str().unwrap_or("movie").to_string(),
+            episode_start: m["episode_start"]
+                .as_u64()
+                .and_then(|n| u16::try_from(n).ok()),
             file: media_file(&dir).unwrap_or_default(),
-            reason: if year == 0 {
+            reason: if let Some(reason) = m["failure_reason"].as_str() {
+                reason.to_string()
+            } else if year == 0 {
                 "no confident title/year match".into()
             } else {
                 "uncertain title match".into()

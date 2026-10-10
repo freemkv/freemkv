@@ -15,6 +15,9 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(test)]
+mod selection_test_fixtures;
+
 // ── CLI shell (the gold-standard freemkv CLI, replicated verbatim) ──────────
 // Also declared in `lib.rs`: the CLI and the GUI hold an ISO under one `<final>.lock`.
 mod artifact_lock;

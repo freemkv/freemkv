@@ -376,6 +376,10 @@ fn rip_keys_map()
     RIP_KEYS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+pub(crate) fn reset_after_drain() {
+    rip_keys_map().clear();
+}
+
 /// Keep the rip's key set for the staged `iso` until its mux is done (memory only).
 pub fn hold_rip_keys(iso: &Path, keys: libfreemkv::keys::KeyRing) {
     rip_keys_map().insert(iso.to_path_buf(), keys);

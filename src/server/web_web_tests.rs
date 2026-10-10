@@ -3719,13 +3719,147 @@ mod http {
     // fall back to the disc's detected tmdb_media_type, not default to
     // "movie" (which collapses every TV episode into one Show (Year).mkv).
     #[test]
+    fn held_capture_episode_confirmation_queues_iso_without_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let dir = tmp.path().join("held-episode");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = ripper::staging::DiscState::new(ripper::staging::StagingState::Review);
+        saved.title = "Show Season 1 Disc 2".into();
+        saved.media_type = "tv".into();
+        saved.disc_identity = "stable-disc".into();
+        saved.iso_path = dir.join("disc.iso").to_string_lossy().into_owned();
+        std::fs::write(&saved.iso_path, b"capture").unwrap();
+        ripper::staging::write_state(&dir, &saved);
+        for invalid in ["0", "65536", "-1", "1.5", "\"4\""] {
+            let body =
+                format!(r#"{{"dir":"held-episode","action":"proceed","episode_start":{invalid}}}"#);
+            assert_eq!(
+                roundtrip(&cfg, "POST", "/api/review/resolve", Some(&body), &[]).0,
+                400
+            );
+        }
+        let body = r#"{"dir":"held-episode","action":"proceed","episode_start":4}"#;
+        assert_eq!(
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[]).0,
+            200
+        );
+        let current = ripper::staging::read_state(&dir).unwrap();
+        assert_eq!(current.state, ripper::staging::StagingState::Ripped);
+        assert_eq!(current.episode_start, Some(4));
+        assert!(current.replan_required);
+        assert_eq!(current.disc_identity, "stable-disc");
+        assert_eq!(std::fs::read(&saved.iso_path).unwrap(), b"capture");
+    }
+
+    #[test]
+    fn single_pass_title_override_guards_persisted_mode_after_settings_change() {
+        let run = |device: &str, current_type: &str, current_id: u64, body: &str| {
+            let tmp = tempfile::tempdir().unwrap();
+            let cfg = Arc::new(RwLock::new(Config {
+                staging_dir: tmp.path().to_string_lossy().into_owned(),
+                // Settings changed after this single-pass job started.
+                max_retries: 3,
+                ..Default::default()
+            }));
+            let dir = tmp.path().join("job");
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut saved =
+                ripper::staging::DiscState::new(ripper::staging::StagingState::Sweeping);
+            saved.tmdb_id = current_id;
+            saved.media_type = current_type.into();
+            saved.max_retries = 0;
+            ripper::staging::write_state(&dir, &saved);
+            ripper::update_state(
+                device,
+                ripper::RipState {
+                    device: device.to_string(),
+                    status: "ripping".into(),
+                    disc_present: true,
+                    job_id: "job".into(),
+                    tmdb_media_type: current_type.into(),
+                    ..Default::default()
+                },
+            );
+            let result = roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/title/{device}"),
+                Some(body),
+                &[],
+            );
+            let row = ripper::STATE.lock().unwrap().remove(device).unwrap();
+            let persisted = ripper::staging::read_state(&dir).unwrap();
+            assert_eq!(row.metadata_revision, persisted.metadata_revision);
+            if result.0 == 200 {
+                assert_eq!(row.metadata_revision, 1);
+                assert_eq!(row.user_metadata, persisted.user_metadata);
+            } else {
+                assert_eq!(row.metadata_revision, 0);
+            }
+            result.0
+        };
+
+        assert_eq!(
+            run(
+                "sgtitleguardtv1",
+                "tv",
+                10,
+                r#"{"job_id":"job","title":"Show","media_type":"tv","tmdb_id":11}"#,
+            ),
+            409,
+            "changing a TV TMDB id during single-pass must be refused"
+        );
+        assert_eq!(
+            run(
+                "sgtitleguardunknown2",
+                "",
+                0,
+                r#"{"job_id":"job","title":"Show","media_type":"tv","tmdb_id":10}"#,
+            ),
+            409,
+            "unknown-to-TV changes the single-pass plan and must be refused"
+        );
+        assert_eq!(
+            run(
+                "sgtitleguardtv3",
+                "tv",
+                10,
+                r#"{"job_id":"job","title":"Renamed","media_type":"tv","tmdb_id":10}"#,
+            ),
+            200,
+            "same TV identity permits a title edit"
+        );
+        assert_eq!(
+            run(
+                "sgtitleguardunverified4",
+                "movie",
+                10,
+                r#"{"job_id":"job","title":"Renamed","media_type":"movie","tmdb_id":10}"#,
+            ),
+            200,
+            "an unverified live job may edit metadata in its own namespace"
+        );
+    }
+
+    #[test]
     fn title_override_omitted_media_type_preserves_detected_tv() {
-        let cfg = Arc::new(RwLock::new(Config::default()));
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
         let device = "sgtitleovrtvpreserve1";
         ripper::update_state(
             device,
             ripper::RipState {
                 device: device.to_string(),
+                disc_present: true,
+                job_id: "job".into(),
+                disc_identity: "verified-disc".into(),
                 tmdb_media_type: "tv".to_string(),
                 ..Default::default()
             },
@@ -3735,13 +3869,15 @@ mod http {
             &cfg,
             "POST",
             &format!("/api/title/{device}"),
-            Some(r#"{"title":"Endeavour","tmdb_id":0}"#),
+            Some(r#"{"job_id":"job","title":"Endeavour","tmdb_id":0}"#),
             &[],
         );
         assert_eq!(code, 200, "a known device must accept the override");
 
-        let stored = ripper::take_title_override(device)
-            .expect("handle_title_override must record an override");
+        let stored = ripper::staging::read_state(&tmp.path().join("job"))
+            .unwrap()
+            .user_metadata
+            .expect("correction must be durable");
         assert_eq!(
             stored.media_type, "tv",
             "omitting media_type must preserve the disc's detected \
@@ -3753,12 +3889,19 @@ mod http {
 
     #[test]
     fn title_override_card_shows_what_the_engine_will_use() {
-        let cfg = Arc::new(RwLock::new(Config::default()));
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
         let device = "sgtitleovrcard4";
         ripper::update_state(
             device,
             ripper::RipState {
                 device: device.to_string(),
+                disc_present: true,
+                job_id: "job".into(),
+                disc_identity: "verified-disc".into(),
                 tmdb_title: "Film A".to_string(),
                 tmdb_poster: "https://image.tmdb.org/t/p/w185/a.jpg".to_string(),
                 tmdb_overview: "About A".to_string(),
@@ -3770,7 +3913,7 @@ mod http {
             &cfg,
             "POST",
             &format!("/api/title/{device}"),
-            Some(r#"{"title":"Show B","media_type":"tv","tmdb_id":0}"#),
+            Some(r#"{"job_id":"job","title":"Show B","media_type":"tv","tmdb_id":0}"#),
             &[],
         );
         assert_eq!(code, 200);
@@ -3787,23 +3930,33 @@ mod http {
             &cfg,
             "POST",
             &format!("/api/title/{device}"),
-            Some(r#"{"title":"Show C","tmdb_id":0}"#),
+            Some(r#"{"job_id":"job","title":"Show C","tmdb_id":0}"#),
             &[],
         );
         assert_eq!(code, 200);
-        let stored = ripper::take_title_override(device).unwrap();
+        let stored = ripper::staging::read_state(&tmp.path().join("job"))
+            .unwrap()
+            .user_metadata
+            .unwrap();
         assert_eq!(stored.media_type, "tv");
         crate::server::ripper::STATE.lock().unwrap().remove(device);
     }
 
     #[test]
     fn title_override_omitted_media_type_defaults_movie_when_unknown() {
-        let cfg = Arc::new(RwLock::new(Config::default()));
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
         let device = "sgtitleovrnodetect2";
         ripper::update_state(
             device,
             ripper::RipState {
                 device: device.to_string(),
+                disc_present: true,
+                job_id: "job".into(),
+                disc_identity: "verified-disc".into(),
                 // tmdb_media_type left empty: nothing detected yet.
                 ..Default::default()
             },
@@ -3813,13 +3966,15 @@ mod http {
             &cfg,
             "POST",
             &format!("/api/title/{device}"),
-            Some(r#"{"title":"X","tmdb_id":0}"#),
+            Some(r#"{"job_id":"job","title":"X","tmdb_id":0}"#),
             &[],
         );
         assert_eq!(code, 200, "a known device must accept the override");
 
-        let stored = ripper::take_title_override(device)
-            .expect("handle_title_override must record an override");
+        let stored = ripper::staging::read_state(&tmp.path().join("job"))
+            .unwrap()
+            .user_metadata
+            .expect("correction must be durable");
         assert_eq!(
             stored.media_type, "movie",
             "with no detected media_type, omission must fall back to movie"
@@ -3830,7 +3985,11 @@ mod http {
 
     #[test]
     fn title_override_explicit_media_type_is_honored() {
-        let cfg = Arc::new(RwLock::new(Config::default()));
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
         let device = "sgtitleovrexplicit3";
         // Detected as movie, but the operator explicitly overrides to tv:
         // the explicit field must win over whatever STATE says.
@@ -3838,6 +3997,9 @@ mod http {
             device,
             ripper::RipState {
                 device: device.to_string(),
+                disc_present: true,
+                job_id: "job".into(),
+                disc_identity: "verified-disc".into(),
                 tmdb_media_type: "movie".to_string(),
                 ..Default::default()
             },
@@ -3847,13 +4009,15 @@ mod http {
             &cfg,
             "POST",
             &format!("/api/title/{device}"),
-            Some(r#"{"title":"X","media_type":"tv","tmdb_id":0}"#),
+            Some(r#"{"job_id":"job","title":"X","media_type":"tv","tmdb_id":0}"#),
             &[],
         );
         assert_eq!(code, 200, "a known device must accept the override");
 
-        let stored = ripper::take_title_override(device)
-            .expect("handle_title_override must record an override");
+        let stored = ripper::staging::read_state(&tmp.path().join("job"))
+            .unwrap()
+            .user_metadata
+            .expect("correction must be durable");
         assert_eq!(
             stored.media_type, "tv",
             "an explicit media_type in the request body must be honored \

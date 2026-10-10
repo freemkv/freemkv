@@ -8,6 +8,7 @@
 //! multipass recovery runs in the engine (`freemkv_engine::run_with`), driven
 //! through `passes::ServerPassHost`.
 
+mod jobs;
 pub(crate) mod mux;
 mod passes;
 pub mod resume;
@@ -29,73 +30,42 @@ pub use session::{
 #[allow(unused_imports)]
 pub use state::{
     BadRange, Resumable, RipState, STATE, device_known, hold_stopped_disc, is_busy,
-    release_stopped_disc, set_stop_cooldown, set_title_override, take_title_override,
-    try_claim_active, try_claim_active_checked, update_state, update_state_with,
+    release_stopped_disc, set_stop_cooldown, try_claim_active, try_claim_active_checked,
+    update_state, update_state_with,
 };
 
 /// Persist an operator title correction onto the current disc's staging entry.
-/// The mapfile remains byte-for-byte intact: its disc hash is the identity;
-/// title/routing metadata lives in state.json and staged filenames.
+/// Active files never move; naming is resolved when the job is delivered.
 pub fn retitle_staging_for_device(
     cfg: &Arc<RwLock<Config>>,
     device: &str,
-    title: &str,
-    year: u16,
-    media_type: &str,
-) -> Result<(), String> {
+    expected_job: &str,
+    metadata: staging::UserMetadata,
+) -> Result<u64, String> {
     let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let (old_title, label) = {
-        let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let row = s.get(device).ok_or_else(|| "unknown device".to_string())?;
-        (row.disc_name.clone(), row.disc_label.clone())
-    };
-    if old_title.is_empty() || old_title == title {
-        return Ok(());
+    let row = STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .cloned()
+        .ok_or("unknown device")?;
+    if row.job_id.is_empty()
+        || row.job_id != expected_job
+        || !row.disc_present
+        || row.status == "scanning"
+    {
+        return Err("the disc changed or is not identified yet; refresh and try again".into());
     }
-    let root = std::path::Path::new(&c.staging_dir);
-    let old_dir = root.join(staging::staging_basename(root, &old_title, &label));
-    if !old_dir.is_dir() {
-        return Ok(());
-    }
-    let new_dir = root.join(staging::staging_basename(root, title, &label));
-    if new_dir != old_dir && new_dir.exists() {
-        return Err(format!(
-            "the corrected title already has staging: {}",
-            new_dir.display()
-        ));
-    }
-    if new_dir != old_dir {
-        std::fs::rename(&old_dir, &new_dir)
-            .map_err(|e| format!("could not rename staging: {e}"))?;
-    }
-    let old_stem = crate::server::util::sanitize_path_compact(&old_title);
-    let new_stem = crate::server::util::sanitize_path_compact(title);
-    if old_stem != new_stem {
-        let entries = std::fs::read_dir(&new_dir)
-            .map_err(|e| format!("could not inspect renamed staging: {e}"))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("could not inspect staged file: {e}"))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(rest) = name.strip_prefix(&old_stem) else {
-                continue;
-            };
-            let target = new_dir.join(format!("{new_stem}{rest}"));
-            if target.exists() {
-                return Err(format!(
-                    "the corrected title already has staged file: {}",
-                    target.display()
-                ));
-            }
-            std::fs::rename(entry.path(), target)
-                .map_err(|e| format!("could not rename staged file: {e}"))?;
-        }
-    }
-    staging::mutate_state_if_present(&new_dir, |st| {
-        st.title = title.to_string();
-        st.year = year;
-        st.media_type = media_type.to_string();
-    });
-    Ok(())
+    let dir = jobs::path(std::path::Path::new(&c.staging_dir), &row.job_id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create staging: {e}"))?;
+    staging::save_user_metadata_for_device(
+        &dir,
+        metadata,
+        &row.disc_identity,
+        &row.disc_label,
+        device,
+    )
+    .map_err(|e| e.to_string())
 }
 
 // Internal-use imports for the orchestrator code that lives in this
@@ -120,6 +90,16 @@ pub(crate) fn scan_opts_for(cfg: &Config) -> libfreemkv::ScanOptions {
     }
 }
 
+pub(crate) fn reset_after_drain() {
+    session::reset_after_drain();
+    state::reset_after_drain();
+    FRESH_RIP_CLAIMS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    resume::reset_after_drain();
+}
+
 // Scan-phase watchdog: emits a WARN every 15s while structure scan / key resolve are in flight,
 // so a wedged drive is visible instead of leaving the UI stuck silently.
 struct ScanWatchdog {
@@ -135,7 +115,7 @@ impl ScanWatchdog {
         let active_w = active.clone();
         let phase_w = phase.clone();
         let device = device.to_string();
-        std::thread::spawn(move || {
+        let _ = crate::server::daemon::spawn_background("scan-watchdog", move || {
             let start = std::time::Instant::now();
             let mut warned = false;
             // A due deadline, not `elapsed % 15`: sleep overshoot can skip an exact multiple.
@@ -247,14 +227,25 @@ enum MuxSource {
     Drive(Box<dyn libfreemkv::SectorSource>),
 }
 
-// The staged image's index for the drive-scanned `title`: the same playlist,
-// else the first title (the drive rip's pick is always its first title).
-fn image_title_index(image: &libfreemkv::Disc, title: &libfreemkv::DiscTitle) -> usize {
-    image
-        .titles
-        .iter()
-        .position(|t| !title.playlist.is_empty() && t.playlist == title.playlist)
-        .unwrap_or(0)
+// Rebind the frozen presentation after scanning the staged image.
+fn image_title_index(
+    image: &libfreemkv::Disc,
+    title: &libfreemkv::DiscTitle,
+) -> libfreemkv::Result<usize> {
+    let expected = crate::title_identity::TitleIdentity::of(title);
+    let mut matches =
+        image.titles.iter().enumerate().filter(|(_, candidate)| {
+            crate::title_identity::TitleIdentity::of(candidate) == expected
+        });
+    match (matches.next(), matches.next()) {
+        (Some((index, _)), None) => Ok(index),
+        _ => Err(libfreemkv::Error::IoError {
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Selected presentation is missing or ambiguous in the staged image",
+            ),
+        }),
+    }
 }
 
 // Output file extension for a rip of `disc`: `mk3d` for a 3D main
@@ -304,8 +295,8 @@ fn resolve_rip_keys(
 }
 
 // What a rip of `disc` decrypts (KU §2.5): the whole disc for an ISO output (delivered
-// decrypted, as the CLI and GUI deliver one), else title 0 (the rip's feature) and every
-// episode a TV plan fans out to.
+// decrypted, as the CLI and GUI deliver one), else the selected feature and every
+// episode a TV plan fans out to. A review hold does not authorize a fallback title.
 fn rip_key_scope(
     disc: &libfreemkv::Disc,
     cfg: &Config,
@@ -319,7 +310,9 @@ fn rip_key_scope(
         return libfreemkv::keys::KeyScope::None;
     }
     let mut titles = fanout_episode_indices(&disc.titles, cfg, media_type, disc_name);
-    titles.push(0);
+    if let Ok(index) = capture_title_index(&disc.titles, cfg, media_type) {
+        titles.push(index);
+    }
     titles.sort_unstable();
     titles.dedup();
     libfreemkv::keys::KeyScope::Titles(titles)
@@ -1074,8 +1067,7 @@ fn auto_rip_fresh(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     if staging_hold_stands_down(cfg, device, GuardFor::Insert) {
         return;
     }
-    wipe_staging_for_disc(cfg, device);
-    rip_disc(cfg, device, device_path, false);
+    rip_disc_inner(cfg, device, device_path, false, true);
 }
 
 // Staging dirs a fresh rip owns (dir → device), from its wipe until it returns.
@@ -1670,12 +1662,9 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
 
     crate::server::log::device_log(device, &format!("Disc: {}", id_name));
 
-    // TMDB lookup — fast, user sees poster while full scan runs
-    let tmdb = crate::server::tmdb::lookup(&id_name, &cfg_read.tmdb_api_key);
-    let display_name = tmdb
-        .as_ref()
-        .map(|t| t.title.clone())
-        .unwrap_or_else(|| id_name.clone());
+    // Resolve identity before lookup so a saved operator choice wins on restart.
+    let tmdb: Option<crate::server::tmdb::TmdbResult> = None;
+    let display_name = id_name.clone();
 
     // Show identify results immediately — no format badge until full scan confirms UHD vs BD
     update_state(
@@ -1763,6 +1752,56 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         }
     };
     tracing::info!(device = %device, elapsed_ms = scan_t0.elapsed().as_millis() as u64, "scan: structure done");
+
+    // Verified fingerprints may adopt one capture; unreadable samples get an
+    // isolated namespace and an operator warning, never a synthetic identity.
+    let (identity, job_id, identity_warning) = match jobs::fingerprint(&disc, &mut drive) {
+        Ok(identity) => {
+            match jobs::locate(std::path::Path::new(&cfg_read.staging_dir), &identity) {
+                Ok(job) => (identity, job, None),
+                Err(e) => {
+                    update_state_with(device, |s| {
+                        s.status = "error".into();
+                        s.last_error = e;
+                    });
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            let root = std::path::Path::new(&cfg_read.staging_dir);
+            let job = match jobs::fresh_unverified_job(root) {
+                Ok(job) => job,
+                Err(alloc) => {
+                    update_state_with(device, |s| {
+                        s.status = "error".into();
+                        s.last_error = alloc;
+                    });
+                    return;
+                }
+            };
+            let warning = format!(
+                "Disc identity could not be verified ({e}); starting an isolated fresh capture. No existing staging job will be reused."
+            );
+            (String::new(), job, Some(warning))
+        }
+    };
+    let saved_state = jobs::path(std::path::Path::new(&cfg_read.staging_dir), &job_id)
+        .ok()
+        .and_then(|path| staging::read_state(&path));
+    let tmdb = saved_state
+        .clone()
+        .and_then(jobs::metadata_from_state)
+        .or_else(|| crate::server::tmdb::lookup(&id_name, &cfg_read.tmdb_api_key));
+    let display_name = tmdb
+        .as_ref()
+        .map(|m| m.title.clone())
+        .unwrap_or_else(|| id_name.clone());
+    let saved_revision = saved_state.as_ref().map_or(0, |s| s.metadata_revision);
+    let saved_user_metadata = saved_state.and_then(|s| s.user_metadata);
+    update_state_with(device, |s| {
+        s.restore_job_metadata(&job_id, &identity, saved_user_metadata, saved_revision);
+    });
 
     // User-facing unlocker matrix — which unlockers RAN, emitted right after disc-identify and
     // BEFORE the keyserver (depends only on drive-init + scan state, not key resolution).
@@ -1878,10 +1917,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         .unwrap_or_default();
     let codecs = disc.titles.first().map(format_codecs).unwrap_or_default();
 
-    let disc_hash = disc
-        .aacs
-        .as_ref()
-        .map(|a| libfreemkv::hex::strip_hex_prefix(&a.disc_hash).to_ascii_lowercase());
+    let disc_hash = (!identity.is_empty()).then_some(identity.clone());
 
     // Store session — drive stays open for rip
     store_session(
@@ -1903,11 +1939,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     // 0.20.7: if resume-on-startup flipped this disc's staging dir to
     // `.failed` (restart loop), surface it on the dashboard before a fresh
     // rip; `failure_reason` overrides the normal idle status when present.
-    let staging_disc = cfg_read.staging_device_dir(&staging::staging_basename(
-        std::path::Path::new(&cfg_read.staging_dir),
-        &display_name,
-        &id_name,
-    ));
+    let staging_disc = cfg_read.staging_device_dir(&job_id);
     let failure_reason = staging::read_failed_reason(std::path::Path::new(&staging_disc));
     let (status_str, last_error_str, failure_field) = match failure_reason.as_ref() {
         Some(r) => ("failed".to_string(), r.clone(), Some(r.clone())),
@@ -1927,9 +1959,15 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             disc_present: true,
             disc_name: display_name,
             disc_label: id_name.clone(),
+            job_id,
+            disc_identity: identity,
             disc_format,
             tmdb_title: tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default(),
             tmdb_year: tmdb.as_ref().map(|t| t.year).unwrap_or(0),
+            tmdb_media_type: tmdb
+                .as_ref()
+                .map(|t| t.media_type.clone())
+                .unwrap_or_default(),
             tmdb_poster: tmdb
                 .as_ref()
                 .map(|t| t.poster_url.clone())
@@ -1940,7 +1978,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
                 .unwrap_or_default(),
             duration,
             codecs,
-            last_error: last_error_str,
+            last_error: identity_warning.unwrap_or(last_error_str),
             failure_reason: failure_field,
             key_status,
             resumable,
@@ -1997,6 +2035,14 @@ fn dispatch_rip_request(
     device_path: &str,
     mode: crate::server::web::ResumeMode,
 ) {
+    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let needs_capture = staging_basename_for_device(&c, device)
+        .and_then(|job| staging::read_state(&std::path::Path::new(&c.staging_dir).join(job)))
+        .is_some_and(|s| s.replan_required && s.needs_disc && !s.muxing);
+    if mode != crate::server::web::ResumeMode::Wipe && needs_capture {
+        rip_disc(cfg, device, device_path, true);
+        return;
+    }
     // E7034: this disc is what its staged image waits for; finish that mux, never re-rip.
     if mode != crate::server::web::ResumeMode::Wipe
         && disc_staging_hold(cfg, device, false) == Some(StagingHold::NeedsDisc)
@@ -2095,8 +2141,7 @@ fn dispatch_rip_request(
                 drop_session(device);
                 return;
             }
-            wipe_staging_for_disc(cfg, device);
-            rip_disc(cfg, device, device_path, false);
+            rip_disc_inner(cfg, device, device_path, false, true);
         }
         crate::server::web::ResumeMode::Fresh => auto_rip_fresh(cfg, device, device_path),
         crate::server::web::ResumeMode::Default => {
@@ -2406,6 +2451,9 @@ pub fn staging_basename_for_device(cfg: &Config, device: &str) -> Option<String>
     let (display_name, disc_label) = {
         let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let rs = s.get(device)?;
+        if !rs.job_id.is_empty() {
+            return Some(rs.job_id.clone());
+        }
         (rs.disc_name.clone(), rs.disc_label.clone())
     };
     if display_name.is_empty() {
@@ -2490,7 +2538,9 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
             // User-initiated resume goes straight to the remux-eligibility
             // check, still refusing OWNED (.ripped/.muxing), HELD (.review),
             // or TERMINAL (.failed) dirs — see resumable_dir_blocked above.
-            let snap = staging::snapshot_staging_disc(&path)?;
+            let Some(snap) = staging::snapshot_staging_disc(&path) else {
+                continue;
+            };
             // Owned/held/terminal dirs are not drive-resumable — see
             // `resumable_dir_blocked` for the per-marker reasoning (H1/M3).
             if resumable_dir_blocked(&snap) {
@@ -2499,15 +2549,19 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
             if !snap.has_iso || !snap.has_mapfile {
                 continue;
             }
-            let (iso_path, mapfile_path) = resume::find_iso_and_mapfile(&path)?;
+            let Some((iso_path, mapfile_path)) = resume::find_iso_and_mapfile(&path) else {
+                continue;
+            };
             let map = match freemkv_engine::Mapfile::load(&mapfile_path) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
             let hash_match = disc_hash.as_deref().is_some_and(|expected| {
-                map.disc_hash()
-                    .map(|found| found.eq_ignore_ascii_case(expected))
-                    .unwrap_or(false)
+                staging::read_state(&path).is_some_and(|s| s.disc_identity == expected)
+                    || map
+                        .disc_hash()
+                        .map(|found| found.eq_ignore_ascii_case(expected))
+                        .unwrap_or(false)
             });
             if (disc_hash.is_some() && !hash_match)
                 || (disc_hash.is_none() && !staging_dir_matches_disc(&basename, &sanitized))
@@ -2531,6 +2585,12 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
                 Some(n) => n.to_string_lossy().into_owned(),
                 None => continue,
             };
+            let saved = staging::read_state(&path);
+            let display_name = saved
+                .as_ref()
+                .filter(|s| !s.title.is_empty())
+                .map(|s| s.title.clone())
+                .unwrap_or(display_name);
             return Some(resume::ResumeClass::Remux {
                 iso_path,
                 mapfile_path,
@@ -2538,7 +2598,7 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
                 // Cold disc-insert resume from preserved staging: no `.ripped`
                 // hand-off and no operator-override concept, so confidence is
                 // unknown — resume_remux falls back to its own match check.
-                title_confident: None,
+                title_confident: saved.as_ref().map(|s| s.title_confident),
             });
         }
     }
@@ -2557,58 +2617,6 @@ fn is_safe_staging_segment(seg: &str) -> bool {
             std::path::Path::new(seg).components().next(),
             Some(std::path::Component::Normal(_))
         )
-}
-
-/// Wipe the staging subdir for the currently-scanned disc. Used by
-/// `/api/rip?resume=no` to give the user an explicit clean slate
-/// before a fresh sweep.
-fn wipe_staging_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) {
-    // Recover a poisoned lock instead of silently no-op'ing the user's explicit
-    // clean-slate request: bailing here leaves stale staging for the fresh sweep.
-    let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    // Wipe THIS disc's dir, not merely the one its title names: with a boxset
-    // in the drive, `Movie` may belong to disc 1 while disc 2 owns `Movie_2`,
-    // and wiping by title would destroy the wrong disc's staging.
-    let Some(sanitized) = staging_basename_for_device(&cfg_read, device) else {
-        return;
-    };
-    // Defence-in-depth: never let an untrusted disc label sanitize to a
-    // segment that escapes the staging root — else `join("..")` +
-    // `remove_dir_all` would delete its parent.
-    if !is_safe_staging_segment(&sanitized) {
-        crate::server::log::device_log(
-            device,
-            &format!("Refusing to wipe staging: unsafe sanitized dir name {sanitized:?}"),
-        );
-        return;
-    }
-    let staging_root = std::path::Path::new(&cfg_read.staging_dir);
-    let path = staging_root.join(&sanitized);
-    // Belt-and-braces: confirm the join stays strictly inside the
-    // staging root before removing anything.
-    if path.parent() != Some(staging_root) {
-        crate::server::log::device_log(
-            device,
-            &format!(
-                "Refusing to wipe staging: {} is not a direct child of {}",
-                path.display(),
-                staging_root.display()
-            ),
-        );
-        return;
-    }
-    if path.exists() {
-        match std::fs::remove_dir_all(&path) {
-            Ok(_) => crate::server::log::device_log(
-                device,
-                &format!("Wiped staging dir for fresh rip: {}", path.display()),
-            ),
-            Err(e) => crate::server::log::device_log(
-                device,
-                &format!("Failed to wipe staging dir {}: {}", path.display(), e),
-            ),
-        }
-    }
 }
 
 // Detect whether `display_name`'s disc has resumable staging state and of what kind: Remux
@@ -2645,6 +2653,26 @@ fn resumable_for_disc_with_hash(
         // only a fallback. When the live scan has a disc hash, let the
         // mapfile identity decide below.
         let name_match = basename == sanitized;
+        let identity_match = disc_hash.is_some_and(|expected| {
+            staging::read_state(&path).is_some_and(|s| s.disc_identity == expected)
+                || resume::find_iso_and_mapfile(&path)
+                    .and_then(|(_, p)| freemkv_engine::Mapfile::load(&p).ok())
+                    .is_some_and(|m| {
+                        m.disc_hash()
+                            .is_some_and(|h| h.eq_ignore_ascii_case(expected))
+                    })
+        });
+        if (disc_hash.is_some() && !identity_match) || (disc_hash.is_none() && !name_match) {
+            continue;
+        }
+        if staging::read_state(&path).is_some_and(|s| s.reset_in_progress) {
+            continue;
+        }
+        if staging::read_state(&path)
+            .is_some_and(|s| s.replan_required && s.needs_disc && !s.muxing)
+        {
+            return Some(Resumable::Sweep);
+        }
         // A terminal `.failed` (or held `.review`) dir is NOT resumable: a
         // re-rip wouldn't clear stale `.failed`, and the mux worker would
         // skip it forever. Mirrors resumable_dir_blocked; forces a Wipe.
@@ -2668,14 +2696,6 @@ fn resumable_for_disc_with_hash(
             Ok(m) => m,
             Err(_) => continue,
         };
-        let hash_match = disc_hash.is_some_and(|expected| {
-            map.disc_hash()
-                .map(|found| found.eq_ignore_ascii_case(expected))
-                .unwrap_or(false)
-        });
-        if (disc_hash.is_some() && !hash_match) || (disc_hash.is_none() && !name_match) {
-            continue;
-        }
         let st = map.stats();
         // Any not-good data (pending or previously Unreadable) is retryable —
         // there is NO terminal "won't retry" state. Only a mapfile that is
@@ -2805,6 +2825,16 @@ fn fire_rip_complete_webhook(
 /// non-tried) ranges are read. When false, Pass 1 starts fresh (the mapfile
 /// is recreated and the ISO truncated) — the classic full sweep.
 pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resume_sweep: bool) {
+    rip_disc_inner(cfg, device, device_path, resume_sweep, false);
+}
+
+fn rip_disc_inner(
+    cfg: &Arc<RwLock<Config>>,
+    device: &str,
+    device_path: &str,
+    resume_sweep: bool,
+    wipe: bool,
+) {
     // Rip has the mux slot first: a running Library remux stops and re-queues.
     let _mux_slot = crate::server::library::arbiter::claim_for_rip();
     // Replace the spawn site's fresh Halt with one backed by the drive's
@@ -2831,6 +2861,72 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             return;
         }
     };
+
+    let known_path = staging_basename_for_device(&cfg_read, device)
+        .map(|job| jobs::path(std::path::Path::new(&cfg_read.staging_dir), &job))
+        .transpose();
+    let known_path = match known_path {
+        Ok(path) => path,
+        Err(e) => {
+            update_state_with(device, |s| {
+                s.status = "error".into();
+                s.last_error = e;
+            });
+            return;
+        }
+    };
+    let known_lease = known_path.as_deref().map(staging::job_lease);
+    let _known_owner = match known_lease.as_ref().map(|lease| lease.try_lock()) {
+        Some(Ok(owner)) => Some(owner),
+        Some(Err(_)) => {
+            update_state_with(device, |s| {
+                s.status = "error".into();
+                s.last_error =
+                    "This staging job is active on another drive or worker; nothing was reset"
+                        .into();
+            });
+            return;
+        }
+        None => None,
+    };
+    if wipe {
+        let reset = known_path
+            .as_deref()
+            .ok_or_else(|| std::io::Error::other("disc staging identity is unavailable"))
+            .and_then(|path| {
+                if disc_owned_by_worker(cfg, device) {
+                    return Err(std::io::Error::other(
+                        "the staged image is queued for muxing",
+                    ));
+                }
+                let row = STATE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(device)
+                    .cloned()
+                    .ok_or_else(|| std::io::Error::other("disc staging identity changed"))?;
+                let job = if row.job_id.is_empty() {
+                    staging::staging_basename(
+                        std::path::Path::new(&cfg_read.staging_dir),
+                        &row.disc_name,
+                        &row.disc_label,
+                    )
+                } else {
+                    row.job_id
+                };
+                if path.file_name() != Some(std::ffi::OsStr::new(&job)) {
+                    return Err(std::io::Error::other("disc staging identity changed"));
+                }
+                staging::reset_capture_preserving_metadata(path, &row.disc_identity)
+            });
+        if let Err(e) = reset {
+            update_state_with(device, |s| {
+                s.status = "error".into();
+                s.last_error = format!("Cannot reset capture: {e}");
+            });
+            return;
+        }
+    }
 
     // Preserve UI state. Recover a poisoned STATE lock rather than dropping it
     // (`.ok()` → None): the paired `update_state` below already recovers via
@@ -3031,13 +3127,37 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         disc.titles.first().map(|t| t.size_bytes).unwrap_or(0)
     };
 
-    // An operator title override (Ripper card's "✎ change" picker) takes
-    // precedence over the scan's auto-match; falls back to the scan result.
-    // A picked title is trusted (treated as confident → no review hold).
-    let title_override = take_title_override(device);
-    let overridden = title_override.is_some();
-    let tmdb_owned: Option<crate::server::tmdb::TmdbResult> =
-        title_override.or_else(|| session.tmdb.clone());
+    // Freeze actual execution mode before a correction can alter the plan.
+    let saved_state = if let Some(path) = &known_path {
+        let started = if crate::server::health::share_unmounted(path) {
+            Err(std::io::Error::other(
+                "staging network share is not mounted",
+            ))
+        } else {
+            std::fs::create_dir_all(path)
+                .and_then(|()| staging::begin_capture(path, cfg_read.max_retries))
+        };
+        match started {
+            Ok(st) => Some(st),
+            Err(e) => {
+                update_state_with(device, |s| {
+                    s.status = "error".into();
+                    s.last_error = format!("Cannot begin capture: {e}");
+                });
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let _metadata_sweeping_guard = known_path.clone().map(|staging| SweepingGuard { staging });
+    let saved_confident = saved_state
+        .as_ref()
+        .is_some_and(|s| s.user_metadata.is_some() || s.title_confident);
+    let episode_start = saved_state.as_ref().and_then(|s| s.episode_start);
+    let saved_metadata = saved_state.and_then(jobs::metadata_from_state);
+    let overridden = saved_confident;
+    let tmdb_owned = saved_metadata.or_else(|| session.tmdb.clone());
     let tmdb = &tmdb_owned;
     let tmdb_title = tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default();
     let tmdb_year = tmdb.as_ref().map(|t| t.year).unwrap_or(0);
@@ -3100,10 +3220,33 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         return;
     }
 
+    // Missing authored episode evidence must not turn a TV capture into one
+    // movie-style output. Whole-disc ISO capture does not select mux titles.
+    if let Err(error) = check_capture_selection(&disc.titles, &cfg_read, &tmdb_media_type) {
+        let reason = selection_review_message(&error);
+        crate::server::log::device_log(device, &reason);
+        update_state_with(device, |s| {
+            s.status = "error".into();
+            s.last_error = reason;
+        });
+        return;
+    }
+
     // The main movie, picked by the engine exactly as the CLI and GUI pick it.
-    let main = freemkv_engine::resolve_selection(&disc, &freemkv_engine::Selection::MainMovie);
-    let main_idx = main.first().copied().unwrap_or(0);
+    let main_idx = match capture_title_index(&disc.titles, &cfg_read, &tmdb_media_type) {
+        Ok(index) => index,
+        Err(error) => {
+            let reason = selection_review_message(&error);
+            crate::server::log::device_log(device, &reason);
+            update_state_with(device, |s| {
+                s.status = "error".into();
+                s.last_error = reason;
+            });
+            return;
+        }
+    };
     let title = disc.titles[main_idx].clone();
+    let selected_identity = crate::title_identity::TitleIdentity::of(&title);
     let duration = crate::server::util::format_duration_hm(title.duration_secs);
     let codecs = format_codecs(&title);
 
@@ -3288,11 +3431,38 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // `disc_name` is the RAW volume label, the only thing distinguishing two
     // discs of a boxset behind one shared TMDB title. Must resolve to the
     // same dir disc_staging_hold/find_resumable_for_disc just checked.
-    let staging = cfg_read.staging_device_dir(&staging::staging_basename(
-        std::path::Path::new(&cfg_read.staging_dir),
-        &display_name,
-        &disc_name,
-    ));
+    let job_id = staging_basename_for_device(&cfg_read, device).unwrap_or_else(|| {
+        staging::staging_basename(
+            std::path::Path::new(&cfg_read.staging_dir),
+            &display_name,
+            &disc_name,
+        )
+    });
+    let staging = cfg_read.staging_device_dir(&job_id);
+    let job_lease = staging::job_lease(std::path::Path::new(&staging));
+    let _job_owner = if let Some(path) = &known_path {
+        if path != std::path::Path::new(&staging) {
+            update_state_with(device, |s| {
+                s.status = "error".into();
+                s.last_error =
+                    "The staging job changed before capture started; refresh and retry".into();
+            });
+            return;
+        }
+        None
+    } else {
+        match job_lease.try_lock() {
+            Ok(owner) => Some(owner),
+            Err(_) => {
+                update_state_with(device, |s| {
+                    s.status = "error".into();
+                    s.last_error =
+                        "The staging job is already active; retry when it finishes".into();
+                });
+                return;
+            }
+        }
+    };
     // Under an unmounted share the dir would be made on the container's own disk.
     let made = if crate::server::health::share_unmounted(std::path::Path::new(&staging)) {
         Err(std::io::Error::other("its network share is not mounted"))
@@ -3320,6 +3490,26 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // same boxset routes to its own dir instead of reading this `.completed`.
     // Also adopts a legacy pre-label dir; never overwrites a different label.
     staging::adopt_disc_label(std::path::Path::new(&staging), &disc_name);
+    let identity = STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .map(|s| s.disc_identity.clone())
+        .unwrap_or_default();
+    if let Err(e) = staging::mutate_state(
+        std::path::Path::new(&staging),
+        staging::StagingState::Sweeping,
+        |s| {
+            s.disc_identity = identity;
+            s.origin_device = device.to_string();
+        },
+    ) {
+        update_state_with(device, |s| {
+            s.status = "error".into();
+            s.last_error = e.to_string();
+        });
+        return;
+    }
     // Write `.sweeping` before Pass 1 to govern the whole sweep+patch window;
     // without it a crash mid-sweep leaves the dir ungoverned (restart-count
     // toward `.failed`, mover WARN-floods). Replaced by `.ripped`/`.failed`.
@@ -3355,8 +3545,46 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         "{}.iso",
         crate::server::util::sanitize_path_compact(&display_name)
     );
-    let iso_path_str = format!("{staging}/{iso_filename}");
-    let mapfile_path_str = format!("{iso_path_str}.mapfile");
+    let existing_capture = resume::find_iso_and_mapfile(std::path::Path::new(&staging));
+    let (iso_path_str, mapfile_path_str) = existing_capture
+        .map(|(iso, map)| {
+            (
+                iso.to_string_lossy().into_owned(),
+                map.to_string_lossy().into_owned(),
+            )
+        })
+        .unwrap_or_else(|| {
+            let iso = format!("{staging}/{iso_filename}");
+            (iso.clone(), format!("{iso}.mapfile"))
+        });
+    let iso_filename = std::path::Path::new(&iso_path_str)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    if let Err(e) = staging::mutate_state(
+        std::path::Path::new(&staging),
+        staging::StagingState::Sweeping,
+        |s| {
+            s.title = display_name.clone();
+            s.year = tmdb_year;
+            s.media_type = tmdb_media_type.clone();
+            s.tmdb_id = tmdb_id;
+            s.tmdb_poster = tmdb_poster.clone();
+            s.tmdb_overview = tmdb_overview.clone();
+            s.max_retries = cfg_read.max_retries;
+            if uses_multipass(cfg_read.max_retries) {
+                s.iso_path = iso_path_str.clone();
+                s.mapfile_path = mapfile_path_str.clone();
+            }
+        },
+    ) {
+        update_state_with(device, |s| {
+            s.status = "error".into();
+            s.last_error = e.to_string();
+        });
+        return;
+    }
     let dest_url = if staging::is_network_output(&output_format, &cfg_read.network_target) {
         format!("network://{}", cfg_read.network_target)
     } else {
@@ -3394,6 +3622,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             output_file: delivered_file.clone(),
             tmdb_title: tmdb_title.clone(),
             tmdb_year,
+            tmdb_media_type: tmdb_media_type.clone(),
             tmdb_poster: tmdb_poster.clone(),
             tmdb_overview: tmdb_overview.clone(),
             duration: duration.clone(),
@@ -4073,17 +4302,35 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         };
         // TV-routing metadata `RippedMarker` doesn't carry, plus the deliverable PLAN
         // (`outputs[]`), so it propagates through mux/resume into the mover.
-        let plan = plan_mux_outputs(
+        let plan = match plan_mux_outputs(
             &disc.titles,
             &cfg_read,
             &tmdb_media_type,
             &disc_name,
             tmdb_id,
             &filename,
-        );
+            episode_start,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let reason = selection_review_message(&error);
+                staging::mutate_state_if_present(std::path::Path::new(&staging), |s| {
+                    s.state = staging::StagingState::Review;
+                    s.failure_reason = Some(reason.clone());
+                });
+                crate::server::log::device_log(device, &reason);
+                update_state_with(device, |s| {
+                    s.status = "error".into();
+                    s.last_error = reason;
+                });
+                unregister_halt(device);
+                return;
+            }
+        };
         let staging_path = std::path::Path::new(&staging);
         if let Err(e) = hand_off_to_mux_worker(staging_path, &marker, rip_keys.as_ref().ok(), |s| {
             s.tmdb_id = tmdb_id;
+            s.episode_start = episode_start;
             s.disc_name = disc_name.clone();
             s.season = crate::server::tmdb::season_from_label(&disc_name);
             s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
@@ -4325,7 +4572,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 iso_path.to_path_buf(),
             ))
             .and_then(|(image_disc, _)| {
-                let idx = image_title_index(&image_disc, &title);
+                let idx = image_title_index(&image_disc, &title)?;
                 crate::server::keysource::open_staged_image(
                     &cfg_read,
                     iso_path,
@@ -4334,9 +4581,10 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     staged_keys,
                     Some(halt_token.clone()),
                 )
+                .map(|image| (image, idx))
             });
-            let image = match opened {
-                Ok(image) => {
+            let (image, image_index) = match opened {
+                Ok((image, index)) => {
                     crate::server::log::device_log(
                         device,
                         &format!(
@@ -4344,7 +4592,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                             image.disc.capacity_sectors
                         ),
                     );
-                    image
+                    (image, index)
                 }
                 Err(libfreemkv::Error::Halted) => {
                     crate::server::log::device_log(
@@ -4400,7 +4648,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 }
             };
             let iso_src = mux::IsoMuxSource {
-                title_index: image_title_index(&image.disc, &title),
+                title_index: image_index,
                 image: &image,
             };
             match mux::mux_iso(mux_inputs, iso_src, mux_atomics) {
@@ -4700,6 +4948,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
                 s.outputs = vec![staging::Output {
                     filename: mkv_leaf,
+                    title_index: main_idx,
+                    title_identity: Some(selected_identity.clone()),
                     ..Default::default()
                 }];
             }) {
@@ -5127,8 +5377,8 @@ fn hand_off_to_mux_worker(
     if let Some(set) = keys {
         crate::server::keysource::hold_rip_keys(iso, set.clone());
     }
-    staging::mutate_state_if_present(staging_path, plan);
-    let written = crate::server::muxer::write_marker(staging_path, marker);
+    let written = staging::mutate_state(staging_path, staging::StagingState::Sweeping, plan)
+        .and_then(|()| crate::server::muxer::write_marker(staging_path, marker));
     if written.is_err() {
         crate::server::keysource::forget_rip_keys(iso);
     }
@@ -5195,25 +5445,50 @@ fn handoff_marker_name(title_confident: bool) -> &'static str {
     if title_confident { ".done" } else { ".review" }
 }
 
+// Capture may preserve a whole-disc ISO without committing to any mux titles.
+fn check_capture_selection(
+    titles: &[libfreemkv::DiscTitle],
+    cfg: &Config,
+    media_type: &str,
+) -> Result<(), crate::server::planner::PlanError> {
+    if output_is_iso_image(&cfg.output_format) {
+        return Ok(());
+    }
+    let kind = (media_type == "tv").then_some(crate::server::planner::MediaKind::Tv);
+    crate::server::planner::check_episode_selection(titles, cfg, kind)?;
+    capture_title_index(titles, cfg, media_type).map(|_| ())
+}
+
+fn capture_title_index(
+    titles: &[libfreemkv::DiscTitle],
+    cfg: &Config,
+    media_type: &str,
+) -> Result<usize, crate::server::planner::PlanError> {
+    if output_is_iso_image(&cfg.output_format) && !titles.is_empty() {
+        return Ok(0); // Whole-disc capture makes no presentation choice.
+    }
+    if let Some(index) = fanout_episode_indices(titles, cfg, media_type, "").first() {
+        return Ok(*index);
+    }
+    crate::server::planner::MoviePlanner::from_config(cfg).title_index(titles)
+}
+
+fn selection_review_message(error: &crate::server::planner::PlanError) -> String {
+    format!(
+        "Title selection needs review before muxing: {error:?}. No fallback title was selected."
+    )
+}
+
 // Episode titles a TV disc fans out to under `tv_auto`; empty = one movie-style output.
 // Pure (no TMDB): the preflight sizes the same plan `plan_mux_outputs` later names.
 fn fanout_episode_indices(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
-    disc_name: &str,
+    _disc_name: &str,
 ) -> Vec<usize> {
-    let is_tv = media_type == "tv" || crate::server::tmdb::season_from_label(disc_name).is_some();
-    if !cfg.tv_auto || !is_tv {
-        return Vec::new();
-    }
-    // The episode cluster: drops the play-all sum-title, extras/menus, dupes.
-    let indices = freemkv_engine::episode_titles(titles);
-    // A single feature that merely carries a TV label (e.g. a TV movie) is one output.
-    if indices.len() <= 1 {
-        return Vec::new();
-    }
-    indices
+    let kind = (media_type == "tv").then_some(crate::server::planner::MediaKind::Tv);
+    crate::server::planner::episode_indices(titles, cfg, kind)
 }
 
 // The titles a fresh rip's staged image must hold for its mux: the main feature, the TV plan's
@@ -5300,21 +5575,32 @@ fn plan_mux_outputs(
     disc_name: &str,
     tmdb_id: u64,
     movie_filename: &str,
-) -> Vec<staging::Output> {
-    let one_output = || {
-        vec![staging::Output {
-            filename: movie_filename.to_string(),
-            ..Default::default()
-        }]
-    };
+    episode_start: Option<u16>,
+) -> Result<Vec<staging::Output>, crate::server::planner::PlanError> {
     let indices = fanout_episode_indices(titles, cfg, media_type, disc_name);
     if indices.is_empty() {
-        return one_output();
+        let title_index =
+            crate::server::planner::MoviePlanner::from_config(cfg).title_index(titles)?;
+        return Ok(vec![staging::Output {
+            filename: movie_filename.to_string(),
+            title_index,
+            title_identity: Some(crate::title_identity::TitleIdentity::of(
+                &titles[title_index],
+            )),
+            ..Default::default()
+        }]);
     }
     let season_num = crate::server::tmdb::season_from_label(disc_name).unwrap_or(1);
     // TMDB episode list, best-effort (empty on any failure → sequential naming).
     let episodes = crate::server::tmdb::season_episodes(tmdb_id, season_num, &cfg.tmdb_api_key);
-    plan_episode_outputs(titles, &indices, disc_name, &episodes, movie_filename)
+    plan_episode_outputs(
+        titles,
+        &indices,
+        disc_name,
+        &episodes,
+        movie_filename,
+        episode_start,
+    )
 }
 
 // Name the fanned-out episode `indices` against the season's TMDB `episodes`.
@@ -5324,39 +5610,31 @@ fn plan_episode_outputs(
     disc_name: &str,
     episodes: &[crate::server::tmdb::Episode],
     movie_filename: &str,
-) -> Vec<staging::Output> {
+    episode_start: Option<u16>,
+) -> Result<Vec<staging::Output>, crate::server::planner::PlanError> {
     let season_num = crate::server::tmdb::season_from_label(disc_name).unwrap_or(1);
-    let title_secs: Vec<f64> = indices.iter().map(|&i| titles[i].duration_secs).collect();
-    // Multi-disc offset: start from the uniform-split guess `(disc-1)*count+1`,
-    // then let `align_disc_offset` repair uneven splits when runtimes carry
-    // signal. With no signal it ties and returns this same fallback (never worse).
-    let disc_num = crate::server::tmdb::disc_from_label(disc_name)
-        .unwrap_or(1)
-        .max(1);
-    let fallback_start = 1u16.saturating_add(
-        disc_num
-            .saturating_sub(1)
-            .saturating_mul(indices.len() as u16),
-    );
-    let start = crate::server::tmdb::align_disc_offset(&title_secs, episodes, fallback_start);
-    let assignments = crate::server::tmdb::map_episodes(&title_secs, episodes, start);
-    // Staging leaves derive from the movie leaf's stem + extension so they share
-    // the output format and stay unique per episode. The mover renames each to
-    // `Show S{NN}E{MM}[ - Name].ext` at file time (see `mover::tv_episode_leaf`).
-    let path = std::path::Path::new(movie_filename);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("title");
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("mkv");
-    indices
-        .iter()
-        .zip(assignments)
-        .map(|(&idx, a)| staging::Output {
-            filename: format!("{stem}_S{season_num:02}E{:02}.{ext}", a.episode),
-            title_index: idx,
-            episode: Some(a.episode),
-            episode_name: a.name,
-            moved: false,
-        })
-        .collect()
+    let disc_num = crate::server::tmdb::disc_from_label(disc_name).unwrap_or(1);
+    Ok(crate::server::planner::episode_outputs(
+        titles,
+        indices,
+        season_num,
+        disc_num,
+        episodes,
+        std::path::Path::new(movie_filename),
+        episode_start,
+    )?
+    .into_iter()
+    .map(|output| staging::Output {
+        filename: output.filename,
+        title_index: output.title_index,
+        title_identity: Some(crate::title_identity::TitleIdentity::of(
+            &titles[output.title_index],
+        )),
+        episode: output.episode,
+        episode_name: output.episode_name,
+        moved: false,
+    })
+    .collect())
 }
 
 // The FMTS CaptureOnly line: only a multipass rip captures an ISO to defer the mux to.
@@ -5450,6 +5728,13 @@ fn prune_intermediate_iso(
     keep_iso: bool,
 ) {
     if !uses_multipass(max_retries) || keep_iso {
+        return;
+    }
+    if iso_path
+        .parent()
+        .and_then(staging::read_state)
+        .is_some_and(|s| s.replan_required)
+    {
         return;
     }
     match std::fs::remove_file(iso_path) {
@@ -6246,6 +6531,14 @@ mod teardown_poison_tests;
 #[cfg(test)]
 #[path = "mod_tv_plan_tests.rs"]
 mod tv_plan_tests;
+
+#[cfg(test)]
+#[path = "mod_selection_guard_tests.rs"]
+mod selection_guard_tests;
+
+#[cfg(test)]
+#[path = "mod_metadata_transaction_tests.rs"]
+mod metadata_transaction_tests;
 
 #[cfg(test)]
 #[path = "mod_probe_failure_tests.rs"]

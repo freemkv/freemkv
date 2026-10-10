@@ -1,14 +1,14 @@
 //! The remux queue, persisted as JSON in the config folder.
 //!
-//! FIFO, one job at a time. Every change is written through the daemon's
-//! durable write (temp file, fsync, rename, folder fsync). A job found
+//! FIFO, one job at a time. Every change uses a phase-aware durable write
+//! (temp file, fsync, rename, folder fsync). A job found
 //! running at load was cut off by a restart: it goes back to the head of the
 //! queue, and its stale `.partial` is removed. The old MKV was never touched.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::server::planner::RemuxPlan;
 
@@ -75,6 +75,11 @@ pub struct Job {
     /// movie job shape and is deliberately retained for schema compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<RemuxPlan>,
+    /// User identity captured at enqueue, independent of subsequent lookup state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_match: Option<super::matches::SavedMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<super::replacement::Replacement>,
     /// Mutable execution state kept separately from the immutable plan.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputProgress>,
@@ -118,6 +123,49 @@ pub struct StagedFile {
 }
 
 impl Job {
+    fn has_replacement_work(&self) -> bool {
+        self.replacement.as_ref().is_some_and(|r| r.has_work())
+    }
+
+    fn artifact_targets(&self) -> Vec<PathBuf> {
+        let mut paths = self.output_targets();
+        if let Some(replacement) = &self.replacement {
+            paths.extend(replacement.candidates().map(Path::to_path_buf));
+        }
+        paths
+    }
+    fn owns_target(&self, target: &Path) -> bool {
+        self.target == target
+            || self.outputs.iter().any(|o| o.target == target)
+            || self
+                .replacement
+                .as_ref()
+                .is_some_and(|r| r.candidates().any(|p| p == target))
+    }
+
+    pub(crate) fn output_targets(&self) -> Vec<PathBuf> {
+        if self.plan.is_some() && !self.outputs.is_empty() {
+            return self.outputs.iter().map(|o| o.target.clone()).collect();
+        }
+        match &self.plan {
+            Some(plan) => plan
+                .outputs
+                .iter()
+                .map(|o| {
+                    if plan.outputs.len() == 1 {
+                        self.target.clone()
+                    } else {
+                        self.target
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .join(&o.filename)
+                    }
+                })
+                .collect(),
+            None => vec![self.target.clone()],
+        }
+    }
+
     fn set_staged(&mut self, staged: Option<StagedFile>) {
         self.staged_bytes = staged.as_ref().map(|s| s.bytes);
         self.staged_attempts = staged.as_ref().map(|s| s.attempts);
@@ -151,10 +199,14 @@ fn unqueue(f: &mut QueueFile, pick: impl Fn(&Job) -> bool) -> usize {
         if j.state != JobState::Queued || !pick(j) {
             return true;
         }
-        if j.staged.is_none() {
+        if j.staged.is_none() && !j.has_replacement_work() {
             return false;
         }
-        j.park(PARKED);
+        j.park(if j.has_replacement_work() {
+            "Replacement stopped. Retry resumes the saved output transaction."
+        } else {
+            PARKED
+        });
         parked += 1;
         true
     });
@@ -268,14 +320,14 @@ impl QueueFile {
 
     /// The queued or running job for `target`, if any.
     pub fn active_for(&self, target: &Path) -> Option<&Job> {
-        self.jobs
-            .iter()
-            .find(|j| j.target == target && matches!(j.state, JobState::Queued | JobState::Running))
+        self.jobs.iter().find(|j| {
+            j.owns_target(target) && matches!(j.state, JobState::Queued | JobState::Running)
+        })
     }
 
     /// The latest job for `target` in any state.
     pub fn latest_for(&self, target: &Path) -> Option<&Job> {
-        self.jobs.iter().rev().find(|j| j.target == target)
+        self.jobs.iter().rev().find(|j| j.owns_target(target))
     }
 }
 
@@ -294,9 +346,52 @@ pub struct Queue {
     // older snapshot can never land after a newer one.
     saved: Mutex<u64>,
     generation: AtomicU64,
+    durability_pending: AtomicBool,
+}
+
+// Unlike a plain io::Result, preserve whether rename committed the new bytes.
+// Queue memory must follow publication even when the final directory sync fails.
+fn write_queue(
+    path: &Path,
+    bytes: &[u8],
+    sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), (bool, std::io::Error)> {
+    use crate::server::ripper::staging::{MarkerWriteError, write_marker_phased};
+    write_marker_phased(path, bytes, sync_directory).map_err(|failure| match failure {
+        MarkerWriteError::BeforePublish(error) => (false, error),
+        MarkerWriteError::AfterPublish(error) => (true, error),
+    })
+}
+
+fn write_queue_durable(path: &Path, bytes: &[u8]) -> Result<(), (bool, std::io::Error)> {
+    write_queue(path, bytes, libfreemkv::io::fsync::dir_checked)
 }
 
 impl Queue {
+    /// Keep admission and plan changes excluded until the orphan is unlinked.
+    pub(crate) fn remove_orphan_partial(&self, path: &Path) -> bool {
+        self.remove_orphan_partial_with(path, |p| std::fs::remove_file(p))
+    }
+
+    fn remove_orphan_partial_with(
+        &self,
+        path: &Path,
+        unlink: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> bool {
+        let f = self.lock();
+        if f.jobs
+            .iter()
+            .filter(|j| j.state == JobState::Running)
+            .flat_map(Job::artifact_targets)
+            .any(|p| partial_path(&p) == path)
+        {
+            return false;
+        }
+        let removed = unlink(path).is_ok();
+        drop(f);
+        removed
+    }
+
     /// Load (or start) the queue in `config_dir`, re-queueing a job a restart cut off.
     pub fn open(config_dir: &Path) -> Self {
         let path = config_dir.join(QUEUE_FILE);
@@ -321,13 +416,16 @@ impl Queue {
             }
         }
         for job in file.jobs.iter().filter(|j| j.state == JobState::Queued) {
-            let _ = std::fs::remove_file(partial_path(&job.target));
+            for target in std::iter::once(job.target.clone()).chain(job.artifact_targets()) {
+                let _ = std::fs::remove_file(partial_path(&target));
+            }
         }
         let q = Self {
             path,
             state: Mutex::new(file),
             saved: Mutex::new(0),
             generation: AtomicU64::new(1),
+            durability_pending: AtomicBool::new(true),
         };
         q.persist_now();
         q
@@ -361,57 +459,215 @@ impl Queue {
     /// Queue `items` in order. A target already queued or running is skipped, and so is one
     /// with a finished file kept on local staging (it is retried or discarded instead).
     pub fn add(&self, items: Vec<NewJob>) -> usize {
-        self.mutate(|f| {
-            let mut n = 0;
-            let now = crate::server::util::epoch_secs();
-            for item in items {
-                let kept = f
-                    .latest_for(&item.target)
-                    .is_some_and(|j| j.staged.is_some());
-                if kept || f.active_for(&item.target).is_some() {
-                    continue;
-                }
-                f.jobs.retain(|j| j.target != item.target);
-                f.next_id += 1;
-                f.jobs.push(Job {
-                    id: f.next_id,
-                    title: item.title,
-                    iso: item.iso,
-                    target: item.target,
-                    plan: None,
-                    outputs: Vec::new(),
-                    replace: item.replace,
-                    state: JobState::Queued,
-                    queued_at: now,
-                    started_at: None,
-                    finished_at: None,
-                    note: None,
-                    failure: None,
-                    attempts: 0,
-                    first_failed_at: None,
-                    not_before: None,
-                    staged: None,
-                    staged_bytes: None,
-                    staged_attempts: None,
-                });
-                n += 1;
+        self.mutate(|f| Self::append(f, items, true, None, None))
+    }
+
+    /// Start new planning after an identity correction, never reuse an episode plan.
+    #[cfg(test)]
+    pub fn add_replanned(&self, items: Vec<NewJob>) -> usize {
+        self.mutate(|f| Self::append(f, items, false, None, None))
+    }
+
+    pub(crate) fn add_corrected(
+        &self,
+        item: NewJob,
+        selected: super::matches::SavedMatch,
+    ) -> std::io::Result<usize> {
+        self.add_corrected_inner(item, selected, None)
+    }
+
+    pub(crate) fn add_corrected_authorized(
+        &self,
+        item: NewJob,
+        selected: super::matches::SavedMatch,
+        frozen: super::replacement::Replacement,
+    ) -> std::io::Result<usize> {
+        frozen.verify_admission(&item.iso)?;
+        self.add_corrected_inner(item, selected, Some(frozen))
+    }
+
+    fn add_corrected_inner(
+        &self,
+        item: NewJob,
+        selected: super::matches::SavedMatch,
+        frozen: Option<super::replacement::Replacement>,
+    ) -> std::io::Result<usize> {
+        let config_dir = self
+            .path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("queue has no config directory"))?;
+        self.try_mutate_durable(|f| {
+            if f.jobs.iter().any(|j| {
+                j.iso == item.iso && matches!(j.state, JobState::Queued | JobState::Running)
+            }) {
+                return Ok(0);
             }
-            n
+            if let Some(job) = f
+                .jobs
+                .iter_mut()
+                .rev()
+                .find(|j| j.iso == item.iso && j.has_replacement_work())
+            {
+                if frozen.is_some() {
+                    return Err(std::io::Error::other(
+                        "unfinished replacement must retain its original authorization",
+                    ));
+                }
+                if job.selected_match.as_ref() != Some(&selected) {
+                    return Err(std::io::Error::other(
+                        "unfinished replacement uses a different match",
+                    ));
+                }
+                job.state = JobState::Queued;
+                job.note = None;
+                job.failure = None;
+                job.finished_at = None;
+                job.not_before = None;
+                return Ok(1);
+            }
+            let replacement = match frozen {
+                Some(frozen) => frozen,
+                None => super::replacement::Replacement::capture(
+                    &item.iso,
+                    &super::links::read(config_dir)?,
+                )?,
+            };
+            Ok(Self::append(
+                f,
+                vec![item],
+                false,
+                Some(selected),
+                Some(replacement),
+            ))
         })
+    }
+
+    /// Exclude claims while saving a correction for an otherwise idle source.
+    pub(crate) fn with_idle_source<T>(
+        &self,
+        source: &Path,
+        save: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        let state = self.lock();
+        if state.jobs.iter().any(|j| {
+            j.iso == source
+                && (matches!(j.state, JobState::Queued | JobState::Running)
+                    || j.staged.is_some()
+                    || j.has_replacement_work()
+                    || j.outputs.iter().any(|o| o.staged.is_some()))
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "source has active or retained output; stop or resolve that job first",
+            ));
+        }
+        let result = save();
+        drop(state);
+        result
+    }
+
+    fn append(
+        f: &mut QueueFile,
+        items: Vec<NewJob>,
+        reuse_saved_plans: bool,
+        selected_match: Option<super::matches::SavedMatch>,
+        replacement: Option<super::replacement::Replacement>,
+    ) -> usize {
+        let mut n = 0;
+        let now = crate::server::util::epoch_secs();
+        for item in items {
+            if !reuse_saved_plans
+                && f.jobs.iter().any(|j| {
+                    j.iso == item.iso
+                        && (matches!(j.state, JobState::Queued | JobState::Running)
+                            || j.staged.is_some()
+                            || j.outputs.iter().any(|o| o.staged.is_some()))
+                })
+            {
+                continue;
+            }
+            let kept = f
+                .latest_for(&item.target)
+                .is_some_and(|j| j.staged.is_some() || j.has_replacement_work());
+            if f.jobs
+                .iter()
+                .any(|j| j.iso == item.iso && j.has_replacement_work())
+            {
+                continue;
+            }
+            if kept || f.active_for(&item.target).is_some() {
+                continue;
+            }
+            let prior = f.jobs.iter().rev().find_map(|j| {
+                if !reuse_saved_plans || j.iso != item.iso {
+                    return None;
+                }
+                let output = j.outputs.iter().find(|o| o.target == item.target)?;
+                let mut plan = j.plan.clone()?;
+                plan.outputs.retain(|o| o.id == output.id);
+                Some((
+                    plan,
+                    vec![OutputProgress {
+                        id: output.id.clone(),
+                        target: item.target.clone(),
+                        state: OutputState::Pending,
+                        staged: None,
+                    }],
+                ))
+            });
+            let (plan, outputs) = match prior {
+                Some((p, o)) => (Some(p), o),
+                None => (None, Vec::new()),
+            };
+            f.jobs.retain(|j| j.target != item.target);
+            f.next_id += 1;
+            f.jobs.push(Job {
+                id: f.next_id,
+                title: item.title,
+                iso: item.iso,
+                target: item.target,
+                plan,
+                selected_match: selected_match.clone(),
+                replacement: replacement.clone(),
+                outputs,
+                replace: item.replace,
+                state: JobState::Queued,
+                queued_at: now,
+                started_at: None,
+                finished_at: None,
+                note: None,
+                failure: None,
+                attempts: 0,
+                first_failed_at: None,
+                not_before: None,
+                staged: None,
+                staged_bytes: None,
+                staged_attempts: None,
+            });
+            n += 1;
+        }
+        n
     }
 
     /// Take the oldest queued job past its backoff and mark it running. `None` while
     /// paused. An idle queue is left alone: no generation bump, no write.
     pub fn claim_next(&self) -> Option<Job> {
+        if self.durability_pending.load(Ordering::SeqCst) {
+            self.persist_now();
+        }
         let now = crate::server::util::epoch_secs();
         {
             let f = self.lock();
-            if f.paused || f.running().is_some() || f.next_ready(now).is_none() {
+            if self.durability_pending.load(Ordering::SeqCst)
+                || f.paused
+                || f.running().is_some()
+                || f.next_ready(now).is_none()
+            {
                 return None;
             }
         }
         self.mutate(|f| {
-            if f.paused || f.running().is_some() {
+            if self.durability_pending.load(Ordering::SeqCst) || f.paused || f.running().is_some() {
                 return None;
             }
             let job = f.jobs.iter_mut().find(|j| j.ready(now))?;
@@ -427,20 +683,59 @@ impl Queue {
     /// this before the first output so a restart can resume from the same
     /// source/output decisions instead of planning again.
     pub fn set_plan(&self, id: u64, plan: RemuxPlan) -> bool {
-        self.mutate(|f| {
+        self.set_plan_targets(id, plan, None)
+    }
+
+    pub(crate) fn save_replacement(
+        &self,
+        id: u64,
+        replacement: super::replacement::Replacement,
+    ) -> std::io::Result<()> {
+        let saved = self.mutate_durable(|f| {
             let Some(job) = f.jobs.iter_mut().find(|j| j.id == id) else {
                 return false;
             };
-            if job.plan.is_some() {
+            if job.replacement.is_none() {
+                return false;
+            }
+            job.replacement = Some(replacement);
+            true
+        })?;
+        if !saved {
+            return Err(std::io::Error::other("replacement job disappeared"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_plan_targets(
+        &self,
+        id: u64,
+        plan: RemuxPlan,
+        targets: Option<Vec<PathBuf>>,
+    ) -> bool {
+        self.mutate_durable(|f| {
+            let Some(job) = f.jobs.iter_mut().find(|j| j.id == id) else {
+                return false;
+            };
+            if job.plan.is_some() || job.staged.is_some() {
+                return false;
+            }
+            if targets
+                .as_ref()
+                .is_some_and(|t| t.len() != plan.outputs.len())
+            {
                 return false;
             }
             let multi = plan.outputs.len() > 1;
             job.outputs = plan
                 .outputs
                 .iter()
-                .map(|output| OutputProgress {
+                .enumerate()
+                .map(|(index, output)| OutputProgress {
                     id: output.id.clone(),
-                    target: if multi {
+                    target: if let Some(targets) = &targets {
+                        targets[index].clone()
+                    } else if multi {
                         job.target
                             .parent()
                             .unwrap_or_else(|| Path::new("."))
@@ -455,6 +750,10 @@ impl Queue {
             job.plan = Some(plan);
             true
         })
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "remux plan was not durably saved");
+            false
+        })
     }
 
     pub fn begin_output(&self, id: u64, output_id: &str) -> bool {
@@ -465,7 +764,7 @@ impl Queue {
                 .find(|j| j.id == id)
                 .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
             else {
-                return true;
+                return false;
             };
             if output.state == OutputState::Done {
                 return false;
@@ -597,7 +896,7 @@ impl Queue {
     pub fn retry_staged_now(&self, target: &Path) -> bool {
         self.mutate(|f| {
             let Some(pos) = f.jobs.iter().rposition(|j| {
-                j.target == target && j.staged.is_some() && j.state != JobState::Running
+                j.owns_target(target) && j.staged.is_some() && j.state != JobState::Running
             }) else {
                 return false;
             };
@@ -627,12 +926,17 @@ impl Queue {
             let pos = f
                 .jobs
                 .iter()
-                .rposition(|j| j.target == target && j.staged.is_some())
+                .rposition(|j| j.owns_target(target) && j.staged.is_some())
                 .ok_or(false)?;
             if f.jobs[pos].state == JobState::Running {
                 return Err(true);
             }
             let path = f.jobs[pos].staged.clone().ok_or(false)?;
+            for output in &mut f.jobs[pos].outputs {
+                if output.staged.as_ref() == Some(&path) {
+                    output.staged = None;
+                }
+            }
             if f.jobs[pos].state == JobState::Queued {
                 f.jobs.remove(pos);
             } else {
@@ -651,6 +955,11 @@ impl Queue {
             let found: std::collections::HashSet<PathBuf> =
                 kept.iter().map(|(_, s, _)| s.path.clone()).collect();
             for j in f.jobs.iter_mut() {
+                for output in &mut j.outputs {
+                    if output.staged.as_ref().is_some_and(|p| !found.contains(p)) {
+                        output.staged = None;
+                    }
+                }
                 if j.staged.as_ref().is_some_and(|p| !found.contains(p)) {
                     j.set_staged(None);
                     if j.state == JobState::Queued {
@@ -660,6 +969,26 @@ impl Queue {
             }
             let mut added = 0;
             for (item, staged, failure) in kept {
+                if let Some(j) = f.jobs.iter_mut().rev().find(|j| {
+                    j.iso == item.iso && j.outputs.iter().any(|o| o.target == item.target)
+                }) {
+                    if j.state != JobState::Running {
+                        let output = j
+                            .outputs
+                            .iter_mut()
+                            .find(|o| o.target == item.target)
+                            .unwrap();
+                        output.staged = Some(staged.path.clone());
+                        output.state = OutputState::Pending;
+                        j.state = JobState::Queued;
+                        j.not_before = None;
+                        j.finished_at = None;
+                        j.note = Some(JobNote::StagedWaiting);
+                        j.failure.get_or_insert(failure);
+                        j.set_staged(Some(staged));
+                    }
+                    continue;
+                }
                 if let Some(j) = f
                     .jobs
                     .iter_mut()
@@ -683,6 +1012,8 @@ impl Queue {
                     iso: item.iso,
                     target: item.target,
                     plan: None,
+                    selected_match: None,
+                    replacement: None,
                     outputs: Vec::new(),
                     replace: item.replace,
                     state: JobState::Queued,
@@ -727,8 +1058,9 @@ impl Queue {
     pub fn clear_finished(&self) -> usize {
         self.mutate(|f| {
             let before = f.jobs.len();
-            f.jobs
-                .retain(|j| matches!(j.state, JobState::Queued | JobState::Running));
+            f.jobs.retain(|j| {
+                matches!(j.state, JobState::Queued | JobState::Running) || j.has_replacement_work()
+            });
             before - f.jobs.len()
         })
     }
@@ -748,9 +1080,20 @@ impl Queue {
         })
     }
 
-    /// Remove job `id` outright (a cancelled job leaves no trace in the list).
+    /// Remove a job, retaining a stopped replacement until its transaction resolves.
     pub fn drop_job(&self, id: u64) {
-        self.mutate(|f| f.jobs.retain(|j| j.id != id));
+        self.mutate(|f| {
+            f.jobs.retain_mut(|j| {
+                if j.id != id {
+                    return true;
+                }
+                if j.has_replacement_work() {
+                    j.park("Replacement stopped. Retry resumes the saved output transaction.");
+                    return true;
+                }
+                false
+            })
+        });
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -776,6 +1119,51 @@ impl Queue {
         out
     }
 
+    /// A landed update remains visible on sync failure, but cannot be claimed
+    /// until persistence succeeds. An error does not promise rollback.
+    fn mutate_durable<T>(&self, f: impl FnOnce(&mut QueueFile) -> T) -> std::io::Result<T> {
+        self.try_mutate_durable(|state| Ok(f(state)))
+    }
+
+    fn try_mutate_durable<T>(
+        &self,
+        f: impl FnOnce(&mut QueueFile) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        self.try_mutate_durable_with(f, write_queue_durable)
+    }
+
+    fn try_mutate_durable_with<T>(
+        &self,
+        f: impl FnOnce(&mut QueueFile) -> std::io::Result<T>,
+        write: impl FnOnce(&Path, &[u8]) -> Result<(), (bool, std::io::Error)>,
+    ) -> std::io::Result<T> {
+        let mut state = self.lock();
+        let mut next = state.clone();
+        let out = f(&mut next)?;
+        if next == *state && !self.durability_pending.load(Ordering::SeqCst) {
+            return Ok(out);
+        }
+        let json = serde_json::to_vec_pretty(&next).map_err(std::io::Error::other)?;
+        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        let result = write(&self.path, &json);
+        if let Err((false, error)) = result {
+            return Err(error);
+        }
+        *state = next;
+        *saved = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.durability_pending
+            .store(result.is_err(), Ordering::SeqCst);
+        if let Err((_, error)) = result {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "queue update published but directory durability unconfirmed; intent retained: {error}"
+                ),
+            ));
+        }
+        Ok(out)
+    }
+
     // Snapshot under the state lock, write outside it (the config folder may be NFS).
     fn persist_now(&self) {
         let (generation, json) = {
@@ -783,13 +1171,31 @@ impl Queue {
             (self.generation(), serde_json::to_vec_pretty(&*g))
         };
         let Ok(json) = json else { return };
+        self.persist_snapshot(generation, &json, write_queue_durable);
+    }
+
+    fn persist_snapshot(
+        &self,
+        generation: u64,
+        json: &[u8],
+        write: impl FnOnce(&Path, &[u8]) -> Result<(), (bool, std::io::Error)>,
+    ) {
         let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
-        if generation <= *saved {
+        if generation < *saved
+            || (generation == *saved && !self.durability_pending.load(Ordering::SeqCst))
+        {
             return;
         }
-        match crate::server::ripper::staging::write_marker_durable(&self.path, &json) {
-            Ok(()) => *saved = generation,
-            Err(e) => {
+        match write(&self.path, json) {
+            Ok(()) => {
+                *saved = generation;
+                self.durability_pending.store(false, Ordering::SeqCst);
+            }
+            Err((published, e)) => {
+                if published {
+                    *saved = generation;
+                }
+                self.durability_pending.store(true, Ordering::SeqCst);
                 tracing::warn!(path = %self.path.display(), error = %e, "library queue write failed")
             }
         }

@@ -1,4 +1,58 @@
 use super::*;
+use std::time::Duration;
+
+#[test]
+fn aggregate_handle_waits_for_every_library_service() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let mut releases = Vec::new();
+    let mut tasks: Vec<LibraryTask> = Vec::new();
+    for name in ["test-index", "test-quick", "test-deep", "test-remux"] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        releases.push(tx);
+        let started = started_tx.clone();
+        tasks.push((
+            name,
+            Box::new(move || {
+                started.send(()).unwrap();
+                rx.recv().unwrap();
+            }),
+        ));
+    }
+    let group = start_tasks(tasks);
+    for _ in 0..4 {
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    for release in releases.iter().take(3) {
+        release.send(()).unwrap();
+    }
+    assert!(
+        !group.is_finished(),
+        "the fourth worker still owns its state"
+    );
+    releases[3].send(()).unwrap();
+    group.join().unwrap();
+}
+
+#[test]
+fn drained_instance_reopens_saved_queue_instead_of_reusing_old_arc() {
+    let t = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        autorip_dir: t.path().join("cfg").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let slot = Mutex::new(None);
+    std::fs::create_dir_all(&cfg.autorip_dir).unwrap();
+    reload_instance(&slot, &cfg);
+    let old = slot.lock().unwrap().clone().unwrap();
+    assert!(!old.queue.snapshot().paused);
+    let on_disk = queue::Queue::open(Path::new(&cfg.autorip_dir));
+    on_disk.set_paused(true);
+    reload_instance(&slot, &cfg);
+    let fresh = slot.lock().unwrap().clone().unwrap();
+    assert!(!Arc::ptr_eq(&old, &fresh));
+    assert!(fresh.queue.snapshot().paused);
+    assert!(!old.queue.snapshot().paused);
+}
 
 #[test]
 fn dirs_fall_back_to_where_rips_are_filed() {
@@ -22,6 +76,7 @@ fn dirs_fall_back_to_where_rips_are_filed() {
         dirs(&c),
         Dirs {
             library: "/lib".into(),
+            tv: Some(Path::new(&c.output_dir).join(&c.tv_dir)),
             isos: Some("/src".into()),
             iso_subfolders: true
         }
@@ -31,6 +86,7 @@ fn dirs_fall_back_to_where_rips_are_filed() {
 fn dirs_in(t: &Path) -> Dirs {
     Dirs {
         library: t.join("lib"),
+        tv: None,
         isos: Some(t.join("isos")),
         iso_subfolders: false,
     }
@@ -111,6 +167,7 @@ fn a_restart_keeps_every_stored_audit_until_a_file_is_really_gone() {
     let t = tempfile::tempdir().unwrap();
     let d = Dirs {
         library: t.path().join("media/movies"),
+        tv: None,
         isos: Some(t.path().join("media/iso")),
         iso_subfolders: false,
     };
@@ -173,6 +230,7 @@ fn a_restart_keeps_every_stored_audit_until_a_file_is_really_gone() {
 #[test]
 fn orphaned_partials_are_swept_but_the_running_one_is_kept() {
     let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
     let d = dirs_in(t.path());
     let a = d.library.join("A");
     std::fs::create_dir_all(&a).unwrap();
@@ -334,4 +392,56 @@ fn the_title_log_round_trips_and_reads_old_lines() {
         (LineKind::Err, "tab\tinside")
     );
     assert_eq!(lines[3].seq, 4);
+}
+
+#[test]
+fn source_match_survives_library_reopen() {
+    let t = tempfile::tempdir().unwrap();
+    let iso = t.path().join("Castaway.iso");
+    let lib = Library::open(t.path(), &t.path().join("logs"));
+    let media = crate::server::planner::MediaMetadata {
+        title: "Cast Away".into(),
+        year: 2000,
+        tmdb_id: 8358,
+        kind: Some(crate::server::planner::MediaKind::Movie),
+        ..Default::default()
+    };
+    let saved = lib
+        .source_matches
+        .as_ref()
+        .unwrap()
+        .save(&iso, 0, media)
+        .unwrap();
+    drop(lib);
+    let reopened = Library::open(t.path(), &t.path().join("logs"));
+    assert_eq!(reopened.source_match(&iso).unwrap(), Some(saved));
+    assert_eq!(
+        reopened.source_match(&t.path().join("other.iso")).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn source_match_corruption_is_not_a_missing_match() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("library-matches.json"), b"broken").unwrap();
+    let lib = Library::open(t.path(), &t.path().join("logs"));
+    assert!(lib.source_match(&t.path().join("source.iso")).is_err());
+}
+
+#[test]
+fn source_match_cannot_be_saved_for_an_unindexed_path() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = Library::open(t.path(), &t.path().join("logs"));
+    let d = Dirs {
+        library: t.path().join("movies"),
+        tv: None,
+        isos: Some(t.path().join("iso")),
+        iso_subfolders: false,
+    };
+    assert!(
+        lib.change_source_match(&d, &t.path().join("outside.iso"), 0, Default::default())
+            .is_err()
+    );
+    assert!(!t.path().join("library-matches.json").exists());
 }

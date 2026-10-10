@@ -1,3 +1,226 @@
+#[test]
+#[cfg(unix)]
+fn unsupported_copy_operation_keeps_its_classification_when_context_is_added() {
+    assert_eq!(
+        super::copy_error_kind(&std::io::Error::from_raw_os_error(libc::ENOTSUP)),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        super::copy_error_kind(&std::io::Error::from_raw_os_error(libc::EACCES)),
+        std::io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
+fn mixed_collision_failures_back_off_and_uncertain_listing_preserves_hold() {
+    let _guard = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_string_lossy().into_owned();
+    let path = dir.path().join("held").to_string_lossy().into_owned();
+    super::clear_move_error(&path);
+    super::record_error_with(&path, "collision", "fix destination", |_| {});
+    super::schedule_failed_delivery(&path, &[super::MoveOutcome::Collision]);
+    assert!(super::move_retry_ready(&path, std::time::Instant::now()));
+    for _ in 0..3 {
+        super::schedule_failed_delivery(
+            &path,
+            &[super::MoveOutcome::Collision, super::MoveOutcome::Failed],
+        );
+    }
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    assert!(!super::move_retry_ready(&path, later));
+    super::prune_after_listing(&root, &std::collections::HashSet::new(), false);
+    assert!(
+        !super::move_retry_ready(&path, later),
+        "enumeration error cannot reset hold"
+    );
+    super::prune_after_listing(
+        &root,
+        &std::collections::HashSet::from([path.clone()]),
+        true,
+    );
+    assert!(
+        !super::move_retry_ready(&path, later),
+        "observed entry with failed stat cannot reset hold"
+    );
+    super::prune_after_listing(&root, &std::collections::HashSet::new(), true);
+    assert!(
+        super::move_retry_ready(&path, later),
+        "confirmed absence prunes stale hold"
+    );
+}
+
+#[test]
+fn recovered_folder_clears_wait_warning_but_not_failed_delivery_history() {
+    let _guard = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let path = "test-recovered-folder-warning";
+    super::clear_move_error(path);
+    super::record_error_at_stage(path, "waiting", "share slow", true, |_| {});
+    super::clear_recovered_folder_wait(path);
+    assert!(!super::MOVE_ERRORS.lock().unwrap().contains_key(path));
+    super::record_error_with(path, "copy failed", "fix destination", |_| {});
+    super::schedule_move_retry(path);
+    super::clear_recovered_folder_wait(path);
+    assert_eq!(
+        super::MOVE_ERRORS
+            .lock()
+            .unwrap()
+            .get(path)
+            .unwrap()
+            .attempts,
+        1
+    );
+    super::clear_move_error(path);
+}
+
+#[test]
+fn cancellation_after_copy_never_publishes_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.iso");
+    let destination = dir.path().join("destination.iso");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let calls = std::cell::Cell::new(0);
+    let written = std::sync::atomic::AtomicU64::new(0);
+    let error = super::copy_counting_cancellable(&source, &destination, &written, &|| {
+        calls.set(calls.get() + 1);
+        calls.get() >= 3 // data read, EOF, then publication gate
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), b"source bytes");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn concurrent_destination_winner_survives_copy_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.iso");
+    let destination = dir.path().join("destination.iso");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let calls = std::cell::Cell::new(0);
+    let written = std::sync::atomic::AtomicU64::new(0);
+    let error = super::copy_counting_cancellable(&source, &destination, &written, &|| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 3 {
+            std::fs::write(&destination, b"unrelated winner").unwrap();
+        }
+        false
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"unrelated winner");
+    assert_eq!(std::fs::read(&source).unwrap(), b"source bytes");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+}
+
+#[test]
+fn move_file_never_replaces_different_size_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.iso");
+    let destination = dir.path().join("destination.iso");
+    std::fs::write(&source, b"source bytes").unwrap();
+    std::fs::write(&destination, b"winner").unwrap();
+    assert!(matches!(
+        super::move_file(&source, &destination, &|_, _, _, _| {}),
+        super::MoveOutcome::Collision
+    ));
+    assert_eq!(std::fs::read(source).unwrap(), b"source bytes");
+    assert_eq!(std::fs::read(destination).unwrap(), b"winner");
+}
+
+#[test]
+fn journal_checkpoint_failure_preserves_source_and_never_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.iso");
+    let destination = dir.path().join("destination.iso");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let outcome = super::move_file_journaled(
+        &source,
+        &destination,
+        &|_, _, _, _| {},
+        std::sync::Arc::new(|_| Err(std::io::Error::other("journal failed"))),
+        dir.path(),
+    );
+    assert!(matches!(outcome, super::MoveOutcome::Failed));
+    assert_eq!(std::fs::read(source).unwrap(), b"source bytes");
+    assert!(!destination.exists());
+}
+
+#[test]
+fn journal_callback_concurrent_winner_is_not_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.iso");
+    let destination = dir.path().join("destination.iso");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let winner = destination.clone();
+    let outcome = super::move_file_journaled(
+        &source,
+        &destination,
+        &|_, _, _, _| {},
+        std::sync::Arc::new(move |_| std::fs::write(&winner, b"winner")),
+        dir.path(),
+    );
+    assert!(matches!(outcome, super::MoveOutcome::Collision));
+    assert_eq!(std::fs::read(source).unwrap(), b"source bytes");
+    assert_eq!(std::fs::read(destination).unwrap(), b"winner");
+}
+
+#[test]
+fn delivery_retries_back_off_then_require_operator_retry() {
+    let _guard = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let path = "test-bounded-delivery-retry";
+    super::clear_move_error(path);
+    let start = std::time::Instant::now();
+    assert!(super::move_retry_ready(path, start));
+    for attempt in 1..=3 {
+        super::record_error_with(path, "copy failed", "fix destination", |_| {});
+        super::schedule_move_retry(path);
+        assert!(!super::move_retry_ready(path, start));
+        assert_eq!(
+            super::move_retry_ready(path, start + std::time::Duration::from_secs(300)),
+            attempt < 3
+        );
+    }
+    super::clear_move_error(path);
+    assert!(super::move_retry_ready(path, start));
+    assert_eq!(
+        super::retry_deadline(1, start),
+        Some(start + std::time::Duration::from_secs(30))
+    );
+    assert_eq!(
+        super::retry_deadline(2, start),
+        Some(start + std::time::Duration::from_secs(120))
+    );
+    assert_eq!(super::retry_deadline(3, start), None);
+}
+
+#[test]
+fn copy_error_identifies_failed_operation_and_preserves_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.iso");
+    std::fs::write(&source, b"preserve me").unwrap();
+    let destination = dir.path().join("missing-parent/output.iso");
+    let written = std::sync::atomic::AtomicU64::new(0);
+    let error =
+        super::copy_counting_cancellable(&source, &destination, &written, &|| false).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        error
+            .to_string()
+            .contains("create destination temporary file")
+    );
+    assert!(error.to_string().contains("missing-parent"));
+    assert_eq!(std::fs::read(source).unwrap(), b"preserve me");
+    assert!(!destination.exists());
+}
+
 // The mover must not hold the config lock WHILE moving. Observes the lock from INSIDE the
 // injected move — the only place this property is actually observable.
 #[test]
@@ -59,6 +282,7 @@ fn ep_output(filename: &str, episode: Option<u16>, episode_name: &str) -> Output
     Output {
         filename: filename.into(),
         title_index: 0,
+        title_identity: None,
         episode,
         episode_name: episode_name.into(),
         moved: false,
@@ -751,17 +975,17 @@ fn move_file_moves_when_dest_missing() {
 }
 
 #[test]
-fn move_file_overwrites_when_dest_size_differs() {
-    // A partial dest from a previous failed cp must NOT cause a
-    // permanent stall — the new full src should overwrite it.
+fn move_file_preserves_unowned_different_size_destination() {
+    // Size mismatch is not proof that an existing destination belongs to us.
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("a.mkv");
     let dest = tmp.path().join("b.mkv");
     std::fs::write(&src, b"new full content").unwrap();
     std::fs::write(&dest, b"partial").unwrap();
     let outcome = move_file(&src, &dest, &noop_progress);
-    assert_eq!(outcome, MoveOutcome::Moved);
-    assert_eq!(std::fs::read(&dest).unwrap(), b"new full content");
+    assert_eq!(outcome, MoveOutcome::Collision);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"partial");
+    assert_eq!(std::fs::read(&src).unwrap(), b"new full content");
 }
 
 // FIX 4 — STRANDED_WARNED was inserted-into but never pruned, growing unbounded (the same
@@ -870,8 +1094,8 @@ fn move_file_does_not_skip_an_invalid_same_size_dest() {
     );
     assert_eq!(
         outcome,
-        MoveOutcome::Moved,
-        "rename overwrites the bad dest"
+        MoveOutcome::Collision,
+        "invalid contents do not authorize overwriting an unowned destination"
     );
 }
 
@@ -1777,7 +2001,7 @@ fn copy_counting_copies_bytes_and_publishes_total() {
     let data = vec![0xABu8; 5 * 1024 * 1024 + 17];
     std::fs::write(&src, &data).unwrap();
     let written = AtomicU64::new(0);
-    let n = copy_counting(&src, &dst, &written).unwrap();
+    let n = copy_counting(&src, &dst, &written, &libfreemkv::halt::Halt::new()).unwrap();
     assert_eq!(n, data.len() as u64, "returns total bytes copied");
     assert_eq!(
         written.load(Ordering::Relaxed),
@@ -1798,7 +2022,7 @@ fn copy_counting_errors_on_missing_source() {
     let src = tmp.path().join("nope.bin");
     let dst = tmp.path().join("dst.bin");
     let written = AtomicU64::new(0);
-    assert!(copy_counting(&src, &dst, &written).is_err());
+    assert!(copy_counting(&src, &dst, &written, &libfreemkv::halt::Halt::new()).is_err());
 }
 
 // Regression (temp + rename atomicity): a failed/interrupted copy must NOT leave any file
@@ -1813,7 +2037,7 @@ fn copy_counting_failure_leaves_no_file_at_final_name() {
     let src = tmp.path().join("missing.bin");
     let dst = tmp.path().join("final.mkv");
     let written = AtomicU64::new(0);
-    assert!(copy_counting(&src, &dst, &written).is_err());
+    assert!(copy_counting(&src, &dst, &written, &libfreemkv::halt::Halt::new()).is_err());
     assert!(
         !dst.exists(),
         "a failed copy must leave no file at the final dest name"
@@ -1843,7 +2067,7 @@ fn copy_counting_success_renames_atomically_and_cleans_temp() {
     let data = vec![0x5Au8; 3 * 1024 * 1024 + 5];
     std::fs::write(&src, &data).unwrap();
     let written = AtomicU64::new(0);
-    let n = copy_counting(&src, &dst, &written).unwrap();
+    let n = copy_counting(&src, &dst, &written, &libfreemkv::halt::Halt::new()).unwrap();
     assert_eq!(n, data.len() as u64);
     assert_eq!(
         std::fs::read(&dst).unwrap(),
@@ -1881,7 +2105,7 @@ fn copy_counting_clears_orphaned_part_temps_from_other_pids() {
     std::fs::write(&unrelated, b"keep").unwrap();
 
     let written = AtomicU64::new(0);
-    copy_counting(&src, &dst, &written).unwrap();
+    copy_counting(&src, &dst, &written, &libfreemkv::halt::Halt::new()).unwrap();
 
     assert!(!orphan_a.exists(), "orphaned .part for this dest removed");
     assert!(!orphan_b.exists(), "orphaned .part for this dest removed");
@@ -1960,12 +2184,9 @@ fn copy_counting_sees_a_shutdown_raised_mid_copy() {
     let dst = tmp.path().join("midabort-final.bin");
     std::fs::write(&src, vec![0x3Du8; 9 * 1024 * 1024]).unwrap();
     let written = AtomicU64::new(0);
-    let checks = std::cell::Cell::new(0);
-    // Low for the first chunk, raised from the second check on.
-    let cancel = || {
-        checks.set(checks.get() + 1);
-        checks.get() > 1
-    };
+    // Raise shutdown after one chunk, independent of how many cancellation
+    // gates protect open/read/write/publication boundaries.
+    let cancel = || written.load(std::sync::atomic::Ordering::Relaxed) >= 4 * 1024 * 1024;
 
     let err = copy_counting_cancellable(&src, &dst, &written, &cancel)
         .expect_err("a shutdown raised mid-copy must abort it");
@@ -2166,15 +2387,15 @@ fn check_and_move_second_disc_of_a_title_is_filed_beside_the_first() {
         "a successfully filed second disc is not an operator error"
     );
 
-    // Idempotency: a retried tick must re-claim `_2`, never walk to `_3`.
+    // A recreated staging job has no journal proving ownership of `_2`.
+    // Identical bytes alone must not claim an existing library file.
     std::fs::create_dir_all(&disc_dir).unwrap();
     std::fs::write(disc_dir.join(".done"), marker_json("Clash")).unwrap();
     std::fs::write(&staged_mkv, &new).unwrap();
     check_and_move(&cfg);
     assert!(
-        !dest_dir.join("Clash (2024)_3.mkv").exists(),
-        "a re-move of the SAME disc must re-claim its own name, not litter \
-             the library with _3, _4, ..."
+        dest_dir.join("Clash (2024)_3.mkv").exists(),
+        "a new job without delivery provenance must take an unowned name"
     );
     assert_eq!(
         std::fs::read(&second).unwrap(),
@@ -2354,7 +2575,9 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
         let recorded = error_snapshot(&dest_key);
         clear_error(&dest_key);
         assert!(
-            recorded.is_none(),
+            recorded
+                .as_ref()
+                .is_some_and(|e| e.reason == "publication failed"),
             "a failed copy that created no destination must not claim a \
                  partial copy needs hand-deleting, got: {recorded:?}"
         );
@@ -2370,7 +2593,11 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
                  running with read-through privileges"
         );
     } else {
-        assert_eq!(outcome, MoveOutcome::Failed, "a failed copy is Failed");
+        assert_eq!(
+            outcome,
+            MoveOutcome::Failed,
+            "permission failure does not fall back to copy"
+        );
         assert!(src.exists(), "the source must survive a failed move");
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -2428,7 +2655,11 @@ fn move_file_copy_failure_keeps_pre_existing_dest() {
                  running with read-through privileges"
         );
     } else {
-        assert_eq!(outcome, MoveOutcome::Failed, "a failed copy is Failed");
+        assert_eq!(
+            outcome,
+            MoveOutcome::Collision,
+            "an existing destination blocks publication"
+        );
         assert!(src.exists(), "the source must survive a failed move");
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -2470,7 +2701,9 @@ fn move_file_copy_failure_removes_this_attempts_dest() {
             "no output of THIS attempt may be left at the destination name"
         );
         assert!(
-            recorded.is_none(),
+            recorded
+                .as_ref()
+                .is_some_and(|e| e.reason == "publication failed"),
             "a failed copy that created no destination must not claim a \
                  partial copy needs hand-deleting, got: {recorded:?}"
         );
@@ -2591,17 +2824,18 @@ fn a_blocked_pass_clears_the_move_progress_bar() {
     mkv.extend_from_slice(&[0xC7u8; 2048]);
     std::fs::write(disc.join("MoveBarDisc.mkv"), &mkv).unwrap();
 
-    std::fs::create_dir_all(
-        movie_dir
-            .join("MoveBarDisc (2024)")
-            .join("MoveBarDisc (2024).mkv"),
-    )
-    .unwrap();
+    let blocked = movie_dir
+        .join("MoveBarDisc (2024)")
+        .join("MoveBarDisc (2024).mkv");
+    for variant in 1..=64 {
+        std::fs::create_dir_all(dest_with_variant(&blocked.to_string_lossy(), variant)).unwrap();
+    }
 
     // The bars an earlier dir's copy left published.
     *MOVE_STATE.lock().unwrap_or_else(|e| e.into_inner()) = vec![MoveState {
         name: "MoveBarDisc".to_string(),
         artifact: "mkv".to_string(),
+        phase: super::MovePhase::Copying,
         progress_pct: 60,
         progress_gb: 1.2,
         total_gb: 2.0,
@@ -2618,10 +2852,9 @@ fn a_blocked_pass_clears_the_move_progress_bar() {
         "the staging dir must be left alone when delivery is blocked \
              (otherwise this test is not exercising a failure branch)"
     );
-    assert_eq!(
-        recorded.map(|e| e.reason),
-        Some("copy to destination failed".to_string()),
-        "the pass must have ended in the any_failed branch"
+    assert!(
+        recorded.is_some_and(|e| e.reason.contains("unowned delivery destination exists")),
+        "the plan must be refused without adopting an occupied name"
     );
     let bar = MOVE_STATE
         .lock()
@@ -2727,11 +2960,11 @@ fn the_teardown_is_gated_on_a_complete_listing() {
         .find("if !listing_complete {")
         .expect("check_and_move must refuse to tear down an incompletely-listed staging dir");
     let teardown = src
-        .find("let cleanup_err = std::fs::remove_dir_all(&dir).err();")
+        .find("let cleanup_err = delivered.cleanup().err();")
         .expect("the staging teardown must still exist");
     assert!(
         guard < teardown,
-        "the incomplete-listing guard must come BEFORE remove_dir_all — \
+        "the incomplete-listing guard must come BEFORE cleanup — \
              after it, the file the pass never saw is already deleted"
     );
     let body = &src[guard..teardown];
@@ -3358,7 +3591,7 @@ fn check_and_move_card_carries_the_create_dir_error() {
 // the library name (the next tick's variant search would file around it).
 #[cfg(unix)]
 #[test]
-fn move_file_removes_its_own_copy_that_fails_validation() {
+fn move_file_permission_failure_does_not_fall_back_to_copy() {
     use std::os::unix::fs::PermissionsExt;
     let dir = scratch_dir("badcopy");
     let src_dir = dir.join("staging");
@@ -3378,7 +3611,7 @@ fn move_file_removes_its_own_copy_that_fails_validation() {
         return;
     };
 
-    assert_eq!(outcome, MoveOutcome::PostCopyInvalid);
+    assert_eq!(outcome, MoveOutcome::Failed);
     assert!(!dest.exists(), "the broken copy must be removed");
     assert!(src.exists(), "the source is the source of truth");
     std::fs::remove_dir_all(&dir).ok();

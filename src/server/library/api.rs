@@ -1,8 +1,8 @@
 //! `/api/library*` and the Library's frames on the `/events` stream.
 //!
-//! Every handler here answers from memory: the index snapshot, the queue and
-//! the console. Filesystem work belongs to the indexer and the worker threads
-//! (the per-title log read is the one exception, and it takes no lock).
+//! Listings answer from index/queue snapshots. Mutations persist their state;
+//! corrected-remux admission also verifies source and ownership identities.
+//! Media scanning and muxing belong to the indexer and worker threads.
 
 use super::queue::JobState;
 use super::{Library, dirs, instance};
@@ -50,6 +50,23 @@ fn targets_of(body: &str) -> Vec<PathBuf> {
     out
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatchRequest {
+    source: PathBuf,
+    expected_revision: u64,
+    media: crate::server::planner::MediaMetadata,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmedMatchRequest {
+    source: PathBuf,
+    expected_revision: u64,
+    media: crate::server::planner::MediaMetadata,
+    ownership: super::ownership::Confirmation,
+}
+
 /// Serve a `/api/library*` request; one that is not ours is handed back.
 pub fn handle(
     request: tiny_http::Request,
@@ -76,6 +93,85 @@ pub fn handle(
             download(request, &library_json(&lib, &c));
         }
         (true, _, "/api/library") => json_response(request, 200, &library_json(&lib, &c)),
+        (true, _, "/api/library/match") => {
+            let source = PathBuf::from(query_param(&url, "source").unwrap_or_default());
+            if not_ready(&lib)
+                || !lib
+                    .listing(&d)
+                    .rows
+                    .iter()
+                    .any(|r| r.iso.as_ref() == Some(&source))
+            {
+                err(request, 404, "source ISO is not in the current library");
+            } else {
+                let preview = lib.preview_ownership(&c, &source);
+                match preview {
+                    Ok((saved, preview)) => json_response(
+                        request,
+                        200,
+                        &json!({"source": source, "saved": saved,
+                            "owned_outputs": preview.owned_outputs, "candidates": preview.candidates,
+                            "preview_token": preview.preview_token,
+                            "omitted_candidates": preview.omitted_candidates})
+                            .to_string(),
+                    ),
+                    Err(error) => err(request, 409, &error.to_string()),
+                }
+            }
+        }
+        (_, true, "/api/library/match/remux") => {
+            let Ok((request, body)) = read_json_body(request) else {
+                return None;
+            };
+            let Ok(change) = serde_json::from_str::<ConfirmedMatchRequest>(&body) else {
+                err(request, 400, "invalid confirmed source match request");
+                return None;
+            };
+            match lib.confirm_match_and_queue(
+                &c,
+                &change.source,
+                change.expected_revision,
+                change.media,
+                change.ownership,
+            ) {
+                Ok((saved, queued)) => json_response(
+                    request,
+                    200,
+                    &json!({"ok": true, "saved": saved, "queued": queued}).to_string(),
+                ),
+                Err(error) => err(request, 409, &error.to_string()),
+            }
+        }
+        (_, true, "/api/library/match") => {
+            let Ok((request, body)) = read_json_body(request) else {
+                return None;
+            };
+            let Ok(change) = serde_json::from_str::<MatchRequest>(&body) else {
+                err(request, 400, "invalid source match request");
+                return None;
+            };
+            match lib.change_source_match(
+                &d,
+                &change.source,
+                change.expected_revision,
+                change.media,
+            ) {
+                Ok(saved) => json_response(
+                    request,
+                    200,
+                    &json!({"ok": true, "saved": saved}).to_string(),
+                ),
+                Err(error) => {
+                    let status = match error.kind() {
+                        std::io::ErrorKind::InvalidInput => 400,
+                        std::io::ErrorKind::NotFound => 404,
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::AlreadyExists => 409,
+                        _ => 500,
+                    };
+                    err(request, status, &error.to_string());
+                }
+            }
+        }
         (true, _, "/api/library/raw") => {
             let path = query_param(&url, "path").unwrap_or_default();
             match lib.audits.raw(std::path::Path::new(&path)) {
@@ -168,8 +264,10 @@ pub fn handle(
                 err(request, 409, &why);
                 return None;
             }
-            let n = lib.enqueue(&d, pick);
-            queued(request, n, eligible);
+            match lib.enqueue_checked(&d, pick) {
+                Ok(n) => queued(request, n, eligible),
+                Err(error) => err(request, 500, &error),
+            }
         }
         (_, true, "/api/library/queue/out-of-date") | (_, true, "/api/library/queue/all") => {
             if not_ready(&lib) {
@@ -192,8 +290,10 @@ pub fn handle(
                 .iter()
                 .filter(|r| r.target.is_some() && r.iso.is_some() && pick(r))
                 .count();
-            let n = lib.enqueue(&d, pick);
-            queued(request, n, eligible);
+            match lib.enqueue_checked(&d, pick) {
+                Ok(n) => queued(request, n, eligible),
+                Err(error) => err(request, 500, &error),
+            }
         }
         (_, true, "/api/library/queue/remove") => {
             let Ok((request, body)) = read_json_body(request) else {
@@ -335,10 +435,24 @@ fn clear_idle_staging(root: &std::path::Path) -> (usize, usize) {
             continue;
         };
         let path = entry.path();
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let job_lease = crate::server::ripper::staging::job_lease(&path);
+        let Ok(_idle) = job_lease.try_lock() else {
+            continue;
+        };
         let Some(snapshot) = crate::server::ripper::staging::snapshot_staging_disc(&path) else {
             continue;
         };
-        if snapshot.has_sweeping || snapshot.has_ripped || snapshot.has_muxing {
+        if snapshot.has_sweeping
+            || snapshot.has_ripped
+            || snapshot.has_muxing
+            || snapshot.has_done
+            || snapshot.had_entry_error
+            || snapshot.state_unreadable.is_some()
+            || crate::server::ripper::staging::read_state(&path).is_none()
+        {
             continue;
         }
         match std::fs::remove_dir_all(&path) {

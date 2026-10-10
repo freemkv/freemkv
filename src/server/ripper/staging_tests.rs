@@ -1,6 +1,155 @@
 use super::*;
 use std::fs;
 
+#[test]
+fn capture_reset_keeps_corrected_identity_but_discards_old_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut old = DiscState::new(StagingState::Stopped);
+    old.disc_identity = "disc-hash".into();
+    old.title = "Castaway".into();
+    try_write_state(dir.path(), &old).unwrap();
+    let correction = UserMetadata {
+        episode_start: None,
+        title: "Cast Away".into(),
+        year: 2000,
+        media_type: "movie".into(),
+        tmdb_id: 8358,
+        poster_url: String::new(),
+        overview: String::new(),
+    };
+    let revision = save_user_metadata(dir.path(), correction.clone()).unwrap();
+    fs::write(dir.path().join("old.iso"), b"old capture").unwrap();
+    fs::create_dir(dir.path().join("old-output")).unwrap();
+    fs::write(dir.path().join("old-output/episode.mkv"), b"old output").unwrap();
+    let lease = job_lease(dir.path());
+    let _owner = lease.lock().unwrap();
+    reset_capture_preserving_metadata(dir.path(), "").unwrap();
+    let saved = read_state(dir.path()).unwrap();
+    assert_eq!(saved.disc_identity, "disc-hash");
+    assert_eq!(saved.user_metadata, Some(correction));
+    assert_eq!(saved.metadata_revision, revision);
+    assert_eq!(saved.title, "Cast Away");
+    assert_eq!(saved.state, StagingState::Stopped);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    let started = begin_capture(dir.path(), 0).unwrap();
+    assert_eq!(started.title, "Cast Away");
+    assert_eq!(started.tmdb_id, 8358);
+    assert_eq!(started.metadata_revision, revision);
+    assert_eq!(started.state, StagingState::Sweeping);
+    assert_eq!(started.max_retries, 0);
+}
+
+#[test]
+fn capture_reset_refuses_corrupt_metadata_without_removing_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(state_path(dir.path()), b"{ torn").unwrap();
+    fs::write(dir.path().join("keep.iso"), b"capture").unwrap();
+    let lease = job_lease(dir.path());
+    let _owner = lease.lock().unwrap();
+    assert!(reset_capture_preserving_metadata(dir.path(), "").is_err());
+    assert_eq!(fs::read(dir.path().join("keep.iso")).unwrap(), b"capture");
+    assert_eq!(fs::read(state_path(dir.path())).unwrap(), b"{ torn");
+}
+
+#[test]
+fn interrupted_capture_reset_cannot_resume_old_capture_with_an_empty_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut old = DiscState::new(StagingState::Stopped);
+    old.disc_identity = "same-disc".into();
+    old.title = "Show".into();
+    old.media_type = "tv".into();
+    try_write_state(dir.path(), &old).unwrap();
+    fs::write(dir.path().join("old.iso"), b"old capture").unwrap();
+    let lease = job_lease(dir.path());
+    let _owner = lease.lock().unwrap();
+    assert!(
+        reset_capture_with(dir.path(), "", || Err(io::Error::other("simulated crash"))).is_err()
+    );
+    assert!(read_state(dir.path()).unwrap().reset_in_progress);
+    assert!(dir.path().join("old.iso").exists());
+    assert!(snapshot_staging_disc(dir.path()).is_none());
+    assert!(begin_capture(dir.path(), 1).is_err());
+    assert!(try_write_state(dir.path(), &old).is_err());
+    mutate_state_if_present(dir.path(), |st| st.reset_in_progress = false);
+    assert!(read_state(dir.path()).unwrap().reset_in_progress);
+    reset_capture_preserving_metadata(dir.path(), "").unwrap();
+    let ready = read_state(dir.path()).unwrap();
+    assert!(!ready.reset_in_progress);
+    assert_eq!(ready.disc_identity, "same-disc");
+    assert!(!dir.path().join("old.iso").exists());
+    assert!(begin_capture(dir.path(), 1).is_ok());
+}
+
+#[test]
+fn interrupted_legacy_capture_reset_is_also_held_until_cleanup_finishes() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("legacy");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("old.iso"), b"old capture").unwrap();
+    let lease = job_lease(&dir);
+    let _owner = lease.lock().unwrap();
+    assert!(reset_capture_with(&dir, "", || Err(io::Error::other("simulated crash"))).is_err());
+    assert!(read_state(&dir).unwrap().reset_in_progress);
+    assert!(snapshot_staging_disc(&dir).is_none());
+    reset_capture_preserving_metadata(&dir, "").unwrap();
+    assert!(!dir.exists());
+}
+
+#[test]
+fn interrupted_legacy_reset_is_rediscovered_after_mapfile_removal() {
+    let hash = "0123456789abcdef0123456789abcdef01234567";
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("OldMovie");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("OldMovie.iso"), b"capture").unwrap();
+    let map_path = dir.join("OldMovie.iso.mapfile");
+    let mut map = freemkv_engine::Mapfile::create(&map_path, 4096, "test").unwrap();
+    map.set_disc_hash(hash);
+    map.flush().unwrap();
+    assert_eq!(
+        super::super::jobs::locate(root.path(), hash).unwrap(),
+        "OldMovie"
+    );
+    let lease = job_lease(&dir);
+    let _owner = lease.lock().unwrap();
+    assert!(
+        reset_capture_with(&dir, hash, || {
+            fs::remove_file(&map_path)?;
+            Err(io::Error::other(
+                "crash after removing identity-bearing map",
+            ))
+        })
+        .is_err()
+    );
+    assert_eq!(
+        super::super::jobs::locate(root.path(), hash).unwrap(),
+        "OldMovie"
+    );
+    assert!(read_state(&dir).unwrap().reset_in_progress);
+    reset_capture_preserving_metadata(&dir, hash).unwrap();
+    assert_eq!(
+        super::super::jobs::locate(root.path(), hash).unwrap(),
+        "OldMovie"
+    );
+    assert!(!read_state(&dir).unwrap().reset_in_progress);
+    assert!(!dir.join("OldMovie.iso").exists());
+}
+
+#[test]
+fn capture_reset_refuses_a_conflicting_verified_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut saved = DiscState::new(StagingState::Stopped);
+    saved.disc_identity = "first-disc".into();
+    try_write_state(dir.path(), &saved).unwrap();
+    fs::write(dir.path().join("keep.iso"), b"capture").unwrap();
+    let lease = job_lease(dir.path());
+    let _owner = lease.lock().unwrap();
+    assert!(reset_capture_preserving_metadata(dir.path(), "other-disc").is_err());
+    assert_eq!(fs::read(dir.path().join("keep.iso")).unwrap(), b"capture");
+    assert_eq!(read_state(dir.path()).unwrap().disc_identity, "first-disc");
+    assert!(!read_state(dir.path()).unwrap().reset_in_progress);
+}
+
 fn tmpdir() -> PathBuf {
     // Repo-local scratch, never /tmp (wiped on reboot, cross-run collisions).
     // Anchor to the crate's target/ dir so `cargo clean` cleans it up.
@@ -357,8 +506,9 @@ fn clear_inprogress_markers_strips_sweeping_and_muxing_under_root() {
 
     clear_inprogress_markers(&root);
 
-    assert!(
-        read_state(&disc_a).is_none(),
+    assert_eq!(
+        read_state(&disc_a).unwrap().state,
+        StagingState::Stopped,
         ".sweeping must be cleared on graceful shutdown"
     );
     assert!(
@@ -1038,6 +1188,51 @@ fn marker_rename_failure_cleans_up_tmp() {
     );
 }
 
+#[test]
+fn marker_directory_sync_failure_is_reported_after_atomic_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.json");
+    fs::write(&path, b"old").unwrap();
+    let error = write_marker_with_directory_sync(&path, b"new", |parent| {
+        assert_eq!(parent, dir.path());
+        Err(io::Error::from(io::ErrorKind::StorageFull))
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"new",
+        "failure does not imply rollback"
+    );
+    assert!(!dir.path().join("journal.json.tmp").exists());
+}
+
+#[test]
+fn marker_phased_write_distinguishes_rename_and_directory_sync_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marker");
+    std::fs::create_dir(&path).unwrap();
+    assert!(matches!(
+        write_marker_phased(&path, b"new", |_| panic!("sync after failed rename")),
+        Err(MarkerWriteError::BeforePublish(_))
+    ));
+    assert!(!dir.path().join("marker.tmp").exists());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, b"old").unwrap();
+    let error = write_marker_phased(&path, b"new", |_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "injected directory sync",
+        ))
+    })
+    .unwrap_err();
+    assert!(
+        matches!(error, MarkerWriteError::AfterPublish(ref e) if e.kind() == std::io::ErrorKind::StorageFull)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    assert!(!dir.path().join("marker.tmp").exists());
+}
+
 // Exhaustive resume-on-startup classifier matrix (rc4 hardening): drives
 // `resume_or_quarantine_staging` over every marker/artifact/restart_count
 // combination, asserting the resulting `ResumeAction` or silent wipe/skip.
@@ -1541,8 +1736,8 @@ fn sweeping_marker_cleared_by_terminal_writes() {
     let d3 = tmpdir();
     write_sweeping_marker(&d3);
     clear_sweeping_marker(&d3);
-    // Clearing a Sweeping dir removes state.json entirely (resumable, not owned).
-    assert!(read_state(&d3).is_none());
+    // Stopping releases ownership without discarding identity or metadata.
+    assert_eq!(read_state(&d3).unwrap().state, StagingState::Stopped);
     // Idempotent: clearing an already-gone marker must not panic/error.
     clear_sweeping_marker(&d3);
 }
@@ -1798,6 +1993,7 @@ fn muxing_status_fails_closed_on_corrupt_or_foreign_state() {
     v["schema"] = serde_json::json!(1);
     fs::write(disc.join(STATE_FILE), v.to_string()).unwrap();
     assert!(muxing_status(&disc).is_err(), "foreign-schema state.json");
+    fs::remove_file(disc.join(STATE_FILE)).unwrap();
 
     let mut st = DiscState::new(StagingState::Ripped);
     st.muxing = true;
@@ -1915,4 +2111,137 @@ fn ripped_marker_round_trips_through_disc_state() {
         serde_json::to_value(st.to_ripped_marker()).unwrap(),
         serde_json::to_value(&m).unwrap()
     );
+}
+#[test]
+fn singlepass_empty_outputs_refuse_plan_change_from_persisted_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut running = super::DiscState::new(super::StagingState::Sweeping);
+    running.media_type = "movie".into();
+    running.max_retries = 0;
+    super::try_write_state(dir.path(), &running).unwrap();
+    let result = super::save_user_metadata(
+        dir.path(),
+        super::UserMetadata {
+            episode_start: None,
+            title: "Show".into(),
+            year: 2020,
+            media_type: "tv".into(),
+            tmdb_id: 10,
+            poster_url: String::new(),
+            overview: String::new(),
+        },
+    );
+    assert!(
+        result.is_err(),
+        "active single-pass has no ISO even before outputs exist"
+    );
+    assert_eq!(super::read_state(dir.path()).unwrap(), running);
+}
+
+#[test]
+fn operator_metadata_survives_stale_worker_snapshot_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut worker = super::DiscState::new(super::StagingState::Sweeping);
+    worker.title = "Castaway".into();
+    super::try_write_state(dir.path(), &worker).unwrap();
+    super::save_user_metadata(
+        dir.path(),
+        super::UserMetadata {
+            episode_start: None,
+            title: "Cast Away".into(),
+            year: 2000,
+            media_type: "movie".into(),
+            tmdb_id: 8358,
+            poster_url: String::new(),
+            overview: "Chosen movie".into(),
+        },
+    )
+    .unwrap();
+    worker.state = super::StagingState::Ripped;
+    super::try_write_state(dir.path(), &worker).unwrap();
+    let restored = super::read_state(dir.path()).unwrap();
+    assert_eq!(restored.title, "Cast Away");
+    assert_eq!(restored.tmdb_id, 8358);
+    assert_eq!(restored.state, super::StagingState::Ripped);
+    assert!(restored.title_confident);
+}
+
+#[test]
+fn persisted_mode_guard_allows_idle_selection_and_multipass_replanning() {
+    for (state, retries, media_type, current_id, new_id) in [
+        (super::StagingState::Stopped, 0, "movie", 0, 10),
+        (super::StagingState::Sweeping, 3, "movie", 0, 10),
+        (super::StagingState::Sweeping, 0, "tv", 10, 10),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut saved = super::DiscState::new(state);
+        saved.max_retries = retries;
+        saved.media_type = media_type.into();
+        saved.tmdb_id = current_id;
+        super::try_write_state(dir.path(), &saved).unwrap();
+        super::save_user_metadata(
+            dir.path(),
+            super::UserMetadata {
+                episode_start: None,
+                title: "Selected".into(),
+                year: 2020,
+                media_type: "tv".into(),
+                tmdb_id: new_id,
+                poster_url: String::new(),
+                overview: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(super::read_state(dir.path()).unwrap().title, "Selected");
+    }
+}
+#[test]
+fn a_metadata_edit_while_mux_finishes_holds_the_old_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let mut initial = super::DiscState::new(super::StagingState::Ripped);
+    initial.media_type = "tv".into();
+    initial.tmdb_id = 1;
+    initial.max_retries = 3;
+    initial.outputs.push(super::Output {
+        filename: "old-episode.mkv".into(),
+        episode: Some(1),
+        ..Default::default()
+    });
+    super::try_write_state(dir, &initial).unwrap();
+    let paused = std::sync::Barrier::new(2);
+    let resume = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            super::mark_handoff(dir, true, |stale| {
+                paused.wait();
+                resume.wait();
+                stale.title = "Old show".into();
+                stale.tmdb_id = 1;
+            })
+            .unwrap();
+        });
+        paused.wait();
+        super::save_user_metadata(
+            dir,
+            super::UserMetadata {
+                episode_start: None,
+                title: "Correct show".into(),
+                year: 2020,
+                media_type: "tv".into(),
+                tmdb_id: 2,
+                poster_url: String::new(),
+                overview: String::new(),
+            },
+        )
+        .unwrap();
+        resume.wait();
+        worker.join().unwrap();
+    });
+    let saved = super::read_state(dir).unwrap();
+    assert_eq!(saved.state, super::StagingState::Ripped);
+    assert!(saved.replan_required);
+    assert_eq!(saved.tmdb_id, 2);
+    assert_eq!(saved.title, "Correct show");
+    assert_eq!(saved.metadata_revision, 1);
 }

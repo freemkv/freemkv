@@ -442,6 +442,7 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--title",
     "-a",
     "--audio",
+    "--presentation-language",
     "-s",
     "--subtitles",
     "--keydb",
@@ -823,6 +824,9 @@ fn usage() {
     println!("{}", crate::strings::get("usage.flags_header"));
     println!("{}", crate::strings::get("usage.flag.title"));
     println!("{}", crate::strings::get("usage.flag.audio"));
+    println!(
+        "  --presentation-language de  Choose an authored language presentation; independent of --audio all"
+    );
     println!("{}", crate::strings::get("usage.flag.subtitles"));
     println!("{}", crate::strings::get("usage.flag.keydb"));
     println!("{}", crate::strings::get("usage.flag.key_url_1"));

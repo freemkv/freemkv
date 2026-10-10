@@ -5,6 +5,18 @@
 use crate::server::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC, SECTOR_BYTES};
 use std::sync::Mutex;
 
+pub(super) fn reset_after_drain() {
+    STATE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    STOPPED_INSERTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    STOP_COOLDOWNS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
 /// One contiguous bad range as seen in the UI. Derived from the mapfile
 /// during a multi-pass rip; chapter/time-offset come from the scanned title's
 /// playlist metadata when the bad region lands in AV content.
@@ -51,6 +63,16 @@ pub struct RipState {
     /// there), because nearly every caller builds a fresh `RipState`.
     #[serde(skip)]
     pub disc_label: String,
+    /// Stable staging basename; independent of the displayed title.
+    pub job_id: String,
+    pub episode_start: Option<u16>,
+    #[serde(skip)]
+    pub disc_identity: String,
+    #[serde(skip)]
+    pub user_metadata: Option<super::staging::UserMetadata>,
+    /// Watermark for durably committed corrections published to this job.
+    #[serde(skip)]
+    pub metadata_revision: u64,
     /// This device's terminal state is a DEFERRAL, not a failure: the work
     /// stopped for a reason that fixes itself (keys arrive), staging is
     /// intact, and the next pass will pick it up unchanged.
@@ -216,6 +238,48 @@ pub struct RipState {
     pub claim_gen: u64,
 }
 
+impl RipState {
+    /// Install the metadata snapshot read by a scan for its identified job.
+    pub(super) fn restore_job_metadata(
+        &mut self,
+        job_id: &str,
+        identity: &str,
+        metadata: Option<super::staging::UserMetadata>,
+        revision: u64,
+    ) {
+        // A scan may have read disk before an in-flight correction published.
+        // Revisions are per job: only a different job may reset the watermark.
+        if self.job_id != job_id || revision >= self.metadata_revision {
+            self.user_metadata = metadata;
+            self.metadata_revision = revision;
+        }
+        self.job_id = job_id.to_string();
+        self.disc_identity = identity.to_string();
+        self.episode_start = self.user_metadata.as_ref().and_then(|m| m.episode_start);
+    }
+
+    /// Publish a durably committed correction onto the matching live job.
+    pub fn publish_user_metadata(
+        &mut self,
+        expected_job: &str,
+        revision: u64,
+        metadata: super::staging::UserMetadata,
+    ) {
+        if self.job_id != expected_job || revision <= self.metadata_revision {
+            return;
+        }
+        self.metadata_revision = revision;
+        self.disc_name = metadata.title.clone();
+        self.tmdb_title = metadata.title.clone();
+        self.tmdb_year = metadata.year;
+        self.tmdb_poster = metadata.poster_url.clone();
+        self.tmdb_overview = metadata.overview.clone();
+        self.tmdb_media_type = metadata.media_type.clone();
+        self.episode_start = metadata.episode_start;
+        self.user_metadata = Some(metadata);
+    }
+}
+
 impl Default for RipState {
     fn default() -> Self {
         Self {
@@ -224,6 +288,11 @@ impl Default for RipState {
             disc_present: false,
             disc_name: String::new(),
             disc_label: String::new(),
+            job_id: String::new(),
+            episode_start: None,
+            disc_identity: String::new(),
+            user_metadata: None,
+            metadata_revision: 0,
             failure_deferred: false,
             failure_finalize: false,
             failure_space: false,
@@ -294,28 +363,6 @@ pub(super) fn damage_severity_for(errors: u32, total_lost_ms: f64) -> String {
 // Global state for web UI.
 pub static STATE: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, RipState>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
-
-/// Operator-chosen TMDB title overrides, keyed by device. Set from the Drives
-/// card's "✎ change" picker BEFORE a manual rip; consumed once by `rip_disc`,
-/// where it takes precedence over the scan's auto-match so the rip files under
-/// the operator's pick (and counts as confident → no review hold).
-pub static TITLE_OVERRIDES: once_cell::sync::Lazy<
-    Mutex<std::collections::HashMap<String, crate::server::tmdb::TmdbResult>>,
-> = once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
-
-/// Record an operator title override for `device` (from the Drives card picker).
-pub fn set_title_override(device: &str, r: crate::server::tmdb::TmdbResult) {
-    // Recover-and-proceed on poison (same convention as is_busy/update_state):
-    // silently dropping the override would lose the operator's title pick.
-    let mut m = TITLE_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
-    m.insert(device.to_string(), r);
-}
-
-/// Take (and clear) the operator title override for `device`, if any.
-pub fn take_title_override(device: &str) -> Option<crate::server::tmdb::TmdbResult> {
-    let mut m = TITLE_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
-    m.remove(device)
-}
 
 // An explicit Stop suppresses automatic work for this insertion, not just a timer.
 static STOPPED_INSERTIONS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, bool>>> =
@@ -397,10 +444,6 @@ pub(super) fn is_in_cooldown(device: &str) -> bool {
 /// accumulate stale entries. Recovers poisoned locks before cleanup.
 pub(super) fn forget_device_state(device: &str) {
     release_stopped_disc(device);
-    TITLE_OVERRIDES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(device);
     STOP_COOLDOWNS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -462,6 +505,33 @@ pub fn update_state(device: &str, mut state: RipState) {
         state.disc_label = prev.disc_label.clone();
     }
     let prev_started = s.get(device).map(|p| p.started_epoch_secs).unwrap_or(0);
+    if state.disc_present
+        && let Some(prev) = s.get(device)
+    {
+        if state.job_id.is_empty()
+            && (state.disc_label.is_empty() || state.disc_label == prev.disc_label)
+        {
+            state.job_id = prev.job_id.clone();
+            state.disc_identity = prev.disc_identity.clone();
+        }
+        if state.job_id == prev.job_id
+            && !state.job_id.is_empty()
+            && state.metadata_revision <= prev.metadata_revision
+        {
+            state.user_metadata = prev.user_metadata.clone();
+            state.metadata_revision = prev.metadata_revision;
+            state.episode_start = prev.episode_start;
+            if let Some(m) = &state.user_metadata {
+                state.disc_label = prev.disc_label.clone();
+                state.disc_name = m.title.clone();
+                state.tmdb_title = m.title.clone();
+                state.tmdb_year = m.year;
+                state.tmdb_poster = m.poster_url.clone();
+                state.tmdb_overview = m.overview.clone();
+                state.tmdb_media_type = m.media_type.clone();
+            }
+        }
+    }
     let now_active = is_active_status(&state.status);
     let was_active = s.get(device).is_some_and(|p| is_active_status(&p.status));
 

@@ -171,11 +171,12 @@ pub struct Config {
     pub tv_dir: String,
     pub min_length_secs: u64,
     pub main_feature: bool,
-    /// Fully-automatic TV: when a disc resolves as a series, rip every episode
-    /// title (not just the main feature), auto-number them `S{NN}E{MM}` from
-    /// TMDB, and file into `Show (Year)/Season NN/` — no operator step. Default
-    /// true (it's *auto*rip). When false, a TV disc is held for review so the
-    /// operator confirms selection/season/episodes before filing.
+    /// Content presentation language; empty leaves selection policy unspecified.
+    #[serde(default)]
+    pub presentation_language: String,
+    /// Plan automatic TV fan-out from authored title evidence and confirmed numbering.
+    /// Missing proof requires review; metadata alone does not identify disc episodes.
+    /// False uses the single-output path, without preventing explicitly reviewed TV plans.
     #[serde(default = "default_true")]
     pub tv_auto: bool,
     pub auto_eject: bool,
@@ -285,6 +286,7 @@ impl std::fmt::Debug for Config {
             .field("tv_dir", &self.tv_dir)
             .field("min_length_secs", &self.min_length_secs)
             .field("main_feature", &self.main_feature)
+            .field("presentation_language", &self.presentation_language)
             .field("tv_auto", &self.tv_auto)
             .field("auto_eject", &self.auto_eject)
             .field("on_insert", &self.on_insert)
@@ -698,12 +700,12 @@ pub fn save_coalesced(
     }
     if !slot.writer_active {
         let writer_path = path.clone();
-        std::thread::Builder::new()
-            .name("autorip-settings-save".into())
-            .spawn(move || run_save_writer(&writer_path))
-            .inspect_err(|_| {
-                slot.pending = None;
-            })?;
+        crate::server::daemon::spawn_background("autorip-settings-save", move || {
+            run_save_writer(&writer_path)
+        })
+        .inspect_err(|_| {
+            slot.pending = None;
+        })?;
         slot.writer_active = true;
     }
     Ok(rx)
@@ -738,6 +740,10 @@ fn run_save_writer(path: &str) {
             let _ = w.send(copy_io_result(&result));
         }
     }
+}
+
+pub(crate) fn reset_after_drain() {
+    SAVE_SLOTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 #[cfg(test)]

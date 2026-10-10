@@ -492,7 +492,6 @@ fn a_title_the_breakdown_never_mentions_falls_back_to_the_union() {
 fn shared_pid_disc() -> crate::engine::Scanned {
     use crate::engine::{Row, Scanned};
     let mk = |ty: &str, ti: usize, pid: Option<u16>| Row {
-        role: None,
         type_s: ty.into(),
         item: ty.into(),
         format: String::new(),
@@ -525,6 +524,10 @@ fn shared_pid_disc() -> crate::engine::Scanned {
         rows.push(mk("Subtitles", ti, Some(0x1200)));
     }
     Scanned {
+        selection_model: freemkv_engine::SelectionModel::from_titles(&[
+            libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
+        ]),
         label: "SHARED".into(),
         volume_id: "SHARED".into(),
         rows,
@@ -617,6 +620,7 @@ fn an_untouched_selection_keeps_every_stream_for_every_title() {
 // uses neither — multipass re-scan can shift numbers; remap re-resolves.
 fn id(playlist: &str, start_lba: u32) -> TitleIdentity {
     TitleIdentity::of(&libfreemkv::DiscTitle {
+        selection_evidence: Default::default(),
         playlist: playlist.to_string(),
         playlist_id: playlist
             .trim_end_matches(".mpls")
@@ -644,6 +648,7 @@ fn id(playlist: &str, start_lba: u32) -> TitleIdentity {
 /// playlist id, same duration, same size — read from different sectors.
 fn dup_title(start_lba: u32) -> libfreemkv::DiscTitle {
     libfreemkv::DiscTitle {
+        selection_evidence: Default::default(),
         playlist: "00800.mpls".to_string(),
         playlist_id: 800,
         duration_secs: 7530.0,

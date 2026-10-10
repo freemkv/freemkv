@@ -18,8 +18,6 @@ pub struct Row {
     pub notes: String,
     /// Format and notes as one line, for a shell without the separate columns.
     pub desc: String,
-    /// A title row's proven role (play-all / episode); `None` where the disc proves none.
-    pub role: Option<freemkv_engine::TitleRole>,
     pub depth: u8,
     pub checkable: bool,
     /// Index of the owning title, for selection bookkeeping.
@@ -54,7 +52,7 @@ pub struct Row {
     pub size_bytes: Option<u64>,
 }
 
-/// What the shell needs after a scan. Pure data — no engine types.
+/// What the shell needs after a scan. Owned data, with no live disc handles.
 #[derive(Debug, Clone)]
 pub struct Scanned {
     pub label: String,
@@ -67,6 +65,8 @@ pub struct Scanned {
     /// Empty for a container source, and for a disc with no volume id.
     pub volume_id: String,
     pub rows: Vec<Row>,
+    /// Engine selection evidence in canonical scan order, independent of display rows.
+    pub selection_model: fe::SelectionModel,
     pub key_summary: String,
     pub title_count: usize,
     /// Video codec name per title, indexed by canonical title index. Lets the
@@ -321,7 +321,6 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                 _ => None,
             };
             Row {
-                role: None,
                 type_s: ty.into(),
                 item: crate::strings::get(item_key),
                 desc: cell(vec![format.clone(), notes.clone()], "  —  "),
@@ -349,7 +348,6 @@ fn chapter_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
         return Vec::new();
     }
     let row = |type_s: &str, item: String, notes: String, depth, duration_secs| Row {
-        role: None,
         type_s: type_s.into(),
         item,
         desc: notes.clone(),
@@ -440,7 +438,6 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         .to_string();
 
     let mut rows = vec![Row {
-        role: None,
         type_s: "File".into(),
         item: name.clone(),
         format: scheme.to_uppercase(),
@@ -464,7 +461,6 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         size_bytes: None,
     }];
     rows.push(Row {
-        role: None,
         type_s: "Title".into(),
         item: title_item(0),
         format: String::new(),
@@ -501,6 +497,7 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         None => "unencrypted".into(),
     };
     Ok(Scanned {
+        selection_model: fe::SelectionModel::from_titles(std::slice::from_ref(t)),
         label: name,
         // A container source has no volume id; `run_stream` names its output
         // from the file's own stem instead.
@@ -694,7 +691,6 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
     };
 
     rows.push(Row {
-        role: None,
         type_s: "Disc".into(),
         item: label.clone(),
         format: format_name(&disc.format),
@@ -724,7 +720,6 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         // on the disc, so only a real playlist name (untrusted disc bytes, sanitized) is shown.
         let notes = title_notes(t, disc.format != libfreemkv::DiscFormat::Dvd, roles[ti]);
         rows.push(Row {
-            role: roles[ti],
             type_s: "Title".into(),
             item: title_item(ti),
             format: String::new(),
@@ -754,6 +749,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
 
     let details = disc_details(disc, &summary);
     Scanned {
+        selection_model: fe::SelectionModel::from_disc(disc),
         label,
         volume_id: disc.volume_id.clone(),
         title_count: disc.titles.len(),
@@ -4034,6 +4030,10 @@ mod key_summary_tests;
 #[cfg(test)]
 #[path = "engine_disc_details_tests.rs"]
 mod disc_details_tests;
+
+#[cfg(test)]
+#[path = "engine_selection_tests.rs"]
+mod selection_tests;
 
 // The routing and per-title wiring decisions a rip makes before it touches
 // a drive: is_disc_source, stream_selection_for, title_index and friends —

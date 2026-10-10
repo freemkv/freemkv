@@ -253,7 +253,6 @@ fn row(type_s: &str, pid: u16, lang: &str, forced: bool) -> crate::engine::Row {
         forced,
         mirrors: None,
         size_bytes: None,
-        role: None,
     }
 }
 
@@ -308,6 +307,7 @@ fn episode_disc() -> Scanned {
     use freemkv_engine::TitleRole::{Episode, PlayAll};
     let mut sc = probe_scan();
     sc.rows.clear();
+    let mut model_titles = Vec::new();
     let titles = [
         (PlayAll, "eng"),
         (PlayAll, "deu"),
@@ -317,9 +317,38 @@ fn episode_disc() -> Scanned {
         (Episode, "deu"),
     ];
     for (ti, (role, lang)) in titles.into_iter().enumerate() {
+        let mut title = libfreemkv::DiscTitle::empty();
+        title.playlist_id = ti as u16;
+        title.duration_secs = 2600.0;
+        title.clips.push(libfreemkv::Clip {
+            clip_id: format!("presentation-{}", ti / 2),
+            in_time: 0,
+            out_time: 2600 * 45_000,
+            duration_secs: 2600.0,
+            source_packets: 0,
+            feed_span: None,
+        });
+        title
+            .streams
+            .push(libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+                pid: 0x80 + ti as u16,
+                codec: libfreemkv::Codec::Ac3,
+                channels: libfreemkv::AudioChannels::Stereo,
+                language: lang.into(),
+                sample_rate: libfreemkv::SampleRate::S48,
+                secondary: false,
+                purpose: libfreemkv::LabelPurpose::Normal,
+                label: String::new(),
+            }));
+        title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
+            roster: "fixture:episode-menu".into(),
+            title_count: titles.len(),
+            member: role == Episode,
+            ordinal: (role == Episode).then(|| ti / 2 - 1),
+        };
+        model_titles.push(title);
         let mut t = row("Title", 0, "", false);
         (t.depth, t.pid, t.title, t.duration_secs) = (1, None, ti, 2600.0);
-        t.role = Some(role);
         sc.rows.push(t);
         let mut a = row("Audio", 0x80 + ti as u16, lang, false);
         a.title = ti;
@@ -328,6 +357,8 @@ fn episode_disc() -> Scanned {
         sub.title = ti;
         sc.rows.push(sub);
     }
+    sc.selection_model = freemkv_engine::SelectionModel::from_titles(&model_titles);
+    sc.title_count = model_titles.len();
     sc
 }
 
@@ -341,15 +372,12 @@ fn the_selection_bar_picks_episodes_and_the_film_in_the_chosen_languages() {
     };
     let ticked = |mode: &str, p: &LangPrefs| Tree::from_scan(&sc, mode, 0.0, p).ticked_titles();
     assert_eq!(ticked("Episodes", &langs(&["deu"])), vec![3, 5]);
-    assert_eq!(
-        ticked("Episodes", &langs(&["eng", "deu"])),
-        vec![2, 3, 4, 5]
-    );
+    assert_eq!(ticked("Episodes", &langs(&["eng", "deu"])), vec![2, 4]);
     assert_eq!(ticked("Main film only", &langs(&["deu"])), vec![1]);
     assert_eq!(ticked("Main film only", &langs(&[])), vec![0]);
     assert_eq!(ticked("No titles", &langs(&[])), Vec::<usize>::new());
     // A language no title carries does not empty the choice.
-    assert_eq!(ticked("Episodes", &langs(&["jpn"])), vec![2, 3, 4, 5]);
+    assert_eq!(ticked("Episodes", &langs(&["jpn"])), vec![2, 4]);
 }
 
 // `episode_disc` with, on every title, a regular French subtitle (0x40+) and a forced
@@ -409,6 +437,24 @@ fn picking(sc: Scanned) -> App {
 }
 
 #[test]
+fn audio_all_preserves_explicit_presentation_language_and_locale_is_not_a_fallback() {
+    let mut app = picking(pick_disc());
+    app.settings.presentation_language = "de".into();
+    app.settings.audio_langs = "en".into();
+    app.settings.language = "fr".into();
+    app.pick_prefs = LangPrefs::from_settings(&app.settings);
+    app.pick_audio(None);
+    assert!(app.pick_prefs.audio.is_empty());
+    assert_eq!(app.pick_prefs.presentation_language.as_deref(), Some("de"));
+    assert_eq!(app.settings.presentation_language, "de");
+    app.settings.presentation_language.clear();
+    assert_eq!(
+        LangPrefs::from_settings(&app.settings).presentation_language,
+        None
+    );
+}
+
+#[test]
 fn the_subtitle_choices_step_through_their_states() {
     let mut app = picking(pick_disc());
     let pick = |app: &App| app.view().pick.expect("a source is open");
@@ -465,6 +511,9 @@ fn the_subtitle_choices_step_through_their_states() {
     assert_eq!(flags(&app), (true, true));
     assert!(pick(&app).subs_none);
 
+    let restored = LangPrefs::from_settings(&app.settings);
+    assert!(restored.no_subtitles && restored.no_forced);
+
     app.pick_subtitles(SubPick::All);
     assert_eq!(app.settings.subtitle_mode, "all");
     assert_eq!(flags(&app), (false, false));
@@ -481,7 +530,7 @@ fn the_audio_choice_toggles_languages_and_all_clears_them() {
     assert!(v.audio_all);
     assert_eq!(v.audio_summary, "All");
     assert_eq!(v.audio, vec![("eng".into(), false), ("deu".into(), false)]);
-    assert_eq!(app.tree.ticked_titles(), vec![2, 3, 4, 5]);
+    assert_eq!(app.tree.ticked_titles(), vec![2, 4]);
 
     app.pick_audio(Some("deu"));
     assert_eq!(app.settings.audio_langs, "deu");
@@ -550,7 +599,12 @@ fn every_menu_entry_maps_back_to_its_own_choice() {
 
 #[test]
 fn the_title_choices_offer_episodes_only_on_a_disc_that_proves_them() {
-    let mut app = picking(pick_disc());
+    let mut authored = pick_disc();
+    // Display labels cannot grant or revoke the model's episode evidence.
+    for row in &mut authored.rows {
+        row.notes.clear();
+    }
+    let mut app = picking(authored);
     let v = app.view().pick.unwrap();
     let modes: Vec<_> = v.titles.iter().map(|t| t.0).collect();
     assert_eq!(modes, PICK_TITLES.to_vec());
@@ -561,7 +615,9 @@ fn the_title_choices_offer_episodes_only_on_a_disc_that_proves_them() {
     let v = app.view().pick.unwrap();
     assert_eq!((v.title.as_str(), v.title_index()), ("Episodes", at));
 
-    let plain = picking(probe_scan());
+    let mut unknown = probe_scan();
+    unknown.rows[0].notes = "Episode".into();
+    let plain = picking(unknown);
     let v = plain.view().pick.unwrap();
     assert!(v.titles.iter().all(|t| t.0 != "Episodes"));
     assert_eq!(v.titles.len(), PICK_TITLES.len() - 1);
@@ -885,6 +941,12 @@ fn empty_page_copy_distinguishes_ready_empty_and_unanswered_tray() {
     assert_eq!(crate::ui::empty_description(None), base);
     assert!(crate::ui::empty_description(Some(true)).contains("Disc inserted"));
     assert!(crate::ui::empty_description(Some(false)).contains("No disc"));
+    assert_eq!(crate::ui::empty_heading(None), "Open a source");
+    assert_eq!(crate::ui::empty_heading(Some(true)), "Disc inserted");
+    assert_eq!(
+        crate::ui::empty_heading(Some(false)),
+        crate::strings::get("gui.page.empty_title")
+    );
 }
 
 /// The user did not wait. A probe landing after they opened something
@@ -1048,7 +1110,7 @@ fn unit_tests_never_reach_a_real_drive() {
     let mut app = App::new();
     let before = app.log.len();
     app.open(PROBE_SOURCE);
-    assert_eq!(app.view().disc_present, Some(false));
+    assert_eq!(app.view().disc_present, None);
     assert_eq!(
         app.log.get(before).map(|l| l.text.as_str()),
         Some(NO_DRIVE_IN_TESTS)
@@ -1601,6 +1663,7 @@ fn a_header_row_with_a_pid_is_not_a_phantom_title() {
             node("Audio", Some(0x1101), 0),
         ],
         roots: vec![0, 1],
+        ..Default::default()
     };
     let TitleStreams::PerTitle(per) = tree.ticked_streams_by_title() else {
         panic!("expected a per-title breakdown");
@@ -1621,6 +1684,11 @@ fn a_language_name_outside_the_picker_matches_in_any_case() {
 /// count it.
 fn probe_scan() -> Scanned {
     Scanned {
+        selection_model: freemkv_engine::SelectionModel::from_titles(&[{
+            let mut title = libfreemkv::DiscTitle::empty();
+            title.duration_secs = 600.0;
+            title
+        }]),
         label: "PROBE_DISC".to_string(),
         volume_id: "PROBE_DISC".to_string(),
         rows: vec![crate::engine::Row {
@@ -1639,7 +1707,6 @@ fn probe_scan() -> Scanned {
             forced: false,
             mirrors: None,
             size_bytes: None,
-            role: None,
         }],
         key_summary: "none".to_string(),
         title_count: 1,
@@ -1899,6 +1966,10 @@ fn app_with_titles(codecs: &[&str]) -> App {
         })
         .collect();
     sc.title_count = codecs.len();
+    sc.selection_model = freemkv_engine::SelectionModel::from_titles(&vec![
+            libfreemkv::DiscTitle::empty();
+            codecs.len()
+        ]);
     sc.video_codecs = codecs.iter().map(|c| c.to_string()).collect();
     let mut app = App::new();
     app.video_codecs = sc.video_codecs.clone();
@@ -2116,6 +2187,7 @@ fn an_empty_scan_yields_an_empty_tree() {
     // than a placeholder disc.
     let t = Tree::from_scan(
         &crate::engine::Scanned {
+            selection_model: Default::default(),
             label: String::new(),
             volume_id: String::new(),
             title_count: 0,
@@ -2595,6 +2667,7 @@ fn a_disc_removed_while_idle_on_its_titles_resets_to_the_start_screen() {
     let mut app = idle_disc(Page::Titles, disc_gone);
     tick_until_watched(&mut app);
     assert_eq!(app.page, Page::Empty);
+    assert_eq!(app.view().disc_present, Some(false));
     assert!(app.source.is_empty() && app.tree.arena.is_empty());
     assert!(
         app.tick().contains(&Effect::StopTicking),

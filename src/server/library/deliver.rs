@@ -52,7 +52,7 @@ impl Default for Timing {
 }
 
 // Bound buffered writes so a multi-GB delivery cannot fill the NFS RPC queue
-// ahead of directory checks. Final sync_all still establishes durability before landing.
+// ahead of directory checks. The final durable sync runs before landing.
 struct CheckpointWriter<W, F> {
     writer: W,
     pending: usize,
@@ -92,7 +92,7 @@ pub(crate) trait DeliverIo: Sync {
             writer: file,
             pending: 0,
             limit: 64 * 1024 * 1024,
-            sync: |f: &mut std::fs::File| f.sync_data(),
+            sync: sync_copy_checkpoint,
         }))
     }
     /// Make `file` durable: stall-based, `halt`-aware, reporting `(bytes_done, total)`.
@@ -121,6 +121,17 @@ pub(crate) trait DeliverIo: Sync {
 pub(crate) struct OsIo;
 
 impl DeliverIo for OsIo {}
+
+fn sync_copy_checkpoint(file: &mut std::fs::File) -> io::Result<()> {
+    // Rust's macOS sync_data requests F_FULLFSYNC, which SMB may reject.
+    // The shared flusher retains durability via fsync on that specific error.
+    #[cfg(target_os = "macos")]
+    {
+        libfreemkv::io::durable_sync_file(file, None, &mut |_, _| {})
+    }
+    #[cfg(not(target_os = "macos"))]
+    file.sync_data()
+}
 
 /// A delivery failed after the local file verified, and that file was kept for [`resume`].
 /// Carried inside the returned [`io::Error`] (see [`kept_of`]), which keeps the cause's
@@ -294,6 +305,11 @@ struct Stop<'a> {
     seen: AtomicBool,
 }
 
+pub(crate) fn with_halt<T>(sink: &dyn Sink, action: impl FnOnce(&Halt) -> T) -> T {
+    let halt = Halt::new();
+    Stop::new(&halt, sink).linked(action)
+}
+
 impl<'a> Stop<'a> {
     fn new(halt: &'a Halt, sink: &'a dyn Sink) -> Self {
         Self {
@@ -361,12 +377,10 @@ struct RemoteGuard<'a> {
 
 fn bounded_cleanup(cleanup: impl FnOnce() + Send + 'static, limit: Duration) -> io::Result<bool> {
     let (tx, rx) = std::sync::mpsc::channel();
-    match std::thread::Builder::new()
-        .name("library-cleanup".into())
-        .spawn(move || {
-            cleanup();
-            let _ = tx.send(());
-        }) {
+    match crate::server::daemon::spawn_background("library-cleanup", move || {
+        cleanup();
+        let _ = tx.send(());
+    }) {
         Ok(_) => match rx.recv_timeout(limit) {
             Ok(()) => Ok(true),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(false),
@@ -462,22 +476,12 @@ fn refuse_existing(target: &Path, replace: bool) -> io::Result<()> {
 }
 
 /// Move `partial` onto `target`. Without `replace`, a hard link lands it only if the target is
-/// still absent (a rename would overwrite one that appeared meanwhile); a filesystem without
-/// hard links falls back to the rename.
+/// still absent. Unsupported filesystems fail closed, never using an overwriting rename.
 pub(crate) fn land(partial: &Path, target: &Path, replace: bool) -> io::Result<()> {
     if replace {
         return std::fs::rename(partial, target);
     }
-    match std::fs::hard_link(partial, target) {
-        Ok(()) => {
-            if let Err(e) = std::fs::remove_file(partial) {
-                tracing::warn!(path = %partial.display(), error = %e, "could not remove the landed partial");
-            }
-            Ok(())
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(target_exists(target)),
-        Err(_) => std::fs::rename(partial, target),
-    }
+    libfreemkv::io::publish::no_replace(partial, target)
 }
 
 fn progress(pass: &'static str, bytes_done: u64, bytes_total: u64) -> Progress {
@@ -622,13 +626,11 @@ fn copy_to(
     let quit = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
     let (count, give_up) = (copied.clone(), quit.clone());
-    std::thread::Builder::new()
-        .name("library-deliver-copy".into())
-        .spawn(move || {
-            let result = copy_all(&mut src, &mut *dst, &count, &give_up);
-            drop((src, dst));
-            let _ = tx.send(result);
-        })?;
+    crate::server::daemon::spawn_background("library-deliver-copy", move || {
+        let result = copy_all(&mut src, &mut *dst, &count, &give_up);
+        drop((src, dst));
+        let _ = tx.send(result);
+    })?;
     let started = Instant::now();
     let report = |done: u64| {
         let speed = (done as f64 / started.elapsed().as_secs_f64().max(0.001)) as u64;
@@ -776,11 +778,9 @@ fn verify_inner(
         read: read.clone(),
     };
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("library-deliver-verify".into())
-        .spawn(move || {
-            let _ = tx.send(libfreemkv::probe_mkv_with_cues(reader));
-        })?;
+    crate::server::daemon::spawn_background("library-deliver-verify", move || {
+        let _ = tx.send(libfreemkv::probe_mkv_with_cues(reader));
+    })?;
     let beat_file = std::fs::OpenOptions::new().write(true).open(path).ok();
     let beat = LockBeat::new(beat_file, timing.lock_beat);
     let report = |done| progress("verify", done, have);

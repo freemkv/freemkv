@@ -710,3 +710,14 @@ fn copy_checkpoints_bound_buffering_and_surface_sync_failures() {
     );
     assert_eq!(calls.get(), 2);
 }
+
+#[test]
+fn copy_checkpoint_sync_preserves_written_bytes() {
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(b"checkpoint").unwrap();
+    sync_copy_checkpoint(&mut file).unwrap();
+    file.rewind().unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"checkpoint");
+}

@@ -75,6 +75,7 @@ impl Node {
 /// language is kept, so "German & Spanish audio" keeps both.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LangPrefs {
+    pub presentation_language: Option<String>,
     pub audio: Vec<String>,
     pub subtitles: Vec<String>,
     /// Independent of `subtitles`, never a narrowing of it.
@@ -95,6 +96,7 @@ impl LangPrefs {
     /// or a 639-1/2T/2B/3 code is the engine's job, not ours.
     pub fn parse(audio: &str, subtitles: &str, forced: &str) -> Self {
         LangPrefs {
+            presentation_language: None,
             audio: split_langs(audio),
             subtitles: split_langs(subtitles),
             forced: split_langs(forced),
@@ -106,6 +108,8 @@ impl LangPrefs {
     /// The preferences as persisted in Settings.
     pub fn from_settings(s: &crate::settings::Settings) -> Self {
         let mut p = Self::parse(&s.audio_langs, &s.sub_langs, &s.forced_sub_langs);
+        p.presentation_language =
+            (!s.presentation_language.trim().is_empty()).then(|| s.presentation_language.clone());
         match s.subtitle_mode.as_str() {
             "none" => {
                 p.no_subtitles = true;
@@ -128,6 +132,12 @@ impl LangPrefs {
             && !self.no_subtitles
             && !self.no_forced
     }
+
+    pub fn selection_preferences(&self) -> freemkv_engine::SelectionPreferences {
+        freemkv_engine::SelectionPreferences {
+            presentation_language: self.presentation_language.clone(),
+        }
+    }
 }
 
 /// The selection bar's subtitle choices.
@@ -141,8 +151,8 @@ pub enum SubPick {
     Lang(String),
 }
 
-/// The selection bar's title choices, as stored modes. "Episodes" is offered only when the
-/// disc proves episodes ([`freemkv_engine::TitleRole`]).
+/// Stored title modes. "Episodes" is offered only when the shared selection
+/// model returns an executable episode selection, not review-only candidates.
 pub const PICK_TITLES: &[&str] = &[
     "Main film only",
     "Episodes",
@@ -314,6 +324,8 @@ pub enum Check {
 pub struct Tree {
     pub arena: Vec<Node>,
     pub roots: Vec<usize>,
+    // Preserve the model's authored episode order without reordering display rows.
+    episode_order: Vec<usize>,
 }
 
 // Does the minimum-title-length filter keep this title? ONE predicate shared by row display and
@@ -327,9 +339,9 @@ impl Tree {
     ///
     /// `sel_mode` is the "Default selection" setting; it decides which titles start checked.
     /// `min_secs` hides titles shorter than it (known, non-zero duration), but never so
-    /// aggressively the list is empty. `prefs` narrows which of a checked title's STREAM rows
-    /// start checked; empty `prefs` or a category matching nothing on this title keeps every
-    /// stream checked — see `preferred_pids`.
+    /// aggressively the list is empty. `prefs` ranks equivalent language presentations and
+    /// narrows checked stream rows; a category matching nothing retains available streams
+    /// rather than producing silent output — see `preferred_pids`.
     pub fn from_scan(sc: &Scanned, sel_mode: &str, min_secs: f64, prefs: &LangPrefs) -> Self {
         // Titles present in the scan, with durations, for the filter + defaults.
         let titles: Vec<(usize, f64)> = sc
@@ -344,54 +356,36 @@ impl Tree {
         } else {
             0.0
         };
-        // Titles start checked only from those `title_visible` shows. With audio languages
-        // chosen, a title carrying none of them is another language's version: Main film,
-        // Longest and Episodes look among the titles that do, when any do.
-        let speaks = |ti: usize| {
-            sc.rows.iter().any(|r| {
-                r.title == ti
-                    && r.type_s == "Audio"
-                    && prefs.audio.iter().any(|a| same_language(a, &r.lang))
-            })
-        };
-        let all_visible: Vec<(usize, f64)> = titles
+        let visible: std::collections::HashSet<usize> = titles
             .iter()
-            .copied()
             .filter(|(_, d)| title_visible(*d, min_eff))
+            .map(|(i, _)| *i)
             .collect();
-        let in_language: Vec<(usize, f64)> = all_visible
-            .iter()
-            .copied()
-            .filter(|(i, _)| speaks(*i))
-            .collect();
-        let pool = if prefs.audio.is_empty() || in_language.is_empty() {
-            all_visible.clone()
+        let selection = match sel_mode {
+            "All titles" => freemkv_engine::Selection::All,
+            "No titles" => freemkv_engine::Selection::Titles(Vec::new()),
+            "Episodes" => freemkv_engine::Selection::Episodes,
+            "Longest title" => freemkv_engine::Selection::Longest,
+            _ => freemkv_engine::Selection::MainMovie,
+        };
+        // Select against the full evidence snapshot before applying visibility. Hiding the
+        // main feature must not promote an unrelated title. Review candidates remain
+        // available for manual ticking, but never become automatic executable choices.
+        let report = sc.selection_model.select_with_preferences(
+            &selection,
+            &lang_filter(&prefs.audio),
+            &prefs.selection_preferences(),
+        );
+        let episode_order = if matches!(selection, freemkv_engine::Selection::Episodes) {
+            report.indices.clone()
         } else {
-            in_language
+            Vec::new()
         };
-        let role_of = |ti: usize| {
-            sc.rows
-                .iter()
-                .find(|r| r.depth == 1 && r.title == ti)
-                .and_then(|r| r.role)
-        };
-        let selected: std::collections::HashSet<usize> = match sel_mode {
-            "All titles" => all_visible.iter().map(|(i, _)| *i).collect(),
-            "No titles" => Default::default(),
-            "Episodes" => pool
-                .iter()
-                .map(|(i, _)| *i)
-                .filter(|&i| role_of(i) == Some(freemkv_engine::TitleRole::Episode))
-                .collect(),
-            "Longest title" => pool
-                .iter()
-                .max_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(i, _)| *i)
-                .into_iter()
-                .collect(),
-            // "Main film only" (default): the first title on screen.
-            _ => pool.iter().map(|(i, _)| *i).take(1).collect(),
-        };
+        let selected: std::collections::HashSet<usize> = report
+            .indices
+            .into_iter()
+            .filter(|i| visible.contains(i))
+            .collect();
 
         // Which stream PIDs the language preferences keep, per canonical title index.
         // Computed only for titles that start checked (unchecked ones have no ticked
@@ -494,7 +488,11 @@ impl Tree {
                 }
             }
         }
-        Tree { arena, roots }
+        Tree {
+            arena,
+            roots,
+            episode_order,
+        }
     }
 
     /// Tick state for a row: the row's OWN flag decides `Off`, its checkable
@@ -579,7 +577,8 @@ impl Tree {
     /// draws it — reports anything but [`Check::Off`]. `Mixed` is ripped — some tracks are
     /// still ticked, which is exactly what the partial glyph promises.
     pub fn ticked_titles(&self) -> Vec<usize> {
-        self.arena
+        let mut titles: Vec<_> = self
+            .arena
             .iter()
             .enumerate()
             .filter(|(i, n)| {
@@ -588,7 +587,16 @@ impl Tree {
                     && self.check_state(*i) != Check::Off
             })
             .map(|(_, n)| n.title_idx)
-            .collect()
+            .collect();
+        if !self.episode_order.is_empty() {
+            titles.sort_by_key(|index| {
+                self.episode_order
+                    .iter()
+                    .position(|i| i == index)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        titles
     }
 
     /// Number of title rows in the tree. Used by `start_run` to tell a
@@ -2765,6 +2773,7 @@ impl App {
         // tree to return to: the end-of-rip eject must not hide the outcome.
         let page = self.page;
         self.close_source();
+        self.disc_present = Some(false);
         if page == Page::Result {
             self.page = Page::Result;
         }
@@ -2815,11 +2824,6 @@ impl App {
 
     /// The selection bar's subtitle choice.
     pub fn pick_subtitles(&mut self, choice: SubPick) -> Vec<Effect> {
-        let mode = match &choice {
-            SubPick::All | SubPick::Lang(_) => "all",
-            SubPick::None => "none",
-            SubPick::Forced => "forced",
-        };
         let p = &mut self.pick_prefs;
         match choice {
             SubPick::All => {
@@ -2846,7 +2850,12 @@ impl App {
                 }
             }
         }
-        self.settings.subtitle_mode = mode.into();
+        self.settings.subtitle_mode = match (p.no_subtitles, p.no_forced) {
+            (true, true) => "none",
+            (true, false) => "forced",
+            _ => "all",
+        }
+        .into();
         self.settings.sub_langs = lang_selection_to_string(&p.subtitles);
         self.settings.forced_sub_langs = lang_selection_to_string(&p.forced);
         self.repick()
@@ -3044,9 +3053,6 @@ impl App {
                 }
                 // The page shows no source, so none may remain to Start or Eject.
                 self.clear_source();
-                if disc {
-                    self.disc_present = Some(false);
-                }
             }
         }
         vec![Effect::Redraw]
@@ -3454,10 +3460,15 @@ impl App {
                 (c, on)
             })
             .collect();
-        let has_episodes = sc
-            .rows
-            .iter()
-            .any(|r| r.role == Some(freemkv_engine::TitleRole::Episode));
+        let has_episodes = !sc
+            .selection_model
+            .select_with_preferences(
+                &freemkv_engine::Selection::Episodes,
+                &lang_filter(&p.audio),
+                &p.selection_preferences(),
+            )
+            .indices
+            .is_empty();
         let titles = PICK_TITLES
             .iter()
             .filter(|mode| **mode != "Episodes" || has_episodes)
@@ -4012,13 +4023,21 @@ pub(crate) fn result_heading(outcome: crate::engine::RunOutcome) -> String {
 // This is called by the platform shells, which are separate target-specific
 // modules and therefore absent from the portable library build.
 #[allow(dead_code)]
+pub(crate) fn empty_heading(disc_present: Option<bool>) -> String {
+    match disc_present {
+        Some(true) => crate::strings::get_or("gui.page.disc_ready_title", "Disc inserted"),
+        Some(false) => crate::strings::get("gui.page.empty_title"),
+        None => crate::strings::get_or("gui.page.open_source_title", "Open a source"),
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn empty_description(disc_present: Option<bool>) -> String {
     let base = crate::strings::get("gui.page.empty_subtitle");
     match disc_present {
-        Some(true) => format!(
-            "{base}\n\n{}",
+        Some(true) => {
             crate::strings::get_or("gui.page.disc_ready", "Disc inserted — ready to open.")
-        ),
+        }
         Some(false) => format!(
             "{base}\n\n{}",
             crate::strings::get_or("gui.page.no_disc", "No disc detected.")

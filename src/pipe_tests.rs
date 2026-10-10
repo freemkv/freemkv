@@ -8,6 +8,38 @@ use super::{
 };
 
 #[test]
+fn presentation_language_cli_is_independent_of_audio_all() {
+    let titles = crate::selection_test_fixtures::launch_titles();
+    for (language, expected) in [("de", 1), ("en", 0)] {
+        let flags = parse_flags(&[
+            "--presentation-language".into(),
+            language.into(),
+            "--audio".into(),
+            "all".into(),
+        ])
+        .unwrap();
+        assert!(flags.streams.is_all());
+        assert_eq!(
+            super::automatic_presentation_title(
+                &titles,
+                &flags.streams.audio,
+                flags.presentation_language
+            )
+            .unwrap(),
+            expected
+        );
+    }
+    assert!(
+        super::automatic_presentation_title(
+            &titles,
+            &freemkv_engine::StreamFilter::All,
+            Some("fr".into())
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn a_dir_source_must_exist_and_be_a_directory() {
     let base = std::env::temp_dir().join(format!("fmkv-dirval-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
@@ -2028,6 +2060,7 @@ fn value_flag_set_matches_parser() {
         "--title",
         "-a",
         "--audio",
+        "--presentation-language",
         "-s",
         "--subtitles",
         "--keydb",

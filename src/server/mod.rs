@@ -13,7 +13,8 @@ use std::sync::atomic::AtomicBool;
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// Set by the System-panel soft reboot. The daemon drains the current
-/// instance, then starts a fresh in-process instance.
+/// instance, then reloads persisted state and starts fresh in-process services.
+/// A timed-out drain defers restart; SHUTDOWN stays set until every worker exits.
 pub static REBOOT: AtomicBool = AtomicBool::new(false);
 
 /// Full build label: package version + git short hash (e.g. `1.1.1 (g2014a41)`),

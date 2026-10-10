@@ -1757,8 +1757,15 @@ impl Controller {
 
         // pages
         let iv = self.ivars();
+        if let Some(head) = iv.empty_head.borrow().as_ref() {
+            head.setStringValue(&NSString::from_str(&crate::ui::empty_heading(
+                v.disc_present,
+            )));
+        }
         if let Some(sub) = iv.empty_sub.borrow().as_ref() {
-            sub.setStringValue(&crate::ui::empty_description(v.disc_present));
+            sub.setStringValue(&NSString::from_str(&crate::ui::empty_description(
+                v.disc_present,
+            )));
         }
         {
             if let Some(x) = iv.page_empty.borrow().as_ref() {
@@ -2726,6 +2733,8 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
                     | objc2_app_kit::NSAutoresizingMaskOptions::ViewMaxXMargin,
             );
         }
+        *c.ivars().empty_head.borrow_mut() = Some(head);
+        *c.ivars().empty_sub.borrow_mut() = Some(sub);
     }
 
     // ── result page ──
@@ -3198,8 +3207,6 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         *c.ivars().fields.borrow_mut() = vals;
     }
     *c.ivars().page_empty.borrow_mut() = Some(page_empty);
-    *c.ivars().empty_head.borrow_mut() = Some(head);
-    *c.ivars().empty_sub.borrow_mut() = Some(sub);
     *c.ivars().page_main.borrow_mut() = Some(page_main);
     *c.ivars().page_prog.borrow_mut() = Some(page_prog);
 
@@ -4076,6 +4083,13 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     // Three INDEPENDENT language sets — see `ui::LangPrefs`. They decide which
     // stream rows start ticked; nothing here bypasses the tick boxes, so the
     // user still sees and can change every choice.
+    t.field(
+        mtm,
+        "presentation_language",
+        "Presentation language (de / en; blank = audio preference)",
+        "",
+        220.0,
+    );
     t.langs(
         mtm,
         "audio_langs",

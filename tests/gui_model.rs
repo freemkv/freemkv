@@ -15,13 +15,24 @@ use freemkv::ui::*;
 // Shaped like `engine::scan_disc`'s output. `title` is the CANONICAL disc
 // title index, deliberately not the row position.
 
+fn selection_model(durations: &[f64]) -> freemkv_engine::SelectionModel {
+    let titles: Vec<_> = durations
+        .iter()
+        .map(|&secs| {
+            let mut title = libfreemkv::DiscTitle::empty();
+            title.duration_secs = secs;
+            title
+        })
+        .collect();
+    freemkv_engine::SelectionModel::from_titles(&titles)
+}
+
 fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> ScanRow {
     ScanRow {
         type_s: type_s.into(),
         item: type_s.into(),
         format: String::new(),
         notes: String::new(),
-        role: None,
         desc: desc.into(),
         depth,
         checkable,
@@ -57,6 +68,7 @@ fn video_only_disc() -> Scanned {
     t.duration_secs = 5400.0;
     Scanned {
         label: "VIDEO_ONLY".into(),
+        selection_model: selection_model(&[5400.0]),
         volume_id: "VIDEO_ONLY".into(),
         rows: vec![
             row("Bluray disc", "VIDEO_ONLY", 0, false, usize::MAX),
@@ -86,6 +98,7 @@ fn disc(titles: &[(f64, usize)]) -> Scanned {
     }
     Scanned {
         label: "TEST_DISC".into(),
+        selection_model: selection_model(&titles.iter().map(|(secs, _)| *secs).collect::<Vec<_>>()),
         volume_id: "TEST_DISC".into(),
         rows,
         key_summary: "keys: none needed".into(),
@@ -121,6 +134,7 @@ fn mp2_extension_disc() -> Scanned {
     other.pid = Some(0x0080);
     Scanned {
         label: "MP2_EXT".into(),
+        selection_model: selection_model(&[5400.0]),
         volume_id: "MP2_EXT".into(),
         rows: vec![
             row("DVD disc", "MP2_EXT", 0, false, usize::MAX),
@@ -847,18 +861,15 @@ fn the_filter_never_empties_the_list() {
 }
 
 #[test]
-fn the_main_film_default_ticks_a_title_the_filter_actually_kept() {
-    // "Main film only" used to mean literal disc title 0, regardless of the
-    // minimum-length filter. On a disc whose title 0 is a 30-second stinger,
-    // that title is hidden, so the tree opened with NOTHING ticked.
+fn hiding_the_main_film_does_not_select_an_unrelated_visible_title() {
+    // Visibility cannot change the engine's main-feature decision.
     let sc = disc(&[(30.0, 1), (5400.0, 1)]);
     let t = tree(&sc, "Main film only", 300.0);
     assert_eq!(t.title_count(), 1, "the filter should have hidden title 0");
     assert_eq!(
         t.ticked_titles(),
-        vec![1],
-        "the default selection ticked a title the filter had removed, so the \
-         disc opened with nothing selected"
+        Vec::<usize>::new(),
+        "hiding the main feature must not promote another title"
     );
 }
 
@@ -869,6 +880,7 @@ fn every_default_selection_ticks_only_titles_that_are_on_screen() {
     // excluded by a `>= min_secs` test that 0.0 can never pass.
     let mut sc = disc(&[(5400.0, 1), (30.0, 1)]);
     sc.rows.extend(title_block(2, 0.0, 1));
+    sc.selection_model = selection_model(&[5400.0, 30.0, 0.0]);
     sc.title_count = 3;
     sc.video_codecs.push("H.264".into());
 
@@ -893,6 +905,7 @@ fn a_title_with_no_known_duration_is_never_hidden() {
     // information would make a scan that failed to time its titles look empty.
     let mut sc = disc(&[(5400.0, 1)]);
     sc.rows.extend(title_block(1, 0.0, 1));
+    sc.selection_model = selection_model(&[5400.0, 0.0]);
     sc.title_count = 2;
     sc.video_codecs.push("H.264".into());
     let t = tree(&sc, "All titles", 300.0);
@@ -1816,6 +1829,7 @@ fn tagged_disc(streams: &[(&str, &str, bool)]) -> Scanned {
         rows.push(r);
     }
     Scanned {
+        selection_model: selection_model(&[5400.0]),
         label: "TEST_DISC".into(),
         volume_id: "TEST_DISC".into(),
         rows,

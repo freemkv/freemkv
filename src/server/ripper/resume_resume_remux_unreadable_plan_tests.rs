@@ -78,6 +78,7 @@ fn assert_held(state_bytes: &[u8], tag: &str) {
 
     // Repaired: the next resume clears the held card (then fails on the
     // missing ISO, which is fine here).
+    std::fs::remove_file(staging.join(staging::STATE_FILE)).unwrap();
     staging::write_state(
         &staging,
         &staging::DiscState::new(staging::StagingState::Ripped),
