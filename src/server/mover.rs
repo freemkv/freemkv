@@ -1539,6 +1539,7 @@ fn check_and_move(cfg: &Config) {
             *MOVE_STATE.lock().unwrap_or_else(|e| e.into_inner()) = seeded;
         }
         let mut outcomes: Vec<MoveOutcome> = Vec::new();
+        let mut held: Option<String> = None;
         let mut announced_moving = false;
         for (i, (src, dest)) in planned_moves.iter().enumerate() {
             let on_progress = move |pct: u8, gb: f64, total_gb: f64, speed: f64| {
@@ -1569,6 +1570,7 @@ fn check_and_move(cfg: &Config) {
                 Err(e) => {
                     crate::server::log::syslog(&format!("Delivery journal held {}: {e}", dest));
                     block_move(i);
+                    held.get_or_insert(e.to_string());
                     MoveOutcome::Failed
                 }
             };
@@ -1725,6 +1727,16 @@ fn check_and_move(cfg: &Config) {
                 &dir_str,
                 "post-cp validation failed: destination is structurally invalid or unreadable",
                 "the copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); the mover removes a broken copy it made and retries next tick (if a dst file remains, remove it) — see device_system.log for the specific check",
+            );
+            schedule_failed_delivery(&dir_str, &outcomes);
+            continue;
+        }
+
+        if let Some(reason) = held {
+            record_error(
+                &dir_str,
+                &format!("delivery held: {reason}"),
+                "The library file does not match what this delivery prepared or published, and it is never removed automatically. Inspect it, remove it if it is broken or not this rip, then choose Retry. Staged sources are retained.",
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;

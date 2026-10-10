@@ -728,6 +728,36 @@ fn an_unowned_destination_stays_a_collision_on_every_retry() {
     assert!(entry.source.exists());
 }
 
+#[test]
+fn a_held_journal_names_its_reason_in_the_error_row() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, manifest) = fixture();
+    std::fs::write(&manifest.entries[0].destination, b"").unwrap();
+    super::super::check_and_move(&cfg);
+    let key = dir.to_string_lossy().into_owned();
+    let row = super::super::MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get(&key)
+        .cloned()
+        .unwrap();
+    assert!(row.reason.contains("zero-length"), "{}", row.reason);
+    assert!(
+        row.hint.contains("never removed automatically"),
+        "{}",
+        row.hint
+    );
+    assert_eq!(
+        std::fs::metadata(&manifest.entries[0].destination)
+            .unwrap()
+            .len(),
+        0
+    );
+    super::super::clear_move_error(&key);
+}
+
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
 // live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
 #[cfg(unix)]
