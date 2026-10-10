@@ -232,6 +232,33 @@ pub fn handle(
                 Err((code, msg)) => err(request, code, &msg),
             }
         }
+        (_, true, "/api/library/staged/clear") => {
+            let stage = crate::server::health::remux_stage_dir();
+            let targets: Vec<PathBuf> = lib
+                .queue
+                .snapshot()
+                .jobs
+                .iter()
+                .filter(|j| j.staged.is_some())
+                .map(|j| j.target.clone())
+                .collect();
+            let mut discarded = 0usize;
+            let mut failed = 0usize;
+            for target in targets {
+                match discard_kept(&lib, &target, stage.as_deref()) {
+                    Ok(()) => discarded += 1,
+                    Err((_, msg)) => {
+                        failed += 1;
+                        tracing::warn!(target = %target.display(), error = %msg, "staged remux was not cleared");
+                    }
+                }
+            }
+            json_response(
+                request,
+                200,
+                &json!({"ok": true, "discarded": discarded, "failed": failed}).to_string(),
+            );
+        }
         (_, true, "/api/library/queue/stop-all") => {
             let (running, removed) = lib.stop_all();
             let paused = lib.queue.snapshot().paused;

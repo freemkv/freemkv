@@ -2901,6 +2901,11 @@ mod http {
             let (code, _) = roundtrip(&cfg, "POST", &url, Some("{}"), &[]);
             assert_eq!(code, 400, "{action}: a target is required");
         }
+        let (code, body) = roundtrip(&cfg, "POST", "/api/library/staged/clear", None, &[]);
+        assert_eq!(code, 200, "{body}");
+        let cleared: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(cleared["discarded"], 0);
+        assert_eq!(cleared["failed"], 0);
         let (code, _) = roundtrip(
             &cfg,
             "GET",
