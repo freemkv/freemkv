@@ -3520,11 +3520,7 @@ fn rip_disc_inner(
     // FILE names, NOT the dir basename — plain sanitize(display_name), no
     // `_2` disc suffix (the dir already separates discs). delete_partial_output
     // and the mover's TV/fallback delivery both key off this exact form.
-    let filename = format!(
-        "{}.{}",
-        crate::server::util::sanitize_path_compact(&display_name),
-        ext
-    );
+    let filename = staged_output_name(&display_name, ext);
     let output_path = format!("{}/{}", staging, filename);
     // Intermediate-ISO + mapfile paths for multipass, derived once here
     // (previously rebuilt at ~5 scattered sites). Plain title, no disc
@@ -5552,6 +5548,15 @@ pub(super) fn mux_reserve_for(
         .iter()
         .filter_map(|&i| titles.get(i))
         .fold(0u64, |acc, t| acc.saturating_add(t.size_bytes))
+}
+
+// The staged leaf of a movie output (and the stem of its episodes): the title,
+// sanitized, with no `_2` disc suffix. A replan names it the same way.
+pub(super) fn staged_output_name(display_name: &str, ext: &str) -> String {
+    format!(
+        "{}.{ext}",
+        crate::server::util::sanitize_path_compact(display_name)
+    )
 }
 
 // Decide the deliverables a captured disc produces: titles to mux out of the ISO + staging

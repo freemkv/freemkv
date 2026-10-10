@@ -448,3 +448,32 @@ fn a_resume_with_the_unit_key_delivers_to_the_move_queue_only() {
     );
     assert!(crate::server::muxer::pending_queue(staging.parent().unwrap()).is_empty());
 }
+
+// A correction's replan names the movie output from the corrected title, as a fresh rip
+// does: the mover files a movie with no TMDB folder under that leaf.
+#[test]
+fn a_replanned_movie_output_is_named_from_its_title() {
+    let (staging, outcome, _t, ..) = resume_ripped(Keys::UnitKey, |dir, _, _| {
+        staging::mutate_state_if_present(dir, |state| {
+            state.user_metadata = Some(staging::UserMetadata {
+                title: "Cast Away".into(),
+                year: 2000,
+                media_type: "movie".into(),
+                tmdb_id: 0,
+                episode_start: None,
+                poster_url: String::new(),
+                overview: String::new(),
+            });
+            state.replan_required = true;
+        });
+    });
+    assert!(outcome.success, "{:?}", outcome.failure_reason);
+    let leaf = format!(
+        "{}.mkv",
+        crate::server::util::sanitize_path_compact("Cast Away")
+    );
+    let outputs = staging::read_state(&staging).unwrap().outputs;
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].filename, leaf);
+    assert!(staging.join(&leaf).exists(), "{leaf}");
+}

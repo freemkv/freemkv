@@ -1017,9 +1017,14 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     }
 
     if let Some(saved) = saved_state.filter(|s| s.replan_required) {
-        let filename = format!(
-            "output-main.{}",
-            super::output_extension_for(&cfg_read.output_format, &disc)
+        let title = if saved.title.is_empty() {
+            &display_name
+        } else {
+            &saved.title
+        };
+        let filename = super::staged_output_name(
+            title,
+            super::output_extension_for(&cfg_read.output_format, &disc),
         );
         let outputs = match super::plan_mux_outputs(
             &disc.titles,
