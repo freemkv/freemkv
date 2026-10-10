@@ -1,7 +1,7 @@
 use crate::server::config::{self, Config, WebhookEntry};
 use crate::server::ripper;
 use once_cell::sync::Lazy;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};

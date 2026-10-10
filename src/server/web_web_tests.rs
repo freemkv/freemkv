@@ -3801,7 +3801,7 @@ mod http {
             ("", "")
         );
 
-        let bad = held("bad");
+        held("bad");
         let body =
             r#"{"dir":"bad","action":"retitle","title":"X","poster_url":"javascript:alert(1)"}"#;
         assert_eq!(

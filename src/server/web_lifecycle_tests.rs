@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write as _;
 
 #[test]
 fn open_sse_handler_drains_promptly_on_shutdown() {
