@@ -128,6 +128,26 @@ fn engine_title_events_restart_the_top_bar_and_advance_the_bottom_one() {
     assert_eq!((p.title_pct, p.batch_pct), (0.0, Some(50.0)));
 }
 
+// Unknown (0) planned sizes must not make the top bar read 100% before a title starts.
+#[test]
+fn unknown_planned_sizes_do_not_pin_the_top_bar_at_full() {
+    use super::{RunState, UiSink};
+    use freemkv_engine as fe;
+    use freemkv_engine::Sink as _;
+    use std::sync::Arc;
+
+    let st = Arc::new(RunState::default());
+    st.plan_titles(vec![(0, 0), (1, 0)]);
+    let sink = UiSink(Arc::clone(&st));
+    sink.progress(&fe::Progress {
+        bytes_done: 30,
+        bytes_total: 100,
+        ..Default::default()
+    });
+    let p = *st.prog.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(p.title_pct, 30.0);
+}
+
 // Makes outcome_now's doc claim true instead of merely written down: every `lines` lock in
 // engine.rs/main.rs must recover from poison, verified by source scan.
 #[test]

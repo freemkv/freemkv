@@ -1120,6 +1120,15 @@ fn unit_tests_never_reach_a_real_drive() {
     assert_eq!(app.log.len(), before + 1, "the probe stays silent");
 }
 
+#[test]
+fn a_failed_launch_probe_proves_the_tray_is_empty() {
+    let mut app = App::new();
+    app.open_probe(PROBE_SOURCE);
+    drain_probe(&mut app);
+    assert!(app.source.is_empty());
+    assert_eq!(app.view().disc_present, Some(false));
+}
+
 // ── An explicit open while the launch probe holds the drive ─────────────
 
 fn probe_state(result: Option<Result<Scanned, String>>, done: bool) -> ProbeState {

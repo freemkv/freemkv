@@ -3099,6 +3099,11 @@ impl App {
                 }
                 // The page shows no source, so none may remain to Start or Eject.
                 self.clear_source();
+                // The launch probe's quiet failure on a drive is the empty tray
+                // (see `disc_present`); clear_source just reset it to undecided.
+                if quiet && disc {
+                    self.disc_present = Some(false);
+                }
             }
         }
         vec![Effect::Redraw]
