@@ -544,6 +544,14 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
         }
         match verdict {
             MuxVerdict::Dispatch => {
+                // Another owner (the rip thread finishing its hand-off) still holds the
+                // job: retry next tick, as every other lease user does, never wait here.
+                if crate::server::ripper::staging::job_lease(&dir)
+                    .try_lock()
+                    .is_err()
+                {
+                    continue;
+                }
                 // Stamp `.muxing` the INSTANT Dispatch commits (before reading the
                 // marker) so `muxing_status` covers the whole dispatch — writing it later
                 // left a TOCTOU where a web entry raced the state.json read-modify-write.
