@@ -386,6 +386,11 @@ impl Queue {
         path: &Path,
         unlink: impl FnOnce(&Path) -> std::io::Result<()>,
     ) -> bool {
+        // Most candidates were never written; look outside the lock (the share may hang).
+        if matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
+            return false;
+        }
         let f = self.lock();
         if f.jobs
             .iter()
@@ -484,7 +489,22 @@ impl Queue {
         let config_dir = self
             .path
             .parent()
-            .ok_or_else(|| std::io::Error::other("queue has no config directory"))?;
+            .ok_or_else(|| std::io::Error::other("queue has no config directory"))?
+            .to_path_buf();
+        let iso = item.iso.clone();
+        self.add_corrected_with(item, selected, move || {
+            super::replacement::Replacement::capture(&iso, &super::links::read(&config_dir)?)
+        })
+    }
+
+    fn add_corrected_with(
+        &self,
+        item: NewJob,
+        selected: super::matches::SavedMatch,
+        capture: impl FnOnce() -> std::io::Result<super::replacement::Replacement>,
+    ) -> std::io::Result<usize> {
+        // Old outputs are stat'ed on the library share: never under the queue lock.
+        let captured = capture();
         self.try_mutate_durable(|f| {
             if f.jobs.iter().any(|j| {
                 j.iso == item.iso && matches!(j.state, JobState::Queued | JobState::Running)
@@ -509,10 +529,7 @@ impl Queue {
                 job.not_before = None;
                 return Ok(1);
             }
-            let replacement = super::replacement::Replacement::capture(
-                &item.iso,
-                &super::links::read(config_dir)?,
-            )?;
+            let replacement = captured?;
             Ok(Self::append(
                 f,
                 vec![item],

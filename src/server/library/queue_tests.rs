@@ -980,3 +980,32 @@ fn clearing_keeps_a_replacement_whose_candidate_cannot_be_proven_ours() {
     assert_eq!(q.clear_finished(), 0);
     assert_eq!(q.snapshot().jobs.len(), 1);
 }
+
+#[test]
+fn sweeping_a_missing_partial_never_touches_the_share_under_the_queue_lock() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let missing = t.path().join("never-written.mkv.partial");
+    assert!(!q.remove_orphan_partial_with(&missing, |_| panic!(
+        "unlink attempted for a missing partial"
+    )));
+}
+
+#[test]
+fn corrected_admission_captures_old_outputs_outside_the_queue_lock() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let item = job(t.path(), "old");
+    std::fs::write(&item.iso, b"source").unwrap();
+    let iso = item.iso.clone();
+    let added = q
+        .add_corrected_with(item, corrected_match(), || {
+            assert!(
+                q.state.try_lock().is_ok(),
+                "capture ran under the queue lock"
+            );
+            super::super::replacement::Replacement::capture(&iso, &Default::default())
+        })
+        .unwrap();
+    assert_eq!(added, 1);
+}
