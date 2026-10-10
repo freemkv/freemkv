@@ -127,6 +127,14 @@ impl Job {
         self.replacement.as_ref().is_some_and(|r| r.has_work())
     }
 
+    // Active, or retaining output that a correction of its source would orphan.
+    fn holds_source(&self) -> bool {
+        matches!(self.state, JobState::Queued | JobState::Running)
+            || self.staged.is_some()
+            || self.has_replacement_work()
+            || self.outputs.iter().any(|o| o.staged.is_some())
+    }
+
     fn artifact_targets(&self) -> Vec<PathBuf> {
         let mut paths = self.output_targets();
         if let Some(replacement) = &self.replacement {
@@ -473,25 +481,6 @@ impl Queue {
         item: NewJob,
         selected: super::matches::SavedMatch,
     ) -> std::io::Result<usize> {
-        self.add_corrected_inner(item, selected, None)
-    }
-
-    pub(crate) fn add_corrected_authorized(
-        &self,
-        item: NewJob,
-        selected: super::matches::SavedMatch,
-        frozen: super::replacement::Replacement,
-    ) -> std::io::Result<usize> {
-        frozen.verify_admission(&item.iso)?;
-        self.add_corrected_inner(item, selected, Some(frozen))
-    }
-
-    fn add_corrected_inner(
-        &self,
-        item: NewJob,
-        selected: super::matches::SavedMatch,
-        frozen: Option<super::replacement::Replacement>,
-    ) -> std::io::Result<usize> {
         let config_dir = self
             .path
             .parent()
@@ -508,11 +497,6 @@ impl Queue {
                 .rev()
                 .find(|j| j.iso == item.iso && j.has_replacement_work())
             {
-                if frozen.is_some() {
-                    return Err(std::io::Error::other(
-                        "unfinished replacement must retain its original authorization",
-                    ));
-                }
                 if job.selected_match.as_ref() != Some(&selected) {
                     return Err(std::io::Error::other(
                         "unfinished replacement uses a different match",
@@ -525,13 +509,10 @@ impl Queue {
                 job.not_before = None;
                 return Ok(1);
             }
-            let replacement = match frozen {
-                Some(frozen) => frozen,
-                None => super::replacement::Replacement::capture(
-                    &item.iso,
-                    &super::links::read(config_dir)?,
-                )?,
-            };
+            let replacement = super::replacement::Replacement::capture(
+                &item.iso,
+                &super::links::read(config_dir)?,
+            )?;
             Ok(Self::append(
                 f,
                 vec![item],
@@ -542,6 +523,51 @@ impl Queue {
         })
     }
 
+    /// Admit a confirmed correction and save its match as one step: `save` runs only
+    /// once the job is admitted, and `revert` runs if the admission is not published.
+    pub(crate) fn add_corrected_saving(
+        &self,
+        item: NewJob,
+        frozen: super::replacement::Replacement,
+        save: impl FnOnce() -> std::io::Result<super::matches::SavedMatch>,
+        revert: impl FnOnce(&super::matches::SavedMatch),
+    ) -> std::io::Result<super::matches::SavedMatch> {
+        frozen.verify_admission(&item.iso)?;
+        let source = item.iso.clone();
+        let mut attempted = None;
+        let result = self.try_mutate_durable(|f| {
+            if f.jobs.iter().any(|j| j.iso == item.iso && j.holds_source()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "source has active or retained output; stop or resolve that job first",
+                ));
+            }
+            if Self::append(f, vec![item], false, None, Some(frozen)) == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "another job already uses this destination; nothing was saved",
+                ));
+            }
+            let saved = save()?;
+            attempted = Some(saved.clone());
+            if let Some(job) = f.jobs.last_mut() {
+                job.selected_match = Some(saved.clone());
+            }
+            Ok(saved)
+        });
+        if result.is_err()
+            && let Some(saved) = &attempted
+            && !self
+                .lock()
+                .jobs
+                .iter()
+                .any(|j| j.iso == source && j.selected_match.as_ref() == Some(saved))
+        {
+            revert(saved);
+        }
+        result
+    }
+
     /// Exclude claims while saving a correction for an otherwise idle source.
     pub(crate) fn with_idle_source<T>(
         &self,
@@ -549,13 +575,11 @@ impl Queue {
         save: impl FnOnce() -> std::io::Result<T>,
     ) -> std::io::Result<T> {
         let state = self.lock();
-        if state.jobs.iter().any(|j| {
-            j.iso == source
-                && (matches!(j.state, JobState::Queued | JobState::Running)
-                    || j.staged.is_some()
-                    || j.has_replacement_work()
-                    || j.outputs.iter().any(|o| o.staged.is_some()))
-        }) {
+        if state
+            .jobs
+            .iter()
+            .any(|j| j.iso == source && j.holds_source())
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "source has active or retained output; stop or resolve that job first",

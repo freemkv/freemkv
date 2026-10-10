@@ -106,25 +106,32 @@ impl Library {
                 confirmation,
                 &links::read(&self.config_dir)?,
             )?;
-        let saved = self.queue.with_idle_source(source, || {
-            if store.get(source).map_or(0, |s| s.revision) != expected_revision {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "source match changed; reopen Change match",
-                ));
-            }
-            store.save(source, expected_revision, media)
-        })?;
+        let iso_title = self
+            .snapshot()
+            .isos
+            .iter()
+            .find(|iso| iso.path == source)
+            .map(|iso| iso.title.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "source ISO is not indexed"))?;
+        // Keyed by the source, so same-title discs never share one queue identity.
         let job = NewJob {
-            title: saved.media.title.clone(),
+            title: media.title.clone(),
             iso: source.to_path_buf(),
-            target: index::new_mkv_target(&d.library, &saved.media.title),
+            target: index::new_mkv_target(&d.library, &iso_title),
             replace: true,
         };
-        let queued = self
-            .queue
-            .add_corrected_authorized(job, saved.clone(), frozen)?;
+        let previous = store.get(source);
+        let saved = self.queue.add_corrected_saving(
+            job,
+            frozen,
+            || store.save(source, expected_revision, media),
+            |saved| {
+                if let Err(error) = store.revert(source, saved, previous.clone()) {
+                    tracing::warn!(%error, source = %source.display(), "unqueued source match could not be reverted");
+                }
+            },
+        )?;
         self.touch_index();
-        Ok((saved, queued))
+        Ok((saved, 1))
     }
 }
