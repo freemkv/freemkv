@@ -12,6 +12,10 @@ use std::sync::atomic::AtomicBool;
 /// Set by SIGTERM/SIGINT; every worker loop polls it to drain and exit.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Set by the System-panel soft reboot. The daemon drains the current
+/// instance, then starts a fresh in-process instance.
+pub static REBOOT: AtomicBool = AtomicBool::new(false);
+
 /// Full build label: package version + git short hash (e.g. `1.1.1 (g2014a41)`),
 /// the same shape libfreemkv stamps into every MKV. Surfaced in `--version`,
 /// the UI footer, `/api/version`, and the startup log so the running build is

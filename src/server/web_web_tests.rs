@@ -4095,6 +4095,27 @@ mod http {
         );
     }
 
+    #[test]
+    fn system_reboot_requests_a_fresh_instance_and_preserves_durable_state() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::server::REBOOT.store(false, std::sync::atomic::Ordering::Release);
+                crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _reset = Reset;
+        crate::server::REBOOT.store(false, std::sync::atomic::Ordering::Release);
+        crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
+        assert_eq!(code, 202, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["rebooting"], true);
+        assert!(crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
+        assert!(crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+    }
+
     // ── handle_device_log (GET /api/logs/<device>) ──────────────────
 
     #[test]

@@ -160,7 +160,20 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
     crate::server::log::syslog(&format!("Web server listening on {}", addr));
     tracing::info!(address = %addr, "web server listening");
 
-    for request in server.incoming_requests() {
+    loop {
+        let request = match server.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "web listener stopped receiving requests");
+                break;
+            }
+        };
         if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
@@ -363,6 +376,14 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         handle_webhook_test(request, cfg);
     } else if is_get && url == "/api/system" {
         handle_system_info(request, cfg);
+    } else if is_post && url == "/api/system/reboot" {
+        crate::server::REBOOT.store(true, std::sync::atomic::Ordering::Release);
+        crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
+        json_response(
+            request,
+            202,
+            r#"{"ok":true,"rebooting":true,"message":"Library is restarting; durable jobs and audit state are preserved."}"#,
+        );
     } else if is_post && url == "/api/move-errors/clear-all" {
         crate::server::mover::clear_all_move_errors();
         json_response(request, 200, r#"{"ok":true}"#);

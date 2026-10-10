@@ -19,7 +19,7 @@ export default {
   mount(view, ctx) {
     view.innerHTML = `
       <div class="page-head"><div><h1>System</h1><p class="lede" id="lede">Loading…</p></div>
-        <div class="actions"><a class="btn btn-secondary" href="/api/logs/download" id="bundle">Download all logs</a></div></div>
+        <div class="actions"><button class="btn btn-ghost" id="reboot">Reboot library</button><a class="btn btn-secondary" href="/api/logs/download" id="bundle">Download all logs</a></div></div>
       <div class="grid grid-2">
         <section class="card"><h2>About</h2><dl class="kv" id="about"></dl></section>
 <section class="card" id="diag-card"><h2>Diagnostics</h2>
@@ -61,5 +61,13 @@ export default {
     });
     $('#syslog', view).addEventListener('click', () => openDeviceTerminal('system', false));
     $('#bundle', view).addEventListener('click', () => toast('Preparing the log bundle…', 'info'));
+    $('#reboot', view).addEventListener('click', async (e) => {
+      if (!window.confirm('Reboot the library? Active work will finish its current safe boundary; queued jobs and audit state are preserved.')) return;
+      const r = await act(e.currentTarget, () => api('POST', '/api/system/reboot'), 'Reboot library');
+      if (r) {
+        put($('#lede', view), '<span class="muted">Library restarting… reconnecting shortly.</span>');
+        e.currentTarget.disabled = true;
+      }
+    });
   },
 };

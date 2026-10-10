@@ -1,6 +1,8 @@
 //! The daemon entry: `freemkv server [--bootstrap | --healthcheck | serve]`.
 
-use super::{SHUTDOWN, VERSION_LABEL, config, keysource, log, mover, muxer, observe, ripper, web};
+use super::{
+    REBOOT, SHUTDOWN, VERSION_LABEL, config, keysource, log, mover, muxer, observe, ripper, web,
+};
 
 use std::sync::atomic::Ordering;
 
@@ -53,183 +55,99 @@ pub fn run(argv: Vec<String>) {
         None => {}
     }
 
-    // Panic hook FIRST — before observe::init, so a panic during tracing
-    // setup still hits post-mortem handling. tracing::error! is a no-op
-    // before init, but log::syslog still records, so it's still useful.
-    std::panic::set_hook(Box::new(|info| {
-        let loc = info
-            .location()
-            .map(|l| format!("{}:{}", l.file(), l.line()))
-            .unwrap_or_else(|| "<unknown>".to_string());
-        let msg = info
-            .payload()
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("<non-string panic>");
-        let thread = std::thread::current()
-            .name()
-            .unwrap_or("<unnamed>")
-            .to_string();
-        // Both: structured event for the JSONL stream (greppable post-mortem)
-        // AND the legacy syslog line so the per-device file + UI keep working.
-        tracing::error!(thread = %thread, location = %loc, message = %msg, "panic");
-        log::syslog(&format!("PANIC in thread '{thread}' at {loc}: {msg}"));
-    }));
+    loop {
+        // Panic hook FIRST — before observe::init, so a panic during tracing
+        // setup still hits post-mortem handling. tracing::error! is a no-op
+        // before init, but log::syslog still records, so it's still useful.
+        std::panic::set_hook(Box::new(|info| {
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic>");
+            let thread = std::thread::current()
+                .name()
+                .unwrap_or("<unnamed>")
+                .to_string();
+            // Both: structured event for the JSONL stream (greppable post-mortem)
+            // AND the legacy syslog line so the per-device file + UI keep working.
+            tracing::error!(thread = %thread, location = %loc, message = %msg, "panic");
+            log::syslog(&format!("PANIC in thread '{thread}' at {loc}: {msg}"));
+        }));
 
-    // Tracing — sets up stderr + autorip.log + autorip.jsonl sinks. Filter
-    // via AUTORIP_LOG_LEVEL (default `autorip=info,libfreemkv=warn`).
-    observe::init();
+        // Tracing — sets up stderr + autorip.log + autorip.jsonl sinks. Filter
+        // via AUTORIP_LOG_LEVEL (default `autorip=info,libfreemkv=warn`).
+        observe::init();
 
-    // Signal handler for graceful shutdown
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(
-            libc::SIGTERM,
-            handle_signal as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGINT,
-            handle_signal as *const () as libc::sighandler_t,
-        );
-    }
-
-    // Rotate the system log if it has grown large across restarts. Also
-    // re-checked on the log-prune tick below, bounding a long-uptime daemon too.
-    log::rotate_system_log_if_large();
-
-    log::syslog(&format!(
-        "autorip starting (v{}, edition 2024)",
-        VERSION_LABEL
-    ));
-    tracing::info!(
-        version = VERSION_LABEL,
-        target = std::env::consts::OS,
-        arch = std::env::consts::ARCH,
-        "autorip starting"
-    );
-
-    // Load config
-    let cfg = config::load();
-
-    // Warn at boot if a configured movie/tv/output dir is missing or not writable
-    // (finished rips stay in staging meanwhile). Own thread: a hung network mount
-    // must never hold startup, and the web server, back.
-    {
-        let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(msg) = keysource::keyserver_url_startup_warning(&c) {
-            log::syslog(&msg);
+        // Signal handler for graceful shutdown
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(
+                libc::SIGTERM,
+                handle_signal as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGINT,
+                handle_signal as *const () as libc::sighandler_t,
+            );
         }
-        if let Err(e) = spawn_destination_check(c, mover::check_configured_destinations) {
-            tracing::warn!(error = %e, "could not start the startup destination check");
-        }
-    }
 
-    // The local KEYDB only matters for the `local` key source. In `online`
-    // mode keys come from the key service and a local keydb would only shadow
-    // it (libfreemkv default-search), so skip the download entirely.
-    let online_keys = keysource::uses_online(&cfg.read().unwrap_or_else(|e| e.into_inner()));
+        // Rotate the system log if it has grown large across restarts. Also
+        // re-checked on the log-prune tick below, bounding a long-uptime daemon too.
+        log::rotate_system_log_if_large();
 
-    // Ensure KEYDB exists — download on first boot if URL is configured
-    if online_keys {
-        log::syslog("Online key source — skipping local KEYDB download");
-    } else if keysource::keydb_exists(&cfg.read().unwrap_or_else(|e| e.into_inner())) {
-        log::syslog("KEYDB found");
-    } else {
-        let url = cfg
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .keydb_url
-            .clone();
-        if !url.is_empty() {
-            log::syslog("KEYDB not found, downloading...");
-            // Route through the address guard (validate_fetch_url + pinned
-            // resolver): LAN hosts are fine, unreachable addresses are refused.
-            match web::guarded_get(&url) {
-                Ok(resp) => {
-                    match web::read_capped_keydb_body(
-                        resp.into_body().into_reader(),
-                        web::KEYDB_MAX_BYTES,
-                    ) {
-                        Ok(buf) => {
-                            let saved = keysource::save_keydb(&cfg, &buf);
-                            match saved {
-                                Ok(r) => log::syslog(&format!(
-                                    "KEYDB downloaded: {} entries -> {}",
-                                    r.entries,
-                                    r.path.display()
-                                )),
-                                Err(e) => log::syslog(&format!("KEYDB save failed: {e}")),
-                            }
-                        }
-                        Err(web::KeydbReadError::TooLarge) => {
-                            log::syslog("KEYDB download failed: response exceeded size limit")
-                        }
-                        Err(web::KeydbReadError::Io) => log::syslog("KEYDB download read failed"),
-                    }
-                }
-                Err(e) => log::syslog(&format!(
-                    "KEYDB download failed for {}: {e}",
-                    crate::server::webhook::webhook_url_origin(&url)
-                )),
+        log::syslog(&format!(
+            "autorip starting (v{}, edition 2024)",
+            VERSION_LABEL
+        ));
+        tracing::info!(
+            version = VERSION_LABEL,
+            target = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+            "autorip starting"
+        );
+
+        // Load config
+        let cfg = config::load();
+
+        // Warn at boot if a configured movie/tv/output dir is missing or not writable
+        // (finished rips stay in staging meanwhile). Own thread: a hung network mount
+        // must never hold startup, and the web server, back.
+        {
+            let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(msg) = keysource::keyserver_url_startup_warning(&c) {
+                log::syslog(&msg);
+            }
+            if let Err(e) = spawn_destination_check(c, mover::check_configured_destinations) {
+                tracing::warn!(error = %e, "could not start the startup destination check");
             }
         }
-    }
 
-    // Start mover thread. Joined on shutdown (see end of main) so an
-    // in-flight file move isn't truncated into a partial OUTPUT_DIR file.
-    let mover_handle = std::thread::spawn({
-        let cfg = cfg.clone();
-        move || mover::run(&cfg)
-    });
+        // The local KEYDB only matters for the `local` key source. In `online`
+        // mode keys come from the key service and a local keydb would only shadow
+        // it (libfreemkv default-search), so skip the download entirely.
+        let online_keys = keysource::uses_online(&cfg.read().unwrap_or_else(|e| e.into_inner()));
 
-    // Start mux worker thread — pipelines mux behind the drive so a disc can
-    // rip on one device while a prior title muxes in the background. Joined
-    // on shutdown so an in-flight mux isn't killed mid-write (truncated MKV).
-    let muxer_handle = std::thread::spawn({
-        let cfg = cfg.clone();
-        move || muxer::run(&cfg)
-    });
-
-    // Library remux worker (plus its auditor). It yields the mux slot to any
-    // rip and is joined on shutdown so a cancelled remux cleans its partial.
-    let library_handle = crate::server::library::start(&cfg);
-    crate::server::health::start(&cfg);
-
-    // Start web server thread
-    let _web_handle = std::thread::spawn({
-        let cfg = cfg.clone();
-        move || web::run(&cfg)
-    });
-
-    // Start KEYDB auto-update thread — single source of truth for periodic
-    // refresh. Pre-0.13 a cron entry also spawned a second binary that raced
-    // this thread for /dev/sg* and port 8080; that path was removed.
-    let _keydb_handle = std::thread::spawn({
-        let cfg2 = cfg.clone();
-        move || {
-            tracing::info!("keydb update thread starting (24h interval)");
-            'outer: loop {
-                // 24h sleep in 1s chunks so SHUTDOWN is observed within ~1s.
-                for _ in 0..(24 * 3600) {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if SHUTDOWN.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
-                }
-                // Online key source resolves out-of-band; no local keydb to keep
-                // fresh (and refreshing one would only shadow the service).
-                let (online, url) = {
-                    let c = cfg2.read().unwrap_or_else(|e| e.into_inner());
-                    (keysource::uses_online(&c), c.keydb_url.clone())
-                };
-                if online || url.is_empty() {
-                    continue;
-                }
-                tracing::info!(url_origin = %crate::server::webhook::webhook_url_origin(&url), "keydb: starting daily update");
-                // SSRF-guarded fetch (see web::guarded_get) — the daily
-                // refresh must not bypass the address allow-list that the
-                // settings save and manual update already enforce.
+        // Ensure KEYDB exists — download on first boot if URL is configured
+        if online_keys {
+            log::syslog("Online key source — skipping local KEYDB download");
+        } else if keysource::keydb_exists(&cfg.read().unwrap_or_else(|e| e.into_inner())) {
+            log::syslog("KEYDB found");
+        } else {
+            let url = cfg
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .keydb_url
+                .clone();
+            if !url.is_empty() {
+                log::syslog("KEYDB not found, downloading...");
+                // Route through the address guard (validate_fetch_url + pinned
+                // resolver): LAN hosts are fine, unreachable addresses are refused.
                 match web::guarded_get(&url) {
                     Ok(resp) => {
                         match web::read_capped_keydb_body(
@@ -237,84 +155,180 @@ pub fn run(argv: Vec<String>) {
                             web::KEYDB_MAX_BYTES,
                         ) {
                             Ok(buf) => {
-                                let saved = keysource::save_keydb(&cfg2, &buf);
+                                let saved = keysource::save_keydb(&cfg, &buf);
                                 match saved {
                                     Ok(r) => log::syslog(&format!(
-                                        "KEYDB updated: {} entries -> {}",
+                                        "KEYDB downloaded: {} entries -> {}",
                                         r.entries,
                                         r.path.display()
                                     )),
-                                    Err(e) => log::syslog(&format!("KEYDB update failed: {e}")),
+                                    Err(e) => log::syslog(&format!("KEYDB save failed: {e}")),
                                 }
                             }
                             Err(web::KeydbReadError::TooLarge) => {
-                                log::syslog("KEYDB daily update: response exceeded size limit")
+                                log::syslog("KEYDB download failed: response exceeded size limit")
                             }
                             Err(web::KeydbReadError::Io) => {
-                                log::syslog("KEYDB daily update: response read failed")
+                                log::syslog("KEYDB download read failed")
                             }
                         }
                     }
                     Err(e) => log::syslog(&format!(
-                        "KEYDB update failed for {}: {e}",
+                        "KEYDB download failed for {}: {e}",
                         crate::server::webhook::webhook_url_origin(&url)
                     )),
                 }
             }
-            tracing::info!("keydb update thread stopping");
         }
-    });
 
-    // Log prune thread — replaces the v0.25.5 cron-based cleanup. retention_days
-    // comes from the Settings UI and is re-read each tick so a saved update
-    // takes effect on the next run without a restart.
-    let _log_prune_handle = std::thread::spawn({
-        let cfg = cfg.clone();
-        move || {
-            tracing::info!("log prune thread starting (24h interval)");
-            'outer: loop {
-                // Prune first, then wait: a daemon restarted more often than daily
-                // would otherwise never reach a tick.
-                log_prune_tick(&cfg);
-                for _ in 0..(24 * 3600) {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if SHUTDOWN.load(Ordering::Relaxed) {
-                        break 'outer;
+        // Start mover thread. Joined on shutdown (see end of main) so an
+        // in-flight file move isn't truncated into a partial OUTPUT_DIR file.
+        let mover_handle = std::thread::spawn({
+            let cfg = cfg.clone();
+            move || mover::run(&cfg)
+        });
+
+        // Start mux worker thread — pipelines mux behind the drive so a disc can
+        // rip on one device while a prior title muxes in the background. Joined
+        // on shutdown so an in-flight mux isn't killed mid-write (truncated MKV).
+        let muxer_handle = std::thread::spawn({
+            let cfg = cfg.clone();
+            move || muxer::run(&cfg)
+        });
+
+        // Library remux worker (plus its auditor). It yields the mux slot to any
+        // rip and is joined on shutdown so a cancelled remux cleans its partial.
+        let library_handle = crate::server::library::start(&cfg);
+        crate::server::health::start(&cfg);
+
+        // Start web server thread
+        let web_handle = std::thread::spawn({
+            let cfg = cfg.clone();
+            move || web::run(&cfg)
+        });
+
+        // Start KEYDB auto-update thread — single source of truth for periodic
+        // refresh. Pre-0.13 a cron entry also spawned a second binary that raced
+        // this thread for /dev/sg* and port 8080; that path was removed.
+        let _keydb_handle = std::thread::spawn({
+            let cfg2 = cfg.clone();
+            move || {
+                tracing::info!("keydb update thread starting (24h interval)");
+                'outer: loop {
+                    // 24h sleep in 1s chunks so SHUTDOWN is observed within ~1s.
+                    for _ in 0..(24 * 3600) {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        if SHUTDOWN.load(Ordering::Relaxed) {
+                            break 'outer;
+                        }
+                    }
+                    // Online key source resolves out-of-band; no local keydb to keep
+                    // fresh (and refreshing one would only shadow the service).
+                    let (online, url) = {
+                        let c = cfg2.read().unwrap_or_else(|e| e.into_inner());
+                        (keysource::uses_online(&c), c.keydb_url.clone())
+                    };
+                    if online || url.is_empty() {
+                        continue;
+                    }
+                    tracing::info!(url_origin = %crate::server::webhook::webhook_url_origin(&url), "keydb: starting daily update");
+                    // SSRF-guarded fetch (see web::guarded_get) — the daily
+                    // refresh must not bypass the address allow-list that the
+                    // settings save and manual update already enforce.
+                    match web::guarded_get(&url) {
+                        Ok(resp) => {
+                            match web::read_capped_keydb_body(
+                                resp.into_body().into_reader(),
+                                web::KEYDB_MAX_BYTES,
+                            ) {
+                                Ok(buf) => {
+                                    let saved = keysource::save_keydb(&cfg2, &buf);
+                                    match saved {
+                                        Ok(r) => log::syslog(&format!(
+                                            "KEYDB updated: {} entries -> {}",
+                                            r.entries,
+                                            r.path.display()
+                                        )),
+                                        Err(e) => log::syslog(&format!("KEYDB update failed: {e}")),
+                                    }
+                                }
+                                Err(web::KeydbReadError::TooLarge) => {
+                                    log::syslog("KEYDB daily update: response exceeded size limit")
+                                }
+                                Err(web::KeydbReadError::Io) => {
+                                    log::syslog("KEYDB daily update: response read failed")
+                                }
+                            }
+                        }
+                        Err(e) => log::syslog(&format!(
+                            "KEYDB update failed for {}: {e}",
+                            crate::server::webhook::webhook_url_origin(&url)
+                        )),
                     }
                 }
+                tracing::info!("keydb update thread stopping");
             }
-            tracing::info!("log prune thread stopping");
+        });
+
+        // Log prune thread — replaces the v0.25.5 cron-based cleanup. retention_days
+        // comes from the Settings UI and is re-read each tick so a saved update
+        // takes effect on the next run without a restart.
+        let _log_prune_handle = std::thread::spawn({
+            let cfg = cfg.clone();
+            move || {
+                tracing::info!("log prune thread starting (24h interval)");
+                'outer: loop {
+                    // Prune first, then wait: a daemon restarted more often than daily
+                    // would otherwise never reach a tick.
+                    log_prune_tick(&cfg);
+                    for _ in 0..(24 * 3600) {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        if SHUTDOWN.load(Ordering::Relaxed) {
+                            break 'outer;
+                        }
+                    }
+                }
+                tracing::info!("log prune thread stopping");
+            }
+        });
+
+        // Main loop: poll drives (checks SHUTDOWN flag internally)
+        ripper::drive_poll_loop(&cfg);
+
+        // Graceful shutdown is NOT a failure: clear in-progress markers up front
+        // so the next start resumes cleanly. Robust even if the drain below is
+        // SIGKILLed mid-drain by docker's stop-grace — markers are gone by then.
+        {
+            let c = cfg.read().unwrap_or_else(|e| e.into_inner());
+            ripper::staging::clear_inprogress_markers(std::path::Path::new(&c.staging_dir));
         }
-    });
 
-    // Main loop: poll drives (checks SHUTDOWN flag internally)
-    ripper::drive_poll_loop(&cfg);
+        // Drain any rip threads still mid-flight so we don't exit while
+        // libfreemkv holds a SCSI session. Bounded so a stuck drive can't
+        // pin shutdown indefinitely.
+        ripper::join_all_rip_threads(std::time::Duration::from_secs(60));
 
-    // Graceful shutdown is NOT a failure: clear in-progress markers up front
-    // so the next start resumes cleanly. Robust even if the drain below is
-    // SIGKILLed mid-drain by docker's stop-grace — markers are gone by then.
-    {
-        let c = cfg.read().unwrap_or_else(|e| e.into_inner());
-        ripper::staging::clear_inprogress_markers(std::path::Path::new(&c.staging_dir));
+        // Drain the mover and muxer too: both loop on SHUTDOWN and return after
+        // the current unit, so joining avoids a truncated file or partial MKV.
+        // Bounded so a wedged NFS write or stuck mux can't pin shutdown forever.
+        join_bounded(mover_handle, "mover", std::time::Duration::from_secs(120));
+        join_bounded(muxer_handle, "muxer", std::time::Duration::from_secs(120));
+        join_bounded(
+            library_handle,
+            "library",
+            std::time::Duration::from_secs(120),
+        );
+
+        join_bounded(web_handle, "web", std::time::Duration::from_secs(10));
+
+        log::syslog("autorip stopped");
+        if REBOOT.swap(false, Ordering::AcqRel) {
+            SHUTDOWN.store(false, Ordering::Release);
+            log::syslog("autorip soft reboot: starting fresh instance");
+            continue;
+        }
+        break;
     }
-
-    // Drain any rip threads still mid-flight so we don't exit while
-    // libfreemkv holds a SCSI session. Bounded so a stuck drive can't
-    // pin shutdown indefinitely.
-    ripper::join_all_rip_threads(std::time::Duration::from_secs(60));
-
-    // Drain the mover and muxer too: both loop on SHUTDOWN and return after
-    // the current unit, so joining avoids a truncated file or partial MKV.
-    // Bounded so a wedged NFS write or stuck mux can't pin shutdown forever.
-    join_bounded(mover_handle, "mover", std::time::Duration::from_secs(120));
-    join_bounded(muxer_handle, "muxer", std::time::Duration::from_secs(120));
-    join_bounded(
-        library_handle,
-        "library",
-        std::time::Duration::from_secs(120),
-    );
-
-    log::syslog("autorip stopped");
 }
 
 // Run the startup destination `check` over `cfg` on its own thread and warn about each
