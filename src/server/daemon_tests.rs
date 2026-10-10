@@ -794,3 +794,36 @@ fn the_startup_destination_check_never_blocks_startup() {
     drop(tx);
     handle.join().unwrap();
 }
+
+// A folder probe stuck on a hung mount is abandoned by its caller; it must not
+// hold a restart ticket, or a soft reboot can never finish draining.
+#[test]
+fn hung_folder_probe_does_not_block_restart_drain() {
+    const CHILD: &str = "FREEMKV_TEST_HUNG_PROBE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::daemon::tests::hung_folder_probe_does_not_block_restart_drain",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let (release, hung) = std::sync::mpsc::channel::<()>();
+    let out = crate::server::health::bounded(dir.path(), Duration::from_millis(50), move || {
+        let _ = hung.recv();
+    });
+    assert_eq!(out, crate::server::health::Bounded::TimedOut);
+    assert!(
+        BACKGROUND.drain(Duration::from_millis(500)),
+        "an abandoned probe must not hold a drain ticket"
+    );
+    BACKGROUND.reopen();
+    drop(release);
+}

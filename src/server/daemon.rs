@@ -20,6 +20,16 @@ pub(crate) fn spawn_background<T: Send + 'static>(
     BACKGROUND.spawn(name, f)
 }
 
+/// Spawn a helper the caller may abandon (a probe or lookup that can block forever on a
+/// hung mount or resolver). It holds no restart ticket, so it must not mutate service
+/// state: its only output is a value its caller may already have stopped waiting for.
+pub(crate) fn spawn_abandonable<T: Send + 'static>(
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<T>> {
+    std::thread::Builder::new().name(name.into()).spawn(f)
+}
+
 /// Run the server shell. `argv` is everything after `freemkv server`.
 ///
 /// Every terminal path either exits the process (`--healthcheck`,
