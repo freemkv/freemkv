@@ -4,8 +4,6 @@
 
 import { esc, ago, when, bytes } from './ui.js';
 
-const STATE = { ok: 'ok', unhealthy: 'unhealthy', unresponsive: 'not responding' };
-
 /** The Library's folders (output, source ISO, remux staging) whose last check failed. */
 export function unhealthy(folders) {
   return (folders || []).filter(f => f.health && f.health.state && f.health.state !== 'ok');
@@ -75,16 +73,4 @@ export function stagedLine(s) {
   if (!s || !s.count) return 'Kept staged files: none';
   return 'Kept staged files: ' + esc(s.count) + ' (' + esc(bytes(s.bytes)) + ')'
     + (s.dir ? ' in <span class="mono">' + esc(s.dir) + '</span>' : '') + ', waiting for the output folder';
-}
-
-/** The System page's Folders row: role, path, state, last good access and last error. */
-export function folderHealthRow(m) {
-  const state = m.state || (m.ok ? 'ok' : 'unhealthy');
-  const tone = state === 'ok' ? 'ok' : state === 'unresponsive' ? 'warn' : 'bad';
-  const label = STATE[state] || state;
-  return '<tr><td class="title"><b>' + esc(m.role) + '</b><span class="path mono" title="' + esc(m.path) + '">' + esc(m.path) + '</span></td>'
-    + '<td><span class="dot dot-' + tone + '"></span> ' + (state === 'ok' ? esc(label) : '<span style="color:var(--bad)">' + esc(m.message || label) + '</span>')
-    + (state !== 'ok' && m.since ? '<span class="note">since ' + esc(ago(m.since)) + '</span>' : '') + '</td>'
-    + '<td class="nowrap"><span class="muted small">' + esc(m.last_ok ? ago(m.last_ok) : 'never') + '</span></td>'
-    + '<td>' + (m.last_error ? '<span class="small">' + esc(m.last_error) + '</span><span class="note">' + esc(ago(m.last_error_at)) + '</span>' : '<span class="muted small">–</span>') + '</td></tr>';
 }
