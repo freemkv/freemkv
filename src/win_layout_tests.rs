@@ -400,57 +400,10 @@ fn settings_and_about_chrome_scale() {
 const LANGS: usize = 38;
 
 #[test]
-fn a_short_menu_is_one_column() {
-    // 38 rows of 19px is 722px; four fifths of a 1080p screen is 864px, so
-    // the whole list fits and must NOT be broken into columns.
-    assert_eq!(menu_column_rows(LANGS, 19, 1080), LANGS);
-    assert_eq!(menu_column_rows(1, 19, 1080), 1);
-}
-
-#[test]
-fn a_long_menu_is_split_into_balanced_columns() {
-    // A 768px netbook at 150%: 4/5 of 768 is 614px, 26px rows, so 23 fit.
-    // 38 entries therefore need two columns — and they come out even (19
-    // and 19), not 23 and a stub of 15.
-    assert_eq!(menu_column_rows(LANGS, 26, 768), 19);
-
-    // Squeezed harder: 4/5 of 600 is 480, 40px rows, 12 per column. 38
-    // needs four columns, balanced at 10 each (10+10+10+8).
-    assert_eq!(menu_column_rows(LANGS, 40, 600), 10);
-}
-
-#[test]
-fn every_entry_is_reachable_at_every_screen_size() {
-    // The property that actually matters: the columns must between them
-    // hold the whole list, and no column may overflow the budget. Checked
-    // across a sweep of plausible screens and DPI-scaled row heights.
-    for screen_h in [480, 600, 720, 768, 800, 900, 1080, 1440, 2160] {
-        for item_h in [15, 19, 24, 26, 32, 40, 48] {
-            let rows = menu_column_rows(LANGS, item_h, screen_h);
-            assert!(rows >= 1, "{screen_h}x{item_h} produced an empty column");
-            let cols = LANGS.div_ceil(rows);
-            assert!(
-                rows * cols >= LANGS,
-                "{screen_h}x{item_h}: {cols} columns of {rows} cannot hold {LANGS} entries"
-            );
-            let budget = ((screen_h * 4 / 5) / item_h) as usize;
-            assert!(
-                rows <= budget.max(1),
-                "{screen_h}x{item_h}: column of {rows} exceeds the {budget}-row budget"
-            );
-        }
-    }
-}
-
-#[test]
-fn degenerate_metrics_do_not_divide_by_zero() {
-    // GetSystemMetrics can answer 0 for a metric it does not know, and a
-    // 0-height screen is what a disconnected monitor reports mid-hotplug.
-    // Neither may panic, and neither may return a 0-row column.
-    assert_eq!(menu_column_rows(LANGS, 0, 1080), LANGS);
-    assert_eq!(menu_column_rows(LANGS, 19, 0), 1);
-    assert_eq!(menu_column_rows(LANGS, -5, -5), 1);
-    assert_eq!(menu_column_rows(0, 19, 1080), 1);
+fn dropdowns_keep_every_entry_in_one_vertical_list() {
+    assert_eq!(menu_rows(LANGS), LANGS);
+    assert_eq!(menu_rows(1), 1);
+    assert_eq!(menu_rows(0), 1);
 }
 
 // Settings pages stack downwards from `top` with no scrolling, so a page that grows past

@@ -36,6 +36,7 @@ fn get_set_round_trips_every_key() {
         "container",
         "filename_template",
         "selection",
+        "subtitle_mode",
         "min_title_secs",
         "rip_mode",
         "max_passes",
@@ -59,7 +60,7 @@ fn bool_keys_round_trip() {
     // `capture_without_keys` was removed: it was a checkbox wired to nothing,
     // and "Keep encrypted (raw passthrough)" already covers the one output where
     // writing ciphertext means anything.
-    for k in ["keep_iso", "auto_eject"] {
+    for k in ["keep_iso", "auto_eject", "persist_stream_preferences"] {
         s.set_bool(k, true);
         assert!(s.get_bool(k), "bool key {k} did not round-trip");
         s.set_bool(k, false);

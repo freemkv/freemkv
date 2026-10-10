@@ -425,6 +425,7 @@ fn the_subtitle_choices_step_through_their_states() {
     );
 
     app.pick_subtitles(SubPick::None);
+    assert_eq!(app.settings.subtitle_mode, "none");
     assert_eq!(flags(&app), (true, true));
     let v = pick(&app);
     assert!(v.subs_none && !v.subs_all && !v.subs_forced);
@@ -432,6 +433,7 @@ fn the_subtitle_choices_step_through_their_states() {
     assert_eq!(ticked_pids(&app.tree, 0), vec![0x80]);
 
     app.pick_subtitles(SubPick::Forced);
+    assert_eq!(app.settings.subtitle_mode, "forced");
     assert_eq!(flags(&app), (true, false));
     let v = pick(&app);
     assert!(v.subs_forced && !v.subs_none && !v.subs_all);
@@ -464,8 +466,10 @@ fn the_subtitle_choices_step_through_their_states() {
     assert!(pick(&app).subs_none);
 
     app.pick_subtitles(SubPick::All);
+    assert_eq!(app.settings.subtitle_mode, "all");
     assert_eq!(flags(&app), (false, false));
     assert!(app.pick_prefs.subtitles.is_empty() && app.pick_prefs.forced.is_empty());
+    assert!(app.settings.sub_langs.is_empty() && app.settings.forced_sub_langs.is_empty());
     assert!(pick(&app).subs_all);
 }
 
@@ -480,6 +484,7 @@ fn the_audio_choice_toggles_languages_and_all_clears_them() {
     assert_eq!(app.tree.ticked_titles(), vec![2, 3, 4, 5]);
 
     app.pick_audio(Some("deu"));
+    assert_eq!(app.settings.audio_langs, "deu");
     let v = app.view().pick.unwrap();
     assert!(!v.audio_all);
     assert_eq!(v.audio_summary, "deu");
@@ -487,10 +492,21 @@ fn the_audio_choice_toggles_languages_and_all_clears_them() {
     assert_eq!(app.tree.ticked_titles(), vec![3, 5]);
 
     app.pick_audio(Some("eng"));
+    assert_eq!(app.settings.audio_langs, "deu,eng");
     assert_eq!(app.view().pick.unwrap().audio_summary, "eng, deu");
     app.pick_audio(None);
+    assert!(app.settings.audio_langs.is_empty());
     assert!(app.pick_prefs.audio.is_empty());
     assert!(app.view().pick.unwrap().audio_all);
+}
+
+#[test]
+fn stream_preference_persistence_can_be_disabled() {
+    let mut app = App::new();
+    app.settings.persist_stream_preferences = false;
+    let before = app.log.len();
+    assert!(app.save_pick_preferences().is_empty());
+    assert_eq!(app.log.len(), before);
 }
 
 #[test]
@@ -755,6 +771,11 @@ fn a_failed_probe_says_nothing_but_a_failed_open_still_reports() {
         &app.log[before..]
     );
     assert!(matches!(app.page, Page::Empty));
+    assert_eq!(
+        app.view().disc_present,
+        None,
+        "file failures do not claim tray state"
+    );
 
     app.open(BAD);
     assert!(
@@ -849,12 +870,21 @@ fn a_probe_result_is_applied_by_the_tick() {
     let fx = app.tick();
     assert!(app.probe.is_none(), "a collected probe must clear its slot");
     assert_eq!(app.source, PROBE_SOURCE, "the scanned source must be set");
+    assert_eq!(app.view().disc_present, Some(true));
     assert!(matches!(app.page, Page::Titles));
     assert_eq!(app.tree.title_count(), 1);
     assert!(
         !fx.contains(&Effect::StopTicking),
         "the open disc keeps the tick for its watch: {fx:?}"
     );
+}
+
+#[test]
+fn empty_page_copy_distinguishes_ready_empty_and_unanswered_tray() {
+    let base = crate::strings::get("gui.page.empty_subtitle");
+    assert_eq!(crate::ui::empty_description(None), base);
+    assert!(crate::ui::empty_description(Some(true)).contains("Disc inserted"));
+    assert!(crate::ui::empty_description(Some(false)).contains("No disc"));
 }
 
 /// The user did not wait. A probe landing after they opened something
@@ -1018,6 +1048,7 @@ fn unit_tests_never_reach_a_real_drive() {
     let mut app = App::new();
     let before = app.log.len();
     app.open(PROBE_SOURCE);
+    assert_eq!(app.view().disc_present, Some(false));
     assert_eq!(
         app.log.get(before).map(|l| l.text.as_str()),
         Some(NO_DRIVE_IN_TESTS)
@@ -2353,7 +2384,14 @@ impl Bars {
         self.st.titles_done.fetch_add(1, Ordering::SeqCst);
         self.sample();
         self.st.title_end(idx);
-        self.sample()
+        let boundary = self.sample();
+        if idx + 1 < self.app.run_titles {
+            assert_eq!(
+                boundary.0, 0.0,
+                "title {idx} ends with the next title bar reset"
+            );
+        }
+        boundary
     }
 
     // The bottom bar never decreases; the top one only at a title's start (checked there).
@@ -2377,7 +2415,7 @@ impl Bars {
 #[test]
 fn two_titles_reset_the_top_bar_and_fill_the_bottom_bar_by_halves() {
     let mut b = Bars::new(&[1000, 1000]);
-    assert_eq!(b.title(0, 1000), (100.0, 50.0));
+    assert_eq!(b.title(0, 1000), (0.0, 50.0));
     b.title(1, 1000);
     // Halfway through the second title: the top bar is its half, the bottom three quarters.
     assert!(b.seen.contains(&(50.0, 75.0)), "{:?}", b.seen);

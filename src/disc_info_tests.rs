@@ -1,6 +1,15 @@
 use super::*;
 use libfreemkv::disc::DiscRegion;
 
+#[test]
+fn unlocker_display_reports_only_the_successful_match() {
+    assert_eq!(
+        super::matched_unlocker(&[("freemkv", false), ("LD", true), ("AACS", false)]),
+        "LD"
+    );
+    assert_eq!(super::matched_unlocker(&[("freemkv", false)]), "none");
+}
+
 // `info` flag validation is the same for every URL scheme: `disc:// --typo`
 // used to exit 1, but `iso://x.iso --typo` silently listed titles because that
 // route scanned args for `--full` via `.any()`. Both now go through `parse_info_flags`.

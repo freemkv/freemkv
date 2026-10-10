@@ -129,7 +129,11 @@ impl PickBar {
             }
             let code = sh.borrow().as_ref().and_then(|v| v.audio_choice(tag));
             if let Some(code) = code {
-                me.apply(|a| a.pick_audio(code.as_deref()));
+                me.apply(|a| {
+                    let mut fx = a.pick_audio(code.as_deref());
+                    fx.extend(a.save_pick_preferences());
+                    fx
+                });
             }
         }));
         let (me, sh) = (shell.clone(), shown.clone());
@@ -139,7 +143,11 @@ impl PickBar {
             }
             let choice = sh.borrow().as_ref().and_then(|v| v.subs_choice(tag));
             if let Some(choice) = choice {
-                me.apply(|a| a.pick_subtitles(choice));
+                me.apply(|a| {
+                    let mut fx = a.pick_subtitles(choice);
+                    fx.extend(a.save_pick_preferences());
+                    fx
+                });
             }
         }));
 

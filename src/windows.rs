@@ -1243,6 +1243,10 @@ impl Shell {
     // `cw`/`ch` and the returned rects are physical pixels, as `WM_SIZE` reports.
     fn relayout(&self, cw: i32, ch: i32) {
         let v = self.app.borrow().view();
+        let _ = self
+            .lbl_empty_sub
+            .hwnd()
+            .SetWindowText(&crate::ui::empty_description(v.disc_present));
         let hidden = v.log_hidden;
         let dpi = window_dpi(self.wnd.hwnd());
         let label_w = |i: usize| {
@@ -1750,6 +1754,10 @@ impl Shell {
     /// writes to controls, and it computes nothing.
     fn render(&self) {
         let v = self.app.borrow().view();
+        let _ = self
+            .lbl_empty_sub
+            .hwnd()
+            .SetWindowText(&crate::ui::empty_description(v.disc_present));
 
         // Format list depends on source kind, so it's re-derived every render,
         // not just at build time — a real macOS bug had "Whole disc → ISO image"
@@ -1966,7 +1974,11 @@ impl Shell {
             .as_ref()
             .and_then(|v| v.audio_choice(tag));
         if let Some(code) = choice {
-            let fx = self.app_mut(|a| a.pick_audio(code.as_deref()));
+            let fx = self.app_mut(|a| {
+                let mut fx = a.pick_audio(code.as_deref());
+                fx.extend(a.save_pick_preferences());
+                fx
+            });
             self.perform(fx);
         }
     }
@@ -1987,7 +1999,11 @@ impl Shell {
             .as_ref()
             .and_then(|v| v.subs_choice(tag));
         if let Some(choice) = choice {
-            let fx = self.app_mut(|a| a.pick_subtitles(choice));
+            let fx = self.app_mut(|a| {
+                let mut fx = a.pick_subtitles(choice);
+                fx.extend(a.save_pick_preferences());
+                fx
+            });
             self.perform(fx);
         }
     }
@@ -2928,25 +2944,12 @@ impl LangPicker {
     fn track_once(&self, owner: &w::HWND, anchor: w::RECT) -> Option<String> {
         let mut menu = w::HMENU::CreatePopupMenu().ok()?;
         let langs = crate::ui::PICKER_LANGUAGES;
-        // CYMENU (popup row height) and CYSCREEN feed `menu_column_rows`, which
-        // turns a list taller than the screen into columns instead of scroll arrows.
-        let rows = lay::menu_column_rows(
-            langs.len(),
-            w::GetSystemMetrics(co::SM::CYMENU),
-            w::GetSystemMetrics(co::SM::CYSCREEN),
-        );
         let cur = self.value();
         for (i, (code, _english)) in langs.iter().enumerate() {
             let name = crate::ui::lang_display_name(code);
             let mut flags = co::MF::STRING;
             if crate::ui::lang_is_selected(&cur, code) {
                 flags |= co::MF::CHECKED;
-            }
-            if i > 0 && i % rows == 0 {
-                // MENUBARBREAK, not MENUBREAK: it draws the vertical rule
-                // between columns, without which two columns read as one wide
-                // one with a stray gap.
-                flags |= co::MF::MENUBARBREAK;
             }
             if menu
                 .AppendMenu(
@@ -3306,6 +3309,13 @@ impl Prefs {
         langs.push((
             "forced_sub_langs",
             r.lang(&g("gui.set.forced_sub_langs"), &st.forced_sub_langs, 240),
+        ));
+        checks.push((
+            "persist_stream_preferences",
+            r.check(&crate::strings::get_or(
+                "gui.set.persist_stream_preferences",
+                "Remember audio and subtitle choices",
+            )),
         ));
         r.note(&g("gui.set.lang_prefs_note"));
 

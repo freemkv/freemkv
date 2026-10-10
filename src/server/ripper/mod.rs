@@ -1701,13 +1701,12 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     // User-facing unlocker matrix — which unlockers RAN, emitted right after disc-identify and
     // BEFORE the keyserver (depends only on drive-init + scan state, not key resolution).
     {
-        let matrix = disc
+        let matched = disc
             .unlocker_matrix(&drive)
             .into_iter()
-            .map(|(name, ok)| format!("{name}: {}", if ok { "yes" } else { "no" }))
-            .collect::<Vec<_>>()
-            .join(", ");
-        crate::server::log::device_log(device, &format!("Unlockers — {matrix}"));
+            .find_map(|(name, ok)| ok.then_some(name))
+            .unwrap_or("none");
+        crate::server::log::device_log(device, &format!("Unlocker: {matched}"));
     }
 
     // The rip's key set, resolved ONCE here, right after the scan, for every title the rip

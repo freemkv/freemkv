@@ -30,6 +30,7 @@ pub(super) struct MainView {
     stack: gtk::Stack,
     pick_bar: PickBar,
     tree: TitleTree,
+    empty: adw::StatusPage,
     out_entry: gtk::Entry,
     out_hint: gtk::Label,
     fmt_drop: gtk::DropDown,
@@ -332,6 +333,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
         root,
         stack,
         pick_bar,
+        empty,
         tree,
         out_entry,
         out_hint,
@@ -367,6 +369,8 @@ impl MainView {
     /// Assign the view. Computes nothing the core already decided.
     pub(super) fn render(&self, v: &View, memo: &mut Memo) {
         self.stack.set_visible_child_name(glue::page_name(v.page));
+        self.empty
+            .set_description(Some(&crate::ui::empty_description(v.disc_present)));
         let log_fills = glue::log_fills(v.page) && !v.log_hidden;
         self.stack.set_vexpand(!log_fills);
         self.log_scroll.set_vexpand(log_fills);
@@ -446,7 +450,18 @@ impl MainView {
             first: log_first,
             len: log.len(),
         };
-        match glue::log_delta(&memo.log, &now) {
+        // A freshly constructed/relocalized GTK text buffer can be empty even
+        // when the model memo still describes the same log. In that case the
+        // normal delta says `Same` and the launch line never gets painted.
+        // The buffer is the renderer's actual state; repair it from the model
+        // whenever it is empty but the model has lines.
+        let buffer_empty = self.log_view.buffer().char_count() == 0;
+        let delta = if buffer_empty && !log.is_empty() {
+            LogDelta::Rewrite
+        } else {
+            glue::log_delta(&memo.log, &now)
+        };
+        match delta {
             LogDelta::Same => return,
             LogDelta::Append(from) => self.append_log(&log[from..]),
             LogDelta::Rewrite => {

@@ -34,6 +34,10 @@ pub struct Settings {
     /// only if in English" is a single coherent request that one list cannot
     /// express, which is why this is a third field and not a flag.
     pub forced_sub_langs: String,
+    /// Subtitle stream mode: `all`, `none`, or `forced`.
+    pub subtitle_mode: String,
+    /// Whether title-bar audio/subtitle choices are written to disk.
+    pub persist_stream_preferences: bool,
     // Drive & I/O
     pub rip_mode: String,
     pub max_passes: String,
@@ -84,6 +88,8 @@ impl Default for Settings {
             audio_langs: String::new(),
             sub_langs: String::new(),
             forced_sub_langs: String::new(),
+            subtitle_mode: "all".into(),
+            persist_stream_preferences: true,
             rip_mode: "Multi-pass".into(),
             max_passes: "5".into(),
             abort_lost_secs: "0".into(),
@@ -236,6 +242,7 @@ impl Settings {
             "audio_langs" => self.audio_langs.clone(),
             "sub_langs" => self.sub_langs.clone(),
             "forced_sub_langs" => self.forced_sub_langs.clone(),
+            "subtitle_mode" => self.subtitle_mode.clone(),
             "rip_mode" => self.rip_mode.clone(),
             "max_passes" => self.max_passes.clone(),
             "abort_lost_secs" => self.abort_lost_secs.clone(),
@@ -258,6 +265,7 @@ impl Settings {
             "notify_when_rip_finished" => self.notify_when_rip_finished,
             "raw" => self.raw,
             "force" => self.force,
+            "persist_stream_preferences" => self.persist_stream_preferences,
             _ => false,
         }
     }
@@ -272,6 +280,7 @@ impl Settings {
             "audio_langs" => self.audio_langs = v,
             "sub_langs" => self.sub_langs = v,
             "forced_sub_langs" => self.forced_sub_langs = v,
+            "subtitle_mode" => self.subtitle_mode = v,
             "rip_mode" => self.rip_mode = v,
             "max_passes" => self.max_passes = v,
             "abort_lost_secs" => self.abort_lost_secs = v,
@@ -294,6 +303,7 @@ impl Settings {
             "notify_when_rip_finished" => self.notify_when_rip_finished = v,
             "raw" => self.raw = v,
             "force" => self.force = v,
+            "persist_stream_preferences" => self.persist_stream_preferences = v,
             _ => {}
         }
     }
@@ -384,6 +394,9 @@ impl Settings {
         snap(&mut self.rip_mode, "rip_mode", &d.rip_mode);
         snap(&mut self.key_source, "key_source", &d.key_source);
         snap(&mut self.log_level, "log_level", &d.log_level);
+        if !matches!(self.subtitle_mode.as_str(), "all" | "none" | "forced") {
+            self.subtitle_mode = d.subtitle_mode.clone();
+        }
         // The output container must be one of the canonical format strings the
         // dropdown offers, else it renders blank and the engine can't map it.
         let known = crate::ui::output_formats(true, true).concat();
@@ -515,7 +528,12 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
         return Err(get_or("gui.log.keydb_download_empty", "Download was empty"));
     }
     if let Some(parent) = std::path::Path::new(&dest).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "cannot create keydb directory {}: {e} (the directory must be writable by freemkv)",
+                parent.display()
+            )
+        })?;
     }
     let src = freemkv_keysources::KeydbSource::new(&dest);
     match src.save(&buf) {
@@ -530,7 +548,11 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
         )),
         Err(e) => Err(fmt_or(
             "gui.log.keydb_rejected",
-            "keydb rejected: E{code}",
+            &format!(
+                "keydb could not be written to {}: E{} (check that its directory is writable)",
+                dest,
+                e.code()
+            ),
             &[("code", &e.code().to_string())],
         )),
     }

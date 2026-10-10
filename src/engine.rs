@@ -1495,6 +1495,21 @@ impl Bars {
     fn publish(&self, prog: &mut Prog) {
         prog.title_pct = match self.current {
             Some((_, _, f)) => f * 100.0,
+            // A pre-title read is its own visible pass.  Keep showing that
+            // pass until it ends; the per-title bar resets only between
+            // authored titles.
+            None if self.read.as_ref().is_some_and(|r| !r.over) && prog.bytes_total > 0 => {
+                (prog.bytes_done as f64 / prog.bytes_total as f64 * 100.0).min(100.0)
+            }
+            // A completed title has cleared `current`, but its last engine
+            // progress sample is still 100%.  Do not leak that stale sample
+            // into the per-title bar while the next title is being opened.
+            None if !self.sizes.is_empty()
+                && self.passed < self.sizes.iter().map(|&(_, s)| s).sum::<u64>() =>
+            {
+                0.0
+            }
+            None if !self.sizes.is_empty() => 100.0,
             None if prog.bytes_total > 0 => {
                 (prog.bytes_done as f64 / prog.bytes_total as f64 * 100.0).min(100.0)
             }

@@ -690,6 +690,8 @@ struct Ivars {
     win_main: RefCell<Option<Retained<NSWindow>>>,
     src: RefCell<Option<Retained<TitlesSource>>>,
     page_empty: RefCell<Option<Retained<NSView>>>,
+    empty_head: RefCell<Option<Retained<NSTextField>>>,
+    empty_sub: RefCell<Option<Retained<NSTextField>>>,
     /// Worker threads push user-visible lines here; a main-thread timer drains
     /// it. AppKit objects are main-thread-only, so nothing else may cross.
     inbox: std::sync::Arc<std::sync::Mutex<Vec<(crate::ui::LogKind, String)>>>,
@@ -1288,7 +1290,11 @@ define_class!(
             let tag = picked_tag(&self.ivars().pick_audio);
             let choice = self.ivars().pick_shown.borrow().as_ref().zip(tag).and_then(|(v, t)| v.audio_choice(t));
             if let Some(code) = choice {
-                self.step(|a| a.pick_audio(code.as_deref()));
+                self.step(|a| {
+                    let mut fx = a.pick_audio(code.as_deref());
+                    fx.extend(a.save_pick_preferences());
+                    fx
+                });
             }
         }
 
@@ -1297,7 +1303,11 @@ define_class!(
             let tag = picked_tag(&self.ivars().pick_subs);
             let choice = self.ivars().pick_shown.borrow().as_ref().zip(tag).and_then(|(v, t)| v.subs_choice(t));
             if let Some(choice) = choice {
-                self.step(|a| a.pick_subtitles(choice));
+                self.step(|a| {
+                    let mut fx = a.pick_subtitles(choice);
+                    fx.extend(a.save_pick_preferences());
+                    fx
+                });
             }
         }
 
@@ -1747,6 +1757,9 @@ impl Controller {
 
         // pages
         let iv = self.ivars();
+        if let Some(sub) = iv.empty_sub.borrow().as_ref() {
+            sub.setStringValue(&crate::ui::empty_description(v.disc_present));
+        }
         {
             if let Some(x) = iv.page_empty.borrow().as_ref() {
                 x.setHidden(v.page != Page::Empty);
@@ -3185,6 +3198,8 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         *c.ivars().fields.borrow_mut() = vals;
     }
     *c.ivars().page_empty.borrow_mut() = Some(page_empty);
+    *c.ivars().empty_head.borrow_mut() = Some(head);
+    *c.ivars().empty_sub.borrow_mut() = Some(sub);
     *c.ivars().page_main.borrow_mut() = Some(page_main);
     *c.ivars().page_prog.borrow_mut() = Some(page_prog);
 
@@ -4081,6 +4096,15 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         &crate::strings::get("gui.set.forced_sub_langs"),
         220.0,
         c,
+    );
+    t.check(
+        mtm,
+        "persist_stream_preferences",
+        &crate::strings::get_or(
+            "gui.set.persist_stream_preferences",
+            "Remember audio and subtitle choices",
+        ),
+        true,
     );
     t.note(mtm, &crate::strings::get("gui.set.lang_prefs_note"), tw);
     add_tab(&crate::strings::get("gui.tab.selection"), t);

@@ -234,10 +234,12 @@ pub fn handle(
         }
         (_, true, "/api/library/queue/stop-all") => {
             let (running, removed) = lib.stop_all();
+            let paused = lib.queue.snapshot().paused;
             json_response(
                 request,
                 200,
-                &json!({"ok": true, "stopped": running, "removed": removed}).to_string(),
+                &json!({"ok": true, "stopped": running, "removed": removed, "paused": paused})
+                    .to_string(),
             );
         }
         (_, true, "/api/library/queue/clear-queued") => {

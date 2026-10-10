@@ -453,6 +453,8 @@ fn job_for(dir: &Path, id: u64) -> Job {
         title: "A".into(),
         iso: dir.join("missing.iso"),
         target: dir.join("A/A.mkv"),
+        plan: None,
+        outputs: Vec::new(),
         replace: true,
         state: JobState::Running,
         queued_at: 0,

@@ -17,26 +17,29 @@ const active = r => r.job && (r.job.state === 'queued' || r.job.state === 'runni
 function statePills(r, hold) {
   const j = r.job, res = r.result;
   const log = (j || res) ? '<button class="pill link" type="button" data-log>' + (j && j.state === 'running' ? 'console' : 'log') + '</button>' : '';
+  const outputs = j && j.outputs && j.outputs.length > 1
+    ? '<span class="pill info" data-keep="1">TV · ' + j.outputs.filter(o => o.state === 'done').length + '/' + j.outputs.length + ' episodes</span>'
+    : '';
   if (j && j.state === 'running') {
     // Static markup: the bar and its text are filled in place by paintLive.
-    return '<span class="pill live" data-keep="1"><span class="cellbar" data-live="' + j.id + '"><span class="bar"><i></i></span><span class="txt">starting…</span></span></span>' + log;
+    return outputs + '<span class="pill live" data-keep="1"><span class="cellbar" data-live="' + j.id + '"><span class="bar"><i></i></span><span class="txt">starting…</span></span></span>' + log;
   }
-  if (j && j.staged) return stagedPill(j, Date.now() / 1000) + log;
+  if (j && j.staged) return outputs + stagedPill(j, Date.now() / 1000) + log;
   if (j && j.state === 'queued') {
     const why = queuedNote(j, hold, Date.now() / 1000);
     const tip = j.failure ? ' title="' + esc(j.failure.message) + '"' : '';
-    return '<span class="pill warn" data-keep="1"' + tip + '>Queued' + (why ? ' · ' + esc(why) : '') + '</span>' + log;
+    return outputs + '<span class="pill warn" data-keep="1"' + tip + '>Queued' + (why ? ' · ' + esc(why) : '') + '</span>' + log;
   }
   if (res && res.outcome === 'done') {
-    return '<span class="pill ok" data-keep="1" title="Remuxed in ' + esc(runtime(res.secs) || res.secs + 's') + ', ' + esc(when(res.finished_at)) + '">✓ Done · ' + bytes(res.size_bytes) + '</span>' + log;
+    return outputs + '<span class="pill ok" data-keep="1" title="Remuxed in ' + esc(runtime(res.secs) || res.secs + 's') + ', ' + esc(when(res.finished_at)) + '">✓ Done · ' + bytes(res.size_bytes) + '</span>' + log;
   }
   if (res && res.outcome === 'failed') {
     const f = (j && j.failure) || res;
     const msg = (f.code != null && !f.message.includes('E' + f.code) ? 'E' + f.code + ' ' : '') + f.message;
     const short = msg.replace(/^E(\d+)\s+(Error:\s*)?/, 'E$1 ');
-    return '<span class="pill bad" data-keep="1" title="' + esc(msg) + '">✗ Failed · ' + esc(short.length > 48 ? short.slice(0, 48) + '…' : short) + '</span>' + log;
+    return outputs + '<span class="pill bad" data-keep="1" title="' + esc(msg) + '">✗ Failed · ' + esc(short.length > 48 ? short.slice(0, 48) + '…' : short) + '</span>' + log;
   }
-  return '';
+  return outputs;
 }
 
 // A row's pills in order. The first one never folds into "+N", so a kept finished file
@@ -120,7 +123,7 @@ export default {
         </div>
         <div id="tbl"></div>
       </div>
-      <p class="foot-note">Remux rebuilds a movie file from its disc copy (ISO) with this version of freemkv, and only replaces the old file once the new one checks out. One at a time; rips always go first. Titles that match several disc copies are greyed out and left alone.</p>`;
+      <p class="foot-note">Remux rebuilds media from its disc copy (ISO) with this version of freemkv, and only replaces existing files once the new output checks out. TV discs may produce several episode files. One job at a time; rips always go first. Titles that match several disc copies are greyed out and left alone.</p>`;
     let last = null, q = '';
     const chips = chipFilter($('#stats', view), { store: 'remuxFilter', onChange: () => paint() });
     $('#tbl', view).classList.add('wrap-m');

@@ -28,6 +28,7 @@ pub mod mover;
 pub mod muxer;
 pub mod observe;
 pub mod peers;
+pub mod planner;
 pub mod review;
 pub mod ripper;
 pub mod settings_schema;

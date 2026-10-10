@@ -310,6 +310,14 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     f.langs(&s2, "audio_langs", &g("gui.set.audio_langs"));
     f.langs(&s2, "sub_langs", &g("gui.set.sub_langs"));
     f.langs(&s2, "forced_sub_langs", &g("gui.set.forced_sub_langs"));
+    f.switch(
+        &s2,
+        "persist_stream_preferences",
+        &crate::strings::get_or(
+            "gui.set.persist_stream_preferences",
+            "Remember audio and subtitle choices",
+        ),
+    );
     window.add(&page(
         "gui.tab.selection",
         "object-select-symbolic",

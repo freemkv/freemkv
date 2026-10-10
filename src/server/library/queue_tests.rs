@@ -38,6 +38,46 @@ fn jobs_run_in_order_one_at_a_time_and_pause() {
     );
 }
 
+#[test]
+fn a_claimed_job_persists_its_frozen_plan_once() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    q.add(vec![job(t.path(), "show")]);
+    let claimed = q.claim_next().unwrap();
+    let plan = crate::server::planner::RemuxPlan {
+        version: crate::server::planner::PLAN_VERSION,
+        source_iso: claimed.iso.clone(),
+        media: crate::server::planner::MediaMetadata {
+            title: "Show".into(),
+            kind: Some(crate::server::planner::MediaKind::Tv),
+            ..Default::default()
+        },
+        outputs: vec![crate::server::planner::PlannedOutput {
+            id: "title-1-episode-1".into(),
+            title_index: 1,
+            episode: Some(1),
+            episode_name: "Pilot".into(),
+            filename: "Show_S01E01.mkv".into(),
+        }],
+    };
+    assert!(q.set_plan(claimed.id, plan.clone()));
+    assert_eq!(q.snapshot().jobs[0].outputs[0].state, OutputState::Pending);
+    let kept = t.path().join("1.staged.mkv");
+    q.set_output_staged(claimed.id, "title-1-episode-1", Some(kept.clone()));
+    assert_eq!(q.snapshot().jobs[0].outputs[0].staged, Some(kept));
+    assert!(q.begin_output(claimed.id, "title-1-episode-1"));
+    q.finish_output(claimed.id, "title-1-episode-1", OutputState::Done);
+    assert!(!q.begin_output(claimed.id, "title-1-episode-1"));
+    assert!(
+        !q.set_plan(claimed.id, plan.clone()),
+        "a plan is immutable once attached"
+    );
+    drop(q);
+    let q = Queue::open(t.path());
+    assert_eq!(q.snapshot().jobs[0].plan, Some(plan));
+    assert_eq!(q.snapshot().jobs[0].outputs[0].state, OutputState::Done);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_queue_file_that_cannot_be_read_is_kept() {

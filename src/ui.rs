@@ -105,7 +105,19 @@ impl LangPrefs {
 
     /// The preferences as persisted in Settings.
     pub fn from_settings(s: &crate::settings::Settings) -> Self {
-        Self::parse(&s.audio_langs, &s.sub_langs, &s.forced_sub_langs)
+        let mut p = Self::parse(&s.audio_langs, &s.sub_langs, &s.forced_sub_langs);
+        match s.subtitle_mode.as_str() {
+            "none" => {
+                p.no_subtitles = true;
+                p.no_forced = true;
+            }
+            "forced" => {
+                p.no_subtitles = true;
+                p.no_forced = false;
+            }
+            _ => {}
+        }
+        p
     }
 
     /// No preference expressed at all — the tree is built exactly as before.
@@ -1966,6 +1978,10 @@ pub struct App {
     /// that appended incrementally knows its rendered lines went stale.
     pub log_first: u64,
     pub source: String,
+    /// Last answered state of the optical tray. This is separate from
+    /// `source`: a failed launch probe has no open source but still proves the
+    /// tray is empty.
+    pub disc_present: Option<bool>,
     pub output_dir: String,
     /// Free space at `output_dir`, measured off this thread.
     pub free: FreeSpace,
@@ -2216,6 +2232,7 @@ impl App {
             log: Arc::default(),
             log_first: 0,
             source: String::new(),
+            disc_present: None,
             output_dir,
             free: FreeSpace::default(),
             format,
@@ -2600,6 +2617,7 @@ impl App {
     fn clear_source(&mut self) {
         self.tree = Tree::default();
         self.source.clear();
+        self.disc_present = None;
         self.disc_label.clear();
         // The key set lives in memory for this source only (KU §2.1 invariant 5).
         self.seed = None;
@@ -2791,11 +2809,17 @@ impl App {
             None => self.pick_prefs.audio.clear(),
             Some(c) => toggle_code(&mut self.pick_prefs.audio, c),
         }
+        self.settings.audio_langs = lang_selection_to_string(&self.pick_prefs.audio);
         self.repick()
     }
 
     /// The selection bar's subtitle choice.
     pub fn pick_subtitles(&mut self, choice: SubPick) -> Vec<Effect> {
+        let mode = match &choice {
+            SubPick::All | SubPick::Lang(_) => "all",
+            SubPick::None => "none",
+            SubPick::Forced => "forced",
+        };
         let p = &mut self.pick_prefs;
         match choice {
             SubPick::All => {
@@ -2822,7 +2846,32 @@ impl App {
                 }
             }
         }
+        self.settings.subtitle_mode = mode.into();
+        self.settings.sub_langs = lang_selection_to_string(&p.subtitles);
+        self.settings.forced_sub_langs = lang_selection_to_string(&p.forced);
         self.repick()
+    }
+
+    /// Persist the stream choices made in the title bar. Title mode is not
+    /// included: it is disc-driven and may legitimately change between discs.
+    pub fn save_pick_preferences(&mut self) -> Vec<Effect> {
+        if !self.settings.persist_stream_preferences {
+            return vec![];
+        }
+        match self.settings.save() {
+            Ok(()) => vec![],
+            Err(e) => {
+                self.say(
+                    LogKind::Notice,
+                    &crate::strings::fmt_or(
+                        "gui.log.settings_save_error",
+                        "Could not save audio/subtitle preferences: {e}",
+                        &[("e", &e)],
+                    ),
+                );
+                vec![Effect::Redraw]
+            }
+        }
     }
 
     // Re-tick the tree from the scan it was built from, under the bar's current choices.
@@ -2900,6 +2949,9 @@ impl App {
         let disc = crate::engine::is_disc_source(path);
         match scanned {
             Ok(sc) => {
+                if disc {
+                    self.disc_present = Some(true);
+                }
                 self.clear_log();
                 self.say(
                     LogKind::Result,
@@ -2992,6 +3044,9 @@ impl App {
                 }
                 // The page shows no source, so none may remain to Start or Eject.
                 self.clear_source();
+                if disc {
+                    self.disc_present = Some(false);
+                }
             }
         }
         vec![Effect::Redraw]
@@ -3470,6 +3525,7 @@ impl App {
             .is_some_and(|st| st.cancel.load(Ordering::Relaxed));
         View {
             page: self.page,
+            disc_present: self.disc_present,
             title_rows: self.rows(),
             pick: self.pick_view(),
             info: self
@@ -3951,10 +4007,33 @@ pub(crate) fn result_heading(outcome: crate::engine::RunOutcome) -> String {
     }
 }
 
+/// Home-page copy for the tray state. Keep the undecided state identical to
+/// the normal empty page so a slow launch probe does not flash a false answer.
+// This is called by the platform shells, which are separate target-specific
+// modules and therefore absent from the portable library build.
+#[allow(dead_code)]
+pub(crate) fn empty_description(disc_present: Option<bool>) -> String {
+    let base = crate::strings::get("gui.page.empty_subtitle");
+    match disc_present {
+        Some(true) => format!(
+            "{base}\n\n{}",
+            crate::strings::get_or("gui.page.disc_ready", "Disc inserted — ready to open.")
+        ),
+        Some(false) => format!(
+            "{base}\n\n{}",
+            crate::strings::get_or("gui.page.no_disc", "No disc detected.")
+        ),
+        None => base,
+    }
+}
+
 /// A complete description of the screen. A shell assigns these to widgets and
 /// makes no decisions of its own.
 pub struct View {
     pub page: Page,
+    /// Whether a live optical source is currently known to contain media.
+    /// `None` means the launch probe has not answered yet.
+    pub disc_present: Option<bool>,
     pub title_rows: Vec<Row>,
     /// The selection bar, while a source is open.
     pub pick: Option<PickView>,

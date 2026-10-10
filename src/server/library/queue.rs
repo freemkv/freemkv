@@ -10,9 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::server::planner::RemuxPlan;
+
 /// The queue file's name in the config folder.
 pub const QUEUE_FILE: &str = "library-queue.json";
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +45,25 @@ pub enum JobNote {
     StagedWaiting,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputState {
+    Pending,
+    Running,
+    Done,
+    Failed,
+}
+
+/// Durable delivery state for one output of an immutable remux plan.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutputProgress {
+    pub id: String,
+    pub target: PathBuf,
+    pub state: OutputState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<PathBuf>,
+}
+
 /// One queued remux.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Job {
@@ -50,6 +71,13 @@ pub struct Job {
     pub title: String,
     pub iso: PathBuf,
     pub target: PathBuf,
+    /// Frozen source-to-output decisions. `None` is the legacy single-output
+    /// movie job shape and is deliberately retained for schema compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<RemuxPlan>,
+    /// Mutable execution state kept separately from the immutable plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<OutputProgress>,
     /// An MKV existed at `target` when the job was queued and may be replaced.
     pub replace: bool,
     pub state: JobState,
@@ -350,6 +378,8 @@ impl Queue {
                     title: item.title,
                     iso: item.iso,
                     target: item.target,
+                    plan: None,
+                    outputs: Vec::new(),
                     replace: item.replace,
                     state: JobState::Queued,
                     queued_at: now,
@@ -391,6 +421,84 @@ impl Queue {
             job.finished_at = None;
             Some(job.clone())
         })
+    }
+
+    /// Attach the immutable plan produced for a claimed job. The worker calls
+    /// this before the first output so a restart can resume from the same
+    /// source/output decisions instead of planning again.
+    pub fn set_plan(&self, id: u64, plan: RemuxPlan) -> bool {
+        self.mutate(|f| {
+            let Some(job) = f.jobs.iter_mut().find(|j| j.id == id) else {
+                return false;
+            };
+            if job.plan.is_some() {
+                return false;
+            }
+            let multi = plan.outputs.len() > 1;
+            job.outputs = plan
+                .outputs
+                .iter()
+                .map(|output| OutputProgress {
+                    id: output.id.clone(),
+                    target: if multi {
+                        job.target
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .join(&output.filename)
+                    } else {
+                        job.target.clone()
+                    },
+                    state: OutputState::Pending,
+                    staged: None,
+                })
+                .collect();
+            job.plan = Some(plan);
+            true
+        })
+    }
+
+    pub fn begin_output(&self, id: u64, output_id: &str) -> bool {
+        self.mutate(|f| {
+            let Some(output) = f
+                .jobs
+                .iter_mut()
+                .find(|j| j.id == id)
+                .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
+            else {
+                return true;
+            };
+            if output.state == OutputState::Done {
+                return false;
+            }
+            output.state = OutputState::Running;
+            true
+        })
+    }
+
+    pub fn finish_output(&self, id: u64, output_id: &str, state: OutputState) {
+        self.mutate(|f| {
+            if let Some(output) = f
+                .jobs
+                .iter_mut()
+                .find(|j| j.id == id)
+                .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
+            {
+                output.state = state;
+            }
+        });
+    }
+
+    pub fn set_output_staged(&self, id: u64, output_id: &str, staged: Option<PathBuf>) {
+        self.mutate(|f| {
+            if let Some(output) = f
+                .jobs
+                .iter_mut()
+                .find(|j| j.id == id)
+                .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
+            {
+                output.staged = staged;
+            }
+        });
     }
 
     /// Record how job `id` ended.
@@ -574,6 +682,8 @@ impl Queue {
                     title: item.title,
                     iso: item.iso,
                     target: item.target,
+                    plan: None,
+                    outputs: Vec::new(),
                     replace: item.replace,
                     state: JobState::Queued,
                     queued_at: now,

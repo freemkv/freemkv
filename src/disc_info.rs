@@ -253,17 +253,11 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
     );
     emit_encryption_line(&out, &disc);
 
-    // Unlocker matrix: which registered unlockers actually RAN this rip (not just
-    // "matched the disc kind"), so a missing one (e.g. firmware-unlock = "no" on a
-    // supported drive) is visible. Registry-driven names; rendering matches autorip's.
+    // Report the unlocker that actually handled this rip. Keep the matrix as the
+    // source of truth, but do not expose the internal capability list here.
     {
-        let matrix = disc
-            .unlocker_matrix(&drive)
-            .into_iter()
-            .map(|(name, ok)| format!("{name}: {}", if ok { "yes" } else { "no" }))
-            .collect::<Vec<_>>()
-            .join(", ");
-        out.raw(Normal, &format!("Unlockers — {matrix}"));
+        let matched = matched_unlocker(&disc.unlocker_matrix(&drive));
+        out.raw(Normal, &format!("Unlocker: {matched}"));
     }
 
     // Verbose: hardware/disc facts, blank line, then the AACS crypto block. Key
@@ -302,6 +296,16 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
     out.blank(Normal);
 
     print_titles(&out, &disc, full, verbose, basic);
+}
+
+/// Select the user-facing unlocker label from the registry-derived runtime
+/// results. The matrix remains available to diagnostics; this is the compact
+/// rendering used by disc info and autorip.
+pub(crate) fn matched_unlocker(matrix: &[(&'static str, bool)]) -> &'static str {
+    matrix
+        .iter()
+        .find_map(|(name, ok)| ok.then_some(*name))
+        .unwrap_or("none")
 }
 
 /// Print a full, localized title list for an already-scanned `Disc` using a

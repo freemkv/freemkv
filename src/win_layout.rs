@@ -465,29 +465,13 @@ pub fn form_metrics(dpi: u32) -> FormMetrics {
     }
 }
 
-/// How many entries go in one column of a long popup menu, balanced across
-/// columns via `MF::MENUBARBREAK` so a popup taller than the screen doesn't
-/// need to scroll.
+/// The number of rows in a dropdown's single vertical list.
 ///
-/// `items` is the total entry count, `item_h` is the caller's estimate of one menu row's height
-/// in physical pixels (`SM::CYMENU`, with zero or negative treated as one), and `screen_h` is
-/// the screen height in physical pixels. Returns the row count per column.
+/// Native popup menus handle lists taller than the screen with their own scrolling;
+/// keeping every item in one list ensures all dropdowns open straight down consistently.
 #[must_use]
-pub fn menu_column_rows(items: usize, item_h: i32, screen_h: i32) -> usize {
-    if items == 0 {
-        return 1;
-    }
-    let item_h = item_h.max(1);
-    let usable = (screen_h.max(0) * 4 / 5).max(0);
-    // At least one row per column: a screen too short for even one entry still
-    // has to produce a menu, and Windows' own scroll arrows can cope with that
-    // degenerate case.
-    let budget = ((usable / item_h) as usize).max(1);
-    if items <= budget {
-        return items;
-    }
-    let cols = items.div_ceil(budget);
-    items.div_ceil(cols)
+pub fn menu_rows(items: usize) -> usize {
+    items.max(1)
 }
 
 // ── the title tree's columns ──────────────────────────────────────────────

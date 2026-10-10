@@ -316,6 +316,9 @@ impl Audits {
         complete: bool,
     ) -> usize {
         let mut st = self.lock();
+        if st.paused {
+            return 0;
+        }
         if complete {
             let present: HashSet<PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
             prune_locked(self, &mut st, &present);
@@ -418,12 +421,15 @@ impl Audits {
         }
     }
 
-    /// Empty both lanes and stop the audits running now. Returns how many were waiting.
+    /// Empty both lanes and stop the audits running now. Stop is terminal for the
+    /// current audit run: refill stays disabled until the user explicitly resumes.
+    /// Returns how many were waiting.
     pub fn stop_all(&self) -> usize {
         let mut st = self.lock();
         let n = st.queued().len();
         st.queue.clear();
         st.deep_queue.clear();
+        st.paused = true;
         for slot in [&self.quick, &self.deep] {
             if slot.lock().is_some() {
                 slot.cancel.store(true, Ordering::SeqCst);

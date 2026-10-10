@@ -4,10 +4,11 @@
 
 use super::arbiter::Arbiter;
 use super::deliver;
-use super::queue::{Failure, Job, JobNote, JobResult, NewJob, StagedFile};
+use super::queue::{Failure, Job, JobNote, JobResult, NewJob, OutputState, StagedFile};
 use super::{Dirs, Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use crate::server::health::{self, Fault, Problem};
+use crate::server::planner::Planner;
 use freemkv_engine::{Event, Level, Progress, Sink};
 use std::io::Write as _;
 use std::path::Path;
@@ -94,6 +95,8 @@ pub(crate) enum Ending {
 }
 
 fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job) {
+    let mut job = job;
+    maybe_attach_tv_plan(lib, cfg, &mut job);
     let debug = lib.queue.snapshot().debug_log;
     let log = JobLog::create(&lib.log_path(&job.title));
     lib.stall_cancel.store(false, Ordering::SeqCst);
@@ -152,7 +155,49 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
     lib.set_running(|r| *r = None);
 }
 
+/// Resolve and persist TV fan-out exactly once, before execution. A non-TV,
+/// non-confident, disabled, or unscannable source deliberately remains a
+/// legacy single-output job.
+fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) {
+    if job.plan.is_some() || !cfg.tv_auto || cfg.tmdb_api_key.is_empty() {
+        return;
+    }
+    let Some(match_) = crate::server::tmdb::lookup(&job.title, &cfg.tmdb_api_key) else {
+        return;
+    };
+    if match_.media_type != "tv"
+        || !crate::server::tmdb::is_confident_match(&job.title, &match_.title, match_.year)
+    {
+        return;
+    }
+    let source = freemkv_engine::ImageSource::from_path(&job.iso);
+    let Ok((disc, _reader)) = freemkv_engine::scan_image(&source) else {
+        return;
+    };
+    let media = crate::server::planner::MediaMetadata {
+        title: match_.title,
+        year: match_.year,
+        tmdb_id: match_.tmdb_id,
+        season: crate::server::tmdb::season_from_label(&job.title),
+        disc: crate::server::tmdb::disc_from_label(&job.title),
+        kind: Some(crate::server::planner::MediaKind::Tv),
+    };
+    let planner = crate::server::planner::TvPlanner { cfg };
+    let Ok(plan) = planner.plan(&job.iso, &disc.titles, &media, &job.target) else {
+        return;
+    };
+    if plan.outputs.len() <= 1 {
+        return;
+    }
+    if lib.queue.set_plan(job.id, plan.clone()) {
+        job.plan = Some(plan);
+    }
+}
+
 fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
+    if let Some(plan) = &job.plan {
+        return remux_planned(job, plan, cfg, sink);
+    }
     if !job.replace
         && let Err(why) = safe_to_create(&super::dirs(cfg), &job.target)
     {
@@ -188,6 +233,120 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
         Err(_) if sink.lib.stall_cancel.load(Ordering::SeqCst) => Ending::Stopped(JobNote::Stalled),
         Err(e) => Ending::Failed(e),
     }
+}
+
+/// Execute a frozen plan one output at a time. Planning has already happened
+/// before this function is entered; this path never re-runs TMDB or episode
+/// selection. Each output gets its own staged artifact and final delivery.
+fn remux_planned(
+    job: &Job,
+    plan: &crate::server::planner::RemuxPlan,
+    cfg: &Config,
+    sink: &JobSink<'_>,
+) -> Ending {
+    if plan.version != crate::server::planner::PLAN_VERSION {
+        return Ending::Failed(std::io::Error::other(format!(
+            "unsupported remux plan version {}",
+            plan.version
+        )));
+    }
+    if plan.source_iso != job.iso {
+        return Ending::Failed(std::io::Error::other(
+            "remux plan source ISO does not match queued job",
+        ));
+    }
+    let keys = crate::server::keysource::key_params(cfg);
+    let stage = remux_stage_dir();
+    for (ordinal, output) in plan.outputs.iter().enumerate() {
+        if !sink.lib.queue.begin_output(job.id, &output.id) {
+            continue;
+        }
+        let target = if plan.outputs.len() == 1 {
+            job.target.clone()
+        } else {
+            job.target
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&output.filename)
+        };
+        if !job.replace && target.exists() {
+            return Ending::Failed(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("planned output already exists: {}", target.display()),
+            ));
+        }
+        if let Some(parent) = target.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Ending::Failed(e);
+        }
+        if let Some(staged) = job
+            .outputs
+            .iter()
+            .find(|p| p.id == output.id)
+            .and_then(|p| p.staged.as_deref())
+            .filter(|p| deliver::is_kept(p))
+        {
+            match deliver::resume(staged, sink, &libfreemkv::Halt::new(), &deliver::OsIo) {
+                Ok(_) => {
+                    sink.lib.queue.set_output_staged(job.id, &output.id, None);
+                    sink.lib
+                        .queue
+                        .finish_output(job.id, &output.id, OutputState::Done);
+                    continue;
+                }
+                Err(e) => {
+                    sink.lib
+                        .queue
+                        .finish_output(job.id, &output.id, OutputState::Failed);
+                    return Ending::Failed(e);
+                }
+            }
+        }
+        let request = freemkv_engine::RemuxJob {
+            iso: freemkv_engine::ImageSource::from_path(&job.iso),
+            title: Some(output.title_index),
+            streams: freemkv_engine::StreamChoice::default(),
+            target,
+            replace: job.replace,
+        };
+        let result = if let Some(dir) = &stage {
+            deliver::remux_via_stage(
+                &request,
+                &keys,
+                sink,
+                dir,
+                job.id.saturating_mul(1000).saturating_add(ordinal as u64),
+            )
+        } else {
+            freemkv_engine::remux_iso(&request, &keys, sink)
+        };
+        if let Err(e) = result {
+            if let Some(kept) = deliver::kept_of(&e) {
+                sink.lib
+                    .queue
+                    .set_output_staged(job.id, &output.id, Some(kept.path.clone()));
+            }
+            sink.lib
+                .queue
+                .finish_output(job.id, &output.id, OutputState::Failed);
+            return if sink.lib.cancelled(job.id) {
+                Ending::Stopped(JobNote::Cancelled)
+            } else if sink.preempted() {
+                Ending::Stopped(JobNote::Preempted)
+            } else if shutting_down() {
+                Ending::Stopped(JobNote::Interrupted)
+            } else if sink.lib.stall_cancel.load(Ordering::SeqCst) {
+                Ending::Stopped(JobNote::Stalled)
+            } else {
+                Ending::Failed(e)
+            };
+        }
+        sink.lib
+            .queue
+            .finish_output(job.id, &output.id, OutputState::Done);
+    }
+    Ending::Done { writing_app: None }
 }
 
 fn remux_stage_dir() -> Option<std::path::PathBuf> {
@@ -1149,7 +1308,9 @@ pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbit
         let was = lib.deep_enabled();
         lib.set_deep_enabled(enabled());
         // Turning deep audit on owes every file its decode; refill now, else each minute.
-        if (lib.deep_enabled() && !was) || filled.elapsed() >= Duration::from_secs(60) {
+        if !lib.audits.paused()
+            && ((lib.deep_enabled() && !was) || filled.elapsed() >= Duration::from_secs(60))
+        {
             filled = Instant::now();
             lib.refill_audits();
         }

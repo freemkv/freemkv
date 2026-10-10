@@ -411,8 +411,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.8.2"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.2#c4096f57e731a55a63b55aae8c86a8f353fef7ee"
+version = "1.8.3"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -425,16 +424,14 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.8.2"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.2#0871e1e8389ec6acff30b90da42b63cf3d1b25a8"
+version = "1.8.3"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.8.2"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.2#165690b707d1902079732dc97ecb3a58b08c3e6d"
+version = "1.8.3"
 dependencies = [
  "base64",
  "flate2",
@@ -447,11 +444,12 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.8.2"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.2#2ce158238944d12a5b057154fded508956a1cdde"
+version = "1.8.3"
 dependencies = [
  "aes",
+ "anyhow",
  "base64",
+ "h8-asm",
  "num-bigint",
  "num-traits",
  "pioneer-optical",
@@ -798,6 +796,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "h8-asm"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07f60b20bbdeac16166434ca88ab1ea59438a0d5fcc79399c5efd6f7469c5a93"
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1023,8 +1027,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libfreemkv"
-version = "1.8.2"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.2#4686f7f90561ce301c1b0f91fad93d0b0fb2b966"
+version = "1.8.3"
 dependencies = [
  "aes",
  "base64",
@@ -1390,9 +1393,15 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pioneer-optical"
-version = "0.10.0"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf5074a27cc39fb664d0b994814ffe8530e3e8590aff0d104723332dbcb1abc4"
+checksum = "a072ef7f1c811e86e88bc4016f01d0ac057449aae21e57f31b0bcff537438fa0"
+dependencies = [
+ "flate2",
+ "h8-asm",
+ "miniz_oxide",
+ "serde",
+]
 
 [[package]]
 name = "pkg-config"

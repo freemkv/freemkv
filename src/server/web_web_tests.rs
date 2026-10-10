@@ -140,6 +140,10 @@ fn the_ui_keeps_its_review_fixes() {
     // Both lists filter with the one chip component.
     assert!(library.contains("chipFilter(") && asset("remux.js").contains("chipFilter("));
     assert!(library.contains("download=1") && asset("remux.js").contains("download=1"));
+    assert!(
+        asset("remux.js").contains("TV · ") && asset("remux.js").contains("o.state === 'done'"),
+        "TV multi-output progress must be visible without changing movie rows"
+    );
     assert!(!super::INDEX_HTML.contains("jobchip"));
     assert!(
         !asset("system.js").contains("id=\"keys\""),
@@ -2877,6 +2881,12 @@ mod http {
         );
         let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/pause", None, &[]);
         assert!(body.contains("\"paused\":true"), "{body}");
+        let (code, body) = roundtrip(&cfg, "POST", "/api/library/queue/stop-all", None, &[]);
+        assert_eq!(code, 200, "{body}");
+        assert!(
+            body.contains("\"paused\":false"),
+            "stop-all must leave remux unpaused: {body}"
+        );
         let (code, _) = roundtrip(&cfg, "GET", "/api/library/console", None, &[]);
         assert_eq!(code, 200);
         let (code, body) = roundtrip(&cfg, "GET", "/api/library/folders", None, &[]);

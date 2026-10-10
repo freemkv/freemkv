@@ -106,6 +106,22 @@ fn stop_all_empties_the_queue_and_cancels_the_running_audit() {
     a.finish();
     assert!(!a.cancelled());
     assert_eq!(a.status().queued, 0);
+    assert!(a.status().paused, "stop remains stopped until resume");
+}
+
+#[test]
+fn a_stopped_audit_does_not_refill_until_resumed() {
+    let t = tempfile::tempdir().unwrap();
+    let (p, sig) = file(t.path(), "A.mkv");
+    let a = Audits::open(t.path());
+    a.fill(&[(p.clone(), sig)], false, 1, true);
+    assert_eq!(a.stop_all(), 1);
+    assert!(a.paused());
+    assert_eq!(a.fill(&[(p.clone(), sig)], false, 2, true), 0);
+    assert_eq!(a.status().queued, 0);
+    a.set_paused(false);
+    assert_eq!(a.fill(&[(p, sig)], false, 2, true), 1);
+    assert!(a.next().is_some());
 }
 
 #[test]
