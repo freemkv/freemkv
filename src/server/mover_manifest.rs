@@ -344,6 +344,7 @@ impl Manifest {
                 sync_parent(&entry.destination)?;
                 manifest.entries[index].completed = true;
                 manifest.save()?;
+                super::clear_stale_dest_error(&entry.destination);
                 return Ok(super::MoveOutcome::Skipped);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound && !entry.completed => {}

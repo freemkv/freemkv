@@ -774,6 +774,24 @@ fn a_file_arriving_during_cleanup_keeps_the_journal() {
     assert_eq!(std::fs::read(&late).unwrap(), b"silly rename");
 }
 
+#[test]
+fn journal_recovery_clears_a_stale_destination_error() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[0];
+    Manifest::prepare(&dir, 0, &entry.source).unwrap();
+    libfreemkv::io::publish::no_replace(&entry.source, &entry.destination).unwrap();
+    let key = entry.destination.to_string_lossy().into_owned();
+    super::super::record_error_with(&key, "publication directory sync failed", "", |_| {});
+    assert!(matches!(
+        Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap(),
+        super::super::MoveOutcome::Skipped
+    ));
+    assert!(!super::super::MOVE_ERRORS.lock().unwrap().contains_key(&key));
+}
+
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
 // live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
 #[cfg(unix)]
