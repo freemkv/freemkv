@@ -1053,6 +1053,21 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e.to_string()));
             return;
         }
+        // The superseded plan is never delivered; drop its outputs (plain leaves in
+        // this job only) so they do not hold staging space beside the new plan.
+        for old in &plan_outputs {
+            if is_plain_leaf(&old.filename) && !outputs.iter().any(|o| o.filename == old.filename) {
+                match std::fs::remove_file(staging_dir.join(&old.filename)) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        crate::server::log::device_log(
+                            device,
+                            &format!("superseded output {} was not removed: {e}", old.filename),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
         plan_outputs = outputs;
     }
     // Numeric indices belong to the original drive scan. Rebind the entire plan

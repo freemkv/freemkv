@@ -477,3 +477,27 @@ fn a_replanned_movie_output_is_named_from_its_title() {
     assert_eq!(outputs[0].filename, leaf);
     assert!(staging.join(&leaf).exists(), "{leaf}");
 }
+
+// Outputs of the superseded plan are dropped once the replan is committed: they are
+// never delivered, and the space preflight counts only the new plan.
+#[test]
+fn a_replan_drops_the_superseded_outputs() {
+    let (staging, outcome, _t, ..) = resume_ripped(Keys::UnitKey, |dir, _, _| {
+        std::fs::write(dir.join("KU_Disc.mkv"), b"superseded movie output").unwrap();
+        staging::mutate_state_if_present(dir, |state| {
+            state.user_metadata = Some(staging::UserMetadata {
+                title: "Cast Away".into(),
+                year: 2000,
+                media_type: "movie".into(),
+                tmdb_id: 0,
+                episode_start: None,
+                poster_url: String::new(),
+                overview: String::new(),
+            });
+            state.replan_required = true;
+        });
+    });
+    assert!(outcome.success, "{:?}", outcome.failure_reason);
+    assert!(!staging.join("KU_Disc.mkv").exists());
+    assert!(staging.join("Cast_Away.mkv").exists());
+}
