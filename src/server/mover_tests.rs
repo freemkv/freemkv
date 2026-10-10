@@ -249,6 +249,40 @@ fn check_and_move_holds_a_zero_length_destination_instead_of_taking_a_variant() 
 }
 
 #[test]
+fn every_variant_name_taken_is_an_operator_hold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let dest_dir = movie_dir.join("Full (2024)");
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    for n in 1..=crate::server::util::MAX_DISC_VARIANTS {
+        let name = crate::server::util::disc_variant_name("Full (2024)", n);
+        std::fs::write(dest_dir.join(format!("{name}.mkv")), b"another disc").unwrap();
+    }
+    let disc_dir = staging.join("Full");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Full")).unwrap();
+    let mut rip = vec![0x1A, 0x45, 0xDF, 0xA3];
+    rip.extend_from_slice(&[0x55u8; 4096]);
+    std::fs::write(disc_dir.join("Full.mkv"), &rip).unwrap();
+
+    let _g = errors_guard();
+    check_and_move(&cfg);
+    let key = disc_dir.to_string_lossy().to_string();
+    let error = error_snapshot(&key).expect("an operator hold");
+    assert!(
+        error.reason.contains("every disc-variant"),
+        "{}",
+        error.reason
+    );
+    assert!(error.retry_held);
+    assert_eq!(std::fs::read(disc_dir.join("Full.mkv")).unwrap(), rip);
+    clear_error(&key);
+}
+
+#[test]
 fn delivery_retries_back_off_then_require_operator_retry() {
     let _guard = super::TEST_STATE_LOCK
         .lock()
@@ -2943,7 +2977,7 @@ fn a_blocked_pass_clears_the_move_progress_bar() {
              (otherwise this test is not exercising a failure branch)"
     );
     assert!(
-        recorded.is_some_and(|e| e.reason.contains("unowned delivery destination exists")),
+        recorded.is_some_and(|e| e.reason.contains("every disc-variant destination name")),
         "the plan must be refused without adopting an occupied name"
     );
     let bar = MOVE_STATE

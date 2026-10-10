@@ -1364,14 +1364,16 @@ fn check_and_move(cfg: &Config) {
                     // the deferral and retries next tick.
                 }
                 None => {
-                    // Every one of the 64 variants is held by a DIFFERENT file.
-                    // Leave base names in place: the collision guard below then
-                    // refuses the move and surfaces the error. Never overwrite.
-                    crate::server::log::syslog(&format!(
-                        "Move blocked ({}): every disc-variant destination name is taken by a \
-                     different file — resolve the library conflict manually",
-                        display_name
-                    ));
+                    // Every variant name is held by a different file: hold, never overwrite.
+                    record_error(
+                        &dir_str,
+                        &format!(
+                            "every disc-variant destination name is taken by a different file: {display_name}"
+                        ),
+                        "Resolve the library conflict (rename or remove files, or correct the title), then choose Retry. The rip stays in staging.",
+                    );
+                    hold_for_operator(&dir_str);
+                    continue;
                 }
             }
         }

@@ -721,7 +721,10 @@ fn an_unowned_destination_stays_a_collision_on_every_retry() {
             super::super::MoveOutcome::Collision
         ));
     }
-    assert_eq!(std::fs::read(&entry.destination).unwrap(), b"foreign winner");
+    assert_eq!(
+        std::fs::read(&entry.destination).unwrap(),
+        b"foreign winner"
+    );
     assert!(entry.source.exists());
 }
 
