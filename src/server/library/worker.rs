@@ -609,6 +609,11 @@ fn remux_planned_with(
             return Ending::Failed(std::io::Error::other(why));
         }
     }
+    // `job.replace` only vouches for `job.target`; other paths need this source's link.
+    let links = super::links::load(&sink.lib.config_dir);
+    let may_replace = |target: &Path| {
+        (job.replace && target == job.target) || links.get(target) == Some(&job.iso)
+    };
     let mut writing_app = None;
     for (ordinal, output) in plan.outputs.iter().enumerate() {
         if let Some(ending) = cancelled_ending(sink) {
@@ -625,7 +630,8 @@ fn remux_planned_with(
         if let Err(why) = validate(&target) {
             return Ending::Failed(std::io::Error::other(why));
         }
-        if !job.replace && target.exists() {
+        let replace = may_replace(&target);
+        if !replace && target.exists() {
             return Ending::Failed(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 format!("planned output already exists: {}", target.display()),
@@ -646,7 +652,7 @@ fn remux_planned_with(
             title: Some(output.title_index),
             streams: freemkv_engine::StreamChoice::default(),
             target: target.clone(),
-            replace: job.replace,
+            replace,
         };
         sink.lib.set_running(|running| {
             if let Some(running) = running.as_mut().filter(|r| r.job_id == job.id) {

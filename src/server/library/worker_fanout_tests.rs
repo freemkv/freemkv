@@ -561,3 +561,66 @@ fn planned_target_cannot_escape_through_symlink() {
     assert!(matches!(ending, Ending::Failed(_)));
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
 }
+
+// Engine stand-in: refuses an existing target unless the request may replace it.
+fn land_like_engine(request: &freemkv_engine::RemuxJob) -> std::io::Result<Option<String>> {
+    if request.target.exists() && !request.replace {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "engine refused existing target",
+        ));
+    }
+    std::fs::write(&request.target, movie())?;
+    Ok(Some(current_stamp()))
+}
+
+#[test]
+fn planned_outputs_never_inherit_job_replace_for_unowned_files() {
+    let (_t, lib, dirs) = library_with(&["B"]);
+    let mut job = planned(&lib, &dirs);
+    // The row had an MKV at job.target, so the job-level flag is set.
+    job.replace = true;
+    let targets = job.output_targets();
+    std::fs::create_dir_all(targets[1].parent().unwrap()).unwrap();
+    std::fs::write(&targets[1], b"someone else's episode").unwrap();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &config(&dirs),
+        &sink,
+        |request, _, _| land_like_engine(request),
+    );
+    assert!(
+        matches!(&ending, Ending::Failed(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+        "{ending:?}"
+    );
+    assert_eq!(
+        std::fs::read(&targets[1]).unwrap(),
+        b"someone else's episode"
+    );
+}
+
+#[test]
+fn planned_output_linked_to_this_source_may_be_replaced() {
+    let (t, lib, dirs) = library_with(&["B"]);
+    let job = planned(&lib, &dirs);
+    let targets = job.output_targets();
+    std::fs::create_dir_all(targets[1].parent().unwrap()).unwrap();
+    std::fs::write(&targets[1], b"our earlier episode").unwrap();
+    super::super::super::links::record(&t.path().join("config"), &targets[1], &job.iso).unwrap();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &config(&dirs),
+        &sink,
+        |request, _, _| land_like_engine(request),
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(std::fs::read(&targets[1]).unwrap(), movie());
+}
