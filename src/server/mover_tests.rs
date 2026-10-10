@@ -53,13 +53,37 @@ fn mixed_collision_failures_back_off_and_uncertain_listing_preserves_hold() {
 }
 
 #[test]
+fn recovered_root_clears_every_item_waiting_on_it() {
+    let _guard = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (r, q) = (Path::new("/r-root"), Path::new("/q-root"));
+    let keys = ["fw-a", "fw-b", "fw-c", "fw-d"];
+    for k in keys {
+        super::clear_move_error(k);
+    }
+    for (k, root) in [("fw-a", r), ("fw-b", r), ("fw-c", q), ("fw-d", r)] {
+        super::record_error_at_stage(k, "waiting", "slow", Some(root), |_| {});
+    }
+    super::schedule_move_retry("fw-d");
+    super::clear_recovered_folder_waits_for(r);
+    let has = |k: &str| super::MOVE_ERRORS.lock().unwrap().contains_key(k);
+    assert!(!has("fw-a") && !has("fw-b"), "waiters on R cleared");
+    assert!(has("fw-c"), "waiter on Q kept");
+    assert!(has("fw-d"), "failed-delivery history kept");
+    for k in keys {
+        super::clear_move_error(k);
+    }
+}
+
+#[test]
 fn recovered_folder_clears_wait_warning_but_not_failed_delivery_history() {
     let _guard = super::TEST_STATE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let path = "test-recovered-folder-warning";
     super::clear_move_error(path);
-    super::record_error_at_stage(path, "waiting", "share slow", true, |_| {});
+    super::record_error_at_stage(path, "waiting", "share slow", Some(Path::new("/r")), |_| {});
     super::clear_recovered_folder_wait(path);
     assert!(!super::MOVE_ERRORS.lock().unwrap().contains_key(path));
     super::record_error_with(path, "copy failed", "fix destination", |_| {});

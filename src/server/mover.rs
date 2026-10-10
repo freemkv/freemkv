@@ -135,6 +135,9 @@ pub struct MoverError {
     pub retry_held: bool,
     pub waiting_for_folder: bool,
     pub worker_active: bool,
+    // The destination root this row is waiting on, so its recovery can clear every waiter.
+    #[serde(skip)]
+    waiting_root: Option<std::path::PathBuf>,
     #[serde(skip)]
     copy_stalled: bool,
     #[serde(skip)]
@@ -265,6 +268,7 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> bool {
                 attempts: state.attempts,
                 retry_held: retry_after.is_none(),
                 waiting_for_folder: false,
+                waiting_root: None,
                 worker_active: false,
                 copy_stalled: false,
                 retry_after,
@@ -280,14 +284,14 @@ fn record_error(path: &str, reason: &str, hint: &str) {
 // record_error with the log sink injected. The MOVE_ERRORS guard is dropped
 // before `log` runs: syslog does blocking (NFS) I/O, mirroring muxer::record_error.
 fn record_error_with(path: &str, reason: &str, hint: &str, log: impl FnOnce(&str)) {
-    record_error_at_stage(path, reason, hint, false, log);
+    record_error_at_stage(path, reason, hint, None, log);
 }
 
 fn record_error_at_stage(
     path: &str,
     reason: &str,
     hint: &str,
-    waiting_for_folder: bool,
+    waiting_root: Option<&Path>,
     log: impl FnOnce(&str),
 ) {
     let same_reason = {
@@ -305,7 +309,8 @@ fn record_error_at_stage(
                 hint: hint.to_string(),
                 attempts,
                 retry_held: retry_after.is_none(),
-                waiting_for_folder,
+                waiting_for_folder: waiting_root.is_some(),
+                waiting_root: waiting_root.map(Path::to_path_buf),
                 worker_active: false,
                 copy_stalled: false,
                 retry_after,
@@ -326,6 +331,13 @@ fn clear_recovered_folder_wait(path: &str) {
     {
         errors.remove(path);
     }
+}
+
+// A root that passed preflight is healthy for every item that was waiting on it; rows with
+// attempts>0 are failed-delivery history and stay.
+fn clear_recovered_folder_waits_for(root: &Path) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    errors.retain(|_, e| !(e.attempts == 0 && e.waiting_root.as_deref() == Some(root)));
 }
 
 fn clear_error(path: &str) {
@@ -1369,12 +1381,22 @@ fn check_and_move(cfg: &Config) {
                     p.detail
                 ),
                 &format!("{} The rip stays in staging until then.", p.hint),
-                true,
+                Some(&p.path),
                 crate::server::log::syslog,
             );
             continue;
         }
         clear_recovered_folder_wait(&dir_str);
+        let passed_roots: Vec<std::path::PathBuf> = match &delivery {
+            Some(saved) => saved.roots.iter().map(std::path::PathBuf::from).collect(),
+            None => planned_roots(cfg, &tmdb_result, &planned_moves)
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
+        };
+        for root in &passed_roots {
+            clear_recovered_folder_waits_for(root);
+        }
 
         // Two discs of one boxset share a TMDB title/filename; `disc_variant`
         // gives disc 2 `Title (Year)_2.mkv` instead of a collision. ONE variant
@@ -2291,14 +2313,12 @@ fn validate_destination_root(root: &str) -> Result<(), String> {
     }
 }
 
-// The first destination root of `planned` that is stale, unmounted, failing or not answering.
-// A root that is missing, read-only or refused is left to `validate_destination_root`'s messages.
-fn unreachable_root(
+// The distinct absolute destination roots `planned` writes into.
+fn planned_roots(
     cfg: &Config,
     tmdb: &Option<tmdb::TmdbResult>,
     planned: &[(std::path::PathBuf, String)],
-) -> Option<crate::server::health::Problem> {
-    use crate::server::health::{self, Fault};
+) -> Vec<String> {
     let mut roots: Vec<String> = Vec::new();
     for (src, _) in planned {
         let r = destination_root_for(
@@ -2310,7 +2330,18 @@ fn unreachable_root(
             roots.push(r);
         }
     }
-    roots.iter().find_map(|r| {
+    roots
+}
+
+// The first destination root of `planned` that is stale, unmounted, failing or not answering.
+// A root that is missing, read-only or refused is left to `validate_destination_root`'s messages.
+fn unreachable_root(
+    cfg: &Config,
+    tmdb: &Option<tmdb::TmdbResult>,
+    planned: &[(std::path::PathBuf, String)],
+) -> Option<crate::server::health::Problem> {
+    use crate::server::health::{self, Fault};
+    planned_roots(cfg, tmdb, planned).iter().find_map(|r| {
         health::preflight("output", Path::new(r)).err().filter(|p| {
             matches!(
                 p.fault,
