@@ -577,7 +577,7 @@ pub(super) fn session_disc_hash(device: &str) -> Option<String> {
         .get(device)
         .and_then(|sess| sess.disc.as_ref())
         .and_then(|disc| disc.aacs.as_ref())
-        .map(|a| libfreemkv::hex::strip_hex_prefix(&a.disc_hash).to_ascii_lowercase())
+        .and_then(|a| super::jobs::aacs_identity(&a.disc_hash))
 }
 
 /// The key set and Volume ID the scan of `device`'s disc resolved (memory only): what an

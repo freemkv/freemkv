@@ -1948,8 +1948,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
 
     // Does this disc have resumable partial staging? Drives the dashboard's
     // Resume-vs-Rip choice. Computed before `display_name` moves into the state.
-    let resumable =
-        resumable_for_disc_with_hash(&cfg_read, &display_name, &id_name, disc_hash.as_deref());
+    let resumable = resumable_for_disc_with_hash(&cfg_read, &job_id, disc_hash.as_deref());
 
     update_state(
         device,
@@ -2549,6 +2548,13 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
             if !snap.has_iso || !snap.has_mapfile {
                 continue;
             }
+            let matched = match disc_hash.as_deref() {
+                Some(identity) => jobs::dir_matches_identity(&path, identity),
+                None => staging_dir_matches_disc(&basename, &sanitized),
+            };
+            if !matched {
+                continue;
+            }
             let Some((iso_path, mapfile_path)) = resume::find_iso_and_mapfile(&path) else {
                 continue;
             };
@@ -2556,18 +2562,6 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            let hash_match = disc_hash.as_deref().is_some_and(|expected| {
-                staging::read_state(&path).is_some_and(|s| s.disc_identity == expected)
-                    || map
-                        .disc_hash()
-                        .map(|found| found.eq_ignore_ascii_case(expected))
-                        .unwrap_or(false)
-            });
-            if (disc_hash.is_some() && !hash_match)
-                || (disc_hash.is_none() && !staging_dir_matches_disc(&basename, &sanitized))
-            {
-                continue;
-            }
             let stats = map.stats();
             if stats.bytes_pending != 0 {
                 continue;
@@ -2623,15 +2617,6 @@ fn is_safe_staging_segment(seg: &str) -> bool {
 // only when the mapfile is 100% Finished (no pending, no unreadable bytes), else Sweep.
 #[cfg(test)]
 fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Option<Resumable> {
-    resumable_for_disc_with_hash(cfg, display_name, disc_label, None)
-}
-
-fn resumable_for_disc_with_hash(
-    cfg: &Config,
-    display_name: &str,
-    disc_label: &str,
-    disc_hash: Option<&str>,
-) -> Option<Resumable> {
     if display_name.is_empty() {
         return None;
     }
@@ -2642,6 +2627,14 @@ fn resumable_for_disc_with_hash(
         display_name,
         disc_label,
     );
+    resumable_for_disc_with_hash(cfg, &sanitized, None)
+}
+
+fn resumable_for_disc_with_hash(
+    cfg: &Config,
+    sanitized: &str,
+    disc_hash: Option<&str>,
+) -> Option<Resumable> {
     // NFS-resilient listing, not `read_dir(...).flatten()`, which could hide
     // an existing resumable dir and make the operator re-sweep instead of
     // resuming. Mirrors disc_staging_hold.
@@ -2652,17 +2645,11 @@ fn resumable_for_disc_with_hash(
         // A title may have been corrected between runs, so the basename is
         // only a fallback. When the live scan has a disc hash, let the
         // mapfile identity decide below.
-        let name_match = basename == sanitized;
-        let identity_match = disc_hash.is_some_and(|expected| {
-            staging::read_state(&path).is_some_and(|s| s.disc_identity == expected)
-                || resume::find_iso_and_mapfile(&path)
-                    .and_then(|(_, p)| freemkv_engine::Mapfile::load(&p).ok())
-                    .is_some_and(|m| {
-                        m.disc_hash()
-                            .is_some_and(|h| h.eq_ignore_ascii_case(expected))
-                    })
-        });
-        if (disc_hash.is_some() && !identity_match) || (disc_hash.is_none() && !name_match) {
+        let matched = match disc_hash {
+            Some(identity) => jobs::dir_matches_identity(&path, identity),
+            None => basename == sanitized,
+        };
+        if !matched {
             continue;
         }
         if staging::read_state(&path).is_some_and(|s| s.reset_in_progress) {
@@ -2713,17 +2700,9 @@ fn resumable_for_disc_with_hash(
 /// action (the disc has been scanned, so its name is in STATE).
 fn resumable_for_device(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<Resumable> {
     let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let (display_name, disc_label) = {
-        let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let rs = s.get(device)?;
-        (rs.disc_name.clone(), rs.disc_label.clone())
-    };
-    resumable_for_disc_with_hash(
-        &cfg_read,
-        &display_name,
-        &disc_label,
-        session_disc_hash(device).as_deref(),
-    )
+    // The scan's job (an unverified disc's isolated one included), else the legacy name.
+    let sanitized = staging_basename_for_device(&cfg_read, device)?;
+    resumable_for_disc_with_hash(&cfg_read, &sanitized, session_disc_hash(device).as_deref())
 }
 
 // RAII guard that unregisters a device's halt-map entry on drop, so

@@ -324,3 +324,79 @@ fn metadata_only_stopped_job_survives_startup_cleanup() {
     staging::resume_or_quarantine_staging(root.path().to_str().unwrap());
     assert_eq!(staging::read_state(&dir).unwrap().title, "Cast Away");
 }
+
+fn partial_capture(dir: &Path, stem: &str, map_hash: Option<&str>) {
+    std::fs::write(dir.join(format!("{stem}.iso")), b"x").unwrap();
+    let mut map =
+        freemkv_engine::Mapfile::create(&dir.join(format!("{stem}.iso.mapfile")), 4096, "test")
+            .unwrap();
+    if let Some(hash) = map_hash {
+        map.set_disc_hash(hash);
+    }
+    map.flush().unwrap();
+}
+
+#[test]
+fn resume_probes_use_the_same_identity_rule_as_job_location() {
+    let live = "0123456789abcdef0123456789abcdef01234567";
+    let other = "fedcba9876543210fedcba9876543210fedcba98";
+    let root = tempfile::tempdir().unwrap();
+    // Saved identity names another disc; only its mapfile carries the live hash.
+    let dir = job(root.path(), "OtherDisc", other);
+    staging::clear_sweeping_marker(&dir);
+    partial_capture(&dir, "OtherDisc", Some(live));
+    assert!(!dir_matches_identity(&dir, live));
+    assert_eq!(locate(root.path(), live).unwrap(), format!("disc-{live}"));
+    let cfg = crate::server::config::Config {
+        staging_dir: root.path().to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::super::resumable_for_disc_with_hash(&cfg, "OtherDisc", Some(live)),
+        None,
+        "a job that location would not adopt is not offered for resume"
+    );
+}
+
+#[test]
+fn an_unverified_disc_is_never_offered_another_jobs_capture() {
+    use crate::server::{config::Config, ripper};
+    use std::sync::{Arc, RwLock};
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join(staging::staging_basename(
+        root.path(),
+        "Same Title",
+        "SAME_LABEL",
+    ));
+    std::fs::create_dir(&legacy).unwrap();
+    partial_capture(&legacy, "Same Title", None);
+    std::fs::create_dir(root.path().join("unverified-1")).unwrap();
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: root.path().to_string_lossy().into_owned(),
+        ..Default::default()
+    }));
+    let device = "job-unverified-resume";
+    ripper::update_state(
+        device,
+        ripper::RipState {
+            disc_present: true,
+            disc_name: "Same Title".into(),
+            disc_label: "SAME_LABEL".into(),
+            job_id: "unverified-1".into(),
+            ..Default::default()
+        },
+    );
+    let offered = super::super::resumable_for_device(&cfg, device);
+    ripper::STATE.lock().unwrap().remove(device);
+    assert_eq!(offered, None);
+}
+
+#[test]
+fn a_malformed_aacs_hash_is_not_an_identity() {
+    assert_eq!(
+        aacs_identity("0x0123456789ABCDEF0123456789abcdef01234567").as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+    assert_eq!(aacs_identity("not-a-hash"), None);
+    assert_eq!(aacs_identity(""), None);
+}
