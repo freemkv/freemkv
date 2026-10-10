@@ -234,7 +234,28 @@ pub fn handle(
         }
         (_, true, "/api/library/staged/clear") => {
             let root = PathBuf::from(&c.staging_dir);
-            let (discarded, failed) = clear_idle_staging(&root);
+            let (mut discarded, mut failed) = clear_idle_staging(&root);
+            if let Some(remux_stage) = crate::server::health::remux_stage_dir()
+                && remux_stage != root
+            {
+                let targets: Vec<PathBuf> = lib
+                    .queue
+                    .snapshot()
+                    .jobs
+                    .iter()
+                    .filter(|j| j.staged.is_some())
+                    .map(|j| j.target.clone())
+                    .collect();
+                for target in targets {
+                    match discard_kept(&lib, &target, Some(&remux_stage)) {
+                        Ok(()) => discarded += 1,
+                        Err((_, msg)) => {
+                            failed += 1;
+                            tracing::warn!(target = %target.display(), error = %msg, "legacy remux staging file was not cleared");
+                        }
+                    }
+                }
+            }
             json_response(
                 request,
                 200,
