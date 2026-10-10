@@ -2614,6 +2614,19 @@ fn reset_capture_with(
     }
 }
 
+/// Run `prune` (deleting a finished capture's ISO/mapfile) unless a correction has
+/// asked for a replan from them. Returns whether it ran.
+/// The check and the deletion share the state lock that commits corrections.
+pub(super) fn prune_unless_replan_required(dir: &Path, prune: impl FnOnce()) -> bool {
+    let lock = state_lock(dir);
+    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if read_state(dir).is_some_and(|s| s.replan_required) {
+        return false;
+    }
+    prune();
+    true
+}
+
 /// Freeze execution mode, stamp the scan's verified identity and read planning
 /// metadata in one state transaction. The caller owns the job lease and clears
 /// Sweeping when capture exits.

@@ -5718,26 +5718,26 @@ fn prune_intermediate_iso(
     if !uses_multipass(max_retries) || keep_iso {
         return;
     }
-    if iso_path
-        .parent()
-        .and_then(staging::read_state)
-        .is_some_and(|s| s.replan_required)
-    {
+    let Some(staging_dir) = iso_path.parent() else {
         return;
-    }
-    match std::fs::remove_file(iso_path) {
-        Ok(_) => crate::server::log::device_log(device, "Pruned intermediate ISO"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => crate::server::log::device_log(device, &format!("ISO prune warning: {e}")),
-    }
-    // Mirror the ISO arm: a lingering mapfile in staging could be misread as a
-    // partial rip by the resume classifier on next startup, so surface any
-    // unexpected removal error instead of swallowing it.
-    match std::fs::remove_file(mapfile_path) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => crate::server::log::device_log(device, &format!("mapfile prune warning: {e}")),
-    }
+    };
+    staging::prune_unless_replan_required(staging_dir, || {
+        match std::fs::remove_file(iso_path) {
+            Ok(_) => crate::server::log::device_log(device, "Pruned intermediate ISO"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => crate::server::log::device_log(device, &format!("ISO prune warning: {e}")),
+        }
+        // Mirror the ISO arm: a lingering mapfile in staging could be misread as a
+        // partial rip by the resume classifier on next startup, so surface any
+        // unexpected removal error instead of swallowing it.
+        match std::fs::remove_file(mapfile_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                crate::server::log::device_log(device, &format!("mapfile prune warning: {e}"))
+            }
+        }
+    });
 }
 
 /// What the orchestrator must do with a mux outcome, decided from the header

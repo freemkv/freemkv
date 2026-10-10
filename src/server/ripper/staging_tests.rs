@@ -2302,3 +2302,23 @@ fn a_metadata_edit_while_mux_finishes_holds_the_old_plan() {
     assert_eq!(saved.title, "Correct show");
     assert_eq!(saved.metadata_revision, 1);
 }
+
+#[test]
+fn a_correction_committed_during_the_iso_prune_check_keeps_the_iso() {
+    let dir = tempfile::tempdir().unwrap();
+    try_write_state(dir.path(), &DiscState::new(StagingState::Review)).unwrap();
+    let lock = state_lock(dir.path());
+    let held = lock.lock().unwrap();
+    let path = dir.path().to_path_buf();
+    let pruner = std::thread::spawn(move || prune_unless_replan_required(&path, || {}));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // A correction lands (under the state lock) while the prune is deciding.
+    let mut st = read_state(dir.path()).unwrap();
+    st.replan_required = true;
+    write_state_unlocked(dir.path(), &st).unwrap();
+    drop(held);
+    assert!(
+        !pruner.join().unwrap(),
+        "the replan's ISO must not be pruned"
+    );
+}
