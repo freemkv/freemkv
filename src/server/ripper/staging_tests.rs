@@ -136,6 +136,63 @@ fn interrupted_legacy_reset_is_rediscovered_after_mapfile_removal() {
 }
 
 #[test]
+fn capture_reset_refuses_a_job_whose_delivery_is_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut done = DiscState::new(StagingState::Done);
+    done.disc_identity = "same-disc".into();
+    try_write_state(dir.path(), &done).unwrap();
+    fs::write(dir.path().join("Show_S01E03.mkv"), b"unpublished").unwrap();
+    fs::write(dir.path().join(DELIVERY_JOURNAL), b"{}").unwrap();
+    let lease = job_lease(dir.path());
+    let _owner = lease.lock().unwrap();
+    let refused = reset_capture_preserving_metadata(dir.path(), "same-disc").unwrap_err();
+    assert!(refused.to_string().contains("delivery"), "{refused}");
+    assert_eq!(
+        fs::read(dir.path().join("Show_S01E03.mkv")).unwrap(),
+        b"unpublished"
+    );
+    assert!(dir.path().join(DELIVERY_JOURNAL).exists());
+    let kept = read_state(dir.path()).unwrap();
+    assert_eq!(kept.state, StagingState::Done);
+    assert!(!kept.reset_in_progress);
+}
+
+#[test]
+fn capture_reset_does_not_hold_the_state_lock_while_deleting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut old = DiscState::new(StagingState::Stopped);
+    old.disc_identity = "same-disc".into();
+    try_write_state(dir.path(), &old).unwrap();
+    fs::write(dir.path().join("old.iso"), b"old capture").unwrap();
+    let lease = job_lease(dir.path());
+    let _owner = lease.lock().unwrap();
+    let path = dir.path().to_path_buf();
+    reset_capture_with(dir.path(), "same-disc", || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let correction = UserMetadata {
+                episode_start: None,
+                title: "Cast Away".into(),
+                year: 2000,
+                media_type: "movie".into(),
+                tmdb_id: 8358,
+                poster_url: String::new(),
+                overview: String::new(),
+            };
+            let _ = tx.send(save_user_metadata(&path, correction).is_err());
+        });
+        let refused = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a metadata save must not wait on the reset's deletion");
+        assert!(refused, "the interrupted reset refuses the save");
+        Ok(())
+    })
+    .unwrap();
+    assert!(!dir.path().join("old.iso").exists());
+    assert!(!read_state(dir.path()).unwrap().reset_in_progress);
+}
+
+#[test]
 fn capture_reset_refuses_a_conflicting_verified_identity() {
     let dir = tempfile::tempdir().unwrap();
     let mut saved = DiscState::new(StagingState::Stopped);

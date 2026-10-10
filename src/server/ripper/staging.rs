@@ -2525,7 +2525,7 @@ fn reset_capture_with(
     after_prepare: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     let lock = state_lock(dir);
-    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     match std::fs::symlink_metadata(dir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
@@ -2533,6 +2533,12 @@ fn reset_capture_with(
             return Err(io::Error::other("staging reset requires a real directory"));
         }
         Ok(_) => {}
+    }
+    // Published files are owned through this journal; its sources must survive.
+    if !delivery_journal_absent(dir) {
+        return Err(io::Error::other(
+            "a delivery of this job is in progress or held; finish or resolve it before starting over",
+        ));
     }
     let old = match read_state_checked(dir) {
         StateRead::Valid(st) => Some(*st),
@@ -2583,6 +2589,9 @@ fn reset_capture_with(
     // Persist the reset state first: interruption cannot expose half-deleted
     // outputs as completed, and never loses an acknowledged title correction.
     write_state_unlocked(dir, &fresh)?;
+    // `reset_in_progress` now makes every other writer refuse, so deletion runs
+    // without the state lock and never blocks a request on a multi-GB unlink.
+    drop(state_owner);
     after_prepare()?;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -2596,6 +2605,7 @@ fn reset_capture_with(
         }
     }
     fresh.reset_in_progress = false;
+    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     if keep {
         write_state_unlocked(dir, &fresh)
     } else {
