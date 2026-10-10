@@ -283,6 +283,31 @@ fn every_variant_name_taken_is_an_operator_hold() {
 }
 
 #[test]
+fn candidate_validation_failures_keep_their_specific_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("rip.mkv");
+    let dest = dir.path().join("Rip (2024).mkv");
+    let candidate = dir.path().join("Rip (2024).mkv.part-1");
+    let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
+    mkv.extend_from_slice(&[0x11u8; 4096]);
+    std::fs::write(&src, &mkv).unwrap();
+    std::fs::write(&candidate, &mkv[..1024]).unwrap();
+    let short = super::check_candidate(&src, &dest, &candidate).unwrap_err();
+    assert_eq!(
+        super::copy_failure_outcome(&short),
+        super::MoveOutcome::SizeMismatch
+    );
+    let mut garbage = mkv.clone();
+    garbage[..4].copy_from_slice(b"JUNK");
+    std::fs::write(&candidate, &garbage).unwrap();
+    let invalid = super::check_candidate(&src, &dest, &candidate).unwrap_err();
+    assert_eq!(
+        super::copy_failure_outcome(&invalid),
+        super::MoveOutcome::PostCopyInvalid
+    );
+}
+
+#[test]
 fn delivery_retries_back_off_then_require_operator_retry() {
     let _guard = super::TEST_STATE_LOCK
         .lock()

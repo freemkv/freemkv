@@ -465,6 +465,8 @@ pub(crate) enum MoveError {
     Unreadable(String),
 }
 
+impl std::error::Error for MoveError {}
+
 impl std::fmt::Display for MoveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2524,12 +2526,7 @@ fn move_file_inner(
             Some(&worker_halt),
             &|candidate| {
                 if journaled {
-                    // The candidate ends in .part-PID, not the media extension.
-                    if let Some(check) = structural_check(&dest_owned) {
-                        check(candidate).map_err(|e| std::io::Error::other(e.to_string()))?;
-                    }
-                    check_post_copy(&src_owned, candidate)
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    check_candidate(&src_owned, &dest_owned, candidate)?;
                 }
                 before_publish(candidate)
             },
@@ -2599,9 +2596,24 @@ fn move_file_inner(
     }
 }
 
+// The candidate ends in .part-PID, not the media extension: check by `dest`'s type.
+// The MoveError travels inside the io::Error so the outcome keeps its kind.
+fn check_candidate(src: &Path, dest: &Path, candidate: &Path) -> std::io::Result<()> {
+    if let Some(check) = structural_check(dest) {
+        check(candidate).map_err(std::io::Error::other)?;
+    }
+    check_post_copy(src, candidate).map_err(std::io::Error::other)
+}
+
 fn copy_failure_outcome(error: &std::io::Error) -> MoveOutcome {
     if copy_monitor::was_stalled(error) {
         return MoveOutcome::Stalled;
+    }
+    if let Some(invalid) = error.get_ref().and_then(|e| e.downcast_ref::<MoveError>()) {
+        return match invalid {
+            MoveError::SizeDoesNotMatch { .. } => MoveOutcome::SizeMismatch,
+            _ => MoveOutcome::PostCopyInvalid,
+        };
     }
     match error.kind() {
         std::io::ErrorKind::AlreadyExists => MoveOutcome::Collision,
