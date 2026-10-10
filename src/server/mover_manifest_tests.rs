@@ -758,6 +758,22 @@ fn a_held_journal_names_its_reason_in_the_error_row() {
     super::super::clear_move_error(&key);
 }
 
+#[test]
+fn a_file_arriving_during_cleanup_keeps_the_journal() {
+    let (_temp, dir, _cfg, _) = fixture();
+    for index in 0..3 {
+        Manifest::deliver(&dir, index, &|_, _, _, _| {}).unwrap();
+    }
+    let manifest = Manifest::load(&dir).unwrap().unwrap();
+    let late = dir.join(".nfs0000000000001");
+    let error = manifest
+        .cleanup_with(&|| std::fs::write(&late, b"silly rename").unwrap())
+        .unwrap_err();
+    assert!(error.to_string().contains("unplanned"), "{error}");
+    assert!(dir.join(FILE).exists(), "the journal keeps the retry path");
+    assert_eq!(std::fs::read(&late).unwrap(), b"silly rename");
+}
+
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
 // live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
 #[cfg(unix)]

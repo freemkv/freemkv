@@ -478,6 +478,11 @@ impl Manifest {
     }
 
     pub fn cleanup(&self) -> io::Result<()> {
+        self.cleanup_with(&|| {})
+    }
+
+    // `removed` runs after the planned files are gone (tests add a late arrival there).
+    fn cleanup_with(&self, removed: &dyn Fn()) -> io::Result<()> {
         if libfreemkv::io::artifact_lock::file_identity(&self.directory)? != self.directory_id {
             return Err(io::Error::other("staging directory identity changed"));
         }
@@ -512,7 +517,19 @@ impl Manifest {
                 Err(e) => return Err(e),
             }
         }
+        removed();
         libfreemkv::io::fsync::dir_checked(&self.directory)?;
+        // The journal goes last and only from an otherwise empty folder: a late
+        // arrival (an NFS silly-rename) would leave a journal-less, stranded folder.
+        for entry in std::fs::read_dir(&self.directory)? {
+            let path = entry?.path();
+            if path.file_name().is_none_or(|name| name != FILE) {
+                return Err(io::Error::other(format!(
+                    "unplanned staging artifact retained: {}",
+                    path.display()
+                )));
+            }
+        }
         std::fs::remove_file(self.directory.join(FILE))?;
         std::fs::remove_dir(&self.directory)
     }
