@@ -710,6 +710,21 @@ fn links_and_moves_keep_the_configured_destination_form() {
     );
 }
 
+#[test]
+fn an_unowned_destination_stays_a_collision_on_every_retry() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[1];
+    std::fs::write(&entry.destination, b"foreign winner").unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            Manifest::deliver(&dir, 1, &|_, _, _, _| {}).unwrap(),
+            super::super::MoveOutcome::Collision
+        ));
+    }
+    assert_eq!(std::fs::read(&entry.destination).unwrap(), b"foreign winner");
+    assert!(entry.source.exists());
+}
+
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
 // live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
 #[cfg(unix)]

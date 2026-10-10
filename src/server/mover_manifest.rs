@@ -336,8 +336,9 @@ impl Manifest {
                         entry.destination.display()
                     )));
                 }
+                // Nothing of ours was ever prepared for it: a foreign file, not a hold.
                 if entry.prepared.is_none() {
-                    return Err(io::Error::other("unowned destination blocks delivery"));
+                    return Ok(super::MoveOutcome::Collision);
                 }
                 entry.owned()?.verify(&entry.destination)?;
                 sync_parent(&entry.destination)?;
