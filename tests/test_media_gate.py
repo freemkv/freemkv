@@ -150,7 +150,7 @@ def base_files():
             'Cargo.toml', 'build.rs', 'res/freemkv.manifest', 'src/main.rs', 'src/lib.rs', 'src/pipe.rs',
             'src/keydb_fetch.rs', 'src/file_identity.rs', 'src/title_identity.rs', 'src/cli_entry.rs',
             'src/disc_copy_verdict.rs', 'src/sources.rs', 'src/rip_keys.rs', 'src/cli_stop.rs', 'src/artifact_lock.rs',
-            'src/plan_core.rs',
+            'src/plan_core.rs', 'src/selection_test_fixtures.rs',
             '.github/workflows/qa.yml', 'tests/media_gate.py', 'tests/media_checks.py',
             'tests/media-gate-policy.json',
             *(f for f in POLICY['freemkv_required'] if f.startswith('src/') and f.endswith('_tests.rs')))} | {
@@ -238,6 +238,7 @@ class ClassificationTests(unittest.TestCase):
     def test_required(self):
         cases = [('freemkv', p) for p in ('src/pipe.rs', 'src/keydb_fetch.rs', 'src/file_identity.rs',
                                           'src/title_identity.rs', 'src/disc_copy_verdict.rs', 'build.rs',
+                                          'src/selection_test_fixtures.rs',
                                           'res/freemkv.manifest',
                                           '.github/workflows/qa.yml', 'tests/media_gate.py',
                                           'tests/media-gate-policy.json', 'tests/media_checks.py',
@@ -294,6 +295,35 @@ class GuardTests(unittest.TestCase):
 
     def test_clean_fixture_passes(self):
         self.assertEqual(Workspace(self).guards(), [])
+
+    def test_selection_fixture_is_required_not_allowlisted(self):
+        name = 'selection_test_fixtures'
+        self.assertIn(name, POLICY['freemkv_test_modules'])
+        self.assertNotIn(name, POLICY['allowed_crate_callees'])
+        policy = with_policy(
+            freemkv_test_modules=[],
+            freemkv_required=[p for p in POLICY['freemkv_required']
+                              if p != f'src/{name}.rs'])
+        self.assert_fires(Workspace(self), 'G4', name, policy=policy)
+
+    def test_required_test_module_rejects_missing_source_or_changed_cfg(self):
+        name = 'selection_test_fixtures'
+        policy = with_policy(freemkv_required=[p for p in POLICY['freemkv_required']
+                                              if p != f'src/{name}.rs'])
+        self.assert_fires(Workspace(self), 'G1', 'needs its source', policy=policy)
+        for root in POLICY['freemkv_crate_roots']:
+            for cfg in ('', '#[cfg(any())]', '#[cfg_attr(test, path = "other.rs")]',
+                        '#[cfg(test)]\n#[cfg(unix)]', '#[cfg(test)]\n#[path = "other.rs"]'):
+                with self.subTest(root=root, cfg=cfg):
+                    ws = Workspace(self)
+                    ws.edit('freemkv', root, f'#[cfg(test)]\nmod {name};', f'{cfg}\nmod {name};')
+                    self.assert_fires(ws, 'G1', name)
+
+    def test_test_module_policy_cannot_exempt_production_modules(self):
+        ws = Workspace(self)
+        ws.edit('freemkv', 'src/main.rs', '\nmod pipe;', '\n#[cfg(test)]\nmod pipe;')
+        policy = with_policy(freemkv_test_modules=POLICY['freemkv_test_modules'] + ['pipe'])
+        self.assert_fires(ws, 'G1', 'production and test module lists overlap', policy=policy)
 
     def test_g1_path_moved_pipe(self):
         ws = Workspace(self)
@@ -484,6 +514,11 @@ class FingerprintTests(unittest.TestCase):
             'libfreemkv new top-level': lambda: self.ws.write('libfreemkv', 'assets/x', 'x'),
             'engine guide': lambda: self.ws.write('freemkv-engine', 'USING_THE_ENGINE.md', '# resolve 2\n'),
             'pipe.rs': lambda: self.ws.write('freemkv', 'src/pipe.rs', real('src/pipe.rs') + '\n'),
+            'selection fixture': lambda: self.ws.write(
+                'freemkv', 'src/selection_test_fixtures.rs', real('src/selection_test_fixtures.rs') + '\n'),
+            'selection fixture cfg': lambda: self.ws.edit(
+                'freemkv', 'src/main.rs', '#[cfg(test)]\nmod selection_test_fixtures;',
+                '#[cfg(any())]\nmod selection_test_fixtures;'),
             'title_identity.rs': lambda: self.ws.write('freemkv', 'src/title_identity.rs',
                                                        real('src/title_identity.rs') + '\n'),
             'manifest (res)': lambda: self.ws.write('freemkv', 'res/freemkv.manifest', '<x/>'),

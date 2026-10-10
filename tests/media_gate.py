@@ -398,6 +398,13 @@ def _required_source(ws, path, policy):
 def guard_crate_root(ws, policy):
     """G1: the binary root declares every required module plainly; the lib root, where it declares one, too."""
     errors = []
+    test_modules = set(policy.get('freemkv_test_modules', []))
+    overlap = test_modules & set(policy['freemkv_modules'])
+    if overlap:
+        errors.append('G1 production and test module lists overlap: ' + ', '.join(sorted(overlap)))
+    for name in test_modules:
+        if f'src/{name}.rs' not in policy['freemkv_required']:
+            errors.append(f'G1 required test module `{name}` needs its source in freemkv_required')
     for n, root in enumerate(policy['freemkv_crate_roots']):
         mod = Module((ws / 'freemkv' / root).read_text())
         decls = {}
@@ -405,7 +412,7 @@ def guard_crate_root(ws, policy):
             if name in decls:
                 errors.append(f'G1 freemkv/{root}:{line}: `mod {name}` declared twice')
             decls[name] = (ool, attrs, line)
-        for name in policy['freemkv_modules']:
+        for name in [*policy['freemkv_modules'], *sorted(test_modules)]:
             if name not in decls:
                 if n > 0:
                     continue
@@ -413,11 +420,17 @@ def guard_crate_root(ws, policy):
                               f'(remedy: declare `mod {name};`, or update the policy)')
                 continue
             ool, attrs, line = decls[name]
+            is_test = name in test_modules and name not in overlap
+            exact_test = lambda attr: [t[1] for t in attr[2:-1]] == ['cfg', '(', 'test', ')']
+            if is_test and sum(exact_test(attr) for attr in attrs) != 1:
+                errors.append(f'G1 freemkv/{root}:{line}: required test module `{name}` needs exact #[cfg(test)]')
             if not ool:
                 errors.append(f'G1 freemkv/{root}:{line}: `mod {name}` must be out-of-line (`mod {name};`)')
             for attr in attrs:
                 head = attr[2][1] if len(attr) > 2 else ''
                 if head in ('path', 'cfg', 'cfg_attr'):
+                    if is_test and exact_test(attr):
+                        continue
                     errors.append(f'G1 freemkv/{root}:{line}: `#[{head}…]` on required `mod {name}` '
                                   '(remedy: a plain `mod x;` — moved or cfg-gated rip code needs a policy change)')
     for path in policy['freemkv_required']:
@@ -506,7 +519,8 @@ def guard_build_scripts(ws, policy, files_by_repo):
 
 def guard_call_graph(ws, policy):
     """G4: required freemkv files reach only required modules and allowed crate callees."""
-    allowed = set(policy['freemkv_modules']) | set(policy['allowed_crate_callees'])
+    allowed = (set(policy['freemkv_modules']) | set(policy.get('freemkv_test_modules', []))
+               | set(policy['allowed_crate_callees']))
     errors = []
     for path in policy['freemkv_required']:
         if not path.endswith('.rs') or not path.startswith('src/'):
@@ -811,7 +825,7 @@ def project_crate_root(text, policy):
             outer = [x for a in mod.attributes_before(i) for x in a]
             items.append(' '.join(repr(x[1]) if x[0] == 'str' else x[1] for x in outer + toks[i:j + 1]))
     for name, ool, attrs, _ in mod.mod_decls():
-        if name in policy['freemkv_modules']:
+        if name in policy['freemkv_modules'] or name in policy.get('freemkv_test_modules', []):
             head = ' '.join(x[1] for a in attrs for x in a)
             items.append(f'{head} mod {name}{";" if ool else "{}"}'.strip())
     return items
