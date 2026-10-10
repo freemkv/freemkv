@@ -444,18 +444,29 @@ fn rebind_resume_outputs(
     }).collect()
 }
 
+// Why a replanned capture cannot be muxed yet. Only sectors the capture never read
+// are fixed by inserting the disc; anything else is a staging fault to report.
+#[derive(Debug)]
+enum ReplanRefusal {
+    NeedsDisc(String),
+    Unusable(String),
+}
+
 fn validate_replanned_capture(
     disc: &libfreemkv::Disc,
     outputs: &[staging::Output],
     iso: &Path,
     mapfile: &Path,
-) -> Result<(), String> {
-    let map = freemkv_engine::Mapfile::load(mapfile).map_err(|e| e.to_string())?;
-    let mut reader = libfreemkv::FileSectorSource::open(iso).map_err(|e| e.to_string())?;
-    let titles = resume_titles(disc, outputs.len() > 1, outputs)?;
+) -> Result<(), ReplanRefusal> {
+    use ReplanRefusal::{NeedsDisc, Unusable};
+    let map = freemkv_engine::Mapfile::load(mapfile)
+        .map_err(|e| Unusable(format!("the saved recovery map could not be read: {e}")))?;
+    let mut reader = libfreemkv::FileSectorSource::open(iso)
+        .map_err(|e| Unusable(format!("the saved disc image could not be opened: {e}")))?;
+    let titles = resume_titles(disc, outputs.len() > 1, outputs).map_err(Unusable)?;
     let ranges = disc
         .mkv_staging_ranges(&mut reader, &titles)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Unusable(format!("the saved disc image could not be read: {e}")))?;
     let missing = map.ranges_with(&[freemkv_engine::SectorStatus::NonTried]);
     if ranges.iter().any(|&(start, count)| {
         let start = u64::from(start) * 2048;
@@ -465,7 +476,7 @@ fn validate_replanned_capture(
                 .iter()
                 .any(|&(p, n)| p < end && p.saturating_add(n) > start)
     }) {
-        return Err("the corrected episode plan needs sectors not captured yet; insert the same disc and resume to read them".into());
+        return Err(NeedsDisc("the corrected episode plan needs sectors not captured yet; insert the same disc and resume to read them".into()));
     }
     Ok(())
 }
@@ -1042,10 +1053,23 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 return;
             }
         };
-        if let Err(e) = validate_replanned_capture(&disc, &outputs, &iso_path, &mapfile_path) {
-            staging::mutate_state_if_present(&staging_dir, |s| s.needs_disc = true);
-            reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e));
-            return;
+        match validate_replanned_capture(&disc, &outputs, &iso_path, &mapfile_path) {
+            Ok(()) => {}
+            Err(ReplanRefusal::NeedsDisc(e)) => {
+                staging::mutate_state_if_present(&staging_dir, |s| s.needs_disc = true);
+                reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e));
+                return;
+            }
+            Err(ReplanRefusal::Unusable(e)) => {
+                crate::server::log::device_log(device, &format!("Auto-resume aborted: {e}"));
+                crate::server::muxer::record_error(
+                    &staging_dir.to_string_lossy(),
+                    &e,
+                    "The saved ISO, recovery map and outputs are retained; repair staging storage, then retry.",
+                );
+                reset_status_after_ripping(device, "error", &display_name, "", "", Some(e));
+                return;
+            }
         }
         if let Err(e) =
             staging::save_replanned_outputs(&staging_dir, saved.metadata_revision, outputs.clone())

@@ -501,3 +501,30 @@ fn a_replan_drops_the_superseded_outputs() {
     assert!(!staging.join("KU_Disc.mkv").exists());
     assert!(staging.join("Cast_Away.mkv").exists());
 }
+
+// Only sectors the capture never read make a replan wait for the disc. An unreadable
+// recovery map is a staging fault: reported as such, never as "insert the disc".
+#[test]
+fn a_replan_with_an_unreadable_map_is_not_held_for_the_disc() {
+    let (staging, outcome, _t, ..) = resume_ripped(Keys::UnitKey, |dir, _, _| {
+        std::fs::write(dir.join("KU_Disc.iso.mapfile"), b"not a mapfile").unwrap();
+        staging::mutate_state_if_present(dir, |state| {
+            state.user_metadata = Some(staging::UserMetadata {
+                title: "Cast Away".into(),
+                year: 2000,
+                media_type: "movie".into(),
+                tmdb_id: 0,
+                episode_start: None,
+                poster_url: String::new(),
+                overview: String::new(),
+            });
+            state.replan_required = true;
+        });
+    });
+    assert!(!outcome.success);
+    let state = staging::read_state(&staging).unwrap();
+    assert!(!state.needs_disc, "a damaged map is not fixed by the disc");
+    assert!(!outcome.failure_needs_disc);
+    let reason = outcome.failure_reason.unwrap_or_default();
+    assert!(reason.contains("recovery map"), "{reason}");
+}
