@@ -1691,9 +1691,6 @@ fn check_and_move(cfg: &Config) {
         let any_dirty = outcomes
             .iter()
             .any(|o| matches!(o, MoveOutcome::MovedDirty));
-        let any_actively_moved = outcomes
-            .iter()
-            .any(|o| matches!(o, MoveOutcome::Moved | MoveOutcome::MovedDirty));
 
         if outcomes.iter().any(|o| matches!(o, MoveOutcome::Stalled)) {
             hold_for_operator(&dir_str);
@@ -1793,14 +1790,17 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
 
-        // Webhook: only fire on cycles where we actually moved bits, and before
-        // the teardown gates — a later tick sees only Skipped files and can't.
-        if any_actively_moved {
+        // Once per delivery, after linkage and before the teardown gates; the journal
+        // remembers it, so a delivery whose files moved on an earlier tick still fires.
+        if !delivered.announced() {
             crate::server::webhook::send_move(
                 cfg,
                 &display_name,
                 webhook_output_path(&planned_moves),
             );
+            if let Err(error) = manifest::Manifest::mark_announced(&dir) {
+                tracing::warn!(%error, dir = %dir.display(), "mover: move webhook may repeat");
+            }
         }
 
         // Every file this pass could SEE is accounted for, not every file that IS there: a

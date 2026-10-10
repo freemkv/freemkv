@@ -792,6 +792,29 @@ fn journal_recovery_clears_a_stale_destination_error() {
     assert!(!super::super::MOVE_ERRORS.lock().unwrap().contains_key(&key));
 }
 
+#[test]
+fn the_move_webhook_is_owed_until_linkage_succeeds() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, _) = fixture();
+    let key = dir.to_string_lossy().into_owned();
+    let links_path = Path::new(&cfg.autorip_dir).join(crate::server::library::links::LINKS_FILE);
+    std::fs::write(&links_path, b"broken").unwrap();
+    super::super::check_and_move(&cfg);
+    assert!(!Manifest::load(&dir).unwrap().unwrap().announced());
+    // Linkage recovers on Retry, while cleanup is held by an unplanned file.
+    std::fs::write(&links_path, b"{}").unwrap();
+    std::fs::write(dir.join("unplanned"), b"keep").unwrap();
+    super::super::clear_move_error(&key);
+    super::super::check_and_move(&cfg);
+    assert!(
+        Manifest::load(&dir).unwrap().unwrap().announced(),
+        "a delivery whose files were all moved on an earlier tick is still announced"
+    );
+    super::super::clear_move_error(&key);
+}
+
 // LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
 // live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
 #[cfg(unix)]

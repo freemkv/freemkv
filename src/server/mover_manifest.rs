@@ -116,6 +116,9 @@ pub(super) struct Manifest {
     cleanup: Vec<Cleanup>,
     #[serde(default)]
     retry: Option<RetryState>,
+    // The move webhook fired for this delivery (it fires once, after linkage).
+    #[serde(default)]
+    announced: bool,
 }
 
 /// A delivery's retry budget or operator hold, mirrored from the mover's error row so a
@@ -249,6 +252,7 @@ impl Manifest {
             entries,
             cleanup,
             retry: None,
+            announced: false,
         };
         manifest.save()?;
         Ok(manifest)
@@ -259,6 +263,17 @@ impl Manifest {
         // An error may follow a successful rename. Never roll back or assume
         // the old journal survived: every next operation reloads from disk.
         crate::server::ripper::staging::write_marker_durable(&self.directory.join(FILE), &bytes)
+    }
+
+    pub fn announced(&self) -> bool {
+        self.announced
+    }
+
+    pub fn mark_announced(dir: &Path) -> io::Result<()> {
+        let mut manifest =
+            Self::load(dir)?.ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
+        manifest.announced = true;
+        manifest.save()
     }
 
     pub fn retry(&self) -> Option<&RetryState> {
