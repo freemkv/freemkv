@@ -1681,6 +1681,8 @@ fn a_hung_destination_holds_the_move_without_blocking_the_mover() {
 
 #[test]
 fn check_and_move_skips_iso_when_keep_iso_false() {
+    // check_and_move rewrites the process-global move state.
+    let _guard = errors_guard();
     // Regression for 0.25.10: pre-fix the mover blindly moved ANY .iso in a .done dir,
     // landing a 90+ GB ISO in the movie library (2026-05-20) even with keep_iso=false,
     // since the scan loop beat the ripper's ISO-prune.
@@ -1729,6 +1731,8 @@ fn check_and_move_skips_iso_when_keep_iso_false() {
 
 #[test]
 fn check_and_move_delivers_mk3d_main_feature() {
+    // check_and_move rewrites the process-global move state.
+    let _guard = errors_guard();
     // Regression: a Blu-ray 3D rip stages <title>.mk3d (byte-identical Matroska). The
     // staging-scan extension whitelist must recognize mk3d for delivery — if dropped, a 3D
     // rip silently never leaves staging.
@@ -1818,6 +1822,8 @@ fn check_and_move_records_error_when_inner_read_dir_fails() {
 
 #[test]
 fn check_and_move_moves_iso_when_keep_iso_true() {
+    // check_and_move rewrites the process-global move state.
+    let _guard = errors_guard();
     // Companion to the regression above: with keep_iso=true the operator explicitly wants
     // the ISO promoted alongside the MKV. The build_destination fix already routes them to
     // distinct paths; this pins the filter behaviour.
@@ -1845,6 +1851,8 @@ fn check_and_move_moves_iso_when_keep_iso_true() {
 // A rip can deliver an MKV and its companion ISO; both must take the SAME `_2` suffix.
 #[test]
 fn check_and_move_gives_a_discs_companion_files_the_same_variant() {
+    // check_and_move rewrites the process-global move state.
+    let _guard = errors_guard();
     let tmp = tempfile::tempdir().unwrap();
     let staging = tmp.path().join("staging");
     let movie_dir = tmp.path().join("output/Movies");
@@ -1894,6 +1902,8 @@ fn check_and_move_gives_a_discs_companion_files_the_same_variant() {
 // leftover partial not in outputs[] must not be promoted.
 #[test]
 fn check_and_move_files_only_outputs_for_a_tv_dir() {
+    // check_and_move rewrites the process-global move state.
+    let _guard = errors_guard();
     let tmp = tempfile::tempdir().unwrap();
     let staging = tmp.path().join("staging");
     let output_dir = tmp.path().join("output");
@@ -1966,6 +1976,8 @@ fn check_and_move_files_only_outputs_for_a_tv_dir() {
 // TV rip's ISO was dropped then destroyed by teardown.
 #[test]
 fn check_and_move_keeps_iso_for_a_tv_dir_with_keep_iso() {
+    // check_and_move rewrites the process-global move state.
+    let _guard = errors_guard();
     let tmp = tempfile::tempdir().unwrap();
     let staging = tmp.path().join("staging");
     let output_dir = tmp.path().join("output");
@@ -3130,6 +3142,8 @@ enum MoverVerdict {
 // Build a single staging disc dir, run the real check_and_move, and report whether the MKV
 // reached the library and staging was cleaned.
 fn mover_verdict(done_body: Option<&[u8]>, with_mkv: bool, extra: &[&str]) -> MoverVerdict {
+    // check_and_move rewrites the process-global move state.
+    let _guard = errors_guard();
     let tmp = tempfile::tempdir().unwrap();
     let staging = tmp.path().join("staging");
     let movie_dir = tmp.path().join("output/Movies");
