@@ -541,3 +541,130 @@ fn a_zero_length_destination_is_held_as_interrupted_publication() {
     assert_eq!(std::fs::metadata(&entry.destination).unwrap().len(), 0);
     assert!(entry.source.exists());
 }
+
+// LIVE: FREEMKV_LIVE_SMB_DIR=/Volumes/media cargo test --features server --lib
+// live_smb -- --ignored --nocapture. Works in a scratch dir it always removes.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs FREEMKV_LIVE_SMB_DIR on a network share"]
+fn live_smb_publication_and_journaled_delivery() {
+    use std::os::unix::fs::MetadataExt;
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let removed = std::fs::remove_dir_all(&self.0);
+            eprintln!("live: removed {} -> {removed:?}", self.0.display());
+        }
+    }
+    let Some(share) = std::env::var_os("FREEMKV_LIVE_SMB_DIR") else {
+        eprintln!("live: FREEMKV_LIVE_SMB_DIR unset; skipped");
+        return;
+    };
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = Path::new(&share).join(format!(".fmkv-live-{}-{nonce:x}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let scratch = Scratch(root.canonicalize().unwrap());
+    let root = scratch.0.clone();
+
+    // 1. A real no_replace on the share, then a collision.
+    let (src, dst) = (root.join("publish.src"), root.join("publish.mkv"));
+    std::fs::write(&src, b"published bytes").unwrap();
+    let src_ino = std::fs::metadata(&src).unwrap().ino();
+    libfreemkv::io::publish::no_replace(&src, &dst).unwrap();
+    let dst_ino = std::fs::metadata(&dst).unwrap().ino();
+    assert_eq!(std::fs::read(&dst).unwrap(), b"published bytes");
+    assert!(!src.exists());
+    eprintln!("live: no_replace ok; ino {src_ino} -> {dst_ino}");
+    let late = root.join("late.src");
+    std::fs::write(&late, b"late").unwrap();
+    let error = libfreemkv::io::publish::no_replace(&late, &dst).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error:?}");
+    assert_eq!(std::fs::read(&dst).unwrap(), b"published bytes");
+    assert_eq!(std::fs::read(&late).unwrap(), b"late");
+    eprintln!("live: no_replace collision -> {:?}", error.kind());
+
+    // 2. A journaled mover delivery from local staging (copy path) to the share.
+    let local = tempfile::tempdir().unwrap();
+    let job = local.path().join("staging/Live");
+    std::fs::create_dir_all(&job).unwrap();
+    let output = root.join("Movies");
+    std::fs::create_dir(&output).unwrap();
+    let mut rip = vec![0x1A, 0x45, 0xDF, 0xA3];
+    rip.extend((0..4 * 1024 * 1024u32).map(|i| (i % 251) as u8));
+    let source = job.join("Live.mkv");
+    std::fs::write(&source, &rip).unwrap();
+    let destination = output.join("Live (2026).mkv");
+    let plan = |job: &Path, source: &Path| {
+        Manifest::create(
+            job,
+            serde_json::json!({"title": "Live"}),
+            Vec::new(),
+            vec![output.to_string_lossy().into_owned()],
+            &[(
+                source.to_path_buf(),
+                destination.to_string_lossy().into_owned(),
+            )],
+        )
+    };
+    let manifest = plan(&job, &source).unwrap();
+    let locks = manifest.lock_targets().unwrap();
+    let outcome = Manifest::deliver(&job, 0, &|_, _, _, _| {}).unwrap();
+    assert!(
+        matches!(outcome, super::super::MoveOutcome::Moved),
+        "{outcome:?}"
+    );
+    let delivered = Manifest::load(&job).unwrap().unwrap();
+    let entry = &delivered.entries[0];
+    let (prepared, published) = (
+        entry.prepared.clone().unwrap(),
+        entry.published.clone().unwrap(),
+    );
+    eprintln!(
+        "live: delivered {outcome:?}; prepared id {:?} mtime {:?}; published id {:?} mtime {:?}",
+        prepared.file_id, prepared.modified, published.file_id, published.modified
+    );
+    assert!(entry.completed);
+    assert_eq!(std::fs::read(&destination).unwrap(), rip);
+    delivered.verify_delivered().unwrap();
+    delivered.cleanup().unwrap();
+    for lock in locks {
+        lock.delete().unwrap();
+    }
+    assert!(!job.exists(), "journal completed and staging cleaned up");
+    eprintln!("live: journal completed, staging removed");
+
+    // 3. A second delivery onto the existing target holds as a collision.
+    let job2 = local.path().join("staging/Live2");
+    std::fs::create_dir_all(&job2).unwrap();
+    let second = job2.join("Live.mkv");
+    std::fs::write(&second, b"second disc").unwrap();
+    let refused = plan(&job2, &second).err().unwrap();
+    assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+    let winner = output.join("Race (2026).mkv");
+    let racing = winner.clone();
+    let outcome = super::super::move_file_journaled(
+        &second,
+        &winner,
+        &|_, _, _, _| {},
+        Arc::new(move |_| std::fs::write(&racing, b"winner")),
+        &job2,
+        Default::default(),
+    );
+    assert!(
+        matches!(outcome, super::super::MoveOutcome::Collision),
+        "{outcome:?}"
+    );
+    assert_eq!(std::fs::read(&winner).unwrap(), b"winner");
+    assert_eq!(std::fs::read(&destination).unwrap(), rip);
+    assert_eq!(std::fs::read(&second).unwrap(), b"second disc");
+    eprintln!(
+        "live: plan onto existing -> {:?}; publish race -> {outcome:?}",
+        refused.kind()
+    );
+}
