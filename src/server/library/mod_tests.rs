@@ -445,3 +445,26 @@ fn source_match_cannot_be_saved_for_an_unindexed_path() {
     );
     assert!(!t.path().join("library-matches.json").exists());
 }
+
+#[test]
+fn an_unmatched_iso_row_counts_only_the_isos_it_collides_with() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    std::fs::create_dir_all(d.library.join("Kept")).unwrap();
+    std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+    for name in ["Heat (1995)", "Heat", "Other (2001)", "Third (2002)"] {
+        std::fs::write(d.isos.as_ref().unwrap().join(format!("{name}.iso")), b"x").unwrap();
+    }
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    lib.index_now(&d);
+    let listing = lib.listing(&d);
+    let per_iso: Vec<_> = listing
+        .rows
+        .iter()
+        .filter(|r| r.key.starts_with("source:"))
+        .collect();
+    assert_eq!(per_iso.len(), 2, "one row for each colliding Heat ISO");
+    for row in per_iso {
+        assert_eq!(row.note, Some(RowNote::SeveralIsos { count: 2 }));
+    }
+}

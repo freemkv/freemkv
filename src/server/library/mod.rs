@@ -834,22 +834,30 @@ impl Library {
         let queued = self.audits.queued_set();
         let running_audits = self.audits.running_set();
         let mut source_rows = snap.rows.clone();
+        let attached: HashSet<&Path> = snap.rows.iter().filter_map(|r| r.iso.as_deref()).collect();
+        let colliding: HashMap<&Path, usize> = snap
+            .rows
+            .iter()
+            .flat_map(|r| {
+                r.several_isos
+                    .iter()
+                    .map(|i| (i.as_path(), r.several_isos.len()))
+            })
+            .collect();
         for iso in &snap.isos {
-            if !source_rows
-                .iter()
-                .any(|row| row.iso.as_ref() == Some(&iso.path))
-            {
+            if !attached.contains(iso.path.as_path()) {
                 source_rows.push(Row {
                     key: format!("source:{}", iso.path.display()),
                     title: iso.title.clone(),
                     kind: RowKind::Ambiguous,
                     note: Some(RowNote::SeveralIsos {
-                        count: snap.isos.len(),
+                        count: colliding.get(iso.path.as_path()).copied().unwrap_or(1),
                     }),
                     mkv: None,
                     iso: Some(iso.path.clone()),
                     target: None,
                     linked: false,
+                    several_isos: Vec::new(),
                 });
             }
         }
