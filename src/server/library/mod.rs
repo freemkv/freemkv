@@ -1117,17 +1117,27 @@ impl Library {
                 })
             })
             .collect();
+        // Runs of plain rows go in one queue write; each corrected row needs its own.
         let mut added = 0;
+        let mut plain = Vec::new();
         for job in jobs {
             let selected = self.source_match(&job.iso).map_err(|error| {
+                added += self.queue.add(std::mem::take(&mut plain));
                 format!("{added} jobs queued; saved source matches unavailable: {error}")
             })?;
-            added += match selected {
-                Some(selected) => self.queue.add_corrected(job, selected).map_err(|error| {
-                    format!("{added} jobs queued; corrected remux could not be saved: {error}")
-                })?,
-                None => self.queue.add(vec![job]),
+            let Some(selected) = selected else {
+                plain.push(job);
+                continue;
             };
+            if !plain.is_empty() {
+                added += self.queue.add(std::mem::take(&mut plain));
+            }
+            added += self.queue.add_corrected(job, selected).map_err(|error| {
+                format!("{added} jobs queued; corrected remux could not be saved: {error}")
+            })?;
+        }
+        if !plain.is_empty() {
+            added += self.queue.add(plain);
         }
         Ok(added)
     }

@@ -468,3 +468,31 @@ fn an_unmatched_iso_row_counts_only_the_isos_it_collides_with() {
         assert_eq!(row.note, Some(RowNote::SeveralIsos { count: 2 }));
     }
 }
+
+#[test]
+fn queueing_many_rows_writes_the_queue_once() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    std::fs::create_dir_all(d.library.join("Kept")).unwrap();
+    std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+    for name in ["A (2001)", "B (2002)", "C (2003)"] {
+        std::fs::write(d.isos.as_ref().unwrap().join(format!("{name}.iso")), b"x").unwrap();
+    }
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    lib.index_now(&d);
+    let before = lib.queue.generation();
+    assert_eq!(lib.enqueue(&d, |_| true), 3);
+    assert_eq!(
+        lib.queue.generation(),
+        before + 1,
+        "one queue write per request"
+    );
+    let titles: Vec<_> = lib
+        .queue
+        .snapshot()
+        .jobs
+        .into_iter()
+        .map(|j| j.title)
+        .collect();
+    assert_eq!(titles, ["A (2001)", "B (2002)", "C (2003)"]);
+}
