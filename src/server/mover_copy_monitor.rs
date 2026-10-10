@@ -148,7 +148,7 @@ impl Monitor<'_> {
                 path: key.to_string(), reason: reason.into(),
                 hint: "Cancellation requested; an already-entered publication may still finish. Cannot retry while the filesystem call is active; restore/remount the filesystem and wait for the worker to return. Sources and ownership are retained.".into(),
                 attempts, worker_active: true, copy_stalled: true,
-                retry_held: true, retry_after: None, waiting_for_folder: false,
+                retry_held: true, retry_after: None, waiting_for_folder: false, waiting_root: None,
             });
         }
         for state in super::MOVE_STATE
