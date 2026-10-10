@@ -651,7 +651,7 @@ fn a_busy_destination_lock_is_reported_instead_of_blocking_the_mover() {
     let result = rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("lock_targets must give up and report a busy lock");
-    let error = result.err().expect("the held lock is reported");
+    let error = result.expect_err("the held lock is reported");
     assert_eq!(error.kind(), io::ErrorKind::ResourceBusy, "{error}");
     drop(held);
     let locks = manifest.lock_targets().unwrap();
