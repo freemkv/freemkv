@@ -400,3 +400,20 @@ fn a_malformed_aacs_hash_is_not_an_identity() {
     assert_eq!(aacs_identity("not-a-hash"), None);
     assert_eq!(aacs_identity(""), None);
 }
+
+#[test]
+fn a_capture_that_returns_before_its_sweep_stays_locatable() {
+    let identity = "0123456789abcdef0123456789abcdef01234567";
+    let root = tempfile::tempdir().unwrap();
+    let job = format!("disc-{identity}");
+    let dir = root.path().join(&job);
+    std::fs::create_dir(&dir).unwrap();
+    staging::begin_capture(&dir, 0, identity).unwrap();
+    // An early return ("No titles", a selection review) drops SweepingGuard.
+    staging::clear_sweeping_marker(&dir);
+    assert_eq!(staging::read_state(&dir).unwrap().disc_identity, identity);
+    assert_eq!(locate(root.path(), identity).unwrap(), job);
+    let other = "fedcba9876543210fedcba9876543210fedcba98";
+    assert!(staging::begin_capture(&dir, 0, other).is_err());
+    assert_eq!(staging::read_state(&dir).unwrap().disc_identity, identity);
+}

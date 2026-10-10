@@ -31,7 +31,7 @@ fn capture_reset_keeps_corrected_identity_but_discards_old_artifacts() {
     assert_eq!(saved.title, "Cast Away");
     assert_eq!(saved.state, StagingState::Stopped);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
-    let started = begin_capture(dir.path(), 0).unwrap();
+    let started = begin_capture(dir.path(), 0, "").unwrap();
     assert_eq!(started.title, "Cast Away");
     assert_eq!(started.tmdb_id, 8358);
     assert_eq!(started.metadata_revision, revision);
@@ -68,7 +68,7 @@ fn interrupted_capture_reset_cannot_resume_old_capture_with_an_empty_plan() {
     assert!(read_state(dir.path()).unwrap().reset_in_progress);
     assert!(dir.path().join("old.iso").exists());
     assert!(snapshot_staging_disc(dir.path()).is_none());
-    assert!(begin_capture(dir.path(), 1).is_err());
+    assert!(begin_capture(dir.path(), 1, "").is_err());
     assert!(try_write_state(dir.path(), &old).is_err());
     mutate_state_if_present(dir.path(), |st| st.reset_in_progress = false);
     assert!(read_state(dir.path()).unwrap().reset_in_progress);
@@ -77,7 +77,7 @@ fn interrupted_capture_reset_cannot_resume_old_capture_with_an_empty_plan() {
     assert!(!ready.reset_in_progress);
     assert_eq!(ready.disc_identity, "same-disc");
     assert!(!dir.path().join("old.iso").exists());
-    assert!(begin_capture(dir.path(), 1).is_ok());
+    assert!(begin_capture(dir.path(), 1, "").is_ok());
 }
 
 #[test]

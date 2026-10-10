@@ -2614,12 +2614,26 @@ fn reset_capture_with(
     }
 }
 
-/// Freeze execution mode and read planning metadata in one state transaction.
-/// The caller owns the job lease and clears Sweeping when capture exits.
-pub(super) fn begin_capture(dir: &Path, max_retries: u8) -> io::Result<DiscState> {
+/// Freeze execution mode, stamp the scan's verified identity and read planning
+/// metadata in one state transaction. The caller owns the job lease and clears
+/// Sweeping when capture exits.
+pub(super) fn begin_capture(
+    dir: &Path,
+    max_retries: u8,
+    verified_identity: &str,
+) -> io::Result<DiscState> {
     let lock = state_lock(dir);
     let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut st = state_for_write(dir, StagingState::Sweeping)?;
+    if !verified_identity.is_empty() {
+        if st.disc_identity.is_empty() {
+            st.disc_identity = verified_identity.to_owned();
+        } else if st.disc_identity != verified_identity {
+            return Err(io::Error::other(
+                "staging identity changed; nothing was captured",
+            ));
+        }
+    }
     st.state = StagingState::Sweeping;
     st.max_retries = max_retries;
     apply_user_metadata(&mut st);

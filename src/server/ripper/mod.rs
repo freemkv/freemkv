@@ -3106,15 +3106,24 @@ fn rip_disc_inner(
         disc.titles.first().map(|t| t.size_bytes).unwrap_or(0)
     };
 
-    // Freeze actual execution mode before a correction can alter the plan.
+    // Freeze actual execution mode before a correction can alter the plan. The
+    // scan's verified identity lands in the same first write, so an early return
+    // never leaves an identity-less job that location refuses for good.
+    let verified_identity = STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .map(|s| s.disc_identity.clone())
+        .unwrap_or_default();
     let saved_state = if let Some(path) = &known_path {
         let started = if crate::server::health::share_unmounted(path) {
             Err(std::io::Error::other(
                 "staging network share is not mounted",
             ))
         } else {
-            std::fs::create_dir_all(path)
-                .and_then(|()| staging::begin_capture(path, cfg_read.max_retries))
+            std::fs::create_dir_all(path).and_then(|()| {
+                staging::begin_capture(path, cfg_read.max_retries, &verified_identity)
+            })
         };
         match started {
             Ok(st) => Some(st),
