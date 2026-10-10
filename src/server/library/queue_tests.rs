@@ -1009,3 +1009,37 @@ fn corrected_admission_captures_old_outputs_outside_the_queue_lock() {
         .unwrap();
     assert_eq!(added, 1);
 }
+
+#[test]
+fn forgetting_a_jobs_kept_file_forgets_it_on_its_output_too() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    q.add(vec![job(t.path(), "show")]);
+    let claimed = q.claim_next().unwrap();
+    let plan = crate::server::planner::RemuxPlan {
+        version: crate::server::planner::PLAN_VERSION,
+        source_iso: claimed.iso.clone(),
+        media: crate::server::planner::MediaMetadata::default(),
+        outputs: vec![crate::server::planner::PlannedOutput {
+            id: "feature".into(),
+            title_index: 1,
+            episode: None,
+            episode_name: String::new(),
+            filename: "show.mkv".into(),
+        }],
+    };
+    assert!(q.set_plan(claimed.id, plan));
+    let kept = t.path().join("1.staged.mkv");
+    q.set_output_staged(claimed.id, "feature", Some(kept.clone()));
+    q.set_staged(
+        claimed.id,
+        Some(StagedFile {
+            path: kept,
+            bytes: 1,
+            attempts: 0,
+        }),
+    );
+    // The kept file turned out unusable: the job forgets it.
+    q.set_staged(claimed.id, None);
+    assert_eq!(q.snapshot().jobs[0].outputs[0].staged, None);
+}

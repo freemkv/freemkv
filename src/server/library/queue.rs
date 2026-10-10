@@ -175,6 +175,16 @@ impl Job {
     }
 
     fn set_staged(&mut self, staged: Option<StagedFile>) {
+        // An output still pointing at the file the job lets go of would resume a dead path.
+        if let Some(old) = self.staged.take()
+            && staged.as_ref().is_none_or(|s| s.path != old)
+        {
+            for output in &mut self.outputs {
+                if output.staged.as_ref() == Some(&old) {
+                    output.staged = None;
+                }
+            }
+        }
         self.staged_bytes = staged.as_ref().map(|s| s.bytes);
         self.staged_attempts = staged.as_ref().map(|s| s.attempts);
         self.staged = staged.map(|s| s.path);
