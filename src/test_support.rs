@@ -229,6 +229,10 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::RemuxTargetExists { path: p() },
         // A mux batch of zero sectors, E9085.
         Error::MuxBatchSectorsZero,
+        // Automatic title selection needs review, E9086.
+        Error::SelectionReviewRequired {
+            reason: "missing-episode-roster",
+        },
     ]
 }
 

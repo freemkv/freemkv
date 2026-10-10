@@ -73,7 +73,7 @@ fn open(fx: &Fx, calls: &Calls) -> (HeldDrive, KeySet, FakeHandle) {
 fn open_with(fx: &Fx, answer: Answer, calls: &Calls) -> (HeldDrive, KeySet, FakeHandle) {
     let (mut s, disc, fake) = scanned(fx);
     let f = factory(&[(answer, &[K1, K2])], calls);
-    let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
+    let main = open_titles(&disc);
     let (set, _) = crate::rip_keys::resolve(
         &disc,
         s.source_mut().unwrap(),
