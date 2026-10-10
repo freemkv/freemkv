@@ -481,7 +481,13 @@ pub(crate) fn land(partial: &Path, target: &Path, replace: bool) -> io::Result<(
     if replace {
         return std::fs::rename(partial, target);
     }
-    libfreemkv::io::publish::no_replace(partial, target)
+    libfreemkv::io::publish::no_replace(partial, target).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            target_exists(target)
+        } else {
+            e
+        }
+    })
 }
 
 fn progress(pass: &'static str, bytes_done: u64, bytes_total: u64) -> Progress {

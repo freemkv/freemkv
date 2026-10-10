@@ -721,3 +721,20 @@ fn copy_checkpoint_sync_preserves_written_bytes() {
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"checkpoint");
 }
+
+#[test]
+fn a_target_that_appears_before_landing_reports_remux_target_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let partial = dir.path().join("Movie.mkv.partial");
+    let target = dir.path().join("Movie.mkv");
+    std::fs::write(&partial, b"ours").unwrap();
+    std::fs::write(&target, b"theirs").unwrap();
+    let error = land(&partial, &target, false).unwrap_err();
+    assert_eq!(
+        libfreemkv::error_code(&error),
+        Some(libfreemkv::error::E_REMUX_TARGET_EXISTS),
+        "{error:?}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"theirs");
+    assert_eq!(std::fs::read(&partial).unwrap(), b"ours");
+}
