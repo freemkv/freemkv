@@ -599,8 +599,14 @@ impl Library {
             }
         }
         let links = links::load(&self.config_dir);
+        // Path to position, so merging links and delivered outputs is linear.
+        let mut at: HashMap<PathBuf, usize> = HashMap::new();
+        for (i, m) in mkvs.files.iter().enumerate() {
+            at.entry(m.path.clone()).or_insert(i);
+        }
         for target in links.keys() {
-            if !mkvs.files.iter().any(|m| m.path == *target) {
+            if !at.contains_key(target) {
+                at.insert(target.clone(), mkvs.files.len());
                 mkvs.files.push(index::MkvFile {
                     path: target.clone(),
                     title: target
@@ -624,9 +630,10 @@ impl Library {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                if let Some(existing) = mkvs.files.iter_mut().find(|m| m.path == output.target) {
-                    existing.title = title;
+                if let Some(&i) = at.get(&output.target) {
+                    mkvs.files[i].title = title;
                 } else {
+                    at.insert(output.target.clone(), mkvs.files.len());
                     mkvs.files.push(index::MkvFile {
                         path: output.target.clone(),
                         title,
