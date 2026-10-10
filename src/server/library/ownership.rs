@@ -65,6 +65,26 @@ mod tests {
     }
 
     #[test]
+    fn reopening_a_source_supersedes_its_open_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.iso");
+        std::fs::write(&source, b"iso").unwrap();
+        let roots = vec![dir.path().to_owned()];
+        let mut installed = Previews::default();
+        let mut tokens = Vec::new();
+        for _ in 0..40 {
+            let mut prepared = Previews::default();
+            let preview = prepared
+                .create(&source, 0, roots.clone(), Vec::new(), &HashMap::new())
+                .unwrap();
+            installed.install(prepared).unwrap();
+            tokens.push(preview.preview_token);
+        }
+        assert_eq!(installed.0.len(), 1);
+        assert!(installed.0.contains_key(tokens.last().unwrap()));
+    }
+
+    #[test]
     fn candidate_limit_precedes_any_source_or_output_io() {
         let error = Previews::default()
             .create(
@@ -247,9 +267,25 @@ pub(super) fn validate_output(roots: &[PathBuf], path: &Path) -> io::Result<()> 
 }
 
 impl Previews {
+    /// Drop expired and superseded previews of `source`; refuse before any share IO when full.
+    pub fn make_room(&mut self, source: &Path) -> io::Result<()> {
+        self.0.retain(|_, preview| {
+            preview.created.elapsed() < Duration::from_secs(600) && preview.source != source
+        });
+        if self.0.len() >= 32 {
+            return Err(stale(
+                "too many open ownership previews; close dialogs and retry later",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A reopened dialog supersedes the previews it had open for the same source.
     pub fn install(&mut self, prepared: Self) -> io::Result<()> {
-        self.0
-            .retain(|_, preview| preview.created.elapsed() < Duration::from_secs(600));
+        self.0.retain(|_, preview| {
+            preview.created.elapsed() < Duration::from_secs(600)
+                && !prepared.0.values().any(|p| p.source == preview.source)
+        });
         if self.0.len() + prepared.0.len() > 32 {
             return Err(stale(
                 "too many open ownership previews; close dialogs and retry later",
@@ -291,6 +327,14 @@ impl Previews {
                 Err(_) => {}
             }
         }
+        // Paths are distinct here, so a second holder of a canonical path or file id is an alias.
+        let (mut canonical, mut file_ids) = (HashMap::new(), HashMap::new());
+        for output in &inspected {
+            *canonical.entry(output.identity.canonical()).or_insert(0) += 1;
+            if let Some(id) = output.identity.filesystem_id() {
+                *file_ids.entry(id).or_insert(0) += 1;
+            }
+        }
         let mut candidates: Vec<_> = inspected
             .iter()
             .filter(|output| {
@@ -298,9 +342,11 @@ impl Previews {
                     return false;
                 }
                 let aliased = output.identity.same_file(&source_identity)
-                    || inspected.iter().any(|other| {
-                        other.path != output.path && other.identity.same_file(&output.identity)
-                    });
+                    || canonical[output.identity.canonical()] > 1
+                    || output
+                        .identity
+                        .filesystem_id()
+                        .is_some_and(|id| file_ids[&id] > 1);
                 if aliased {
                     omitted_candidates += 1;
                 }
@@ -310,13 +356,6 @@ impl Previews {
             .collect();
         candidates.sort_by(|a, b| a.path.cmp(&b.path));
         replacement.verify_admission(source)?;
-        self.0
-            .retain(|_, preview| preview.created.elapsed() < Duration::from_secs(600));
-        if self.0.len() >= 32 {
-            return Err(stale(
-                "too many open ownership previews; close dialogs and retry later",
-            ));
-        }
         static SEQUENCE: AtomicU64 = AtomicU64::new(1);
         let token = format!(
             "{:x}-{:x}-{:x}",
@@ -387,12 +426,14 @@ impl Previews {
         let mut selected = HashSet::new();
         for id in confirmation.selected_candidates {
             if !selected.insert(id) {
-                return Err(stale("duplicate confirmed candidate"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate confirmed candidate",
+                ));
             }
-            let output = frozen
-                .candidates
-                .get(id)
-                .ok_or_else(|| stale("unknown confirmed candidate"))?;
+            let output = frozen.candidates.get(id).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "unknown confirmed candidate")
+            })?;
             if links.contains_key(&output.path) {
                 return Err(stale("legacy output ownership changed"));
             }

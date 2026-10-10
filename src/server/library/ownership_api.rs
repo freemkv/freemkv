@@ -46,6 +46,10 @@ impl Library {
         let revision = saved.as_ref().map_or(0, |s| s.revision);
         // Only the complete index supplies candidates. Never recursively walk a NAS
         // from a request, and never hold queue/match/preview locks for this IO.
+        self.ownership_previews
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .make_room(source)?;
         let mut prepared = ownership::Previews::default();
         let preview = prepared.create(
             source,

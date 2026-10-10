@@ -32,6 +32,14 @@ impl FileIdentity {
         })
     }
 
+    pub(super) fn canonical(&self) -> &Path {
+        &self.canonical
+    }
+
+    pub(super) fn filesystem_id(&self) -> Option<(u64, u64)> {
+        self.filesystem_id
+    }
+
     pub(super) fn same_file(&self, other: &Self) -> bool {
         self.canonical == other.canonical
             || self
