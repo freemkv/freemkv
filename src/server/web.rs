@@ -1099,13 +1099,38 @@ fn read_body_capped(request: &mut tiny_http::Request) -> BodyRead {
     }
 }
 
+// tiny_http 0.12 has no read timeout, so the body is read on an abandonable thread that
+// owns the request; a sender still stalled when the daemon drains is left behind (its
+// request answers 500 when the read ends) instead of pinning this tracked handler.
+fn read_body_cancellable(request: tiny_http::Request) -> Option<(tiny_http::Request, BodyRead)> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    crate::server::daemon::spawn_abandonable("autorip-http-body", move || {
+        let mut request = request;
+        let read = read_body_capped(&mut request);
+        let _ = tx.send((request, read));
+    })
+    .ok()?;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(read) => return Some(read),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                if !crate::server::SHUTDOWN.load(Ordering::Acquire) => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Read a JSON POST body with the shared size cap, replying with the
 /// appropriate error status (400 bad body / 413 too large) on failure.
-/// Returns `None` once a response has already been sent.
+/// Returns `Err` once a response has been sent, or when the daemon began
+/// draining before the body arrived (the request is then never acted on).
 pub(crate) fn read_json_body(
-    mut request: tiny_http::Request,
+    request: tiny_http::Request,
 ) -> Result<(tiny_http::Request, String), ()> {
-    match read_body_capped(&mut request) {
+    let Some((request, read)) = read_body_cancellable(request) else {
+        return Err(());
+    };
+    match read {
         BodyRead::Ok(body) => Ok((request, body)),
         BodyRead::Err => {
             json_response(request, 400, r#"{"ok":false,"error":"bad body"}"#);
@@ -2737,8 +2762,16 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         response = response.with_header(h);
     }
 
-    let mut stream = request.upgrade("sse", response);
+    let stream = request.upgrade("sse", response);
+    sse_session(stream, cfg, &stop, opened);
+}
 
+fn sse_session<W: std::io::Write + Send + 'static>(
+    stream: W,
+    cfg: &Arc<RwLock<Config>>,
+    stop: &AtomicBool,
+    opened: std::time::Instant,
+) {
     // Re-read the staging dir each tick (cheap) so a Settings change to
     // the staging path is reflected without restarting the SSE stream.
     let staging_dir = || {
@@ -2751,11 +2784,33 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     if crate::server::SHUTDOWN.load(Ordering::Acquire) {
         return;
     }
-    let initial = format!("data: {}\n\n", get_state_json(&staging_dir()));
-    if stream.write_all(initial.as_bytes()).is_err() {
+    // The upgraded stream has no write timeout, so an abandonable writer owns it: a
+    // half-open client cannot pin this tracked handler. One frame is in flight at a
+    // time and the next is built only once it is written (the library cursor advances).
+    let (frames, queued) = std::sync::mpsc::sync_channel::<String>(1);
+    let busy = Arc::new(AtomicBool::new(true));
+    let writer = {
+        let busy = busy.clone();
+        move || {
+            let mut stream = stream;
+            for frame in queued {
+                let sent = stream
+                    .write_all(frame.as_bytes())
+                    .and_then(|()| stream.flush());
+                busy.store(false, Ordering::Release);
+                if sent.is_err() {
+                    return;
+                }
+            }
+        }
+    };
+    if crate::server::daemon::spawn_abandonable("autorip-sse-write", writer).is_err() {
         return;
     }
-    let _ = stream.flush();
+    let initial = format!("data: {}\n\n", get_state_json(&staging_dir()));
+    if frames.send(initial).is_err() {
+        return;
+    }
 
     let mut library = crate::server::library::api::SseCursor::default();
     loop {
@@ -2766,15 +2821,17 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         {
             break;
         }
+        if busy.load(Ordering::Acquire) {
+            continue;
+        }
         let mut frame = format!("data: {}\n\n", get_state_json(&staging_dir()));
         let dirs = crate::server::library::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
         if let Some(lib) = crate::server::library::api::sse_frame(&mut library, Some(&dirs)) {
             frame.push_str(&lib);
         }
-        if stream.write_all(frame.as_bytes()).is_err() {
-            break;
-        }
-        if stream.flush().is_err() {
+        busy.store(true, Ordering::Release);
+        // A failed write ended the writer, so this send reports the dead client.
+        if frames.send(frame).is_err() {
             break;
         }
     }
