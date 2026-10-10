@@ -148,21 +148,53 @@ pub fn lookup(label: &str, api_key: &str) -> Option<TmdbResult> {
     lookup_with(label, |variant| fetch_multi(variant, api_key))
 }
 
-// `lookup`'s variant loop over any `search/multi` source.
+/// TMDB could not be asked (network, HTTP or response failure), as opposed to "no match".
+#[derive(Debug)]
+pub struct LookupFailed;
+
+/// [`lookup`], but a failed query without a confident answer is an error, not "no match".
+pub fn lookup_checked(label: &str, api_key: &str) -> Result<Option<TmdbResult>, LookupFailed> {
+    if api_key.is_empty() {
+        return Ok(None);
+    }
+    lookup_with_checked(label, |variant| fetch_multi(variant, api_key))
+}
+
 fn lookup_with(
     label: &str,
     fetch: impl Fn(&str) -> Option<serde_json::Value>,
 ) -> Option<TmdbResult> {
+    lookup_variants(label, fetch).0
+}
+
+fn lookup_with_checked(
+    label: &str,
+    fetch: impl Fn(&str) -> Option<serde_json::Value>,
+) -> Result<Option<TmdbResult>, LookupFailed> {
+    match lookup_variants(label, fetch) {
+        (Some(best), _) if is_confident_match(label, &best.title, best.year) => Ok(Some(best)),
+        (_, true) => Err(LookupFailed),
+        (found, false) => Ok(found),
+    }
+}
+
+// `lookup`'s variant loop over any `search/multi` source; true when a query failed.
+fn lookup_variants(
+    label: &str,
+    fetch: impl Fn(&str) -> Option<serde_json::Value>,
+) -> (Option<TmdbResult>, bool) {
     // A separator-only label yields no query variants; short-circuit rather
     // than firing `query=&...` (TMDB answers HTTP 422). A season marker
     // ("… Season 5") means TV — bias the pick so it can't be outranked.
     let prefer_tv = season_from_label(label).is_some();
     let mut fallback: Option<TmdbResult> = None;
+    let mut failed = false;
     for variant in query_variants(label) {
         if variant.trim().is_empty() {
             continue;
         }
         let Some(resp) = fetch(&variant) else {
+            failed = true;
             continue;
         };
         let Some(results) = resp["results"].as_array() else {
@@ -171,14 +203,14 @@ fn lookup_with(
         if let Some(best) = pick_best(&variant, results, prefer_tv) {
             // Confident = exact normalized title match on THIS variant + a year.
             if best.year > 0 && norm(&best.title) == norm(&variant) {
-                return Some(best);
+                return (Some(best), failed);
             }
             if fallback.is_none() {
                 fallback = Some(best);
             }
         }
     }
-    fallback
+    (fallback, failed)
 }
 
 /// Normalize a title for comparison: lowercase, every run of non-alphanumerics

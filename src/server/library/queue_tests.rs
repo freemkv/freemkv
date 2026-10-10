@@ -928,3 +928,118 @@ fn stop_all_and_unqueue_keep_a_kept_file_offered() {
     assert_eq!(q.take_staged(&a.target), Err(false));
     assert_eq!(q.staged_total(), (0, 0));
 }
+
+fn failed_replacement_with_candidate(t: &Path, q: &Queue, record_identity: bool) -> (Job, PathBuf) {
+    let item = job(t, "old");
+    std::fs::write(&item.iso, b"source").unwrap();
+    q.add_corrected(item, corrected_match()).unwrap();
+    let claimed = q.claim_next().unwrap();
+    let candidate = t.join("old-candidate.mkv");
+    std::fs::write(&candidate, b"prepared multi-GB candidate").unwrap();
+    let identity = super::super::replacement::FileIdentity::read(&candidate).unwrap();
+    let mut journal = serde_json::to_value(claimed.replacement.as_ref().unwrap()).unwrap();
+    journal["prepared"] = serde_json::json!([{
+        "target": claimed.target,
+        "candidate": candidate,
+        "identity": if record_identity { serde_json::to_value(identity).unwrap() } else { serde_json::Value::Null },
+        "writing_app": null
+    }]);
+    q.save_replacement(claimed.id, serde_json::from_value(journal).unwrap())
+        .unwrap();
+    q.drop_job(claimed.id);
+    (claimed, candidate)
+}
+
+#[test]
+fn clearing_a_failed_unpublished_replacement_reclaims_its_candidates() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (claimed, candidate) = failed_replacement_with_candidate(t.path(), &q, true);
+    assert_eq!(q.snapshot().jobs[0].state, JobState::Failed);
+    assert_eq!(q.clear_finished(), 1);
+    assert!(!candidate.exists(), "the verified candidate is reclaimed");
+    assert!(q.snapshot().jobs.is_empty());
+    assert!(q.with_idle_source(&claimed.iso, || Ok(())).is_ok());
+}
+
+#[test]
+fn clearing_keeps_a_replacement_whose_candidate_cannot_be_proven_ours() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (_, candidate) = failed_replacement_with_candidate(t.path(), &q, false);
+    assert_eq!(q.clear_finished(), 0);
+    assert!(candidate.exists());
+    // A recorded candidate that changed, or vanished (possibly published), stays too.
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (_, candidate) = failed_replacement_with_candidate(t.path(), &q, true);
+    std::fs::write(&candidate, b"something else entirely, longer").unwrap();
+    assert_eq!(q.clear_finished(), 0);
+    assert!(candidate.exists());
+    std::fs::remove_file(&candidate).unwrap();
+    assert_eq!(q.clear_finished(), 0);
+    assert_eq!(q.snapshot().jobs.len(), 1);
+}
+
+#[test]
+fn sweeping_a_missing_partial_never_touches_the_share_under_the_queue_lock() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let missing = t.path().join("never-written.mkv.partial");
+    assert!(!q.remove_orphan_partial_with(&missing, |_| panic!(
+        "unlink attempted for a missing partial"
+    )));
+}
+
+#[test]
+fn corrected_admission_captures_old_outputs_outside_the_queue_lock() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let item = job(t.path(), "old");
+    std::fs::write(&item.iso, b"source").unwrap();
+    let iso = item.iso.clone();
+    let added = q
+        .add_corrected_with(item, corrected_match(), || {
+            assert!(
+                q.state.try_lock().is_ok(),
+                "capture ran under the queue lock"
+            );
+            super::super::replacement::Replacement::capture(&iso, &Default::default())
+        })
+        .unwrap();
+    assert_eq!(added, 1);
+}
+
+#[test]
+fn forgetting_a_jobs_kept_file_forgets_it_on_its_output_too() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    q.add(vec![job(t.path(), "show")]);
+    let claimed = q.claim_next().unwrap();
+    let plan = crate::server::planner::RemuxPlan {
+        version: crate::server::planner::PLAN_VERSION,
+        source_iso: claimed.iso.clone(),
+        media: crate::server::planner::MediaMetadata::default(),
+        outputs: vec![crate::server::planner::PlannedOutput {
+            id: "feature".into(),
+            title_index: 1,
+            episode: None,
+            episode_name: String::new(),
+            filename: "show.mkv".into(),
+        }],
+    };
+    assert!(q.set_plan(claimed.id, plan));
+    let kept = t.path().join("1.staged.mkv");
+    q.set_output_staged(claimed.id, "feature", Some(kept.clone()));
+    q.set_staged(
+        claimed.id,
+        Some(StagedFile {
+            path: kept,
+            bytes: 1,
+            attempts: 0,
+        }),
+    );
+    // The kept file turned out unusable: the job forgets it.
+    q.set_staged(claimed.id, None);
+    assert_eq!(q.snapshot().jobs[0].outputs[0].staged, None);
+}

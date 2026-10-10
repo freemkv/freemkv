@@ -205,6 +205,8 @@ pub struct Row {
     pub target: Option<PathBuf>,
     /// The pairing came from a link recorded at rip time.
     pub linked: bool,
+    /// For `SeveralIsos`: the ISOs that collide on this title.
+    pub several_isos: Vec<PathBuf>,
 }
 
 impl Row {
@@ -262,6 +264,7 @@ pub fn classify(
                     iso: Some(iso.path.clone()),
                     target: Some(m.path.clone()),
                     linked: true,
+                    several_isos: Vec::new(),
                 });
             }
             None => unlinked_mkvs.push(m),
@@ -371,6 +374,11 @@ fn group_row(library: &Path, key: String, ms: &[&MkvFile], is: &[&IsoFile]) -> R
         iso,
         target,
         linked: false,
+        several_isos: if is.len() > 1 {
+            is.iter().map(|i| i.path.clone()).collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 

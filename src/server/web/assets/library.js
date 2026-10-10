@@ -168,7 +168,7 @@ export default {
       if (a.queued) parts.push((a.running ? 'removes ' : 'Removes ') + plural(a.queued, 'queued file'));
       const ok = await confirmDialog({
         title: 'Stop all audits?',
-        body: (parts.join(' and ') || 'Nothing is running') + '. Verdicts already recorded are kept; new and changed files queue again on their own.',
+        body: (parts.join(' and ') || 'Nothing is running') + '. Verdicts already recorded are kept. Audits stay stopped until you press Resume.',
         action: 'Stop all',
       });
       if (!ok) return;

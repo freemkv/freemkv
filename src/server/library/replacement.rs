@@ -48,6 +48,14 @@ impl FileIdentity {
         })
     }
 
+    pub(super) fn canonical(&self) -> &Path {
+        &self.canonical
+    }
+
+    pub(super) fn filesystem_id(&self) -> Option<(u64, u64)> {
+        self.filesystem_id
+    }
+
     pub(super) fn same_file(&self, other: &Self) -> bool {
         self.canonical == other.canonical
             || self
@@ -304,6 +312,32 @@ impl Replacement {
 
     pub(crate) fn has_work(&self) -> bool {
         !self.prepared.is_empty() && !self.complete
+    }
+
+    /// The candidates to delete when this transaction is given up: only while nothing
+    /// was retired and each prepared candidate still verifies as the file we wrote.
+    pub(crate) fn unpublished_candidates(&self) -> io::Result<Vec<PathBuf>> {
+        if !self.retired.is_empty() || self.complete {
+            return Err(io::Error::other("replacement already changed the library"));
+        }
+        self.prepared
+            .iter()
+            .map(|p| {
+                p.identity
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("replacement candidate was never verified"))?
+                    .verify(&p.candidate)?;
+                Ok(p.candidate.clone())
+            })
+            .collect()
+    }
+
+    /// Give up an unpublished transaction: re-verify, then delete its candidates.
+    pub(crate) fn abandon(&self) -> io::Result<()> {
+        for candidate in self.unpublished_candidates()? {
+            std::fs::remove_file(candidate)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn run(

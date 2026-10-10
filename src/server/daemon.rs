@@ -279,7 +279,7 @@ pub fn run(argv: Vec<String>) {
         let mut workers = vec![
             ("mover", Some(mover_handle)),
             ("muxer", Some(muxer_handle)),
-            ("library", Some(library_handle)),
+            ("library", library_handle),
             ("keydb", Some(keydb_handle)),
             ("log-prune", Some(log_prune_handle)),
         ];

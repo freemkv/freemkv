@@ -910,3 +910,26 @@ fn lookup_prefers_the_series_for_a_season_marked_label() {
     let film = lookup_with("Longacre", |_| Some(both.clone())).unwrap();
     assert_eq!(film.media_type, "movie");
 }
+
+#[test]
+fn checked_lookup_reports_a_failed_query_unless_another_is_confident() {
+    assert!(lookup_with_checked("HEAT_UE", |_| None).is_err());
+    let empty = serde_json::json!({"results": []});
+    assert!(matches!(
+        lookup_with_checked("HEAT_UE", |_| Some(empty.clone())),
+        Ok(None)
+    ));
+    let found = lookup_with_checked("HEAT_UE", |q| match q {
+        "Heat" => Some(results_for("Heat", "1995-12-15", "movie")),
+        _ => None,
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(found.year, 1995);
+    // A guess that is not confident is no answer while a query failed.
+    let guess = lookup_with_checked("HEAT_UE", |q| match q {
+        "Heat Ue" => Some(results_for("Heat Wave", "2001-01-01", "movie")),
+        _ => None,
+    });
+    assert!(guess.is_err());
+}

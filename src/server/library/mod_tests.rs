@@ -18,7 +18,7 @@ fn aggregate_handle_waits_for_every_library_service() {
             }),
         ));
     }
-    let group = start_tasks(tasks);
+    let group = start_tasks(tasks).unwrap();
     for _ in 0..4 {
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
@@ -444,4 +444,55 @@ fn source_match_cannot_be_saved_for_an_unindexed_path() {
             .is_err()
     );
     assert!(!t.path().join("library-matches.json").exists());
+}
+
+#[test]
+fn an_unmatched_iso_row_counts_only_the_isos_it_collides_with() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    std::fs::create_dir_all(d.library.join("Kept")).unwrap();
+    std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+    for name in ["Heat (1995)", "Heat", "Other (2001)", "Third (2002)"] {
+        std::fs::write(d.isos.as_ref().unwrap().join(format!("{name}.iso")), b"x").unwrap();
+    }
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    lib.index_now(&d);
+    let listing = lib.listing(&d);
+    let per_iso: Vec<_> = listing
+        .rows
+        .iter()
+        .filter(|r| r.key.starts_with("source:"))
+        .collect();
+    assert_eq!(per_iso.len(), 2, "one row for each colliding Heat ISO");
+    for row in per_iso {
+        assert_eq!(row.note, Some(RowNote::SeveralIsos { count: 2 }));
+    }
+}
+
+#[test]
+fn queueing_many_rows_writes_the_queue_once() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    std::fs::create_dir_all(d.library.join("Kept")).unwrap();
+    std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+    for name in ["A (2001)", "B (2002)", "C (2003)"] {
+        std::fs::write(d.isos.as_ref().unwrap().join(format!("{name}.iso")), b"x").unwrap();
+    }
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    lib.index_now(&d);
+    let before = lib.queue.generation();
+    assert_eq!(lib.enqueue(&d, |_| true), 3);
+    assert_eq!(
+        lib.queue.generation(),
+        before + 1,
+        "one queue write per request"
+    );
+    let titles: Vec<_> = lib
+        .queue
+        .snapshot()
+        .jobs
+        .into_iter()
+        .map(|j| j.title)
+        .collect();
+    assert_eq!(titles, ["A (2001)", "B (2002)", "C (2003)"]);
 }

@@ -341,7 +341,8 @@ pub fn wake() {
 }
 
 /// Start the remux worker, the background indexer and both audit lanes.
-pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
+/// `None` when the service group thread could not be started; shutdown is then requested.
+pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
     let lib = instance(&cfg.read().unwrap_or_else(|e| e.into_inner()));
     let mut tasks: Vec<LibraryTask> = Vec::new();
     type Run = fn(&Arc<Library>, &Arc<RwLock<Config>>);
@@ -364,7 +365,7 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
 
 type LibraryTask = (&'static str, Box<dyn FnOnce() + Send>);
 
-fn start_tasks(tasks: Vec<LibraryTask>) -> std::thread::JoinHandle<()> {
+fn start_tasks(tasks: Vec<LibraryTask>) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("library-services".into())
         .spawn(move || {
@@ -379,9 +380,15 @@ fn start_tasks(tasks: Vec<LibraryTask>) -> std::thread::JoinHandle<()> {
                     }
                 }
             }
-            for handle in handles { let _ = handle.join(); }
+            for handle in handles {
+                let _ = handle.join();
+            }
         })
-        .expect("spawn the library service group")
+        .inspect_err(|e| {
+            tracing::error!(error = %e, "library services could not start");
+            crate::server::SHUTDOWN.store(true, Ordering::Release);
+        })
+        .ok()
 }
 
 /// One row of `GET /api/library`.
@@ -599,8 +606,14 @@ impl Library {
             }
         }
         let links = links::load(&self.config_dir);
+        // Path to position, so merging links and delivered outputs is linear.
+        let mut at: HashMap<PathBuf, usize> = HashMap::new();
+        for (i, m) in mkvs.files.iter().enumerate() {
+            at.entry(m.path.clone()).or_insert(i);
+        }
         for target in links.keys() {
-            if !mkvs.files.iter().any(|m| m.path == *target) {
+            if !at.contains_key(target) {
+                at.insert(target.clone(), mkvs.files.len());
                 mkvs.files.push(index::MkvFile {
                     path: target.clone(),
                     title: target
@@ -624,9 +637,10 @@ impl Library {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                if let Some(existing) = mkvs.files.iter_mut().find(|m| m.path == output.target) {
-                    existing.title = title;
+                if let Some(&i) = at.get(&output.target) {
+                    mkvs.files[i].title = title;
                 } else {
+                    at.insert(output.target.clone(), mkvs.files.len());
                     mkvs.files.push(index::MkvFile {
                         path: output.target.clone(),
                         title,
@@ -834,22 +848,30 @@ impl Library {
         let queued = self.audits.queued_set();
         let running_audits = self.audits.running_set();
         let mut source_rows = snap.rows.clone();
+        let attached: HashSet<&Path> = snap.rows.iter().filter_map(|r| r.iso.as_deref()).collect();
+        let colliding: HashMap<&Path, usize> = snap
+            .rows
+            .iter()
+            .flat_map(|r| {
+                r.several_isos
+                    .iter()
+                    .map(|i| (i.as_path(), r.several_isos.len()))
+            })
+            .collect();
         for iso in &snap.isos {
-            if !source_rows
-                .iter()
-                .any(|row| row.iso.as_ref() == Some(&iso.path))
-            {
+            if !attached.contains(iso.path.as_path()) {
                 source_rows.push(Row {
                     key: format!("source:{}", iso.path.display()),
                     title: iso.title.clone(),
                     kind: RowKind::Ambiguous,
                     note: Some(RowNote::SeveralIsos {
-                        count: snap.isos.len(),
+                        count: colliding.get(iso.path.as_path()).copied().unwrap_or(1),
                     }),
                     mkv: None,
                     iso: Some(iso.path.clone()),
                     target: None,
                     linked: false,
+                    several_isos: Vec::new(),
                 });
             }
         }
@@ -1102,17 +1124,27 @@ impl Library {
                 })
             })
             .collect();
+        // Runs of plain rows go in one queue write; each corrected row needs its own.
         let mut added = 0;
+        let mut plain = Vec::new();
         for job in jobs {
             let selected = self.source_match(&job.iso).map_err(|error| {
+                added += self.queue.add(std::mem::take(&mut plain));
                 format!("{added} jobs queued; saved source matches unavailable: {error}")
             })?;
-            added += match selected {
-                Some(selected) => self.queue.add_corrected(job, selected).map_err(|error| {
-                    format!("{added} jobs queued; corrected remux could not be saved: {error}")
-                })?,
-                None => self.queue.add(vec![job]),
+            let Some(selected) = selected else {
+                plain.push(job);
+                continue;
             };
+            if !plain.is_empty() {
+                added += self.queue.add(std::mem::take(&mut plain));
+            }
+            added += self.queue.add_corrected(job, selected).map_err(|error| {
+                format!("{added} jobs queued; corrected remux could not be saved: {error}")
+            })?;
+        }
+        if !plain.is_empty() {
+            added += self.queue.add(plain);
         }
         Ok(added)
     }

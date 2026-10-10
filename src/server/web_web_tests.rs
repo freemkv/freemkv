@@ -4564,3 +4564,11 @@ mod http {
             serde_json::from_str(json).expect("the first SSE frame must carry valid state JSON");
     }
 }
+
+// Stop all leaves audits paused (Audits::stop_all); the dialog must say so.
+#[test]
+fn audit_stop_all_dialog_says_audits_stay_stopped_until_resume() {
+    let library = asset("library.js");
+    assert!(!library.contains("queue again on their own"));
+    assert!(library.contains("Audits stay stopped until you press Resume"));
+}

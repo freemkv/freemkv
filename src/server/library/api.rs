@@ -139,6 +139,9 @@ pub fn handle(
                     200,
                     &json!({"ok": true, "saved": saved, "queued": queued}).to_string(),
                 ),
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    err(request, 400, &error.to_string())
+                }
                 Err(error) => err(request, 409, &error.to_string()),
             }
         }

@@ -175,7 +175,20 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     if !cfg.tv_auto || cfg.tmdb_api_key.is_empty() {
         return attach_automatic_movie_plan(lib, cfg, job);
     }
-    let Some(match_) = crate::server::tmdb::lookup(&job.title, &cfg.tmdb_api_key) else {
+    let looked_up = crate::server::tmdb::lookup_checked(&job.title, &cfg.tmdb_api_key);
+    attach_from_lookup(lib, cfg, job, looked_up)
+}
+
+fn attach_from_lookup(
+    lib: &Library,
+    cfg: &Config,
+    job: &mut Job,
+    looked_up: Result<Option<crate::server::tmdb::TmdbResult>, crate::server::tmdb::LookupFailed>,
+) -> std::io::Result<()> {
+    let Some(match_) = looked_up.map_err(|_| {
+        std::io::Error::other("TMDB could not be reached to plan this disc; retry once it is back")
+    })?
+    else {
         return attach_automatic_movie_plan(lib, cfg, job);
     };
     if match_.media_type != "tv"
@@ -184,7 +197,7 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
         return attach_automatic_movie_plan(lib, cfg, job);
     }
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
-    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     let (season, disc_number) =
         label_numbers(&disc.volume_id, disc.meta_title.as_deref(), &job.title);
     let media = crate::server::planner::MediaMetadata {
@@ -199,6 +212,11 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     let planner = crate::server::planner::TvPlanner { cfg };
     let plan = tv_plan_result(planner.plan(&job.iso, &disc.titles, &media, &job.target))?;
     persist_auto_plan(lib, cfg, job, plan)
+}
+
+// Keep the OS error and code: finish() classifies storage faults (and their retry) from them.
+fn planning_scan_error(error: libfreemkv::Error) -> std::io::Error {
+    std::io::Error::from(error)
 }
 
 fn persist_auto_plan(
@@ -225,7 +243,7 @@ fn persist_auto_plan(
 
 fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
-    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     let plan = crate::server::planner::MoviePlanner::from_config(cfg).plan(
         &job.iso,
         &disc.titles,
@@ -275,8 +293,11 @@ fn attach_corrected_plan(
     media: &crate::server::planner::MediaMetadata,
 ) -> std::io::Result<()> {
     use crate::server::planner::{MediaKind, MoviePlanner, TvPlanner};
+    let Some(kind) = media.kind else {
+        return Err(std::io::Error::other("saved match has no media type"));
+    };
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
-    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     let media = &with_label_numbers(
         media,
         &disc.volume_id,
@@ -287,10 +308,9 @@ fn attach_corrected_plan(
         title: media.title.clone(),
         year: media.year,
         tmdb_id: media.tmdb_id,
-        media_type: match media.kind {
-            Some(MediaKind::Movie) => "movie",
-            Some(MediaKind::Tv) => "tv",
-            None => return Err(std::io::Error::other("saved match has no media type")),
+        media_type: match kind {
+            MediaKind::Movie => "movie",
+            MediaKind::Tv => "tv",
         }
         .into(),
         poster_url: String::new(),
@@ -302,16 +322,15 @@ fn attach_corrected_plan(
         "feature.mkv",
         media.season,
     ));
-    let plan = match media.kind {
-        Some(MediaKind::Movie) => {
+    let plan = match kind {
+        MediaKind::Movie => {
             MoviePlanner::from_config(cfg).plan(&job.iso, &disc.titles, media, &target)
         }
-        Some(MediaKind::Tv) => {
+        MediaKind::Tv => {
             let mut explicit = cfg.clone();
             explicit.tv_auto = true;
             TvPlanner { cfg: &explicit }.plan(&job.iso, &disc.titles, media, &target)
         }
-        None => unreachable!(),
     }
     .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e:?}")))?;
     let targets = tv_destinations(cfg, &plan)
@@ -638,6 +657,11 @@ fn remux_planned_with(
             return Ending::Failed(std::io::Error::other(why));
         }
     }
+    // `job.replace` only vouches for `job.target`; other paths need this source's link.
+    let links = super::links::load(&sink.lib.config_dir);
+    let may_replace = |target: &Path| {
+        (job.replace && target == job.target) || links.get(target) == Some(&job.iso)
+    };
     let mut writing_app = None;
     for (ordinal, output) in plan.outputs.iter().enumerate() {
         if let Some(ending) = cancelled_ending(sink) {
@@ -654,7 +678,8 @@ fn remux_planned_with(
         if let Err(why) = validate(&target) {
             return Ending::Failed(std::io::Error::other(why));
         }
-        if !job.replace && target.exists() {
+        let replace = may_replace(&target);
+        if !replace && target.exists() {
             return Ending::Failed(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 format!("planned output already exists: {}", target.display()),
@@ -675,29 +700,30 @@ fn remux_planned_with(
             title: Some(output.title_index),
             streams: freemkv_engine::StreamChoice::default(),
             target: target.clone(),
-            replace: job.replace,
+            replace,
         };
         sink.lib.set_running(|running| {
             if let Some(running) = running.as_mut().filter(|r| r.job_id == job.id) {
                 running.target = target.clone();
             }
         });
-        let result = execute(&request, staged, ordinal);
-        if let Err(e) = result {
-            if let Some(kept) = deliver::kept_of(&e) {
+        writing_app = match execute(&request, staged, ordinal) {
+            Ok(app) => app,
+            Err(e) => {
+                if let Some(kept) = deliver::kept_of(&e) {
+                    sink.lib
+                        .queue
+                        .set_output_staged(job.id, &output.id, Some(kept.path.clone()));
+                    sink.lib
+                        .queue
+                        .set_staged(job.id, still_kept(Some(&kept.path)));
+                }
                 sink.lib
                     .queue
-                    .set_output_staged(job.id, &output.id, Some(kept.path.clone()));
-                sink.lib
-                    .queue
-                    .set_staged(job.id, still_kept(Some(&kept.path)));
+                    .finish_output(job.id, &output.id, OutputState::Failed);
+                return cancelled_ending(sink).unwrap_or(Ending::Failed(e));
             }
-            sink.lib
-                .queue
-                .finish_output(job.id, &output.id, OutputState::Failed);
-            return cancelled_ending(sink).unwrap_or(Ending::Failed(e));
-        }
-        writing_app = result.unwrap();
+        };
         sink.lib.note_landed(&target, writing_app.clone());
         sink.lib.queue.set_output_staged(job.id, &output.id, None);
         sink.lib.queue.set_staged(job.id, None);
