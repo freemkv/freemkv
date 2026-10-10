@@ -9,8 +9,12 @@
 
 use std::sync::atomic::AtomicBool;
 
-/// Set by SIGTERM/SIGINT; every worker loop polls it to drain and exit.
+/// Set by SIGTERM/SIGINT or a soft reboot; every worker loop polls it to drain.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Set only by SIGTERM/SIGINT: the process must stop. Unlike SHUTDOWN (also set by a
+/// soft reboot), it vetoes any in-process restart.
+pub static TERMINATE: AtomicBool = AtomicBool::new(false);
 
 /// Set by the System-panel soft reboot. The daemon drains the current
 /// instance, then reloads persisted state and starts fresh in-process services.

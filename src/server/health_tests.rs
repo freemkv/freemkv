@@ -504,3 +504,17 @@ fn remount_discards_old_generation_reports_only() {
     reports.record(1, path, Some(Fault::Stale));
     assert!(reports.paths.contains(path));
 }
+
+// A probe abandoned on a hung mount may finish after a soft reboot; its stale
+// verdict belongs to the old generation and must not trigger a fresh remount.
+#[test]
+fn soft_reboot_ignores_probe_reports_from_the_old_generation() {
+    let mut reports = StaleReports::default();
+    let path = Path::new("/mnt/nfs/movies");
+    let old = reports.generation;
+    reports.after_drain();
+    reports.record(old, path, Some(Fault::Stale));
+    assert!(reports.paths.is_empty());
+    reports.record(reports.generation, path, Some(Fault::Stale));
+    assert!(reports.paths.contains(path));
+}

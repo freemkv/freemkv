@@ -478,7 +478,8 @@ fn release(key: &Path) {
 
 /// Run `probe` for the folder `key` on its own thread and wait at most `limit`.
 /// A probe of `key` already running is waited for within the same limit; one past its own
-/// limit means the folder hangs, and the answer is `Busy` at once.
+/// limit means the folder hangs, and the answer is `Busy` at once. The probe thread is
+/// abandonable (no restart ticket): it may touch only its own probe artifacts.
 pub fn bounded<T, F>(key: &Path, limit: Duration, probe: F) -> Bounded<T>
 where
     T: Send + 'static,
@@ -502,7 +503,7 @@ where
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let owned = key.to_path_buf();
-    let spawned = crate::server::daemon::spawn_background("folder-probe", move || {
+    let spawned = crate::server::daemon::spawn_abandonable("folder-probe", move || {
         struct Release(PathBuf);
         impl Drop for Release {
             fn drop(&mut self) {
@@ -542,6 +543,12 @@ impl StaleReports {
     fn renewed(&mut self, mountpoint: &Path) {
         self.generation = self.generation.wrapping_add(1);
         self.paths.retain(|p| !p.starts_with(mountpoint));
+    }
+
+    // Old-generation probes may still report; advancing past them discards those reports.
+    fn after_drain(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.paths.clear();
     }
 }
 
@@ -888,11 +895,15 @@ pub fn start(cfg: &Arc<RwLock<Config>>) {
     });
 }
 
-/// Called only after the daemon has drained all services and folder probes.
+/// Called only after the daemon has drained all services. Abandoned folder probes may
+/// still be running; their late reports carry an older generation and are ignored.
 pub(crate) fn reset_after_drain() {
     LAST.lock().unwrap_or_else(|e| e.into_inner()).clear();
     GENERATION.store(0, Ordering::SeqCst);
-    *STALE_REPORTS.lock().unwrap_or_else(|e| e.into_inner()) = StaleReports::default();
+    STALE_REPORTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .after_drain();
     #[cfg(unix)]
     {
         *LAST_REMOUNT.lock().unwrap_or_else(|e| e.into_inner()) = None;

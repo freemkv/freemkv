@@ -26,7 +26,7 @@ fn retitle_fixture(
     device: &str,
     state: &staging::DiscState,
     selection: staging::UserMetadata,
-) -> (Result<u64, String>, staging::DiscState, Vec<u8>, Vec<u8>) {
+) -> (std::io::Result<u64>, staging::DiscState, Vec<u8>, Vec<u8>) {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path().join("job");
     std::fs::create_dir_all(&dir).unwrap();

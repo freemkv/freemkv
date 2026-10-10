@@ -22,7 +22,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
         ? { ok: true, queued }
         : { ok: true, queued, saved: { revision: payload.expected_revision + 1, media: payload.media } };
       if (url.startsWith('/api/tmdb/search')) return searchApi ? searchApi(url) : [choice];
-      return { saved: { revision: 7, media: savedMedia }, owned_outputs: ['/tv/<old>.mkv'], preview_token: 'server-snapshot', candidates };
+      return { saved: savedMedia === null ? null : { revision: 7, media: savedMedia }, owned_outputs: ['/tv/<old>.mkv'], preview_token: 'server-snapshot', candidates };
     },
     modal: options => {
       body = options.body;
@@ -207,4 +207,15 @@ test('an ambiguous row with an exact ISO offers correction but not automatic rem
   const html = h.ui.actHtml({ kind: 'ambiguous', iso: '/iso/one.iso', title: 'Old episodes' });
   assert.ok(html.includes('data-match'));
   assert.ok(!html.includes('data-remux'));
+});
+
+test('a source with no saved match leaves the TV season to the disc labels', async () => {
+  const h = await harness('tv', undefined, 1, null);
+  await h.ui.changeMatch({ iso: '/iso/SHOW_S3_D1.iso', title: 'Show' }, {});
+  assert.equal(h.nodes.season.value, '');
+  await h.nodes.search.onclick();
+  await h.nodes.results.onclick({ target: { closest: () => ({ dataset: { pick: '0' } }) } });
+  const post = h.calls.find(c => c.method === 'POST');
+  assert.equal(post.payload.media.season, null);
+  assert.equal(post.payload.expected_revision, 0);
 });

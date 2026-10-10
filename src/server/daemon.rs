@@ -1,7 +1,8 @@
 //! The daemon entry: `freemkv server [--bootstrap | --healthcheck | serve]`.
 
 use super::{
-    REBOOT, SHUTDOWN, VERSION_LABEL, config, keysource, log, mover, muxer, observe, ripper, web,
+    REBOOT, SHUTDOWN, TERMINATE, VERSION_LABEL, config, keysource, log, mover, muxer, observe,
+    ripper, web,
 };
 
 use std::sync::atomic::Ordering;
@@ -11,6 +12,13 @@ mod lifecycle;
 static BACKGROUND: std::sync::LazyLock<std::sync::Arc<lifecycle::Background>> =
     std::sync::LazyLock::new(Default::default);
 
+// Generation drain bounds: all services, the rip threads within it, then the web thread.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const RIP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const WEB_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+// Cadence of the KEYDB refresh and log prune threads, in one-second SHUTDOWN polls.
+const DAILY_SECS: u64 = 24 * 3600;
+
 /// Spawn a service helper which must finish before an internal restart, even
 /// when its caller times out and drops the returned handle.
 pub(crate) fn spawn_background<T: Send + 'static>(
@@ -18,6 +26,16 @@ pub(crate) fn spawn_background<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<T>> {
     BACKGROUND.spawn(name, f)
+}
+
+/// Spawn a helper the caller may abandon (a probe or lookup that can block forever on a
+/// hung mount or resolver). It holds no restart ticket, so it must not mutate service
+/// state: its only output is a value its caller may already have stopped waiting for.
+pub(crate) fn spawn_abandonable<T: Send + 'static>(
+    name: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<T>> {
+    std::thread::Builder::new().name(name.into()).spawn(f)
 }
 
 /// Run the server shell. `argv` is everything after `freemkv server`.
@@ -168,41 +186,12 @@ pub fn run(argv: Vec<String>) {
                 log::syslog("KEYDB not found, downloading...");
                 // Route through the address guard (validate_fetch_url + pinned
                 // resolver): LAN hosts are fine, unreachable addresses are refused.
-                match web::guarded_get(&url) {
-                    Ok(resp) => {
-                        match web::read_capped_keydb_body(
-                            resp.into_body().into_reader(),
-                            web::KEYDB_MAX_BYTES,
-                        ) {
-                            Ok(buf) => {
-                                let saved = keysource::save_keydb(&cfg, &buf);
-                                match saved {
-                                    Ok(r) => log::syslog(&format!(
-                                        "KEYDB downloaded: {} entries -> {}",
-                                        r.entries,
-                                        r.path.display()
-                                    )),
-                                    Err(e) => log::syslog(&format!("KEYDB save failed: {e}")),
-                                }
-                            }
-                            Err(web::KeydbReadError::TooLarge) => {
-                                log::syslog("KEYDB download failed: response exceeded size limit")
-                            }
-                            Err(web::KeydbReadError::Io) => {
-                                log::syslog("KEYDB download read failed")
-                            }
-                        }
-                    }
-                    Err(e) => log::syslog(&format!(
-                        "KEYDB download failed for {}: {e}",
-                        crate::server::webhook::webhook_url_origin(&url)
-                    )),
-                }
+                fetch_keydb(&cfg, &url, true);
             }
         }
 
-        // Start mover thread. Joined on shutdown (see end of main) so an
-        // in-flight file move isn't truncated into a partial OUTPUT_DIR file.
+        // Start mover thread. Joined by the generation drain (stop_generation) so
+        // an in-flight file move isn't truncated into a partial OUTPUT_DIR file.
         let mover_handle = std::thread::spawn({
             let cfg = cfg.clone();
             move || mover::run(&cfg)
@@ -236,7 +225,7 @@ pub fn run(argv: Vec<String>) {
                 tracing::info!("keydb update thread starting (24h interval)");
                 'outer: loop {
                     // 24h sleep in 1s chunks so SHUTDOWN is observed within ~1s.
-                    for _ in 0..(24 * 3600) {
+                    for _ in 0..DAILY_SECS {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         if SHUTDOWN.load(Ordering::Relaxed) {
                             break 'outer;
@@ -255,36 +244,7 @@ pub fn run(argv: Vec<String>) {
                     // SSRF-guarded fetch (see web::guarded_get) — the daily
                     // refresh must not bypass the address allow-list that the
                     // settings save and manual update already enforce.
-                    match web::guarded_get(&url) {
-                        Ok(resp) => {
-                            match web::read_capped_keydb_body(
-                                resp.into_body().into_reader(),
-                                web::KEYDB_MAX_BYTES,
-                            ) {
-                                Ok(buf) => {
-                                    let saved = keysource::save_keydb(&cfg2, &buf);
-                                    match saved {
-                                        Ok(r) => log::syslog(&format!(
-                                            "KEYDB updated: {} entries -> {}",
-                                            r.entries,
-                                            r.path.display()
-                                        )),
-                                        Err(e) => log::syslog(&format!("KEYDB update failed: {e}")),
-                                    }
-                                }
-                                Err(web::KeydbReadError::TooLarge) => {
-                                    log::syslog("KEYDB daily update: response exceeded size limit")
-                                }
-                                Err(web::KeydbReadError::Io) => {
-                                    log::syslog("KEYDB daily update: response read failed")
-                                }
-                            }
-                        }
-                        Err(e) => log::syslog(&format!(
-                            "KEYDB update failed for {}: {e}",
-                            crate::server::webhook::webhook_url_origin(&url)
-                        )),
-                    }
+                    fetch_keydb(&cfg2, &url, false);
                 }
                 tracing::info!("keydb update thread stopping");
             }
@@ -301,7 +261,7 @@ pub fn run(argv: Vec<String>) {
                     // Prune first, then wait: a daemon restarted more often than daily
                     // would otherwise never reach a tick.
                     log_prune_tick(&cfg);
-                    for _ in 0..(24 * 3600) {
+                    for _ in 0..DAILY_SECS {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         if SHUTDOWN.load(Ordering::Relaxed) {
                             break 'outer;
@@ -324,7 +284,12 @@ pub fn run(argv: Vec<String>) {
             ("log-prune", Some(log_prune_handle)),
         ];
         let mut web_handle = Some(web_handle);
-        loop {
+        let staging = cfg
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .staging_dir
+            .clone();
+        let drained = stop_generation(std::path::Path::new(&staging), || {
             // HTTP admission is closed by SHUTDOWN. Existing requests may still
             // spawn rips, so drain their tracked helpers BEFORE the final rip
             // registry check. No short-circuit: every worker gets a drain attempt.
@@ -332,41 +297,119 @@ pub fn run(argv: Vec<String>) {
                 &mut workers,
                 &BACKGROUND,
                 ripper::join_all_rip_threads,
-                std::time::Duration::from_secs(120),
+                DRAIN_TIMEOUT,
             );
             if drained {
                 web::stop_after_drain();
-                drained &= join_bounded(&mut web_handle, "web", std::time::Duration::from_secs(10));
+                drained &= join_bounded(&mut web_handle, "web", WEB_JOIN_TIMEOUT);
             }
-            if drained {
-                break;
-            }
-            log::syslog(
-                "Restart refused while old services are still draining; cancellation remains set",
-            );
-            if !REBOOT.load(Ordering::Acquire) {
-                // Process shutdown may remain bounded. Internal restart must not
-                // detach a survivor and clear its cancellation underneath it.
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-
-        // Cleanup is safe only after all writers have relinquished artifacts.
-        {
-            let c = cfg.read().unwrap_or_else(|e| e.into_inner());
-            ripper::staging::clear_inprogress_markers(std::path::Path::new(&c.staging_dir));
-        }
-        log::syslog("autorip stopped");
-        if REBOOT.swap(false, Ordering::AcqRel) {
+            drained
+        });
+        if drained && take_restart() {
             reset_after_drain();
             BACKGROUND.reopen();
-            SHUTDOWN.store(false, Ordering::Release);
+            reopen_admission();
             restarting = true;
             log::syslog("autorip soft reboot: starting fresh instance");
             continue;
         }
         break;
+    }
+}
+
+// Drain this generation's services; false when they did not all finish. A process stop
+// clears in-progress markers first, so a SIGKILL at the stop grace or a timed-out drain
+// still leaves resumable dirs; a reboot clears them only once every old writer is gone.
+fn stop_generation(staging: &std::path::Path, mut drain: impl FnMut() -> bool) -> bool {
+    let mut cleared = false;
+    loop {
+        let reboot = rebooting();
+        if !reboot && !cleared {
+            ripper::staging::clear_inprogress_markers(staging);
+            cleared = true;
+        }
+        if drain() {
+            break;
+        }
+        if !reboot {
+            log::syslog(
+                "autorip stopped before every service drained; unfinished work is interrupted",
+            );
+            return false;
+        }
+        // Internal restart must not detach a survivor and clear its cancellation
+        // underneath it. A stop request instead gets one bounded shutdown attempt.
+        log::syslog(
+            "Restart refused while old services are still draining; cancellation remains set",
+        );
+        if rebooting() {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+    ripper::staging::clear_inprogress_markers(staging);
+    log::syslog("autorip stopped");
+    true
+}
+
+// A soft reboot is pending and no stop signal has overridden it.
+fn rebooting() -> bool {
+    REBOOT.load(Ordering::Acquire) && !TERMINATE.load(Ordering::Acquire)
+}
+
+// Reopen admission for the fresh generation. A signal that landed while it was being
+// reset re-raises SHUTDOWN, so the new generation stops instead of losing the request.
+fn reopen_admission() {
+    SHUTDOWN.store(false, Ordering::Release);
+    if TERMINATE.load(Ordering::Acquire) {
+        SHUTDOWN.store(true, Ordering::Release);
+    }
+}
+
+// Whether a drained generation should be replaced in-process.
+fn take_restart() -> bool {
+    REBOOT.swap(false, Ordering::AcqRel) && !TERMINATE.load(Ordering::Acquire)
+}
+
+// Fetch KEYDB from `url` through the address guard and save it. `boot` picks the
+// first-boot download's log wording over the daily refresh's.
+fn fetch_keydb(cfg: &std::sync::RwLock<config::Config>, url: &str, boot: bool) {
+    let (saved, save_failed, too_large, read_failed, fetch_failed) = if boot {
+        (
+            "KEYDB downloaded",
+            "KEYDB save failed",
+            "KEYDB download failed: response exceeded size limit",
+            "KEYDB download read failed",
+            "KEYDB download failed",
+        )
+    } else {
+        (
+            "KEYDB updated",
+            "KEYDB update failed",
+            "KEYDB daily update: response exceeded size limit",
+            "KEYDB daily update: response read failed",
+            "KEYDB update failed",
+        )
+    };
+    match web::guarded_get(url) {
+        Ok(resp) => {
+            match web::read_capped_keydb_body(resp.into_body().into_reader(), web::KEYDB_MAX_BYTES)
+            {
+                Ok(buf) => match keysource::save_keydb(cfg, &buf) {
+                    Ok(r) => log::syslog(&format!(
+                        "{saved}: {} entries -> {}",
+                        r.entries,
+                        r.path.display()
+                    )),
+                    Err(e) => log::syslog(&format!("{save_failed}: {e}")),
+                },
+                Err(web::KeydbReadError::TooLarge) => log::syslog(too_large),
+                Err(web::KeydbReadError::Io) => log::syslog(read_failed),
+            }
+        }
+        Err(e) => log::syslog(&format!(
+            "{fetch_failed} for {}: {e}",
+            crate::server::webhook::webhook_url_origin(url)
+        )),
     }
 }
 
@@ -435,7 +478,7 @@ fn drain_services(
     timeout: std::time::Duration,
 ) -> bool {
     let deadline = std::time::Instant::now() + timeout;
-    let mut drained = drain_rips(timeout.min(std::time::Duration::from_secs(60)));
+    let mut drained = drain_rips(timeout.min(RIP_DRAIN_TIMEOUT));
     for (name, handle) in workers {
         drained &= join_bounded(
             handle,
@@ -455,8 +498,8 @@ fn drain_services(
 
 #[cfg(unix)]
 extern "C" fn handle_signal(_sig: libc::c_int) {
-    if SHUTDOWN.load(Ordering::Acquire) {
-        // Second signal — force exit
+    // A soft reboot also sets SHUTDOWN, so only a prior stop signal means "second signal".
+    if TERMINATE.swap(true, Ordering::AcqRel) {
         unsafe { libc::_exit(1) };
     }
     // Release on the store / Acquire on the load so the flag is reliably

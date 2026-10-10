@@ -1,7 +1,7 @@
 use crate::server::config::{self, Config, WebhookEntry};
 use crate::server::ripper;
 use once_cell::sync::Lazy;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -158,7 +158,8 @@ pub(crate) fn reset_after_drain() {
 fn stop_listener() -> bool {
     STOP_LISTENER.load(std::sync::atomic::Ordering::Acquire)
         || (crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
-            && !crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire))
+            && (!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire)
+                || crate::server::TERMINATE.load(std::sync::atomic::Ordering::Acquire)))
 }
 
 pub fn run(cfg: &Arc<RwLock<Config>>) {
@@ -185,9 +186,16 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
     };
     crate::server::log::syslog(&format!("Web server listening on {}", addr));
     tracing::info!(address = %addr, "web server listening");
+    serve(cfg, |timeout| server.recv_timeout(timeout));
+    tracing::info!("web server stopping");
+}
 
+fn serve(
+    cfg: &Arc<RwLock<Config>>,
+    mut recv: impl FnMut(std::time::Duration) -> std::io::Result<Option<tiny_http::Request>>,
+) {
     loop {
-        let request = match server.recv_timeout(std::time::Duration::from_secs(1)) {
+        let request = match recv(std::time::Duration::from_secs(1)) {
             Ok(Some(request)) => request,
             Ok(None) => {
                 if stop_listener() {
@@ -196,7 +204,13 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
                 continue;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "web listener stopped receiving requests");
+                // tiny_http's accept thread has exited: the port is dead for good. As
+                // with a failed bind, stop so the container restart policy recovers us.
+                crate::server::log::syslog(&format!(
+                    "FATAL: web server stopped accepting connections: {e} — signalling shutdown"
+                ));
+                tracing::error!(error = %e, "web listener stopped receiving requests; signalling shutdown");
+                crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
                 break;
             }
         };
@@ -240,7 +254,6 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
             // guard drops here, freeing the reserved slot.
         }
     }
-    tracing::info!("web server stopping");
 }
 
 /// Extract a header value by case-insensitive field name.
@@ -643,8 +656,8 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
         Err(e) => {
             return json_response(
                 request,
-                409,
-                &serde_json::json!({"ok": false, "error": e}).to_string(),
+                metadata_error_status(&e),
+                &serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
             );
         }
     };
@@ -666,6 +679,16 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
         );
     });
     json_response(request, 200, r#"{"ok":true}"#);
+}
+
+// Metadata refusals are plain `io::Error::other` messages (a conflict with the job's
+// state); any other kind is storage failing to take the write, a server error.
+fn metadata_error_status(e: &std::io::Error) -> u16 {
+    if e.kind() == std::io::ErrorKind::Other {
+        409
+    } else {
+        500
+    }
 }
 
 fn capture_episode_start(
@@ -739,6 +762,24 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
                 }
             };
             let retitle = v["action"] == "retitle";
+            // A retitle is a new match: its poster/overview replace the old ones, as
+            // the live title override does; proceed keeps the saved match whole.
+            let (poster_url, overview) = if retitle {
+                let poster = v["poster_url"].as_str().unwrap_or("");
+                if !poster.is_empty() && !is_valid_poster_url(poster) {
+                    return json_response(
+                        request,
+                        400,
+                        r#"{"ok":false,"error":"invalid poster_url"}"#,
+                    );
+                }
+                (
+                    clamp_chars(poster, 1000),
+                    clamp_chars(v["overview"].as_str().unwrap_or(""), 2000),
+                )
+            } else {
+                (saved.tmdb_poster, saved.tmdb_overview)
+            };
             let title = if retitle {
                 clamp_chars(v["title"].as_str().unwrap_or("").trim(), 300)
             } else {
@@ -760,14 +801,14 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
                 media_type,
                 episode_start,
                 tmdb_id: v["tmdb_id"].as_u64().unwrap_or(saved.tmdb_id),
-                poster_url: saved.tmdb_poster,
-                overview: saved.tmdb_overview,
+                poster_url,
+                overview,
             };
             return match ripper::staging::save_review_metadata(&path, metadata) {
                 Ok(_) => json_response(request, 200, r#"{"ok":true}"#),
                 Err(e) => json_response(
                     request,
-                    409,
+                    metadata_error_status(&e),
                     &serde_json::json!({"ok":false,"error":e.to_string()}).to_string(),
                 ),
             };
@@ -1099,13 +1140,38 @@ fn read_body_capped(request: &mut tiny_http::Request) -> BodyRead {
     }
 }
 
+// tiny_http 0.12 has no read timeout, so the body is read on an abandonable thread that
+// owns the request; a sender still stalled when the daemon drains is left behind (its
+// request answers 500 when the read ends) instead of pinning this tracked handler.
+fn read_body_cancellable(request: tiny_http::Request) -> Option<(tiny_http::Request, BodyRead)> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    crate::server::daemon::spawn_abandonable("autorip-http-body", move || {
+        let mut request = request;
+        let read = read_body_capped(&mut request);
+        let _ = tx.send((request, read));
+    })
+    .ok()?;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(read) => return Some(read),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                if !crate::server::SHUTDOWN.load(Ordering::Acquire) => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Read a JSON POST body with the shared size cap, replying with the
 /// appropriate error status (400 bad body / 413 too large) on failure.
-/// Returns `None` once a response has already been sent.
+/// Returns `Err` once a response has been sent, or when the daemon began
+/// draining before the body arrived (the request is then never acted on).
 pub(crate) fn read_json_body(
-    mut request: tiny_http::Request,
+    request: tiny_http::Request,
 ) -> Result<(tiny_http::Request, String), ()> {
-    match read_body_capped(&mut request) {
+    let Some((request, read)) = read_body_cancellable(request) else {
+        return Err(());
+    };
+    match read {
         BodyRead::Ok(body) => Ok((request, body)),
         BodyRead::Err => {
             json_response(request, 400, r#"{"ok":false,"error":"bad body"}"#);
@@ -1209,7 +1275,7 @@ pub(crate) fn resolve_with_timeout(host: &str, port: u16) -> Result<Vec<SocketAd
     let (tx, rx) = mpsc::sync_channel::<Result<Vec<SocketAddr>, std::io::Error>>(1);
     // A refused thread (pid/thread exhaustion) is a resolve failure, not a
     // panic; the closure, and the guard in it, drop on the Err.
-    if let Err(e) = crate::server::daemon::spawn_background("dns-resolver", move || {
+    if let Err(e) = crate::server::daemon::spawn_abandonable("dns-resolver", move || {
         let _g = guard;
         let res = (host.as_str(), port)
             .to_socket_addrs()
@@ -2737,8 +2803,16 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         response = response.with_header(h);
     }
 
-    let mut stream = request.upgrade("sse", response);
+    let stream = request.upgrade("sse", response);
+    sse_session(stream, cfg, &stop, opened);
+}
 
+fn sse_session<W: std::io::Write + Send + 'static>(
+    stream: W,
+    cfg: &Arc<RwLock<Config>>,
+    stop: &AtomicBool,
+    opened: std::time::Instant,
+) {
     // Re-read the staging dir each tick (cheap) so a Settings change to
     // the staging path is reflected without restarting the SSE stream.
     let staging_dir = || {
@@ -2751,11 +2825,33 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     if crate::server::SHUTDOWN.load(Ordering::Acquire) {
         return;
     }
-    let initial = format!("data: {}\n\n", get_state_json(&staging_dir()));
-    if stream.write_all(initial.as_bytes()).is_err() {
+    // The upgraded stream has no write timeout, so an abandonable writer owns it: a
+    // half-open client cannot pin this tracked handler. One frame is in flight at a
+    // time and the next is built only once it is written (the library cursor advances).
+    let (frames, queued) = std::sync::mpsc::sync_channel::<String>(1);
+    let busy = Arc::new(AtomicBool::new(true));
+    let writer = {
+        let busy = busy.clone();
+        move || {
+            let mut stream = stream;
+            for frame in queued {
+                let sent = stream
+                    .write_all(frame.as_bytes())
+                    .and_then(|()| stream.flush());
+                busy.store(false, Ordering::Release);
+                if sent.is_err() {
+                    return;
+                }
+            }
+        }
+    };
+    if crate::server::daemon::spawn_abandonable("autorip-sse-write", writer).is_err() {
         return;
     }
-    let _ = stream.flush();
+    let initial = format!("data: {}\n\n", get_state_json(&staging_dir()));
+    if frames.send(initial).is_err() {
+        return;
+    }
 
     let mut library = crate::server::library::api::SseCursor::default();
     loop {
@@ -2766,15 +2862,17 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         {
             break;
         }
+        if busy.load(Ordering::Acquire) {
+            continue;
+        }
         let mut frame = format!("data: {}\n\n", get_state_json(&staging_dir()));
         let dirs = crate::server::library::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
         if let Some(lib) = crate::server::library::api::sse_frame(&mut library, Some(&dirs)) {
             frame.push_str(&lib);
         }
-        if stream.write_all(frame.as_bytes()).is_err() {
-            break;
-        }
-        if stream.flush().is_err() {
+        busy.store(true, Ordering::Release);
+        // A failed write ended the writer, so this send reports the dead client.
+        if frames.send(frame).is_err() {
             break;
         }
     }

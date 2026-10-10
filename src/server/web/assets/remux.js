@@ -83,8 +83,8 @@ async function changeMatch(row, button) {
       + '<div class="hook"><input class="txt" data-query aria-label="Search TMDB" value="' + esc(saved?.media.title || row.title) + '"><button class="btn btn-secondary" data-search>Search TMDB</button></div>'
       + '<label>Show <select data-kind><option value="">Movies and TV</option><option value="movie">Movies</option><option value="tv">TV</option></select></label>'
       + '<div data-results class="stack"></div>'
-      + '<div class="hook"><label>TV season <input type="number" min="1" max="65535" data-season value="' + (saved?.media.season || 1) + '"></label>'
-      + '<label>Disc number (optional) <input type="number" min="1" max="65535" data-disc value="' + (saved?.media.disc || '') + '"></label>'
+      + '<div class="hook"><label>TV season (optional) <input type="number" min="1" max="65535" data-season value="' + esc(saved?.media.season ?? '') + '"></label>'
+      + '<label>Disc number (optional) <input type="number" min="1" max="65535" data-disc value="' + esc(saved?.media.disc ?? '') + '"></label>'
       + '<label>TV First episode (optional) <input type="number" min="1" max="65535" step="1" data-episode-start value="' + esc(saved?.media.episode_start ?? '') + '"></label></div>',
   });
   let found = [], closed = false, searchRevision = 0;
@@ -115,7 +115,8 @@ async function changeMatch(row, button) {
     if (!pick) return;
     const choice = found[Number(pick.dataset.pick)];
     if (!choice) return;
-    const season = choice.media_type === 'tv' ? Number(m.el.querySelector('[data-season]').value) : null;
+    const seasonValue = m.el.querySelector('[data-season]').value;
+    const season = choice.media_type === 'tv' && seasonValue ? Number(seasonValue) : null;
     const discValue = m.el.querySelector('[data-disc]').value;
     const disc = choice.media_type === 'tv' && discValue ? Number(discValue) : null;
     if ([season, disc].some(n => n !== null && (!Number.isInteger(n) || n < 1 || n > 65535))) { toast('Use valid season and disc numbers', 'info'); return; }
@@ -123,7 +124,7 @@ async function changeMatch(row, button) {
     const episodeValue = episodeInput.value.trim();
     const episode_start = choice.media_type === 'tv' && episodeValue ? Number(episodeValue) : null;
     if (choice.media_type === 'tv' && (episodeInput.validity?.badInput || (episode_start !== null && (!Number.isInteger(episode_start) || episode_start < 1 || episode_start > 65535)))) {
-      toast('First episode must be a whole number from 1 to 65535, or blank', 'info'); return;
+      toast('First episode must be an integer between 1 and 65535, or blank', 'info'); return;
     }
     const selected_candidates = [...m.el.querySelectorAll('[data-legacy-output]:checked')].map(node => Number(node.dataset.legacyOutput));
     const confirm_ownership = !!m.el.querySelector('[data-confirm-ownership]')?.checked;

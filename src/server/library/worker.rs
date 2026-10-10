@@ -185,24 +185,14 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     }
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let (season, disc_number) =
+        label_numbers(&disc.volume_id, disc.meta_title.as_deref(), &job.title);
     let media = crate::server::planner::MediaMetadata {
         title: match_.title,
         year: match_.year,
         tmdb_id: match_.tmdb_id,
-        season: crate::server::tmdb::season_from_label(&disc.volume_id)
-            .or_else(|| {
-                disc.meta_title
-                    .as_deref()
-                    .and_then(crate::server::tmdb::season_from_label)
-            })
-            .or_else(|| crate::server::tmdb::season_from_label(&job.title)),
-        disc: crate::server::tmdb::disc_from_label(&disc.volume_id)
-            .or_else(|| {
-                disc.meta_title
-                    .as_deref()
-                    .and_then(crate::server::tmdb::disc_from_label)
-            })
-            .or_else(|| crate::server::tmdb::disc_from_label(&job.title)),
+        season,
+        disc: disc_number,
         kind: Some(crate::server::planner::MediaKind::Tv),
         episode_start: None,
     };
@@ -245,6 +235,39 @@ fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> st
     persist_auto_plan(lib, cfg, job, tv_plan_result(plan)?)
 }
 
+// Season and disc number from the disc's labels, as automatic TV planning reads them.
+fn label_numbers(
+    volume_id: &str,
+    meta_title: Option<&str>,
+    title: &str,
+) -> (Option<u16>, Option<u16>) {
+    let read = |from: fn(&str) -> Option<u16>| {
+        from(volume_id)
+            .or_else(|| meta_title.and_then(from))
+            .or_else(|| from(title))
+    };
+    (
+        read(crate::server::tmdb::season_from_label),
+        read(crate::server::tmdb::disc_from_label),
+    )
+}
+
+// A confirmed TV match that leaves season or disc open takes them from the disc's labels.
+fn with_label_numbers(
+    media: &crate::server::planner::MediaMetadata,
+    volume_id: &str,
+    meta_title: Option<&str>,
+    title: &str,
+) -> crate::server::planner::MediaMetadata {
+    let mut media = media.clone();
+    if media.kind == Some(crate::server::planner::MediaKind::Tv) {
+        let (season, disc) = label_numbers(volume_id, meta_title, title);
+        media.season = media.season.or(season);
+        media.disc = media.disc.or(disc);
+    }
+    media
+}
+
 fn attach_corrected_plan(
     lib: &Library,
     cfg: &Config,
@@ -254,6 +277,12 @@ fn attach_corrected_plan(
     use crate::server::planner::{MediaKind, MoviePlanner, TvPlanner};
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let media = &with_label_numbers(
+        media,
+        &disc.volume_id,
+        disc.meta_title.as_deref(),
+        &job.title,
+    );
     let metadata = Some(crate::server::tmdb::TmdbResult {
         title: media.title.clone(),
         year: media.year,

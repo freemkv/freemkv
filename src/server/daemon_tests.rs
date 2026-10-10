@@ -794,3 +794,144 @@ fn the_startup_destination_check_never_blocks_startup() {
     drop(tx);
     handle.join().unwrap();
 }
+
+// A folder probe stuck on a hung mount is abandoned by its caller; it must not
+// hold a restart ticket, or a soft reboot can never finish draining.
+#[test]
+fn hung_folder_probe_does_not_block_restart_drain() {
+    const CHILD: &str = "FREEMKV_TEST_HUNG_PROBE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::daemon::tests::hung_folder_probe_does_not_block_restart_drain",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let (release, hung) = std::sync::mpsc::channel::<()>();
+    let out = crate::server::health::bounded(dir.path(), Duration::from_millis(50), move || {
+        let _ = hung.recv();
+    });
+    assert_eq!(out, crate::server::health::Bounded::TimedOut);
+    assert!(
+        BACKGROUND.drain(Duration::from_millis(500)),
+        "an abandoned probe must not hold a drain ticket"
+    );
+    BACKGROUND.reopen();
+    drop(release);
+}
+
+// Run `name` alone in a child test process: these tests drive the process-wide
+// SHUTDOWN/REBOOT/TERMINATE flags and the real signal handler.
+fn in_child(name: &str) -> bool {
+    const CHILD: &str = "FREEMKV_TEST_DAEMON_SIGNAL_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("server::daemon::tests::{name}"),
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "{name} failed in its child process: {status}"
+    );
+    false
+}
+
+// A soft reboot sets SHUTDOWN itself; the first real SIGTERM during its drain is
+// a stop request to honour gracefully, not a "second signal" force-exit.
+#[cfg(unix)]
+#[test]
+fn first_sigterm_during_soft_reboot_drains_instead_of_force_exiting() {
+    if !in_child("first_sigterm_during_soft_reboot_drains_instead_of_force_exiting") {
+        return;
+    }
+    REBOOT.store(true, Ordering::Release);
+    SHUTDOWN.store(true, Ordering::Release);
+    handle_signal(libc::SIGTERM);
+    assert!(SHUTDOWN.load(Ordering::Acquire));
+    assert!(TERMINATE.load(Ordering::Acquire));
+    assert!(!take_restart(), "a stop request vetoes the pending reboot");
+}
+
+// SIGTERM accepted before the reboot handler stores REBOOT must not become a restart,
+// and one landing while admission reopens must leave the new generation stopping.
+#[test]
+fn termination_vetoes_restart_and_survives_admission_reopen() {
+    if !in_child("termination_vetoes_restart_and_survives_admission_reopen") {
+        return;
+    }
+    TERMINATE.store(true, Ordering::Release);
+    SHUTDOWN.store(true, Ordering::Release);
+    REBOOT.store(true, Ordering::Release);
+    assert!(!take_restart());
+    reopen_admission();
+    assert!(SHUTDOWN.load(Ordering::Acquire));
+}
+
+fn muxing_staging() -> (tempfile::TempDir, std::path::PathBuf) {
+    let staging = tempfile::tempdir().unwrap();
+    let disc = staging.path().join("disc");
+    std::fs::create_dir_all(&disc).unwrap();
+    let marker = disc.join(ripper::staging::MUXING_MARKER);
+    std::fs::write(&marker, b"").unwrap();
+    (staging, marker)
+}
+
+// Graceful process stop is not a crash: even when a wedged writer keeps the drain
+// from finishing, in-progress markers must not survive into the next start.
+#[test]
+fn failed_shutdown_drain_still_clears_in_progress_markers() {
+    if !in_child("failed_shutdown_drain_still_clears_in_progress_markers") {
+        return;
+    }
+    let (staging, marker) = muxing_staging();
+    SHUTDOWN.store(true, Ordering::Release);
+    let mut cleared_before_drain = false;
+    assert!(!stop_generation(staging.path(), || {
+        cleared_before_drain = !marker.exists();
+        false
+    }));
+    assert!(
+        cleared_before_drain,
+        "a SIGKILL mid-drain must find clean markers"
+    );
+    assert!(!marker.exists());
+}
+
+// A reboot drain waits for writers before touching markers, and a SIGTERM while it
+// waits turns it into a bounded process stop.
+#[test]
+fn sigterm_during_refused_reboot_stops_with_clean_markers() {
+    if !in_child("sigterm_during_refused_reboot_stops_with_clean_markers") {
+        return;
+    }
+    let (staging, marker) = muxing_staging();
+    REBOOT.store(true, Ordering::Release);
+    SHUTDOWN.store(true, Ordering::Release);
+    let mut calls = 0;
+    let drained = stop_generation(staging.path(), || {
+        calls += 1;
+        if calls == 1 {
+            assert!(marker.exists(), "an old writer may still own it");
+            TERMINATE.store(true, Ordering::Release);
+        }
+        calls == 3
+    });
+    assert!(!drained);
+    assert_eq!(calls, 2);
+    assert!(!marker.exists());
+}

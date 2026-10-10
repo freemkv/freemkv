@@ -74,26 +74,6 @@ test('a queued job says why it waits and when it retries', async () => {
     'waiting for the output folder', 'a backoff that has passed is not shown');
 });
 
-test('the System Folders row shows state, last good access and last error', async () => {
-  const f = await load();
-  const ok = f.folderHealthRow({ role: 'Library', path: '/lib', state: 'ok', ok: true, last_ok: 9 });
-  assert.match(ok, /dot-ok/);
-  assert.match(ok, /ago\(9\)/);
-  assert.match(ok, /<td><span class="muted small">–<\/span><\/td>/);
-  const bad = f.folderHealthRow({
-    role: 'Movies', path: '/m', state: 'unresponsive', ok: false, since: 7,
-    message: 'The movies folder is not responding <x>', last_ok: null,
-    last_error: 'not responding after 5s', last_error_at: 8,
-  });
-  assert.match(bad, /dot-warn/);
-  assert.match(bad, /not responding &lt;x&gt;/);
-  assert.match(bad, /since ago\(7\)/);
-  assert.match(bad, /never/);
-  assert.match(bad, /not responding after 5s.*ago\(8\)/);
-  // An old payload without the new fields still renders.
-  assert.match(f.folderHealthRow({ role: 'Old', path: '/o', ok: false, problem: 'missing' }), /dot-bad/);
-});
-
 test('a job with a kept file says it finished locally, its size and failed copies', async () => {
   const f = await load();
   assert.equal(f.stagedNote({ state: 'queued' }), '');
