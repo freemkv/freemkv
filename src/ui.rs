@@ -2874,7 +2874,7 @@ impl App {
                     LogKind::Notice,
                     &crate::strings::fmt_or(
                         "gui.log.settings_save_error",
-                        "Could not save audio/subtitle preferences: {e}",
+                        "Could not save settings: {e}",
                         &[("e", &e)],
                     ),
                 );
