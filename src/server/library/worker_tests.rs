@@ -1578,3 +1578,34 @@ fn the_default_staging_budget_is_a_quarter_of_the_disk_at_most_500_gb() {
         (2 * 86_400, 3_000_000_000)
     );
 }
+
+#[test]
+fn a_tmdb_outage_fails_planning_instead_of_freezing_a_movie_plan() {
+    let (_t, lib, dirs) = library_with(&["A"]);
+    let fx = crate::ku_fixture::bd_image();
+    let iso = dirs.isos.as_ref().unwrap().join("A.iso");
+    std::fs::write(&iso, &fx.img.image).unwrap();
+    lib.queue.add(vec![NewJob {
+        title: "A".into(),
+        iso,
+        target: dirs.library.join("A/A.mkv"),
+        replace: true,
+    }]);
+    let mut job = lib.queue.claim_next().unwrap();
+    let cfg = Config {
+        tv_auto: true,
+        tmdb_api_key: "key".into(),
+        library_dir: dirs.library.to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let failed = Err(crate::server::tmdb::LookupFailed);
+    assert!(attach_from_lookup(&lib, &cfg, &mut job, failed).is_err());
+    assert!(job.plan.is_none());
+    assert!(
+        lib.queue.snapshot().jobs[0].plan.is_none(),
+        "nothing frozen"
+    );
+    // A clean "no match" still plans the movie, so the fixture can be planned.
+    attach_from_lookup(&lib, &cfg, &mut job, Ok(None)).unwrap();
+    assert!(lib.queue.snapshot().jobs[0].plan.is_some());
+}

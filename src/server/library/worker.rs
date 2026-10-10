@@ -175,7 +175,20 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     if !cfg.tv_auto || cfg.tmdb_api_key.is_empty() {
         return attach_automatic_movie_plan(lib, cfg, job);
     }
-    let Some(match_) = crate::server::tmdb::lookup(&job.title, &cfg.tmdb_api_key) else {
+    let looked_up = crate::server::tmdb::lookup_checked(&job.title, &cfg.tmdb_api_key);
+    attach_from_lookup(lib, cfg, job, looked_up)
+}
+
+fn attach_from_lookup(
+    lib: &Library,
+    cfg: &Config,
+    job: &mut Job,
+    looked_up: Result<Option<crate::server::tmdb::TmdbResult>, crate::server::tmdb::LookupFailed>,
+) -> std::io::Result<()> {
+    let Some(match_) = looked_up.map_err(|_| {
+        std::io::Error::other("TMDB could not be reached to plan this disc; retry once it is back")
+    })?
+    else {
         return attach_automatic_movie_plan(lib, cfg, job);
     };
     if match_.media_type != "tv"
