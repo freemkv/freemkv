@@ -15,17 +15,10 @@ pub(super) fn metadata(root: &Path, job: &str) -> Option<crate::server::tmdb::Tm
 pub(super) fn metadata_from_state(
     st: staging::DiscState,
 ) -> Option<crate::server::tmdb::TmdbResult> {
-    let m = st.user_metadata.or_else(|| {
-        (!st.title.is_empty()).then_some(staging::UserMetadata {
-            title: st.title,
-            year: st.year,
-            media_type: st.media_type,
-            episode_start: st.episode_start,
-            tmdb_id: st.tmdb_id,
-            poster_url: st.tmdb_poster,
-            overview: st.tmdb_overview,
-        })
-    })?;
+    let m = st
+        .user_metadata
+        .clone()
+        .or_else(|| (!st.title.is_empty()).then(|| staging::UserMetadata::shown_by(&st)))?;
     Some(crate::server::tmdb::TmdbResult {
         title: m.title,
         year: m.year,

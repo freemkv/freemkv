@@ -123,7 +123,7 @@ fn explicit_single_output_resume_preserves_nonzero_title_and_metadata() {
     assert!(
         resume::check_resume_selection(&disc.titles, &Config::default(), "tv", true, false).is_ok()
     );
-    assert_eq!(resume::resume_titles(&disc, false, &plan).unwrap(), vec![1]);
+    assert_eq!(resume::resume_titles(&disc, &plan).unwrap(), vec![1]);
     assert_eq!(
         resume::resume_primary_output(&plan, "wrong-movie.mkv".into()),
         plan[0]

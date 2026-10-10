@@ -372,7 +372,6 @@ fn defer_status_after_ripping(
 // Missing proof never authorizes title zero, even for legacy single outputs.
 pub(super) fn resume_titles(
     disc: &libfreemkv::Disc,
-    _is_fanout: bool,
     plan: &[staging::Output],
 ) -> Result<Vec<usize>, String> {
     let mut titles: Vec<usize> = rebind_resume_outputs(&disc.titles, plan)?
@@ -463,7 +462,7 @@ fn validate_replanned_capture(
         .map_err(|e| Unusable(format!("the saved recovery map could not be read: {e}")))?;
     let mut reader = libfreemkv::FileSectorSource::open(iso)
         .map_err(|e| Unusable(format!("the saved disc image could not be opened: {e}")))?;
-    let titles = resume_titles(disc, outputs.len() > 1, outputs).map_err(Unusable)?;
+    let titles = resume_titles(disc, outputs).map_err(Unusable)?;
     let ranges = disc
         .mkv_staging_ranges(&mut reader, &titles)
         .map_err(|e| Unusable(format!("the saved disc image could not be read: {e}")))?;
@@ -1169,7 +1168,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     let titles = if super::output_is_iso_image(&cfg_read.output_format) {
         vec![0] // Whole-disc delivery, not a remux selection.
     } else {
-        match resume_titles(&disc, is_fanout, &plan_outputs) {
+        match resume_titles(&disc, &plan_outputs) {
             Ok(titles) => titles,
             Err(reason) => {
                 reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
@@ -1202,7 +1201,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
 
     // Loss re-validation against the primary title (the classifier checks no loss).
     // `.get` guards a stale/out-of-range plan index.
-    let primary_index = resume_primary_output(&plan_outputs, String::new()).title_index;
+    let primary_index = plan_outputs.first().map_or(0, |o| o.title_index);
     let title = match disc.titles.get(primary_index) {
         Some(t) => t.clone(),
         None => {

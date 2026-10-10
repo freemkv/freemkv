@@ -11,11 +11,13 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-// Serializes operator metadata commits with worker state writes. Kept separate
 type JobMutex = std::sync::Arc<std::sync::Mutex<()>>;
 type LockPool =
     std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<std::sync::Mutex<()>>>>;
 
+// Two per-job pools: state locks serialize state.json commits (operator metadata vs
+// worker writes) and are held briefly; job leases span a whole rip, mux or delivery.
+// Kept separate so a long lease never blocks a state write. Order: lease, then state.
 static STATE_LOCKS: std::sync::LazyLock<LockPool> = std::sync::LazyLock::new(Default::default);
 static JOB_LEASES: std::sync::LazyLock<LockPool> = std::sync::LazyLock::new(Default::default);
 
@@ -52,6 +54,19 @@ pub struct UserMetadata {
 }
 
 impl UserMetadata {
+    /// The metadata a job currently shows (scan or corrected), as a selection.
+    pub(super) fn shown_by(st: &DiscState) -> Self {
+        UserMetadata {
+            title: st.title.clone(),
+            year: st.year,
+            media_type: st.media_type.clone(),
+            episode_start: st.episode_start,
+            tmdb_id: st.tmdb_id,
+            poster_url: st.tmdb_poster.clone(),
+            overview: st.tmdb_overview.clone(),
+        }
+    }
+
     fn apply(&self, st: &mut DiscState) {
         st.title = self.title.clone();
         st.year = self.year;
@@ -2559,16 +2574,7 @@ fn reset_capture_with(
         ));
     }
     let mut fresh = DiscState::new(StagingState::Stopped);
-    UserMetadata {
-        title: old.title,
-        year: old.year,
-        media_type: old.media_type,
-        episode_start: old.episode_start,
-        tmdb_id: old.tmdb_id,
-        poster_url: old.tmdb_poster,
-        overview: old.tmdb_overview,
-    }
-    .apply(&mut fresh);
+    UserMetadata::shown_by(&old).apply(&mut fresh);
     fresh.title_confident = old.title_confident;
     fresh.user_metadata = old.user_metadata;
     fresh.metadata_revision = old.metadata_revision;

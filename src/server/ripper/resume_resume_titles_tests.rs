@@ -11,7 +11,7 @@ fn saved_identity_rebinds_reordered_titles_before_key_selection() {
     disc.titles.swap(0, 1);
     let rebound = rebind_resume_outputs(&disc.titles, &saved).unwrap();
     assert_eq!(rebound[0].title_index, 0);
-    assert_eq!(resume_titles(&disc, false, &rebound).unwrap(), vec![0]);
+    assert_eq!(resume_titles(&disc, &rebound).unwrap(), vec![0]);
     assert_eq!(
         saved[0].title_index, 1,
         "rebinding must not mutate saved evidence"
@@ -83,8 +83,8 @@ fn plan(indices: &[usize]) -> Vec<staging::Output> {
 #[test]
 fn resume_titles_refuses_unproved_numeric_hints() {
     let disc = crate::ku_fixture::bd_image().disc;
-    assert!(resume_titles(&disc, false, &plan(&[3])).is_err());
-    assert!(resume_titles(&disc, true, &plan(&[5, 0, 0])).is_err());
-    assert!(resume_titles(&disc, true, &plan(&[7, 9])).is_err());
-    assert!(resume_titles(&disc, false, &plan(&[0])).is_err());
+    assert!(resume_titles(&disc, &plan(&[3])).is_err());
+    assert!(resume_titles(&disc, &plan(&[5, 0, 0])).is_err());
+    assert!(resume_titles(&disc, &plan(&[7, 9])).is_err());
+    assert!(resume_titles(&disc, &plan(&[0])).is_err());
 }
