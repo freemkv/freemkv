@@ -39,7 +39,7 @@ fn ambiguous_tv_capture_requires_review_for_muxed_formats() {
             tv_auto: true,
             ..Default::default()
         };
-        needs_review(check_capture_selection(&titles(), &cfg, "tv"));
+        needs_review(check_capture_selection(&titles(), &cfg, "tv", ""));
     }
 }
 
@@ -50,17 +50,17 @@ fn ambiguous_tv_iso_capture_remains_available() {
         tv_auto: true,
         ..Default::default()
     };
-    assert!(check_capture_selection(&titles(), &cfg, "tv").is_ok());
+    assert!(check_capture_selection(&titles(), &cfg, "tv", "").is_ok());
 }
 
 #[test]
 fn selection_guard_preserves_movie_and_disabled_tv_auto_policy() {
     let mut cfg = Config::default();
     for kind in ["movie", ""] {
-        assert!(check_capture_selection(&titles(), &cfg, kind).is_ok());
+        assert!(check_capture_selection(&titles(), &cfg, kind, "").is_ok());
     }
     cfg.tv_auto = false;
-    assert!(check_capture_selection(&titles(), &cfg, "tv").is_ok());
+    assert!(check_capture_selection(&titles(), &cfg, "tv", "").is_ok());
 }
 
 #[test]
@@ -76,20 +76,20 @@ fn authored_tv_evidence_allows_capture_and_replan() {
         };
     }
     let cfg = Config::default();
-    assert!(check_capture_selection(&titles, &cfg, "tv").is_ok());
-    assert!(resume::check_resume_selection(&titles, &cfg, "tv", true, true).is_ok());
+    assert!(check_capture_selection(&titles, &cfg, "tv", "").is_ok());
+    assert!(resume::check_resume_selection(&titles, &cfg, "tv", "", true, true).is_ok());
 }
 
 #[test]
 fn ambiguous_tv_resume_keeps_explicit_plan_but_refuses_reselection() {
     let cfg = Config::default();
     let titles = titles();
-    assert!(resume::check_resume_selection(&titles, &cfg, "tv", true, false).is_ok());
+    assert!(resume::check_resume_selection(&titles, &cfg, "tv", "", true, false).is_ok());
     needs_review(resume::check_resume_selection(
-        &titles, &cfg, "tv", true, true,
+        &titles, &cfg, "tv", "", true, true,
     ));
     needs_review(resume::check_resume_selection(
-        &titles, &cfg, "tv", false, false,
+        &titles, &cfg, "tv", "", false, false,
     ));
 }
 
@@ -103,6 +103,7 @@ fn iso_setting_does_not_authorize_ambiguous_resume_mux() {
         &titles(),
         &cfg,
         "tv",
+        "",
         true,
         true,
     ));
@@ -121,7 +122,8 @@ fn explicit_single_output_resume_preserves_nonzero_title_and_metadata() {
         ..Default::default()
     }];
     assert!(
-        resume::check_resume_selection(&disc.titles, &Config::default(), "tv", true, false).is_ok()
+        resume::check_resume_selection(&disc.titles, &Config::default(), "tv", "", true, false)
+            .is_ok()
     );
     assert_eq!(resume::resume_titles(&disc, &plan).unwrap(), vec![1]);
     assert_eq!(

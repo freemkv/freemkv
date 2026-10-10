@@ -839,6 +839,7 @@ pub(super) fn check_resume_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
+    disc_label: &str,
     has_plan: bool,
     replan_required: bool,
 ) -> Result<(), crate::server::planner::PlanError> {
@@ -847,7 +848,7 @@ pub(super) fn check_resume_selection(
     if has_plan && !replan_required {
         return Ok(());
     }
-    let kind = (media_type == "tv").then_some(crate::server::planner::MediaKind::Tv);
+    let kind = super::plan_kind(media_type, disc_label);
     crate::server::planner::check_episode_selection(titles, cfg, kind)
 }
 
@@ -1008,10 +1009,24 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     if let Some(saved) = &saved_state {
         plan_outputs = saved.outputs.clone();
     }
+    // The raw label the replan plans from (plan_mux_outputs), else the scan's.
+    let disc_label = saved_state
+        .as_ref()
+        .map(|s| s.disc_label.clone())
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| {
+            super::STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(device)
+                .map(|s| s.disc_label.clone())
+                .unwrap_or_default()
+        });
     if let Err(error) = check_resume_selection(
         &disc.titles,
         &cfg_read,
         &media_type,
+        &disc_label,
         !plan_outputs.is_empty(),
         replan_required,
     ) {

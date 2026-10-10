@@ -309,7 +309,7 @@ pub static FIELDS: &[Field] = &[
     field("min_length_secs", "Shortest title to rip (seconds)", G::Hidden, Kind::Number { max: MAX_DURATION_SECS }, N(600),
         "Skip titles shorter than this (600 = 10 minutes).").hide_if("output_format", "iso"),
     field("tv_auto", "Rip TV seasons automatically", G::Ripping, Kind::Bool, B(true),
-        "For identified TV sources, plan episode outputs from a complete authored title roster. Missing selection evidence or unconfirmed episode numbering requires review; TMDB metadata alone does not identify disc titles. Off: automatic planning uses one output rather than episode fan-out; explicitly reviewed TV plans remain possible."),
+        "Rip every episode of a TV disc (matched as TV on TMDB, or whose label names a season) and name them from TMDB. A disc whose episode titles cannot be told apart, or whose episode numbering is unconfirmed, is held for review. Off: a TV disc is ripped as one movie-style output instead of being held for its episodes."),
     field("rip_mode", "Reading", G::Recovery, Kind::RipMode, Def::None,
         ""),
     field("on_read_error", "When part of the disc can't be read", G::Recovery, Kind::Choice(ON_READ_ERROR), S("stop"),

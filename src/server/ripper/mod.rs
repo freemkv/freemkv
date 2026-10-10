@@ -310,7 +310,7 @@ fn rip_key_scope(
         return libfreemkv::keys::KeyScope::None;
     }
     let mut titles = fanout_episode_indices(&disc.titles, cfg, media_type, disc_name);
-    if let Ok(index) = capture_title_index(&disc.titles, cfg, media_type) {
+    if let Ok(index) = capture_title_index(&disc.titles, cfg, media_type, disc_name) {
         titles.push(index);
     }
     titles.sort_unstable();
@@ -3210,7 +3210,9 @@ fn rip_disc_inner(
 
     // Missing authored episode evidence must not turn a TV capture into one
     // movie-style output. Whole-disc ISO capture does not select mux titles.
-    if let Err(error) = check_capture_selection(&disc.titles, &cfg_read, &tmdb_media_type) {
+    if let Err(error) =
+        check_capture_selection(&disc.titles, &cfg_read, &tmdb_media_type, &disc_name)
+    {
         let reason = selection_review_message(&error);
         crate::server::log::device_log(device, &reason);
         update_state_with(device, |s| {
@@ -3221,7 +3223,8 @@ fn rip_disc_inner(
     }
 
     // The main movie, picked by the engine exactly as the CLI and GUI pick it.
-    let main_idx = match capture_title_index(&disc.titles, &cfg_read, &tmdb_media_type) {
+    let main_idx = match capture_title_index(&disc.titles, &cfg_read, &tmdb_media_type, &disc_name)
+    {
         Ok(index) => index,
         Err(error) => {
             let reason = selection_review_message(&error);
@@ -5434,24 +5437,25 @@ fn check_capture_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
+    disc_name: &str,
 ) -> Result<(), crate::server::planner::PlanError> {
     if output_is_iso_image(&cfg.output_format) {
         return Ok(());
     }
-    let kind = (media_type == "tv").then_some(crate::server::planner::MediaKind::Tv);
-    crate::server::planner::check_episode_selection(titles, cfg, kind)?;
-    capture_title_index(titles, cfg, media_type).map(|_| ())
+    crate::server::planner::check_episode_selection(titles, cfg, plan_kind(media_type, disc_name))?;
+    capture_title_index(titles, cfg, media_type, disc_name).map(|_| ())
 }
 
 fn capture_title_index(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
+    disc_name: &str,
 ) -> Result<usize, crate::server::planner::PlanError> {
     if output_is_iso_image(&cfg.output_format) && !titles.is_empty() {
         return Ok(0); // Whole-disc capture makes no presentation choice.
     }
-    if let Some(index) = fanout_episode_indices(titles, cfg, media_type, "").first() {
+    if let Some(index) = fanout_episode_indices(titles, cfg, media_type, disc_name).first() {
         return Ok(*index);
     }
     crate::server::planner::MoviePlanner::from_config(cfg).title_index(titles)
@@ -5467,10 +5471,19 @@ fn fanout_episode_indices(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
-    _disc_name: &str,
+    disc_name: &str,
 ) -> Vec<usize> {
-    let kind = (media_type == "tv").then_some(crate::server::planner::MediaKind::Tv);
-    crate::server::planner::episode_indices(titles, cfg, kind)
+    crate::server::planner::episode_indices(titles, cfg, plan_kind(media_type, disc_name))
+}
+
+// Whether a disc is TV for `tv_auto` planning (1.7.7): TMDB says tv, or its label
+// names a season even without a TMDB tv match. Evidence gates still apply.
+pub(super) fn plan_kind(
+    media_type: &str,
+    disc_name: &str,
+) -> Option<crate::server::planner::MediaKind> {
+    (media_type == "tv" || crate::server::tmdb::season_from_label(disc_name).is_some())
+        .then_some(crate::server::planner::MediaKind::Tv)
 }
 
 // The titles a fresh rip's staged image must hold for its mux: the main feature, the TV plan's
