@@ -203,3 +203,38 @@ fn progressing_copy_does_not_hit_a_total_duration_deadline() {
     assert_eq!(result.unwrap(), 10);
     assert!(!halt.is_cancelled());
 }
+
+#[test]
+fn a_flush_reporting_progress_without_new_bytes_is_not_a_stall() {
+    let _guard = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let written = Arc::new(AtomicU64::new(10));
+    let activity = Arc::new(Activity::default());
+    let worker_activity = activity.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        // All bytes written; the durable flush keeps reporting progress.
+        for _ in 0..20 {
+            worker_activity.beat();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        tx.send(Ok(10)).unwrap();
+    });
+    let halt = libfreemkv::Halt::new();
+    let result = Monitor {
+        job: temp.path(),
+        destination: temp.path(),
+        written: &written,
+        activity: &activity,
+        halt: &halt,
+        progress: &|_, _, _, _| {},
+        source_size: 10,
+        stall_window: Duration::from_millis(50),
+        poll_interval: Duration::from_millis(2),
+    }
+    .wait(rx, worker);
+    assert_eq!(result.unwrap(), 10);
+    assert!(!halt.is_cancelled());
+}

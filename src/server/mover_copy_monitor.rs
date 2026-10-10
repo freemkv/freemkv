@@ -18,17 +18,25 @@ pub(super) fn was_stalled(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|e| e.is::<Stalled>())
 }
 
-pub(super) struct Activity(Mutex<&'static str>);
+// The worker's current operation, and a heartbeat for progress that adds no bytes
+// (a durable flush's completed pieces or server write counters).
+pub(super) struct Activity(Mutex<&'static str>, AtomicU64);
 
 impl Default for Activity {
     fn default() -> Self {
-        Self(Mutex::new("starting destination copy"))
+        Self(Mutex::new("starting destination copy"), AtomicU64::new(0))
     }
 }
 
 impl Activity {
     pub fn set(&self, operation: &'static str) {
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = operation;
+    }
+    pub fn beat(&self) {
+        self.1.fetch_add(1, Ordering::Relaxed);
+    }
+    fn beats(&self) -> u64 {
+        self.1.load(Ordering::Relaxed)
     }
     fn operation(&self) -> &'static str {
         *self.0.lock().unwrap_or_else(|e| e.into_inner())
@@ -54,6 +62,7 @@ impl Monitor<'_> {
         worker: std::thread::JoinHandle<()>,
     ) -> io::Result<u64> {
         let mut last_bytes = 0;
+        let mut last_beats = self.activity.beats();
         let mut advanced = Instant::now();
         let mut stalled = None;
         let mut cancelled = false;
@@ -62,8 +71,9 @@ impl Monitor<'_> {
         loop {
             let now = Instant::now();
             let done = self.written.load(Ordering::Relaxed);
-            if done != last_bytes {
-                last_bytes = done;
+            let beats = self.activity.beats();
+            if done != last_bytes || beats != last_beats {
+                (last_bytes, last_beats) = (done, beats);
                 advanced = now;
             }
             if stalled.is_none() && now.duration_since(advanced) >= self.stall_window {

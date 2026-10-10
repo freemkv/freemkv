@@ -682,8 +682,12 @@ fn copy_counting_with_halt(
         // handles macOS network volumes which reject F_FULLFSYNC but support
         // fsync, and bounds a flush that stops making progress.
         stage("syncing destination temporary file");
-        libfreemkv::io::durable_sync_file(&writer, halt, |_, _| {})
-            .map_err(|e| context("sync destination", &tmp, e))?;
+        libfreemkv::io::durable_sync_file(&writer, halt, |_, _| {
+            if let Some(activity) = activity {
+                activity.beat();
+            }
+        })
+        .map_err(|e| context("sync destination", &tmp, e))?;
         Ok(total)
     };
 
