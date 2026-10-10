@@ -575,7 +575,7 @@ pub fn scan_with_keys_under(
     // A FOLDER is an image-level source too: "Open Folder" / drag-and-drop.
     let src = fe::ImageSource::from_path(path);
     let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
-    let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
+    let main = open_titles(&disc);
     let o = crate::rip_keys::ImageOpen {
         scope: libfreemkv::keys::KeyScope::Titles(main.clone()),
         seed: None,
@@ -598,6 +598,32 @@ fn stopped_open<T>(
             Err(format!("E{} {}", e.code(), explain(e.code())))
         }
         r => Ok(r),
+    }
+}
+
+// The titles Open resolves keys for: the main title, or its review candidates when automatic
+// selection needs review. Open never fails on review: ticking titles is the way past it, and
+// the preflight reports `selection-review-required`.
+pub(crate) fn open_titles(disc: &libfreemkv::Disc) -> Vec<usize> {
+    fe::resolve_selection(disc, &fe::Selection::MainMovie)
+        .unwrap_or_else(|review| review.candidates)
+}
+
+// The titles a rip runs. Automatic selection that needs review refuses as E9086 with the
+// reason; a whole-disc copy needs no title choice and measures its loss over the candidates.
+pub(crate) fn rip_titles(
+    disc: &libfreemkv::Disc,
+    sel: &fe::Selection,
+    whole: bool,
+) -> Result<Vec<usize>, String> {
+    match fe::resolve_selection(disc, sel) {
+        Ok(indices) => Ok(indices),
+        Err(review) if whole => Ok(review.candidates),
+        Err(review) => {
+            let e = libfreemkv::Error::from(review.clone());
+            let msg = crate::strings::error_message_with(u32::from(e.code()), review.reason.key());
+            Err(format!("E{} {msg}", e.code()))
+        }
     }
 }
 
@@ -1296,7 +1322,7 @@ pub fn scan_disc_with_keys(
     // An earlier Open's drive first: this open may be of the same drive.
     HOLD.release();
     let (disc, mut session) = drive_scan(source, keys, tok)?;
-    let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
+    let main = open_titles(&disc);
     let scope = libfreemkv::keys::KeyScope::Titles(main.clone());
     let (set, trace) = crate::rip_keys::resolve_observed(
         &disc,
@@ -1386,7 +1412,16 @@ pub fn preflight_with_keys(
     job.keys = seed.cloned();
     match fe::preflight(&disc, &job) {
         fe::Preflight::Ready => Ok(vec![]),
-        fe::Preflight::Blocked(rs) => Ok(rs.iter().map(|r| r.key.to_string()).collect()),
+        fe::Preflight::Blocked(rs) => Ok(rs.iter().map(reason_text).collect()),
+    }
+}
+
+// A preflight reason as the GUI lists it: its stable key, `=detail` when it carries one (the
+// review reason of `selection-review-required`, an out-of-range index).
+fn reason_text(r: &fe::Reason) -> String {
+    match &r.detail {
+        Some(detail) => format!("{}={detail}", r.key),
+        None => r.key.clone(),
     }
 }
 
@@ -2918,7 +2953,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         } else {
             fe::Selection::Titles(req.titles.clone())
         };
-        let indices = fe::resolve_selection(&disc, &sel);
+        let indices = rip_titles(&disc, &sel, false)?;
         // A staged image holds only the titles it was staged for (checked by extents, so the
         // staging mux's re-mapped selection passes); anything else would mux zero-fill.
         fe::ensure_titles_staged(src_path, &disc, &indices).map_err(|e| gui_error(&e, src_path))?;
@@ -3470,8 +3505,8 @@ fn run_disc_scanning(
     } else {
         fe::Selection::Titles(req.titles.clone())
     };
-    let indices = fe::resolve_selection(&disc, &sel);
     let whole = matches!(kind, OutKind::DecryptedFolder | OutKind::IsoImage);
+    let indices = rip_titles(&disc, &sel, whole)?;
     require_selection(whole, &indices)?;
     let scope = if whole {
         disc_copy_scope(kind, req.raw)

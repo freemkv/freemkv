@@ -1560,8 +1560,10 @@ pub(crate) fn resolve_info_keys(
         key_url: None,
         key_auth: None,
     };
-    let main = freemkv_engine::resolve_selection(disc, &freemkv_engine::Selection::MainMovie);
-    let scope = libfreemkv::keys::KeyScope::Titles(main);
+    // The main title, or its review candidates when it needs review: `info` reports, it never
+    // refuses (the engine's plain-rip scope).
+    let scope =
+        freemkv_engine::keys::rip_scope(disc, &[], freemkv_engine::keys::RipOutput::Streams);
     let factory = key_source_factory(&keys, out);
     let (set, trace) = crate::rip_keys::resolve(disc, drive, scope, &factory, None, None);
     emit_resolution_trace(out, &trace);

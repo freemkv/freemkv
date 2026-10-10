@@ -101,7 +101,8 @@ fn authored_order_survives_canonical_duration_sort_in_cli_and_gui() {
             StreamFilter::Langs(prefs.audio.clone())
         };
         assert_eq!(
-            freemkv_engine::resolve_selection_with_audio(&disc, &Selection::Episodes, &audio),
+            freemkv_engine::resolve_selection_with_audio(&disc, &Selection::Episodes, &audio)
+                .unwrap(),
             expected
         );
         let tree = Tree::from_scan(&scan, "Episodes", 0.0, &prefs);
@@ -121,7 +122,8 @@ fn authored_order_survives_canonical_duration_sort_in_cli_and_gui() {
                 &disc,
                 &Selection::Titles(tree.ticked_titles()),
                 &audio
-            ),
+            )
+            .unwrap(),
             expected
         );
     }
@@ -264,4 +266,50 @@ fn visible_episode_subset_keeps_canonical_indices_and_longest_ties_match_engine(
             .indices,
         vec![1]
     );
+}
+
+// Open on a disc whose main title needs review resolves keys for the review candidates and
+// does not fail: ticking titles is the way past the hold.
+#[test]
+fn open_scopes_keys_to_the_review_candidates() {
+    let mut disc = disc(false);
+    disc.titles = crate::selection_test_fixtures::launch_titles();
+    assert_eq!(super::open_titles(&disc), vec![0, 1]);
+}
+
+// A title rip of a selection that needs review refuses with E9086 and the reason, never as
+// "nothing selected"; a whole-disc copy proceeds and measures over the candidates.
+#[test]
+fn a_rip_needing_review_is_e9086_unless_it_copies_the_whole_disc() {
+    let mut disc = disc(false);
+    disc.titles = crate::selection_test_fixtures::launch_titles();
+    let err = super::rip_titles(&disc, &Selection::MainMovie, false).unwrap_err();
+    assert!(err.starts_with("E9086 "), "{err}");
+    assert!(err.contains("missing-presentation-language"), "{err}");
+    assert_eq!(
+        super::rip_titles(&disc, &Selection::MainMovie, true),
+        Ok(vec![0, 1])
+    );
+    assert_eq!(
+        super::rip_titles(&disc, &Selection::Titles(vec![1]), false),
+        Ok(vec![1])
+    );
+}
+
+// The GUI's preflight list keeps a reason's detail: `selection-review-required` names why.
+#[test]
+fn preflight_reasons_keep_their_detail() {
+    let review = freemkv_engine::Reason {
+        key: "selection-review-required".into(),
+        detail: Some("missing-presentation-language".into()),
+    };
+    assert_eq!(
+        super::reason_text(&review),
+        "selection-review-required=missing-presentation-language"
+    );
+    let bare = freemkv_engine::Reason {
+        key: "encrypted-no-key".into(),
+        detail: None,
+    };
+    assert_eq!(super::reason_text(&bare), "encrypted-no-key");
 }
