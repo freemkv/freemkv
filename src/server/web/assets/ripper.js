@@ -340,7 +340,7 @@ function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, o
     const raw = episodeInput.value.trim();
     const start = raw === '' ? null : Number(raw);
     if (media_type === 'tv' && (episodeInput.validity?.badInput || (start !== null && (!Number.isInteger(start) || start < 1 || start > 65535)))) {
-      toast('First episode must be an integer between 1 and 65535', 'info');
+      toast('First episode must be an integer between 1 and 65535, or blank', 'info');
       return null;
     }
     return { ...c, media_type, episode_start: media_type === 'tv' ? start : null };

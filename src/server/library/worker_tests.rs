@@ -1578,3 +1578,33 @@ fn the_default_staging_budget_is_a_quarter_of_the_disk_at_most_500_gb() {
         (2 * 86_400, 3_000_000_000)
     );
 }
+
+// Change match with the season left blank must plan the season the automatic path
+// reads from the labels (SHOW_S3_D1 -> season 3, disc 1), not silently season 1.
+#[test]
+fn confirmed_tv_match_without_season_reads_it_from_the_disc_labels() {
+    use crate::server::planner::{MediaKind, MediaMetadata};
+    let open = MediaMetadata {
+        title: "Show".into(),
+        tmdb_id: 7,
+        kind: Some(MediaKind::Tv),
+        ..Default::default()
+    };
+    let filled = with_label_numbers(&open, "SHOW_S3_D1", None, "Show");
+    assert_eq!((filled.season, filled.disc), (Some(3), Some(1)));
+    let filled = with_label_numbers(&open, "SHOW", Some("Show Season 2 Disc 4"), "Show");
+    assert_eq!((filled.season, filled.disc), (Some(2), Some(4)));
+    let explicit = MediaMetadata {
+        season: Some(5),
+        disc: Some(2),
+        ..open.clone()
+    };
+    let kept = with_label_numbers(&explicit, "SHOW_S3_D1", None, "Show");
+    assert_eq!((kept.season, kept.disc), (Some(5), Some(2)));
+    let movie = MediaMetadata {
+        kind: Some(MediaKind::Movie),
+        ..open
+    };
+    let kept = with_label_numbers(&movie, "SHOW_S3_D1", None, "Show");
+    assert_eq!((kept.season, kept.disc), (None, None));
+}
