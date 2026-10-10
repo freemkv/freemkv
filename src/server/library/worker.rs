@@ -197,7 +197,7 @@ fn attach_from_lookup(
         return attach_automatic_movie_plan(lib, cfg, job);
     }
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
-    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     let media = crate::server::planner::MediaMetadata {
         title: match_.title,
         year: match_.year,
@@ -224,6 +224,11 @@ fn attach_from_lookup(
     persist_auto_plan(lib, cfg, job, plan)
 }
 
+// Keep the OS error and code: finish() classifies storage faults (and their retry) from them.
+fn planning_scan_error(error: libfreemkv::Error) -> std::io::Error {
+    std::io::Error::from(error)
+}
+
 fn persist_auto_plan(
     lib: &Library,
     cfg: &Config,
@@ -248,7 +253,7 @@ fn persist_auto_plan(
 
 fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
-    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     let plan = crate::server::planner::MoviePlanner::from_config(cfg).plan(
         &job.iso,
         &disc.titles,
@@ -269,7 +274,7 @@ fn attach_corrected_plan(
         return Err(std::io::Error::other("saved match has no media type"));
     };
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
-    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(std::io::Error::other)?;
+    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     let metadata = Some(crate::server::tmdb::TmdbResult {
         title: media.title.clone(),
         year: media.year,

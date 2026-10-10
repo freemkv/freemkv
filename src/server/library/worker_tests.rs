@@ -1609,3 +1609,10 @@ fn a_tmdb_outage_fails_planning_instead_of_freezing_a_movie_plan() {
     attach_from_lookup(&lib, &cfg, &mut job, Ok(None)).unwrap();
     assert!(lib.queue.snapshot().jobs[0].plan.is_some());
 }
+
+#[test]
+fn a_share_fault_during_the_planning_scan_stays_a_storage_fault() {
+    let stale = std::io::Error::from(std::io::ErrorKind::StaleNetworkFileHandle);
+    let error = planning_scan_error(libfreemkv::Error::from(stale));
+    assert_eq!(storage_fault(&error), Some(Fault::Stale));
+}
