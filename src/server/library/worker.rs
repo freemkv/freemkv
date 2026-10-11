@@ -4,6 +4,7 @@
 
 use super::arbiter::Arbiter;
 use super::deliver;
+use super::owned::Owned;
 use super::queue::{Failure, Job, JobNote, JobResult, NewJob, OutputState, StagedFile};
 use super::{Dirs, Library, LineKind, Running, transcript};
 use crate::server::config::Config;
@@ -657,11 +658,29 @@ fn remux_planned_with(
             return Ending::Failed(std::io::Error::other(why));
         }
     }
-    // `job.replace` only vouches for `job.target`; other paths need this source's link.
-    let links = super::links::load(&sink.lib.config_dir);
-    let may_replace = |target: &Path| {
-        (job.replace && target == job.target) || links.get(target) == Some(&job.iso)
+    let owned = match current.owned.clone() {
+        Some(owned) => owned,
+        None => match capture_owned(job, cfg, &sink.lib.config_dir).and_then(|owned| {
+            sink.lib
+                .queue
+                .set_owned(job.id, owned.clone())
+                .map(|()| owned)
+        }) {
+            Ok(owned) => owned,
+            Err(e) => return Ending::Failed(e),
+        },
     };
+    // Every existing target must be ours before anything is written; a staged output
+    // defers to its sidecar, which recorded the target as the remux found it.
+    for (output, target) in plan.outputs.iter().zip(&targets) {
+        let progress = current.outputs.iter().find(|p| p.id == output.id);
+        if progress.is_some_and(|p| p.state == OutputState::Done || p.staged.is_some()) {
+            continue;
+        }
+        if let Err(e) = refuse_unowned(target, &owned) {
+            return Ending::Failed(e);
+        }
+    }
     let mut writing_app = None;
     for (ordinal, output) in plan.outputs.iter().enumerate() {
         if let Some(ending) = cancelled_ending(sink) {
@@ -678,23 +697,23 @@ fn remux_planned_with(
         if let Err(why) = validate(&target) {
             return Ending::Failed(std::io::Error::other(why));
         }
-        let replace = may_replace(&target);
-        if !replace && target.exists() {
-            return Ending::Failed(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("planned output already exists: {}", target.display()),
-            ));
-        }
-        if let Some(parent) = target.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            return Ending::Failed(e);
-        }
         let staged = job
             .outputs
             .iter()
             .find(|p| p.id == output.id)
             .and_then(|p| p.staged.as_deref());
+        let replace = match staged {
+            Some(_) => false,
+            None => match may_replace(&target, &owned) {
+                Ok(replace) => replace,
+                Err(e) => return Ending::Failed(e),
+            },
+        };
+        if let Some(parent) = target.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Ending::Failed(e);
+        }
         let request = freemkv_engine::RemuxJob {
             iso: freemkv_engine::ImageSource::from_path(&job.iso),
             title: Some(output.title_index),
@@ -735,6 +754,62 @@ fn remux_planned_with(
         }
     }
     Ending::Done { writing_app }
+}
+
+// The files a job may overwrite: links for its ISO under the output folders, plus
+// the row's own MKV when the job was queued to replace it.
+fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<Vec<Owned>> {
+    let links = super::links::load(config_dir);
+    let roots = super::owned::roots(&super::dirs(cfg));
+    let mut owned = super::owned::capture(&links, &job.iso, &roots)?;
+    if job.replace && !owned.iter().any(|o| o.path == job.target) {
+        match std::fs::symlink_metadata(&job.target) {
+            Ok(meta) if meta.is_file() => owned.push(Owned {
+                path: job.target.clone(),
+                stamp: crate::server::util::Stamp::read(&job.target)?,
+            }),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        owned.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    Ok(owned)
+}
+
+fn refuse_unowned(target: &Path, owned: &[Owned]) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(target) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+        Ok(_) if owned.iter().any(|o| o.path == target) => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} already exists and was not made from this ISO; nothing was written",
+                target.display()
+            ),
+        )),
+    }
+}
+
+// Overwrite only a file this job owns and that is still as it was captured.
+fn may_replace(target: &Path, owned: &[Owned]) -> std::io::Result<bool> {
+    refuse_unowned(target, owned)?;
+    let Some(ours) = owned.iter().find(|o| o.path == target) else {
+        return Ok(false);
+    };
+    match crate::server::util::Stamp::read(target) {
+        Ok(stamp) if stamp == ours.stamp => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) if e.kind() != std::io::ErrorKind::Other => Err(e),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} changed since this remux was planned; it was not touched",
+                target.display()
+            ),
+        )),
+    }
 }
 
 // A planned output must sit under the root its plan files into.

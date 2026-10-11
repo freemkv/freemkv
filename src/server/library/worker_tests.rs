@@ -743,6 +743,7 @@ fn job_for(dir: &Path, id: u64) -> Job {
         selected_match: None,
         replacement: None,
         outputs: Vec::new(),
+        owned: None,
         replace: true,
         state: JobState::Running,
         queued_at: 0,

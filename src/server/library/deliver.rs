@@ -837,21 +837,11 @@ fn deliver(
         sink: stop.sink,
     };
     if let Some(before) = before {
-        let now = match std::fs::symlink_metadata(target) {
-            Ok(m) => TargetStamp::present(&m),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => TargetStamp::Absent,
-            Err(e) => return Err(("target", e)),
-        };
-        let changed = matches!(now, TargetStamp::Present { .. })
-            && before != TargetStamp::Unknown
-            && now != before;
-        if changed {
-            return Err(("target", target_exists(target)));
-        }
+        refuse_changed(target, before).map_err(|e| ("target", e))?;
     }
     let partial = partial_path(target);
     remote.path = Some(partial.clone());
-    let replaced = deliver_steps(local, target, &partial, replace, want, stop, io)?;
+    let replaced = deliver_steps(local, target, &partial, replace, want, before, stop, io)?;
     remote.path = None;
     // The landing committed: a Stop or a failure during the folder sync cuts only the sync short.
     match sync_parent(target, stop, io) {
@@ -868,12 +858,27 @@ fn deliver(
     Ok(replaced)
 }
 
+// A file at `target` that is not the one `before` recorded is not ours to replace.
+fn refuse_changed(target: &Path, before: TargetStamp) -> io::Result<()> {
+    let now = match std::fs::symlink_metadata(target) {
+        Ok(m) => TargetStamp::present(&m),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if before != TargetStamp::Unknown && now != before {
+        return Err(target_exists(target));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn deliver_steps(
     local: &Path,
     target: &Path,
     partial: &Path,
     replace: bool,
     want: Expect,
+    before: Option<TargetStamp>,
     stop: &Stop<'_>,
     io: &dyn DeliverIo,
 ) -> Result<bool, (&'static str, io::Error)> {
@@ -889,8 +894,11 @@ fn deliver_steps(
 
     stop.sink.event(&Event::Phase { name: "replace" });
     let replace_step = || -> io::Result<bool> {
-        // Re-checked: the target may have appeared while the file was copied.
+        // Re-checked: the target may have appeared or changed while the file was copied.
         refuse_existing(target, replace)?;
+        if let Some(before) = before {
+            refuse_changed(target, before)?;
+        }
         let replaced = target_present(target)?;
         // The landing is the commit: a Stop before it leaves the target untouched.
         if stop.is_cancelled() {
@@ -939,7 +947,8 @@ pub(crate) fn deliver_finished(
         runtime: muxed_runtime(f.verified).filter(|r| r.is_finite()),
     };
     let stop = Stop::new(halt, sink);
-    match deliver(f.file, f.target, f.replace, want, None, &stop, io) {
+    let before = f.replace.then_some(f.target_before);
+    match deliver(f.file, f.target, f.replace, want, before, &stop, io) {
         Ok(replaced) => {
             if replaced {
                 sink.event(&Event::Replaced { path: f.target });

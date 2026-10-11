@@ -615,3 +615,134 @@ fn planned_output_linked_to_this_source_may_be_replaced() {
     assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
     assert_eq!(std::fs::read(&targets[1]).unwrap(), movie());
 }
+
+#[test]
+fn unlinked_file_at_a_new_target_fails_already_exists_before_any_output() {
+    let (t, lib, dirs) = library_with(&["B"]);
+    let job = planned(&lib, &dirs);
+    let targets = job.output_targets();
+    let config_dir = t.path().join("config");
+    std::fs::create_dir_all(targets[1].parent().unwrap()).unwrap();
+    std::fs::write(&targets[1], b"someone else's episode").unwrap();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &config(&dirs),
+        &sink,
+        |_, _, _| panic!("nothing may be written while a target is someone else's"),
+    );
+    assert!(
+        matches!(&ending, Ending::Failed(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+        "{ending:?}"
+    );
+    assert!(!targets[0].exists());
+    assert_eq!(
+        std::fs::read(&targets[1]).unwrap(),
+        b"someone else's episode"
+    );
+    assert!(super::super::super::links::load(&config_dir).is_empty());
+}
+
+#[test]
+fn a_file_that_appears_at_a_target_after_capture_stops_that_output_only() {
+    let (_t, lib, dirs) = library_with(&["B"]);
+    let job = planned(&lib, &dirs);
+    let targets = job.output_targets();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let mut calls = 0;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &config(&dirs),
+        &sink,
+        |request, _, _| {
+            calls += 1;
+            std::fs::write(&targets[1], b"appeared meanwhile").unwrap();
+            land_like_engine(request)
+        },
+    );
+    assert!(
+        matches!(&ending, Ending::Failed(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+        "{ending:?}"
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(std::fs::read(&targets[0]).unwrap(), movie());
+    assert_eq!(std::fs::read(&targets[1]).unwrap(), b"appeared meanwhile");
+}
+
+#[test]
+fn a_linked_target_changed_after_capture_is_not_overwritten() {
+    let (t, lib, dirs) = library_with(&["B"]);
+    let job = planned(&lib, &dirs);
+    let targets = job.output_targets();
+    std::fs::create_dir_all(targets[1].parent().unwrap()).unwrap();
+    std::fs::write(&targets[1], b"our earlier episode").unwrap();
+    super::super::super::links::record(&t.path().join("config"), &targets[1], &job.iso).unwrap();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &config(&dirs),
+        &sink,
+        |request, _, _| {
+            if request.title == Some(0) {
+                std::fs::write(&targets[1], b"edited by the user since").unwrap();
+            }
+            land_like_engine(request)
+        },
+    );
+    assert!(
+        matches!(&ending, Ending::Failed(e) if e.to_string().contains("changed since")),
+        "{ending:?}"
+    );
+    assert_eq!(
+        std::fs::read(&targets[1]).unwrap(),
+        b"edited by the user since"
+    );
+}
+
+#[test]
+fn overwrite_authority_is_size_and_mtime_not_inode() {
+    let t = tempfile::tempdir().unwrap();
+    let path = t.path().join("Show S01E01.mkv");
+    std::fs::write(&path, b"episode").unwrap();
+    crate::server::util::pin_mtime(&path).unwrap();
+    let owned = vec![Owned {
+        path: path.clone(),
+        stamp: crate::server::util::Stamp::read(&path).unwrap(),
+    }];
+    // An SMB remount renumbers files: a new inode, same size and time, is still ours.
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let copy = t.path().join("copy");
+    std::fs::copy(&path, &copy).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&copy)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    std::fs::rename(&copy, &path).unwrap();
+    assert!(may_replace(&path, &owned).unwrap());
+    // Same name and size with another time is someone else's file.
+    std::fs::write(&path, b"edited!").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified + Duration::from_secs(60))
+        .unwrap();
+    let e = may_replace(&path, &owned).unwrap_err();
+    assert!(e.to_string().contains("changed since"), "{e}");
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        !may_replace(&path, &owned).unwrap(),
+        "a gone file lands as new"
+    );
+}

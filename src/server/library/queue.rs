@@ -83,6 +83,9 @@ pub struct Job {
     /// Mutable execution state kept separately from the immutable plan.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputProgress>,
+    /// The existing files this job may overwrite, captured once before its first output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned: Option<Vec<super::owned::Owned>>,
     /// An MKV existed at `target` when the job was queued and may be replaced.
     pub replace: bool,
     pub state: JobState,
@@ -636,6 +639,7 @@ impl Queue {
                 selected_match: selected_match.clone(),
                 replacement: replacement.clone(),
                 outputs,
+                owned: None,
                 replace: item.replace,
                 state: JobState::Queued,
                 queued_at: now,
@@ -762,6 +766,25 @@ impl Queue {
             tracing::warn!(%error, "remux plan was not durably saved");
             false
         })
+    }
+
+    /// Durably record the files job `id` may overwrite; kept for every later run of it.
+    pub(crate) fn set_owned(
+        &self,
+        id: u64,
+        owned: Vec<super::owned::Owned>,
+    ) -> std::io::Result<()> {
+        let saved = self.mutate_durable(|f| {
+            let Some(job) = f.jobs.iter_mut().find(|j| j.id == id) else {
+                return false;
+            };
+            job.owned = Some(owned);
+            true
+        })?;
+        if !saved {
+            return Err(std::io::Error::other("remux job no longer exists"));
+        }
+        Ok(())
     }
 
     pub fn begin_output(&self, id: u64, output_id: &str) -> bool {
@@ -1023,6 +1046,7 @@ impl Queue {
                     selected_match: None,
                     replacement: None,
                     outputs: Vec::new(),
+                    owned: None,
                     replace: item.replace,
                     state: JobState::Queued,
                     queued_at: now,

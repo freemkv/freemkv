@@ -738,3 +738,34 @@ fn a_target_that_appears_before_landing_reports_remux_target_exists() {
     assert_eq!(std::fs::read(&target).unwrap(), b"theirs");
     assert_eq!(std::fs::read(&partial).unwrap(), b"ours");
 }
+
+// Rewrites the library file while the copy is synced: it changes after the remux began.
+struct ChangesTarget(PathBuf);
+
+impl DeliverIo for ChangesTarget {
+    fn sync(
+        &self,
+        file: &std::fs::File,
+        halt: &Halt,
+        on_progress: &mut dyn FnMut(u64, u64),
+    ) -> io::Result<()> {
+        std::fs::write(&self.0, b"edited by the user")?;
+        libfreemkv::io::durable_sync_file(file, Some(halt), on_progress)
+    }
+}
+
+#[test]
+fn a_replace_whose_target_changed_before_landing_is_refused_and_untouched() {
+    let s = setup();
+    std::fs::write(&s.target, b"old").unwrap();
+    let sink = Events::default();
+    let io = ChangesTarget(s.target.clone());
+    let e = run(&s, true, &sink, &Halt::new(), &io).unwrap_err();
+    assert_eq!(
+        libfreemkv::error_code(&e),
+        Some(libfreemkv::error::E_REMUX_TARGET_EXISTS),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&s.target).unwrap(), b"edited by the user");
+    assert_nothing_kept(&s);
+}
