@@ -1527,16 +1527,8 @@ fn a_hung_destination_holds_the_move_without_blocking_the_mover() {
     let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
     mkv.extend_from_slice(&[0xAAu8; 1024]);
     std::fs::write(disc_dir.join("Held Up.mkv"), &mkv).unwrap();
-    // A probe of the movie folder that the "kernel" never returns from.
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let hung = crate::server::health::bounded(
-        &movie_dir,
-        std::time::Duration::from_millis(50),
-        move || {
-            let _ = rx.recv();
-        },
-    );
-    assert_eq!(hung, crate::server::health::Bounded::TimedOut);
+    // A probe of the movie folder that the "kernel" has not returned from for the hang bound.
+    let hung = crate::server::health::tests::hung_probe(&movie_dir);
     let started = std::time::Instant::now();
     check_and_move(&cfg);
     assert!(
@@ -1562,7 +1554,7 @@ fn a_hung_destination_holds_the_move_without_blocking_the_mover() {
     assert!(err.reason.contains("not responding"), "{err:?}");
     assert!(err.hint.contains("Remount the share"), "{err:?}");
     // The share answers again: the next tick moves it.
-    drop(tx);
+    drop(hung);
     let t = std::time::Instant::now();
     while crate::server::health::preflight("output", &movie_dir).is_err() {
         assert!(t.elapsed() < std::time::Duration::from_secs(5));
@@ -3715,4 +3707,20 @@ fn a_running_attempt_marks_its_row_retrying_until_it_fails_again() {
     super::record_error_with(path, "copy to destination failed", "", |_| {});
     assert!(!super::MOVE_ERRORS.lock().unwrap()[path].retrying);
     super::clear_move_error(path);
+}
+
+// Live 2026-10-11: a NAS spinning its disks up answered the health check after its 5 s wait,
+// and the mover was refused ("an earlier check of this folder never came back") for minutes.
+// A slow answer is an answer: the move goes ahead.
+#[test]
+fn a_root_whose_health_check_answered_late_still_takes_the_move() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path().to_path_buf();
+    let slow = crate::server::health::begin(&r, std::time::Duration::from_millis(50), || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    });
+    assert_eq!(slow.wait(), crate::server::health::Bounded::TimedOut);
+    let started = std::time::Instant::now();
+    assert_eq!(validate_destination_root(r.to_str().unwrap()), Ok(()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }

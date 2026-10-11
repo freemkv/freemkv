@@ -99,6 +99,28 @@ fn only_a_stale_handle_under_the_share_triggers_a_remount() {
     assert!(!wants_remount(&healthy, mp, true, None, t0));
 }
 
+/// A probe of `path` out for longer than the hang bound, as on a mount the kernel never
+/// returns from; dropping it is the kernel letting go.
+pub(crate) struct HungProbe(PathBuf);
+
+pub(crate) fn hung_probe(path: &Path) -> HungProbe {
+    let started = Instant::now()
+        .checked_sub(HANG_AFTER + Duration::from_secs(1))
+        .expect("uptime past the hang bound");
+    IN_FLIGHT
+        .folders
+        .lock()
+        .unwrap()
+        .push((path.to_path_buf(), started));
+    HungProbe(path.to_path_buf())
+}
+
+impl Drop for HungProbe {
+    fn drop(&mut self) {
+        release(&self.0);
+    }
+}
+
 /// Put `mounts` in place as if a check had just published them.
 pub(crate) fn set_mounts(mounts: Vec<Mount>) {
     publish(mounts, true);
@@ -167,10 +189,16 @@ fn a_read_only_folder_is_reported_not_writable() {
 fn a_stuck_check_is_never_doubled() {
     let t = tempfile::tempdir().unwrap();
     let p = t.path().join("stuck");
-    let late = Instant::now() - Duration::from_secs(1);
+    let late = Instant::now() - HANG_AFTER - Duration::from_secs(1);
     IN_FLIGHT.folders.lock().unwrap().push((p.clone(), late));
     let started = Instant::now();
-    let m = check_folders(vec![("Library", p.clone(), false)]).remove(0);
+    let m = check_folders(
+        vec![("Library", p.clone(), false)],
+        CHECK_TIMEOUT,
+        HANG_AFTER,
+    )
+    .remove(0)
+    .expect("a hung folder has a verdict");
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "a hung folder answers at once"
@@ -187,7 +215,13 @@ fn a_stuck_check_is_never_doubled() {
         .count();
     assert_eq!(n, 1);
     release(&p);
-    let fine = check_folders(vec![("Library", t.path().to_path_buf(), false)]).remove(0);
+    let fine = check_folders(
+        vec![("Library", t.path().to_path_buf(), false)],
+        CHECK_TIMEOUT,
+        HANG_AFTER,
+    )
+    .remove(0)
+    .unwrap();
     assert!(fine.ok);
     assert!(
         !IN_FLIGHT
@@ -205,20 +239,23 @@ fn a_hung_probe_returns_within_its_limit_and_is_never_started_twice() {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     let runs = Arc::new(AtomicU64::new(0));
     let r = runs.clone();
+    let hang = Duration::from_millis(200);
     let started = Instant::now();
-    let out = bounded(&key, Duration::from_millis(200), move || {
+    let out = begin_with(&key, Instant::now() + hang, hang, move || {
         r.fetch_add(1, Ordering::SeqCst);
         let _ = rx.recv(); // a kernel call that never returns
-    });
+    })
+    .wait();
     let took = started.elapsed();
     assert_eq!(out, Bounded::TimedOut);
     assert!(took < Duration::from_millis(1500), "{took:?}");
-    // The next probe of the same folder neither waits nor spawns.
+    // Out for the hang bound: the next probe of the same folder neither waits nor spawns.
     let r = runs.clone();
     let started = Instant::now();
-    let again = bounded(&key, Duration::from_millis(200), move || {
+    let again = begin_with(&key, Instant::now() + hang, hang, move || {
         r.fetch_add(1, Ordering::SeqCst);
-    });
+    })
+    .wait();
     assert_eq!(again, Bounded::Busy);
     assert!(started.elapsed() < Duration::from_millis(100));
     assert_eq!(
@@ -294,8 +331,9 @@ fn preflight_maps_each_failure_to_its_fault_in_bounded_time() {
         assert!(p.message.contains("library folder"), "{}", p.message);
     }
     let hung = t.path().join("hung");
+    let hang = Duration::from_millis(300);
     let started = Instant::now();
-    let p = preflight_with("Output", &hung, Duration::from_millis(300), |_| {
+    let p = preflight_hanging_after("Output", &hung, hang, hang, |_| {
         std::thread::sleep(Duration::from_secs(3));
         Ok(())
     })
@@ -303,12 +341,12 @@ fn preflight_maps_each_failure_to_its_fault_in_bounded_time() {
     assert!(started.elapsed() < Duration::from_millis(1500));
     assert_eq!(p.fault, Fault::Unresponsive);
     let again = Instant::now();
-    let p = preflight_with("Output", &hung, Duration::from_millis(300), |_| Ok(())).unwrap_err();
+    let p = preflight_hanging_after("Output", &hung, hang, hang, |_| Ok(())).unwrap_err();
     assert!(
         again.elapsed() < Duration::from_millis(100),
         "no second probe of a hung folder"
     );
-    assert!(p.detail.contains("never came back"));
+    assert!(p.detail.contains("no answer for"), "{}", p.detail);
 }
 
 // A FIFO with no writer blocks open(2) for read in the kernel: a real hang, like a hard mount.
@@ -595,4 +633,131 @@ fn a_probe_file_that_cannot_be_removed_keeps_the_folder_usable() {
         Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
     });
     assert!(result.is_ok(), "{result:?}");
+}
+
+// Live 2026-10-11: a folder whose probe answers after one caller's short wait is slow, not hung: the
+// next caller must not be refused with "never came back".
+#[test]
+fn a_slow_answer_does_not_latch_the_folder_busy() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().to_path_buf();
+    let first = preflight_with("Output", &dir, Duration::from_millis(100), |_| {
+        std::thread::sleep(Duration::from_millis(400));
+        Ok(())
+    });
+    assert!(first.is_err());
+    assert_eq!(
+        preflight_with("Output", &dir, Duration::from_secs(3), |_| Ok(())),
+        Ok(())
+    );
+}
+
+// A caller that stops waiting does not decide the folder's verdict; the late answer does.
+#[test]
+fn a_late_answer_is_the_verdict() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().to_path_buf();
+    publish(vec![ok_mount("Movies", &dir)], false);
+    let r = preflight_with("output", &dir, Duration::from_millis(50), |_| {
+        std::thread::sleep(Duration::from_millis(300));
+        Ok(())
+    });
+    assert!(r.is_err());
+    assert_eq!(
+        status_for(&dir).unwrap().state,
+        State::Ok,
+        "a short wait flipped the verdict"
+    );
+    publish(vec![bad_mount("Movies", &dir, Fault::Unresponsive)], false);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !status_for(&dir).unwrap().ok {
+        assert!(Instant::now() < deadline, "the late answer was discarded");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    set_mounts(Vec::new());
+}
+
+// The mover's wait covers a NAS spinning up (measured: stat 4-10 s, more for a write).
+#[test]
+fn the_mover_wait_outlasts_a_disk_spin_up() {
+    const SPIN_UP: Duration = Duration::from_secs(15);
+    let waits = [PREFLIGHT_TIMEOUT];
+    assert!(waits.iter().all(|w| *w > SPIN_UP), "{waits:?}");
+}
+
+// A check still running when the health thread stops waiting is no verdict; one out for the
+// hang bound is "not responding", and nothing waits on it any longer.
+#[test]
+fn a_slow_check_is_no_verdict_until_it_hangs() {
+    let p = PathBuf::from("/test/slow-not-hung");
+    IN_FLIGHT
+        .folders
+        .lock()
+        .unwrap()
+        .push((p.clone(), Instant::now()));
+    let row = vec![("Movies", p.clone(), false)];
+    let wait = Duration::from_millis(100);
+    let hang = Duration::from_millis(400);
+    assert!(
+        check_folders(row.clone(), wait, hang)[0].is_none(),
+        "slow is not down"
+    );
+    std::thread::sleep(hang);
+    let t = Instant::now();
+    let m = check_folders(row, wait, hang).remove(0).expect("hung");
+    assert!(t.elapsed() < Duration::from_millis(50), "{:?}", t.elapsed());
+    assert_eq!(m.state, State::Unresponsive);
+    assert!(m.problem.unwrap().contains("no answer for"));
+    release(&p);
+}
+
+// A full publish keeps the last verdict, in its place, for a folder still being checked.
+#[test]
+fn a_folder_still_being_checked_keeps_its_last_verdict() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (a, b) = (Path::new("/test/keep-a"), Path::new("/test/keep-b"));
+    set_mounts(vec![
+        ok_mount("Movies", a),
+        bad_mount("TV", b, Fault::Stale),
+    ]);
+    publish_slots(
+        vec![
+            Slot::Keep(a.to_path_buf()),
+            Slot::New(Box::new(ok_mount("TV", b))),
+        ],
+        true,
+    );
+    let rows = mounts();
+    assert_eq!(
+        rows.iter()
+            .map(|m| (m.path.as_path(), m.ok))
+            .collect::<Vec<_>>(),
+        vec![(a, true), (b, true)]
+    );
+    set_mounts(Vec::new());
+}
+
+// A watched folder's late answer lands even before its first row exists.
+#[test]
+fn a_late_first_answer_for_a_watched_folder_is_published() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().to_path_buf();
+    WATCHED.lock().unwrap().push(("Movies", dir.clone()));
+    let r = preflight_with("output", &dir, Duration::from_millis(20), |_| {
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    });
+    assert!(r.unwrap_err().detail.contains("still checking"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while status_for(&dir).is_none() {
+        assert!(Instant::now() < deadline, "late answer not published");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let m = status_for(&dir).unwrap();
+    assert!(m.ok);
+    assert_eq!(m.role, "Movies");
+    WATCHED.lock().unwrap().retain(|(_, p)| *p != dir);
+    set_mounts(Vec::new());
 }
