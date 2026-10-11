@@ -171,11 +171,58 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
         }
         tracing::info!(iso = %job.iso.display(), "saved match is for an earlier disc at this path; ignored");
     }
-    if !cfg.tv_auto || cfg.tmdb_api_key.is_empty() {
+    if !cfg.tv_auto {
+        if linked_episode(&lib.config_dir, job) {
+            return Err(episode_alone(job));
+        }
         return attach_automatic_movie_plan(lib, cfg, job);
     }
-    let looked_up = crate::server::tmdb::lookup(&job.title, &cfg.tmdb_api_key);
+    let looked_up = if cfg.tmdb_api_key.is_empty() {
+        Ok(None)
+    } else {
+        crate::server::tmdb::lookup(&lookup_label(lib, job), &cfg.tmdb_api_key)
+    };
     attach_from_lookup(lib, cfg, job, looked_up)
+}
+
+// Whether links.json records the job's target as one episode of its ISO's split disc.
+fn linked_episode(config_dir: &Path, job: &Job) -> bool {
+    super::links::entries(config_dir)
+        .get(&job.target)
+        .is_some_and(|l| l.episode && l.iso == job.iso)
+}
+
+// What the disc is looked up by: an episode row is named after one episode, its ISO after the disc.
+fn lookup_label(lib: &Library, job: &Job) -> String {
+    match job.iso.file_stem() {
+        Some(stem) if linked_episode(&lib.config_dir, job) => stem.to_string_lossy().into_owned(),
+        _ => job.title.clone(),
+    }
+}
+
+// An episode row remuxes only the planned output that lands on it, never a whole-disc movie.
+fn episode_alone(job: &Job) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "{} is one episode of a disc that was split into several files, and its title \
+             cannot be told apart from the others, so nothing was written. Use Change match \
+             on its ISO to remux the whole disc.",
+            job.target.display()
+        ),
+    )
+}
+
+/// The one output of a TV plan that lands on `row`, with its target; `None` if none does.
+fn only_the_row(
+    mut plan: crate::server::planner::RemuxPlan,
+    targets: Vec<std::path::PathBuf>,
+    row: &Path,
+) -> Option<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
+    let at = targets.iter().position(|t| t == row)?;
+    let output = plan.outputs.swap_remove(at);
+    plan.outputs = vec![output];
+    Some((plan, vec![row.to_path_buf()]))
 }
 
 fn attach_from_lookup(
@@ -184,31 +231,50 @@ fn attach_from_lookup(
     job: &mut Job,
     looked_up: Result<Option<crate::server::tmdb::TmdbResult>, crate::server::tmdb::LookupFailed>,
 ) -> std::io::Result<()> {
-    let Some(match_) = looked_up.map_err(|_| {
+    let found = looked_up.map_err(|_| {
         std::io::Error::other(crate::strings::get_or(
             "remux.tmdb_unreachable",
             "TMDB could not be reached to plan this disc; retry once it is back",
         ))
-    })?
-    else {
-        return attach_automatic_movie_plan(lib, cfg, job);
-    };
-    if !match_.media_type.is_tv()
-        || !crate::server::tmdb::is_confident_match(&job.title, &match_.title, match_.year)
-    {
-        return attach_automatic_movie_plan(lib, cfg, job);
-    }
+    })?;
+    let label = lookup_label(lib, job);
+    let tv_match = found.filter(|m| {
+        m.media_type.is_tv() && crate::server::tmdb::is_confident_match(&label, &m.title, m.year)
+    });
+    let episode = linked_episode(&lib.config_dir, job);
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
-    let (season, disc_number) =
-        label_numbers(&disc.volume_id, disc.meta_title.as_deref(), &job.title);
+    // TV as the ripper decides it: a TMDB TV match, or a disc label that names a season.
+    let kind = if tv_match.is_some() {
+        MediaKind::Tv
+    } else {
+        MediaKind::Movie
+    };
+    let tv = [
+        disc.volume_id.as_str(),
+        disc.meta_title.as_deref().unwrap_or_default(),
+        label.as_str(),
+    ]
+    .into_iter()
+    .any(|l| crate::server::ripper::plan_kind(kind, l).is_some());
+    if !tv {
+        if episode {
+            return Err(episode_alone(job));
+        }
+        return persist_movie_plan(lib, cfg, job, &disc.titles);
+    }
+    let (season, disc_number) = label_numbers(&disc.volume_id, disc.meta_title.as_deref(), &label);
+    let (title, year, tmdb_id) = match tv_match {
+        Some(m) => (m.title, m.year, m.tmdb_id),
+        None => (crate::server::tmdb::clean_title(&label), 0, 0),
+    };
     let media = crate::server::planner::MediaMetadata {
-        title: match_.title,
-        year: match_.year,
-        tmdb_id: match_.tmdb_id,
+        title,
+        year,
+        tmdb_id,
         season,
         disc: disc_number,
-        kind: Some(crate::server::planner::MediaKind::Tv),
+        kind: Some(MediaKind::Tv),
         episode_start: None,
     };
     let plan = tv_plan_result(crate::server::planner::plan(
@@ -217,6 +283,14 @@ fn attach_from_lookup(
         &media,
         &job.target,
     ))?;
+    if episode {
+        let row = tv_destinations(cfg, &plan)
+            .and_then(|(_, targets)| only_the_row(plan, targets, &job.target));
+        let Some((plan, targets)) = row else {
+            return Err(episode_alone(job));
+        };
+        return persist_plan(lib, job, plan, Some(targets));
+    }
     persist_auto_plan(lib, cfg, job, plan)
 }
 
@@ -232,6 +306,15 @@ fn persist_auto_plan(
     plan: crate::server::planner::RemuxPlan,
 ) -> std::io::Result<()> {
     let targets = tv_destinations(cfg, &plan).map(|(_, targets)| targets);
+    persist_plan(lib, job, plan, targets)
+}
+
+fn persist_plan(
+    lib: &Library,
+    job: &mut Job,
+    plan: crate::server::planner::RemuxPlan,
+    targets: Option<Vec<std::path::PathBuf>>,
+) -> std::io::Result<()> {
     if !lib.queue.set_plan_targets(job.id, plan, targets) {
         return Err(std::io::Error::other(
             "job changed while freezing title selection",
@@ -250,9 +333,18 @@ fn persist_auto_plan(
 fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
+    persist_movie_plan(lib, cfg, job, &disc.titles)
+}
+
+fn persist_movie_plan(
+    lib: &Library,
+    cfg: &Config,
+    job: &mut Job,
+    titles: &[libfreemkv::DiscTitle],
+) -> std::io::Result<()> {
     let plan = crate::server::planner::plan(
         cfg,
-        &disc.titles,
+        titles,
         &crate::server::planner::MediaMetadata::default(),
         &job.target,
     );

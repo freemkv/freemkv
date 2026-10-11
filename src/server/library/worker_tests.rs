@@ -1683,3 +1683,6 @@ fn a_folder_still_being_checked_holds_new_jobs() {
 
 #[path = "worker_ownership_tests.rs"]
 mod ownership;
+
+#[path = "worker_episode_tests.rs"]
+mod episode;
