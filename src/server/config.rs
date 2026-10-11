@@ -478,9 +478,11 @@ pub fn load() -> Arc<RwLock<Config>> {
     // Bounded: staging and output may sit on a network mount that has stopped answering,
     // and startup (the web server with it) must not wait on it.
     let dirs = boot_dirs(&cfg, output_relocated);
-    let created = ensure_dirs_bounded(dirs, crate::server::health::CHECK_TIMEOUT, |p| {
-        std::fs::create_dir_all(p)
-    });
+    let created = ensure_dirs_bounded(
+        dirs,
+        crate::server::health::CHECK_TIMEOUT,
+        boot_create(&cfg),
+    );
     for (d, result) in created {
         if let Err(reason) = result {
             tracing::warn!(path = %d, error = %reason, "could not create required directory");
@@ -509,6 +511,25 @@ fn boot_dirs(cfg: &Config, output_relocated: bool) -> Vec<String> {
         dirs.push(cfg.output_dir.clone());
     }
     dirs
+}
+
+// How startup creates one of `boot_dirs`. A configured staging folder is made only where
+// its parent exists (one level): on a share not mounted yet it would land on local disk.
+// The relocated default under the config folder is ours, and made in full.
+fn boot_create(
+    cfg: &Config,
+) -> impl Fn(&std::path::Path) -> std::io::Result<()> + Send + Sync + 'static {
+    let staging = std::path::PathBuf::from(&cfg.staging_dir);
+    let default = std::path::Path::new(&cfg.autorip_dir).join("staging");
+    move |p: &std::path::Path| {
+        if p != staging || staging == default {
+            return std::fs::create_dir_all(p);
+        }
+        match std::fs::create_dir(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && p.is_dir() => Ok(()),
+            other => other,
+        }
+    }
 }
 
 // Create every one of `dirs` at once through `bounded_each`, each given up on after `limit`

@@ -914,3 +914,31 @@ fn boot_recreates_the_persisted_relocated_default_output() {
     // A saved Settings page persisted the relocated default; the next boot does not relocate.
     assert!(boot_dirs(&cfg, false).contains(&cfg.output_dir));
 }
+
+// A configured staging folder on a share that is not mounted at boot is not created on the
+// local disk (rips would fill it, hidden under the mount once it arrives). It is created
+// when its parent is there, and the relocated default always is.
+#[test]
+fn boot_creates_a_configured_staging_folder_only_where_its_parent_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let unmounted = temp.path().join("Volumes/nas/staging");
+    let mounted = temp.path().join("mnt");
+    std::fs::create_dir_all(&mounted).unwrap();
+    let cfg_dir = temp.path().join("cfg");
+    for (staging, created) in [
+        (unmounted.clone(), false),
+        (mounted.join("staging"), true),
+        (cfg_dir.join("staging"), true),
+    ] {
+        let cfg = Config {
+            autorip_dir: cfg_dir.to_string_lossy().into_owned(),
+            staging_dir: staging.to_string_lossy().into_owned(),
+            output_dir: temp.path().join("out").to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let dirs = boot_dirs(&cfg, false);
+        ensure_dirs_bounded(dirs, std::time::Duration::from_secs(5), boot_create(&cfg));
+        assert_eq!(staging.is_dir(), created, "{}", staging.display());
+    }
+    assert!(!temp.path().join("Volumes").exists());
+}
