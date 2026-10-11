@@ -211,8 +211,9 @@ fn hold_for_operator(path: &str) {
     persist_retry(path);
 }
 
-// Operator Retry requests not yet applied to a delivery journal's retry state.
-static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
+// Operator Retry requests not yet applied to a delivery journal's retry state. The flag
+// records that the retried row was the missing-folder wait.
+static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(Default::default);
 
 // Mirror a staging dir's budget or hold into its delivery journal, if it has one,
@@ -246,6 +247,8 @@ enum Attempt {
     Wait,
     Due,
     Requested,
+    // A Retry of the missing-folder wait itself: the operator accepts recreating it.
+    Recreate,
 }
 
 // Rebuild a missing error row from the journal, or apply a pending operator Retry.
@@ -254,7 +257,7 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(path);
-    if requested {
+    if let Some(folder_wait) = requested {
         if let Err(error) = manifest::Manifest::record_retry(Path::new(path), None) {
             record_error(
                 path,
@@ -263,7 +266,11 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             );
             return Attempt::Wait;
         }
-        return Attempt::Requested;
+        return if folder_wait {
+            Attempt::Recreate
+        } else {
+            Attempt::Requested
+        };
     }
     let Some(state) = saved.retry() else {
         return Attempt::Due;
@@ -388,7 +395,7 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
     RETRY_REQUESTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|key| Path::new(key).parent() != Some(root) || seen.contains(key));
+        .retain(|key, _| Path::new(key).parent() != Some(root) || seen.contains(key));
 }
 
 /// Operator-initiated Retry: clear this error and its retry budget. The next
@@ -396,11 +403,9 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
 pub fn clear_move_error(path: &str) {
     let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
     if errors.get(path).is_none_or(|e| !e.worker_active) {
-        errors.remove(path);
-        RETRY_REQUESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(path.to_string());
+        let folder_wait = errors.remove(path).is_some_and(|e| e.waiting_for_folder);
+        let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+        *requests.entry(path.to_string()).or_insert(false) |= folder_wait;
     }
 }
 
@@ -412,7 +417,7 @@ pub fn clear_all_move_errors() {
         .unwrap_or_else(|e| e.into_inner())
         .retain(|path, e| {
             if !e.worker_active {
-                requests.insert(path.clone());
+                *requests.entry(path.clone()).or_insert(false) |= e.waiting_for_folder;
             }
             e.worker_active
         });
@@ -1317,7 +1322,7 @@ fn check_and_move(cfg: &Config) {
                 .iter()
                 .find_map(|root| crate::server::health::preflight("output", Path::new(root)).err())
                 .or_else(|| {
-                    (attempt != Attempt::Requested)
+                    (attempt != Attempt::Recreate)
                         .then(|| missing_folder(&planned_moves))
                         .flatten()
                 })
@@ -1458,7 +1463,7 @@ fn check_and_move(cfg: &Config) {
         // Create destination directories under the root confirmed above. A journaled
         // delivery's folders existed at freeze: only an operator Retry recreates them.
         let mut dest_ok = true;
-        let create_folders = delivery.is_none() || attempt == Attempt::Requested;
+        let create_folders = delivery.is_none() || attempt == Attempt::Recreate;
         for (_, dest) in planned_moves.iter().filter(|_| create_folders) {
             if let Some(parent) = Path::new(dest).parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
@@ -2432,7 +2437,8 @@ fn move_file(
     job: &Path,
 ) -> MoveOutcome {
     // Journal recovery alone may adopt an existing destination. Never infer
-    // transaction ownership from its size, structure, or the source's absence.
+    // transaction ownership from its size or structure; only a journaled prepared
+    // stamp (plus matching head/tail while the source remains) is adopted.
     match std::fs::symlink_metadata(dest) {
         Ok(_) => return MoveOutcome::Collision,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

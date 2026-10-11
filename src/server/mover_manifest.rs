@@ -442,6 +442,19 @@ impl Manifest {
             if let Some(delivered) = self.entries.iter().find(|e| e.source == entry.path) {
                 verify_parent(&delivered.destination)?;
                 delivered.prepared()?.verify(&delivered.destination)?;
+                // A source still present is deleted only if the destination really is its copy.
+                match std::fs::symlink_metadata(&entry.path) {
+                    Ok(_) => {
+                        if !same_head_and_tail(&entry.path, &delivered.destination)? {
+                            return Err(io::Error::other(format!(
+                                "destination content differs from the staged source: {}",
+                                delivered.destination.display()
+                            )));
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
             }
             match entry.identity.verify(&entry.path) {
                 Ok(()) => std::fs::remove_file(&entry.path)?,

@@ -970,7 +970,7 @@ fn titled_fixture() -> (tempfile::TempDir, PathBuf, Config, PathBuf, Manifest) {
 }
 
 #[test]
-fn name_derived_inodes_deliver_without_rebind() {
+fn a_recreated_destination_with_a_fresh_inode_is_adopted_and_delivered() {
     let _guard = super::super::TEST_STATE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1128,6 +1128,77 @@ fn a_missing_title_folder_in_a_journaled_delivery_waits_instead_of_recreating_it
     super::super::check_and_move(&cfg);
     assert!(!dir.exists());
     assert!(manifest.entries[0].destination.exists());
+}
+
+#[test]
+fn retry_all_on_another_error_does_not_recreate_a_missing_title_folder() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, title, manifest) = titled_fixture();
+    let key = dir.to_string_lossy().into_owned();
+    std::fs::remove_dir(&title).unwrap();
+    // The visible row is an unrelated error, not the missing-folder wait.
+    super::super::record_error(&key, "some other hold", "fix it");
+    super::super::clear_all_move_errors();
+    super::super::check_and_move(&cfg);
+    assert!(!title.exists(), "an unrelated Retry must not mkdir");
+    assert!(manifest.entries[0].source.exists());
+    let row = super::super::MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get(&key)
+        .cloned()
+        .unwrap();
+    assert!(row.waiting_for_folder, "{row:?}");
+    // Retry-all on the missing-folder row itself recreates it.
+    super::super::clear_all_move_errors();
+    super::super::check_and_move(&cfg);
+    assert!(!dir.exists());
+    assert!(manifest.entries[0].destination.exists());
+}
+
+#[test]
+fn cleanup_refuses_a_source_whose_destination_differs_only_in_the_tail() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    for (index, entry) in manifest.entries.iter().enumerate() {
+        let candidate = entry.destination.with_extension("part");
+        std::fs::copy(&entry.source, &candidate).unwrap();
+        Manifest::prepare(&dir, index, &candidate).unwrap();
+        libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
+        Manifest::deliver(&dir, index, &|_, _, _, _| {}).unwrap();
+    }
+    let completed = Manifest::load(&dir).unwrap().unwrap();
+    // Same size and time as prepared, different last byte.
+    let destination = &manifest.entries[0].destination;
+    let modified = std::fs::metadata(destination).unwrap().modified().unwrap();
+    let mut bytes = std::fs::read(destination).unwrap();
+    *bytes.last_mut().unwrap() ^= 0xff;
+    std::fs::write(destination, bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(destination)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert!(completed.cleanup().is_err());
+    assert!(manifest.entries[0].source.exists());
+    assert!(dir.join(FILE).exists());
+}
+
+#[test]
+fn head_and_tail_comparison_ignores_the_middle_of_a_large_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let (a, b) = (temp.path().join("a"), temp.path().join("b"));
+    let base = vec![7u8; 300 * 1024];
+    std::fs::write(&a, &base).unwrap();
+    let mut other = base.clone();
+    other[150 * 1024] = 9;
+    std::fs::write(&b, &other).unwrap();
+    assert!(same_head_and_tail(&a, &b).unwrap());
+    other[300 * 1024 - 1] = 9;
+    std::fs::write(&b, &other).unwrap();
+    assert!(!same_head_and_tail(&a, &b).unwrap());
 }
 
 #[test]

@@ -154,14 +154,7 @@ impl Prepared {
 // Pin the engine-written candidate's time before its identity is journaled,
 // so a deferred SMB close cannot restamp it at publication. Best effort.
 fn pin_mtime(path: &Path) {
-    let pinned = std::fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|file| {
-            let modified = file.metadata()?.modified()?;
-            file.set_modified(crate::server::util::pinned_mtime(modified))
-        });
-    if let Err(error) = pinned {
+    if let Err(error) = crate::server::util::pin_mtime(path) {
         tracing::warn!(%error, path = %path.display(), "replacement: cannot pin candidate time");
     }
 }

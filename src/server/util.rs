@@ -120,7 +120,8 @@ pub fn pinned_mtime(t: std::time::SystemTime) -> std::time::SystemTime {
 }
 
 /// What a journal proves about a file it wrote: its size and the modification time
-/// pinned before close (see [`pin_mtime`]). Never a device or inode: SMB mounts
+/// pinned before close (see [`pin_mtime`]); a rename-path stamp is the source's
+/// own unpinned time. Never a device or inode: SMB mounts
 /// number devices per mount and derive inodes from names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stamp {
@@ -131,14 +132,26 @@ pub struct Stamp {
 impl Stamp {
     /// The stamp of the regular file at `path`; a symlink or directory is an error.
     pub fn read(path: &std::path::Path) -> std::io::Result<Self> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        // No-follow open closes the check-then-open window for a swapped-in symlink.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+        // Read through an open handle: SMB clients refresh cached attributes on open.
+        let metadata = options.open(path)?.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::other(format!(
+                "not a regular file: {}",
+                path.display()
+            )));
+        }
+        #[cfg(not(unix))]
         if !std::fs::symlink_metadata(path)?.is_file() {
             return Err(std::io::Error::other(format!(
                 "not a regular file: {}",
                 path.display()
             )));
         }
-        // Read through an open handle: SMB clients refresh cached attributes on open.
-        let metadata = std::fs::File::open(path)?.metadata()?;
         Ok(Self {
             size: metadata.len(),
             modified: metadata.modified()?,
