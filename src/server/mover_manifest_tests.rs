@@ -1078,3 +1078,89 @@ fn an_old_journal_whose_ids_all_changed_on_remount_completes() {
         2
     );
 }
+
+#[test]
+fn a_missing_title_folder_in_a_journaled_delivery_waits_instead_of_recreating_it() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, title, manifest) = titled_fixture();
+    let key = dir.to_string_lossy().into_owned();
+    std::fs::remove_dir(&title).unwrap();
+    for _ in 0..2 {
+        super::super::check_and_move(&cfg);
+        assert!(
+            !title.exists(),
+            "an unmounted share must not be filled on local disk"
+        );
+        assert!(manifest.entries[0].source.exists());
+        let row = super::super::MOVE_ERRORS
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .unwrap();
+        assert!(row.reason.contains("missing"), "{}", row.reason);
+        assert!(row.attempts == 0 && !row.retry_held, "a wait: {row:?}");
+    }
+    // Retry is the operator saying the folder was removed on purpose.
+    super::super::clear_move_error(&key);
+    super::super::check_and_move(&cfg);
+    assert!(!dir.exists());
+    assert!(manifest.entries[0].destination.exists());
+}
+
+#[test]
+fn a_foreign_same_size_file_with_another_time_is_held_or_collides() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let foreign = |destination: &Path, source: &Path| {
+        let bytes = vec![b'x'; std::fs::metadata(source).unwrap().len() as usize];
+        std::fs::write(destination, bytes).unwrap();
+        let later = Stamp::read(source).unwrap().modified + std::time::Duration::from_secs(2);
+        std::fs::File::options()
+            .write(true)
+            .open(destination)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    };
+    // Prepared: the journal knows another stamp, so this is a hold.
+    let prepared = &manifest.entries[0];
+    Manifest::prepare(&dir, 0, &prepared.source).unwrap();
+    foreign(&prepared.destination, &prepared.source);
+    assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
+    assert!(prepared.source.exists());
+    // Never prepared: nothing of ours, a collision on every retry.
+    let unprepared = &manifest.entries[1];
+    foreign(&unprepared.destination, &unprepared.source);
+    for _ in 0..2 {
+        assert!(matches!(
+            Manifest::deliver(&dir, 1, &|_, _, _, _| {}).unwrap(),
+            super::super::MoveOutcome::Collision
+        ));
+    }
+    assert!(unprepared.source.exists());
+    let saved = Manifest::load(&dir).unwrap().unwrap();
+    assert!(!saved.entries[0].completed && !saved.entries[1].completed);
+}
+
+// Accepted residual: a byte-identical copy that keeps the staged file's time (cp -p,
+// Finder) is indistinguishable from our own publication and is adopted, never overwritten.
+#[test]
+fn a_metadata_preserving_copy_of_the_source_is_adopted() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[0];
+    Manifest::prepare(&dir, 0, &entry.source).unwrap();
+    std::fs::copy(&entry.source, &entry.destination).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&entry.destination)
+        .unwrap()
+        .set_modified(Stamp::read(&entry.source).unwrap().modified)
+        .unwrap();
+    assert!(matches!(
+        Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap(),
+        super::super::MoveOutcome::Skipped
+    ));
+    assert!(Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
+}

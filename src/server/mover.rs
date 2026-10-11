@@ -228,9 +228,16 @@ fn persist_retry(path: &str) {
     }
 }
 
+// Whether a journaled dir may attempt delivery now, and whether the operator asked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    Wait,
+    Due,
+    Requested,
+}
+
 // Rebuild a missing error row from the journal, or apply a pending operator Retry.
-// Returns whether this dir may attempt delivery now.
-fn restore_retry(path: &str, saved: &manifest::Manifest) -> bool {
+fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
     let requested = RETRY_REQUESTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -242,12 +249,12 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> bool {
                 &format!("cannot clear the delivery retry state: {error}"),
                 "Repair the staging storage, then choose Retry; nothing was copied.",
             );
-            return false;
+            return Attempt::Wait;
         }
-        return true;
+        return Attempt::Requested;
     }
     let Some(state) = saved.retry() else {
-        return true;
+        return Attempt::Due;
     };
     let now = std::time::Instant::now();
     MOVE_ERRORS
@@ -273,7 +280,11 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> bool {
                 retry_after,
             }
         });
-    move_retry_ready(path, now)
+    if move_retry_ready(path, now) {
+        Attempt::Due
+    } else {
+        Attempt::Wait
+    }
 }
 
 fn record_error(path: &str, reason: &str, hint: &str) {
@@ -1080,9 +1091,11 @@ fn check_and_move(cfg: &Config) {
                 continue;
             }
         };
-        if let Some(saved) = &delivery
-            && !restore_retry(&dir.to_string_lossy(), saved)
-        {
+        let attempt = match &delivery {
+            Some(saved) => restore_retry(&dir.to_string_lossy(), saved),
+            None => Attempt::Due,
+        };
+        if attempt == Attempt::Wait {
             continue;
         }
 
@@ -1288,6 +1301,11 @@ fn check_and_move(cfg: &Config) {
                 .roots
                 .iter()
                 .find_map(|root| crate::server::health::preflight("output", Path::new(root)).err())
+                .or_else(|| {
+                    (attempt != Attempt::Requested)
+                        .then(|| missing_folder(&planned_moves))
+                        .flatten()
+                })
         } else {
             unreachable_root(cfg, &tmdb_result, &planned_moves)
         };
@@ -1422,11 +1440,11 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
 
-        // Create destination directories. The ROOT is confirmed present +
-        // writable above, so this only materializes the per-title subdir
-        // UNDER that real root — never the root (and thus mount) itself.
+        // Create destination directories under the root confirmed above. A journaled
+        // delivery's folders existed at freeze: only an operator Retry recreates them.
         let mut dest_ok = true;
-        for (_, dest) in &planned_moves {
+        let create_folders = delivery.is_none() || attempt == Attempt::Requested;
+        for (_, dest) in planned_moves.iter().filter(|_| create_folders) {
             if let Some(parent) = Path::new(dest).parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
@@ -2236,6 +2254,28 @@ fn planned_roots(
         }
     }
     roots
+}
+
+// The first destination folder of a journaled plan that is gone: it existed at freeze, so
+// its share may have fallen off its mount point. Recreating it is the operator's call.
+fn missing_folder(
+    planned: &[(std::path::PathBuf, String)],
+) -> Option<crate::server::health::Problem> {
+    use crate::server::health::{Fault, Problem};
+    planned.iter().find_map(|(_, dest)| {
+        let folder = Path::new(dest).parent()?;
+        match std::fs::symlink_metadata(folder) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut problem = Problem::new("output", folder, Fault::Missing, e.to_string());
+                problem.hint = format!(
+                    "{} If the folder was removed on purpose, choose Retry to recreate it.",
+                    problem.hint
+                );
+                Some(problem)
+            }
+            _ => None,
+        }
+    })
 }
 
 // The first destination root of `planned` that is stale, unmounted, failing or not answering.
