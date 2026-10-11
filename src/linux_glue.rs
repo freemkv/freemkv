@@ -62,7 +62,7 @@ pub fn action_name_for(a: &MenuAction) -> Option<&'static str> {
 /// for this purpose (the macOS and Windows shells map it the same way).
 pub fn gating_cmd(a: &MenuAction) -> Option<Cmd> {
     match a {
-        MenuAction::Cmd(c) => Some(*c),
+        MenuAction::Cmd(c) => Some(c.clone()),
         MenuAction::OpenDisc => Some(Cmd::Open),
         _ => None,
     }
@@ -73,7 +73,7 @@ pub fn gating_cmd(a: &MenuAction) -> Option<Cmd> {
 /// target and the Open Disc button ask it for `Cmd::Open`.
 pub fn action_enabled(gate: Option<Cmd>, running: bool, opening: bool) -> bool {
     let Some(cmd) = gate else { return true };
-    !(crate::ui::blocked_while_running(cmd) && (running || (opening && cmd != Cmd::Close)))
+    !(crate::ui::blocked_while_running(&cmd) && (running || (opening && cmd != Cmd::Close)))
 }
 
 /// Spell a shared `Accel` the way `gtk_accelerator_parse` reads it:
@@ -159,15 +159,6 @@ pub fn disc_open_plan(drives: &[crate::engine::OpticalDrive]) -> (LogKind, Strin
     crate::ui::disc_open_plan(drives)
 }
 
-/// A keydb worker's outcome as a log line: a failure in the Notice style,
-/// never the success one.
-pub fn keydb_update_line(r: Result<String, String>) -> (LogKind, String) {
-    match r {
-        Ok(m) => (LogKind::Result, m),
-        Err(e) => (LogKind::Notice, e),
-    }
-}
-
 /// What the log pane last showed: the core's sequence number of its first
 /// line (`View::log_first`) and how many lines it had.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,12 +198,6 @@ pub fn row_title(label: &str) -> String {
         .trim_end_matches([':', '：'])
         .trim_end_matches(|c: char| c.is_whitespace())
         .to_string()
-}
-
-/// Whether closing the window must first ask about the rip in flight. The
-/// latch keeps it to ONE question per departure, as on macOS.
-pub fn needs_rip_confirmation(running: bool, already_confirmed: bool) -> bool {
-    running && !already_confirmed
 }
 
 /// The Settings "container" dropdown: every format a disc can produce, flat,

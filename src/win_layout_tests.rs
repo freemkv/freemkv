@@ -616,14 +616,11 @@ fn a_dropdown_grows_to_its_longest_item_within_its_row() {
 fn enter_and_leaving_a_field_save_without_closing_ok_saves_and_closes() {
     use FormCommit::*;
     let plan = |save, close| CommitPlan { save, close };
-    assert_eq!(form_commit(Ok, true, false), plan(true, true));
-    assert_eq!(form_commit(Ok, true, true), plan(true, true));
-    assert_eq!(form_commit(Enter, true, true), plan(true, false));
-    assert_eq!(form_commit(Enter, true, false), plan(false, false));
-    assert_eq!(form_commit(FocusLost, true, true), plan(true, false));
-    assert_eq!(form_commit(FocusLost, true, false), plan(false, false));
+    assert_eq!(form_commit(Ok, true), plan(true, true));
+    assert_eq!(form_commit(Enter, true), plan(true, false));
+    assert_eq!(form_commit(FocusLost, true), plan(true, false));
     // The window going away takes focus with it; that is not an edit.
-    assert_eq!(form_commit(FocusLost, false, true), plan(false, false));
+    assert_eq!(form_commit(FocusLost, false), plan(false, false));
 }
 
 #[test]

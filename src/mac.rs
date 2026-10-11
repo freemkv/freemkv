@@ -186,23 +186,6 @@ fn trim_chars(
         .then(|| lens.iter().take(drop).sum())
 }
 
-/// The keydb worker's one message and the log kind it is shown with.
-fn keydb_outcome(r: std::thread::Result<Result<String, String>>) -> (crate::ui::LogKind, String) {
-    use crate::ui::LogKind;
-    match r {
-        Ok(Ok(m)) => (LogKind::Result, m),
-        Ok(Err(m)) => (LogKind::Notice, m),
-        // The payload is dropped: a panic message can quote keydb bytes.
-        Err(_) => (
-            LogKind::Notice,
-            crate::strings::get_or(
-                "gui.log.keydb_worker_failed",
-                "keydb update failed — internal error",
-            ),
-        ),
-    }
-}
-
 // ── rip-finished notification ─────────────────────────────────────────────
 
 const NOTIFY_DIR_KEY: &str = "output_dir";
@@ -327,13 +310,6 @@ enum QuitChoice {
     Stay,
 }
 
-// `already_confirmed` keeps ONE alert per departure: window-close and
-// Cmd+Q share this path, and closing the last window is itself a quit,
-// so without the latch the same question would be asked twice.
-fn needs_rip_confirmation(running: bool, already_confirmed: bool) -> bool {
-    running && !already_confirmed
-}
-
 /// What the alert's answer means. First button is "Stop & Quit"; anything else
 /// (including a dismissal) means stay, because losing a rip must never be the
 /// default outcome of an ambiguous answer.
@@ -343,30 +319,6 @@ fn quit_choice(response: isize) -> QuitChoice {
     } else {
         QuitChoice::Stay
     }
-}
-
-/// What committing the Settings form does with the stored settings before and
-/// after reading it back.
-#[derive(Debug, PartialEq)]
-enum PrefsCommit {
-    /// Nothing changed: no write and no "Settings saved" line, so a commit on
-    /// every focus change stays silent.
-    Unchanged,
-    /// Save; `new_dest` re-points the active output folder, set only when the
-    /// default destination itself changed, so a one-off folder pick survives.
-    Save { new_dest: Option<String> },
-}
-
-fn prefs_commit(
-    before: &crate::settings::Settings,
-    after: &crate::settings::Settings,
-) -> PrefsCommit {
-    if serde_json::to_value(before).ok() == serde_json::to_value(after).ok() {
-        return PrefsCommit::Unchanged;
-    }
-    let dest = &after.dest_dir;
-    let new_dest = (*dest != before.dest_dir && !dest.trim().is_empty()).then(|| dest.clone());
-    PrefsCommit::Save { new_dest }
 }
 
 // One place to set a tick box: written by both `cell_for` and
@@ -692,10 +644,6 @@ struct Ivars {
     page_empty: RefCell<Option<Retained<NSView>>>,
     empty_head: RefCell<Option<Retained<NSTextField>>>,
     empty_sub: RefCell<Option<Retained<NSTextField>>>,
-    /// Worker threads push user-visible lines here; a main-thread timer drains
-    /// it. AppKit objects are main-thread-only, so nothing else may cross.
-    inbox: std::sync::Arc<std::sync::Mutex<Vec<(crate::ui::LogKind, String)>>>,
-    drain: RefCell<Option<Retained<NSTimer>>>,
     /// Signature of the tree rows last painted, so a 200 ms progress tick does
     /// not force a full `reloadData` + re-expand of the (usually hidden)
     /// titles outline when nothing about the title list moved — the same
@@ -708,9 +656,6 @@ struct Ivars {
     log_lens: RefCell<std::collections::VecDeque<usize>>,
     /// Retained here because `UNUserNotificationCenter.delegate` is weak.
     notify_delegate: RefCell<Option<Retained<NotifyDelegate>>>,
-    /// The operator has already answered the rip-in-progress question for this
-    /// departure — see `confirm_quit`.
-    quit_confirmed: std::cell::Cell<bool>,
     log_hidden: RefCell<bool>,
     page_result: RefCell<Option<Retained<NSView>>>,
     result_line: RefCell<Option<Retained<NSTextField>>>,
@@ -727,17 +672,11 @@ struct Ivars {
     demo_step: RefCell<usize>,
     two_bars: RefCell<bool>,
     bar2_row: RefCell<Vec<Retained<NSView>>>,
-    settings: RefCell<crate::settings::Settings>,
     pf_fields: RefCell<Vec<(String, Retained<NSTextField>)>>,
-    /// The keydb status note in Settings ▸ Keys, kept so a running "Update
-    /// keydb now" can show progress + the result in place.
+    /// Settings ▸ Keys: the keydb note and "Update keydb now", painted from
+    /// `View::keydb_note` / `View::keydb_busy`.
     keydb_note: RefCell<Option<Retained<NSTextField>>>,
-    /// The "Update keydb now" button — disabled while an update is in flight so
-    /// a second click can't spawn a concurrent download.
     keydb_btn: RefCell<Option<Retained<NSButton>>>,
-    /// A keydb download is in flight. Lives on the CONTROLLER, which outlives
-    /// every Settings window, rather than in the button's enabled state.
-    keydb_updating: std::cell::Cell<bool>,
     pf_checks: RefCell<Vec<(String, Retained<NSButton>)>>,
     pf_popups: RefCell<Vec<(String, Retained<NSPopUpButton>)>>,
     /// The multi-select language pickers, kept separate from `pf_popups`
@@ -1021,8 +960,7 @@ define_class!(
         }
 
         // Cancel: close Settings and keep NOTHING. Deliberately skips
-        // `read_prefs_form` (the only mutator of `settings`), so the stored
-        // copy is left exactly as the window found it.
+        // `commit_prefs`, so nothing the form holds reaches the App.
         #[unsafe(method(onCancelPrefs:))]
         fn on_cancel_prefs(&self, _s: Option<&AnyObject>) {
             if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
@@ -1040,7 +978,7 @@ define_class!(
 
         // One language ticked/unticked in a preferred-languages picker. The
         // set mutation is `ui::lang_toggle`, shared with Windows; the picker
-        // is not yet committed to `settings`, so Cancel can still discard it.
+        // is not yet committed, so Cancel can still discard it.
         #[unsafe(method(onToggleLang:))]
         fn on_toggle_lang(&self, s: Option<&AnyObject>) {
             let mtm = MainThreadMarker::new().unwrap();
@@ -1088,7 +1026,7 @@ define_class!(
             let mtm = MainThreadMarker::new().unwrap();
             // Commit every field first so switching language loses no edits.
             self.commit_prefs();
-            let code = self.ivars().settings.borrow().language.clone();
+            let code = self.ivars().app.borrow().settings.language.clone();
             // Remember the visible tab so we can restore it after the rebuild.
             let tab_idx = self.ivars().tabs.borrow().as_ref().and_then(|tv| {
                 tv.selectedTabViewItem().map(|it| tv.indexOfTabViewItem(&it))
@@ -1121,104 +1059,15 @@ define_class!(
 
         #[unsafe(method(onTestKeyserver:))]
         fn on_test_keyserver(&self, _s: Option<&AnyObject>) {
-            let mut url = String::new();
-            for (k, f) in self.ivars().pf_fields.borrow().iter() {
-                if k == "keyserver_url" {
-                    url = { f.stringValue() }.to_string();
-                }
-            }
-            if url.trim().is_empty() {
-                self.app_mut(|a| {
-                    a.say(
-                        crate::ui::LogKind::Result,
-                        &crate::strings::get("gui.log.no_keyserver"),
-                    )
-                });
-                return;
-            }
-            // Validated by the same rule the key layer uses, so the UI can't
-            // accept a URL the engine would later reject.
-            match freemkv_keysources::validate_keyserver_url(&url) {
-                Ok(_) => self.app_mut(|a| {
-                    a.say(
-                        crate::ui::LogKind::Result,
-                        &crate::strings::fmt("gui.log.keyserver_valid", &[("url", &url)]),
-                    )
-                }),
-                Err(e) => self.app_mut(|a| {
-                    a.say(
-                        crate::ui::LogKind::Notice,
-                        &crate::strings::fmt("gui.log.keyserver_rejected", &[("e", &e.to_string())]),
-                    )
-                }),
-            }
+            self.act(crate::ui::Cmd::TestKeyserver(self.pref_value("keyserver_url")));
         }
 
+        // The LIVE field values, not the saved ones, so Update works before OK.
         #[unsafe(method(onUpdateKeys:))]
         fn on_update_keys(&self, _s: Option<&AnyObject>) {
-            // One download at a time. The disabled button is not enough on its
-            // own: a Settings window rebuilt while a download runs comes back
-            // with a fresh, enabled button.
-            if self.ivars().keydb_updating.get() {
-                // `gui.set.keydb_busy` is mac-only: Windows relies solely on
-                // its disabled Update button (`set_keydb_updating`) and never
-                // re-checks a "busy" flag, so it has no matching note to share.
-                self.set_keydb_note(&crate::strings::get_or(
-                    "gui.set.keydb_busy",
-                    "A keydb update is already running — please wait.",
-                ));
-                return;
-            }
-            // Read the live field values, not the last-saved ones, so Update
-            // works before OK is pressed.
-            let (mut url, mut path) = (String::new(), String::new());
-            for (k, f) in self.ivars().pf_fields.borrow().iter() {
-                let v = { f.stringValue() }.to_string();
-                match k.as_str() {
-                    "keydb_url" => url = v,
-                    "keydb_path" => path = v,
-                    _ => {}
-                }
-            }
-            if url.is_empty() {
-                url = self.ivars().settings.borrow().keydb_url.clone();
-            }
-            if path.is_empty() {
-                path = self.ivars().settings.borrow().keydb_path.clone();
-            }
-            if url.trim().is_empty() {
-                // Nothing to fetch — tell the user in place instead of silently
-                // spawning a thread that errors into the (maybe-hidden) log.
-                self.set_keydb_note(&crate::strings::get("gui.set.keydb_no_url"));
-                return;
-            }
-            self.app_mut(|a| {
-                a.say(
-                    crate::ui::LogKind::Result,
-                    &crate::strings::get("gui.log.fetching_keydb"),
-                )
-            });
-            // Immediate in-Settings feedback: the download is ~20 MB and takes a
-            // few seconds; the drain updates this note to the result when done.
-            self.set_keydb_note(&crate::strings::get("gui.set.keydb_updating"));
-            // Disable the button so a second click can't start a concurrent
-            // download; the drain re-enables it when the result arrives.
-            self.set_keydb_updating(true);
-            let inbox = self.ivars().inbox.clone();
-            std::thread::spawn(move || {
-                // A panic in `update_keydb` must NOT strand the drain: catch it so
-                // a terminal message is pushed either way. It's the ONLY message
-                // the keydb worker sends; dropping it wedges Update off forever.
-                let msg = keydb_outcome(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || crate::settings::update_keydb(&url, &path),
-                )));
-                // RECOVER rather than skip the push.
-                inbox
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(msg);
-            });
-            self.start_drain();
+            let url = self.pref_value("keydb_url");
+            let path = self.pref_value("keydb_path");
+            self.act(crate::ui::Cmd::UpdateKeydb { url, path });
         }
 
         #[unsafe(method(onSelectAll:))]
@@ -1368,45 +1217,9 @@ define_class!(
             // The RULE lives in the core; the shell only maps selectors to
             // commands, so macOS and Windows cannot disagree about it.
             let cmd = cmd_for(action);
-            let blocked = cmd.map(crate::ui::blocked_while_running).unwrap_or(false);
+            let blocked = cmd.as_ref().is_some_and(crate::ui::blocked_while_running);
             objc2::runtime::Bool::new(!(running && blocked))
         }
-
-        #[unsafe(method(onDrain:))]
-        fn on_drain(&self, _s: Option<&AnyObject>) {
-            // RECOVER a poisoned inbox rather than returning: an early return
-            // stranded the drain (keydb "busy" flag stuck, note never shown,
-            // timer firing forever) and a poisoned inbox Vec is still fine.
-            let msgs: Vec<(crate::ui::LogKind, String)> = self
-                .ivars()
-                .inbox
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .drain(..)
-                .collect();
-            if msgs.is_empty() {
-                return;
-            }
-            // Each say() goes through app_mut, which repaints — so worker-thread
-            // messages (keydb update, etc.) show the moment they arrive.
-            for (kind, m) in &msgs {
-                self.app_mut(|a| a.say(*kind, m));
-            }
-            // This drain path is the keydb-update worker; surface its outcome
-            // in the Settings note so the user sees it in place, not just the
-            // log, and re-enable the button now the update is done.
-            if let Some((_, last)) = msgs.last() {
-                self.set_keydb_note(last);
-            }
-            self.set_keydb_updating(false);
-            // The keydb update is one-shot: once drained, stop the timer here
-            // (matching Windows' `drain()`/`TIMER_DRAIN`) or it re-fires at
-            // 5 Hz against an empty inbox for the rest of the process's life.
-            if let Some(t) = self.ivars().drain.borrow_mut().take() {
-                t.invalidate();
-            }
-        }
-
 
         #[unsafe(method(onDoneResult:))]
         fn on_done_result(&self, _s: Option<&AnyObject>) {
@@ -1491,8 +1304,8 @@ impl Controller {
     // Shared by the window close button and every route into `terminate:`
     // (Cmd+Q, File > Quit, Dock, logout) via `applicationShouldTerminate:`.
     fn confirm_quit(&self) -> QuitChoice {
-        let running = self.ivars().app.borrow().running();
-        if !needs_rip_confirmation(running, self.ivars().quit_confirmed.get()) {
+        let fx = { self.ivars().app.borrow_mut() }.dispatch(crate::ui::Cmd::QuitRequested);
+        if !fx.contains(&crate::ui::Effect::ConfirmQuit) {
             return QuitChoice::Proceed;
         }
         let mtm = MainThreadMarker::new().unwrap();
@@ -1513,41 +1326,29 @@ impl Controller {
         )));
         let choice = quit_choice(alert.runModal());
         if choice == QuitChoice::StopThenProceed {
-            // Latch BEFORE cancelling: `running()` stays true until the
-            // worker unwinds, so without the latch a terminate a moment
-            // later would ask the same question again.
-            self.ivars().quit_confirmed.set(true);
-            self.act(crate::ui::Cmd::Cancel);
-            // ...then actually WAIT for it: `Cmd::Cancel` only signals, and
-            // it's the worker's unwind that closes/finalises the partial
-            // file. Bounded by QUIT_GRACE so a wedged drive can't hang quit.
-            let run = self.ivars().app.borrow().run.clone();
-            if let Some(run) = run {
-                crate::engine::await_worker_exit(&run, crate::engine::QUIT_GRACE);
-            }
+            // The core latches the answer, cancels, and waits (bounded) for the worker.
+            self.app_mut(|a| a.confirm_quit());
         }
         choice
     }
 
-    // Commit the Settings form without closing it: read it back, push it into
-    // the running App (which holds its own copy) and save, only when something
+    // Commit the Settings form without closing it; the core saves only what
     // changed. OK, Enter, leaving a field and the language switch all land here.
     fn commit_prefs(&self) {
-        let before = self.ivars().settings.borrow().clone();
-        self.read_prefs_form();
-        let edited = self.ivars().settings.borrow().clone();
-        let PrefsCommit::Save { new_dest } = prefs_commit(&before, &edited) else {
-            return;
-        };
-        let merged = self.app_mut(|a| {
-            let merged = a.commit_settings(&before, edited);
-            if let Some(dest) = new_dest {
-                a.output_dir = dest;
-            }
-            merged
-        });
-        *self.ivars().settings.borrow_mut() = merged;
-        self.save_settings_reporting_error();
+        let mut edited = self.ivars().app.borrow().settings_form().clone();
+        self.read_prefs_form(&mut edited);
+        self.act(crate::ui::Cmd::CommitSettings(Box::new(edited)));
+    }
+
+    /// A Settings text field's live value by key; empty when it is not built.
+    fn pref_value(&self, key: &str) -> String {
+        self.ivars()
+            .pf_fields
+            .borrow()
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, f)| f.stringValue().to_string())
+            .unwrap_or_default()
     }
 
     /// The Settings text field `obj` is, if it is one.
@@ -1558,25 +1359,6 @@ impl Controller {
             .iter()
             .find(|(_, f)| std::ptr::eq(&**f as *const NSTextField as *const AnyObject, obj))
             .map(|(_, f)| f.clone())
-    }
-
-    // Save `Settings` to disk and tell the operator whether it worked. One policy, one call
-    // site.
-    fn save_settings_reporting_error(&self) {
-        match self.ivars().settings.borrow().save() {
-            Ok(()) => self.app_mut(|a| {
-                a.say(
-                    crate::ui::LogKind::Result,
-                    &crate::strings::get("gui.log.settings_saved"),
-                )
-            }),
-            Err(e) => self.app_mut(|a| {
-                a.say(
-                    crate::ui::LogKind::Notice,
-                    &crate::strings::fmt("gui.log.settings_save_error", &[("e", &e.to_string())]),
-                )
-            }),
-        };
     }
 
     // The shell's entire job: hand the command to the core, perform the
@@ -1642,19 +1424,17 @@ impl Controller {
                         });
                     }
                 }
-                E::ShowSettings => {
-                    // Built fresh unless already open, so a window left by
-                    // Cancel or its close button shows the stored settings
-                    // rather than the edits that were walked away from.
+                E::ShowSettings(st) => {
+                    // A reused visible window is refilled from the carried
+                    // settings so its controls match the core's form base.
                     let open = self.ivars().win_prefs.borrow().clone();
-                    // The App owns the live settings (bar picks land there).
-                    if !open.as_ref().is_some_and(|w| w.isVisible()) {
-                        let live = self.ivars().app.borrow().settings.clone();
-                        *self.ivars().settings.borrow_mut() = live;
-                    }
-                    let w = open
-                        .filter(|w| w.isVisible())
-                        .unwrap_or_else(|| build_prefs(mtm, self));
+                    let w = match open.filter(|w| w.isVisible()) {
+                        Some(w) => {
+                            self.refill_prefs(mtm, &st);
+                            w
+                        }
+                        None => build_prefs(mtm, self, &st),
+                    };
                     *self.ivars().win_prefs.borrow_mut() = Some(w.clone());
                     w.center();
                     w.makeKeyAndOrderFront(None);
@@ -1676,7 +1456,7 @@ impl Controller {
                         t.invalidate();
                     }
                 }
-                E::Quit => NSApplication::sharedApplication(mtm).terminate(None),
+                E::Quit | E::ConfirmQuit => NSApplication::sharedApplication(mtm).terminate(None),
                 E::Redraw => {}
                 E::NotifyRipFinished {
                     title,
@@ -1700,20 +1480,16 @@ impl Controller {
         }
     }
 
-    /// Put arbitrary text in the Settings ▸ Keys keydb status note (e.g.
-    /// "Updating…" or the update result). No-op if Settings isn't open.
-    fn set_keydb_note(&self, text: &str) {
-        if let Some(note) = self.ivars().keydb_note.borrow().as_ref() {
-            note.setStringValue(&NSString::from_str(text));
+    // Settings ▸ Keys from the view: the update's note (else the status the
+    // form was built with) and the button, disabled while one runs.
+    fn paint_keydb(&self, note: Option<&str>, busy: bool) {
+        if let (Some(f), Some(text)) = (self.ivars().keydb_note.borrow().as_ref(), note)
+            && f.stringValue().to_string() != text
+        {
+            f.setStringValue(&NSString::from_str(text));
         }
-    }
-
-    // Record that a keydb download is (or isn't) in flight, and reflect it on the button. The
-    // FLAG is the guard; the disabled button is only how it's shown.
-    fn set_keydb_updating(&self, updating: bool) {
-        self.ivars().keydb_updating.set(updating);
         if let Some(b) = self.ivars().keydb_btn.borrow().as_ref() {
-            b.setEnabled(!updating);
+            b.setEnabled(!busy);
         }
     }
 
@@ -1753,6 +1529,7 @@ impl Controller {
         // The format list depends on the source kind, so it is re-derived on
         // every render from the view rather than only at build time.
         self.sync_formats(&v.formats, &v.format);
+        self.paint_keydb(v.keydb_note.as_deref(), v.keydb_busy);
 
         // pages
         let iv = self.ivars();
@@ -1951,10 +1728,7 @@ impl Controller {
     }
 
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let iv = Ivars {
-            settings: RefCell::new(crate::settings::Settings::load()),
-            ..Default::default()
-        };
+        let iv = Ivars::default();
         let this = Self::alloc(mtm).set_ivars(iv);
         unsafe { msg_send![super(this), init] }
     }
@@ -2079,11 +1853,27 @@ impl Controller {
         }
     }
 
-    /// Read every Settings control back into the stored `Settings` (no save, no
-    /// close). Shared by OK and the live language switch so the form-reading
-    /// rules (canonical enum values, container/format mapping) live in one place.
-    fn read_prefs_form(&self) {
-        let mut st = self.ivars().settings.borrow_mut();
+    /// Read every Settings control back into `st` (no save, no close). Shared by
+    /// OK and the live language switch so the form-reading rules (canonical enum
+    /// values, container/format mapping) live in one place.
+    fn refill_prefs(&self, mtm: MainThreadMarker, st: &crate::settings::Settings) {
+        let iv = self.ivars();
+        fill_prefs(
+            mtm,
+            self,
+            st,
+            &iv.pf_fields.borrow(),
+            &iv.pf_checks.borrow(),
+            &iv.pf_popups.borrow(),
+            &iv.pf_langs.borrow(),
+        );
+        for (k, f) in iv.pf_fields.borrow().iter() {
+            if PATH_KEYS.contains(&k.as_str()) {
+                fit_wrapping_field(f);
+            }
+        }
+    }
+    fn read_prefs_form(&self, st: &mut crate::settings::Settings) {
         for (k, f) in self.ivars().pf_fields.borrow().iter() {
             st.set(k, { f.stringValue() }.to_string());
         }
@@ -2169,22 +1959,6 @@ impl Controller {
         self.render();
         let b = content.bounds();
         self.relayout(b.size.width, b.size.height);
-    }
-
-    fn start_drain(&self) {
-        if self.ivars().drain.borrow().is_some() {
-            return;
-        }
-        let t = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-                0.2,
-                self,
-                sel!(onDrain:),
-                None,
-                true,
-            )
-        };
-        *self.ivars().drain.borrow_mut() = Some(t);
     }
 
     // Re-title the View > log menu item, cached after the first lookup so this
@@ -2998,7 +2772,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     let fld =
         { NSComboBox::initWithFrame(NSComboBox::alloc(mtm), r(0.0, BAR_ROW_Y, bw - 380.0, 24.0)) };
     unsafe {
-        let saved = c.ivars().settings.borrow().dest_dir.clone();
+        let saved = c.ivars().app.borrow().settings.dest_dir.clone();
         fld.setStringValue(&NSString::from_str(&saved));
         if !saved.is_empty() {
             fld.addItemWithObjectValue(&Retained::cast_unchecked::<AnyObject>(NSString::from_str(
@@ -3471,7 +3245,10 @@ pub fn run() {
     }
     if let Ok(which) = dev_env("FMKV_WIN") {
         let w = match which.as_str() {
-            "prefs" => build_prefs(mtm, &c),
+            "prefs" => {
+                let st = c.ivars().app.borrow().settings_form().clone();
+                build_prefs(mtm, &c, &st)
+            }
             _ => build_about(mtm, &c),
         };
         if let Ok(tab) = dev_env("FMKV_TAB")
@@ -3947,7 +3724,65 @@ impl Rows {
     }
 }
 
-fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
+type PrefFields = [(String, Retained<NSTextField>)];
+
+// Fill the Settings controls from `st`; also used to refill a reused visible window.
+fn fill_prefs(
+    mtm: MainThreadMarker,
+    c: &Controller,
+    st: &crate::settings::Settings,
+    all_fields: &PrefFields,
+    all_checks: &[(String, Retained<NSButton>)],
+    all_popups: &[(String, Retained<NSPopUpButton>)],
+    all_langs: &[(String, Retained<NSPopUpButton>)],
+) {
+    for (k, f) in all_fields {
+        f.setStringValue(&NSString::from_str(&st.get(k)));
+    }
+    for (k, b) in all_checks {
+        b.setState(if st.get_bool(k) { 1 } else { 0 });
+    }
+    for (k, p) in all_popups {
+        let want = st.get(k);
+        let opts = enum_options(k);
+        if !opts.is_empty() {
+            // Enum popup: map the stored canonical to its menu index.
+            if let Some(i) = opts.iter().position(|(canon, _)| *canon == want) {
+                p.selectItemAtIndex(i as isize);
+            }
+        } else if k == "container" {
+            // Canonical format string; the popup shows the localized label.
+            p.selectItemWithTitle(&NSString::from_str(&crate::ui::format_label(&want)));
+        } else if !want.is_empty() {
+            p.selectItemWithTitle(&NSString::from_str(&want));
+        }
+        // A stored value that matched no item leaves nothing selected (a
+        // blank popup). Fall back to the first row so every popup always
+        // shows a value.
+        if p.indexOfSelectedItem() < 0 {
+            p.selectItemAtIndex(0);
+        }
+        // The language popup applies live the instant it changes.
+        if k == "language" {
+            unsafe {
+                p.setTarget(Some(c));
+                p.setAction(Some(sel!(onPickLanguage:)));
+            }
+        }
+    }
+    // Language pickers hold a SET, so they are populated by their own
+    // setter rather than by matching a title: the stored string may name
+    // several languages, or one this build does not list.
+    for (k, p) in all_langs {
+        set_lang_picker(mtm, p, &st.get(k), c);
+    }
+}
+
+fn build_prefs(
+    mtm: MainThreadMarker,
+    c: &Controller,
+    st: &crate::settings::Settings,
+) -> Retained<NSWindow> {
     // Wide enough that the widest label ("Keep encrypted (raw passthrough) :",
     // "Minimum title length (seconds) :") — and its longer translations — fits
     // the label gutter without clipping, while the controls still have room.
@@ -4194,14 +4029,8 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         160.0,
     );
     *c.ivars().keydb_btn.borrow_mut() = Some(update_btn);
-    // A download may already be running from an earlier Settings session: this
-    // button is brand new and enabled, so tell it what the controller knows.
-    c.set_keydb_updating(c.ivars().keydb_updating.get());
-    {
-        let status = c.ivars().settings.borrow().keydb_status();
-        let note = t.note(mtm, &status, tw);
-        *c.ivars().keydb_note.borrow_mut() = Some(note);
-    }
+    let note = t.note(mtm, &st.keydb_status(), tw);
+    *c.ivars().keydb_note.borrow_mut() = Some(note);
     t.gap();
     t.field(
         mtm,
@@ -4264,52 +4093,16 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     bd.addSubview(&tabs);
     *c.ivars().tabs.borrow_mut() = Some(tabs.clone());
 
-    // Populate from disk, then hand the controls to the controller so OK can
-    // read them back. Defaults that are empty stay empty on purpose (the key
-    // endpoints ship blank).
-    {
-        let st = c.ivars().settings.borrow();
-        for (k, f) in &all_fields {
-            f.setStringValue(&NSString::from_str(&st.get(k)));
-        }
-        for (k, b) in &all_checks {
-            b.setState(if st.get_bool(k) { 1 } else { 0 });
-        }
-        for (k, p) in &all_popups {
-            let want = st.get(k);
-            let opts = enum_options(k);
-            if !opts.is_empty() {
-                // Enum popup: map the stored canonical to its menu index.
-                if let Some(i) = opts.iter().position(|(canon, _)| *canon == want) {
-                    p.selectItemAtIndex(i as isize);
-                }
-            } else if k == "container" {
-                // Canonical format string; the popup shows the localized label.
-                p.selectItemWithTitle(&NSString::from_str(&crate::ui::format_label(&want)));
-            } else if !want.is_empty() {
-                p.selectItemWithTitle(&NSString::from_str(&want));
-            }
-            // A stored value that matched no item leaves nothing selected (a
-            // blank popup). Fall back to the first row so every popup always
-            // shows a value.
-            if p.indexOfSelectedItem() < 0 {
-                p.selectItemAtIndex(0);
-            }
-            // The language popup applies live the instant it changes.
-            if k == "language" {
-                unsafe {
-                    p.setTarget(Some(c));
-                    p.setAction(Some(sel!(onPickLanguage:)));
-                }
-            }
-        }
-        // Language pickers hold a SET, so they are populated by their own
-        // setter rather than by matching a title: the stored string may name
-        // several languages, or one this build does not list.
-        for (k, p) in &all_langs {
-            set_lang_picker(mtm, p, &st.get(k), c);
-        }
-    }
+    // Populate from the carried Settings; empty defaults stay empty on purpose.
+    fill_prefs(
+        mtm,
+        c,
+        st,
+        &all_fields,
+        &all_checks,
+        &all_popups,
+        &all_langs,
+    );
     // Every text field reports to the controller, which commits on Enter and
     // when focus leaves; a path field is sized to its stored value.
     for (k, f) in &all_fields {
@@ -4395,7 +4188,7 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         (crate::strings::get("gui.about.licence"), "MIT".to_string()),
         (
             crate::strings::get("gui.about.keys"),
-            crate::settings::Settings::load().keydb_status(),
+            c.ivars().app.borrow().settings.keydb_status(),
         ),
         (
             crate::strings::get("gui.about.website"),
@@ -5073,21 +4866,22 @@ impl Controller {
         // 8 ── run is refused with no source, and the guard rule holds
         check(
             "blocked-while-running",
-            crate::ui::blocked_while_running(Cmd::Run)
-                && !crate::ui::blocked_while_running(Cmd::Cancel),
+            crate::ui::blocked_while_running(&Cmd::Run)
+                && !crate::ui::blocked_while_running(&Cmd::Cancel),
             "Cancel always reachable, Run is not",
         );
 
         // 9 ── settings persist
         check(
             "settings-load",
-            !crate::settings::Settings::load().dest_dir.is_empty(),
-            "destination restored from disk",
+            !self.ivars().app.borrow().settings.dest_dir.is_empty(),
+            "settings carry a destination folder",
         );
 
         // 10 ── windows build
         let mtm = MainThreadMarker::new().unwrap();
-        let prefs = build_prefs(mtm, self);
+        let st = self.ivars().app.borrow().settings_form().clone();
+        let prefs = build_prefs(mtm, self, &st);
         let tabs = self
             .ivars()
             .tabs
@@ -5210,7 +5004,7 @@ impl Controller {
             crate::engine::preflight(iso, "/tmp", &[]).is_ok(),
             "answers without executing",
         );
-        let ks = crate::settings::Settings::load().keydb_status();
+        let ks = self.ivars().app.borrow().settings.keydb_status();
         check(
             "keydb-status",
             ks.contains("keydb found") || ks.contains("no keydb"),

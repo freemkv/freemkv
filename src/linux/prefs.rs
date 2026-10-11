@@ -12,7 +12,7 @@ use libadwaita::prelude::*;
 
 use super::Shell;
 use crate::linux_glue::{self as glue, row_title};
-use crate::ui::LogKind;
+use crate::ui::Cmd;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -266,16 +266,13 @@ fn page(name: &str, icon: &str, groups: &[adw::PreferencesGroup]) -> adw::Prefer
     p
 }
 
-/// Open Settings, rebuilt fresh from the stored settings so it is always in
+/// Open Settings, rebuilt fresh from `st` (the core's form) so it is always in
 /// the current language. `page` reopens on a given tab (the language switch).
-pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
+pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name: Option<String>) {
     if let Some(p) = shell.prefs.borrow().as_ref() {
         p.window.present();
         return;
     }
-    // The App owns the live settings (bar picks land there).
-    let live = shell.app.borrow().settings.clone();
-    *shell.settings.borrow_mut() = live;
     let window = adw::PreferencesWindow::builder()
         .title(g("gui.win.settings"))
         .transient_for(&shell.window)
@@ -355,9 +352,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     f.entry(&k2, "keydb_url", &g("gui.set.keydb_url"));
     let keydb_row = adw::ActionRow::builder()
         .title(g("gui.set.update_keydb"))
-        .subtitle(glib::markup_escape_text(
-            &shell.settings.borrow().keydb_status(),
-        ))
+        .subtitle(glib::markup_escape_text(&st.keydb_status()))
         .activatable(true)
         .build();
     keydb_row.add_suffix(&gtk::Image::from_icon_name("folder-download-symbolic"));
@@ -400,8 +395,9 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
         langs: f.langs,
         keydb_row: keydb_row.clone(),
     });
-    prefs.populate(&shell.settings.borrow());
-    prefs.set_keydb_updating(shell.keydb_updating.get());
+    prefs.populate(st);
+    let v = shell.app.borrow().view();
+    prefs.paint_keydb(v.keydb_note.as_deref(), v.keydb_busy);
     if let Some(name) = page_name {
         window.set_visible_page_name(&name);
     }
@@ -486,29 +482,12 @@ impl Prefs {
             .unwrap_or_default()
     }
 
-    /// Commit the form: into the stored copy, into the running `App` (so it
-    /// applies now), and to disk. The live output folder follows only when
-    /// the DEFAULT destination actually changed, so a one-off pick survives.
+    /// Commit the form to the core, which applies it at once and saves only
+    /// what changed.
     fn commit(&self, shell: &Rc<Shell>) {
-        let prior = shell.settings.borrow().clone();
-        let before = serde_json::to_value(&prior).ok();
-        let old_dest = prior.dest_dir.clone();
-        self.read_form(&mut shell.settings.borrow_mut());
-        let edited = shell.settings.borrow().clone();
-        if serde_json::to_value(&edited).ok() == before {
-            return;
-        }
-        let new_dest = edited.dest_dir.clone();
-        let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
-        let merged = shell.app_mut(|a| {
-            let merged = a.commit_settings(&prior, edited);
-            if dest_changed {
-                a.output_dir = new_dest;
-            }
-            merged
-        });
-        *shell.settings.borrow_mut() = merged;
-        shell.save_settings_reporting_error();
+        let mut edited = shell.app.borrow().settings_form().clone();
+        self.read_form(&mut edited);
+        shell.act(Cmd::CommitSettings(Box::new(edited)));
     }
 
     /// The language applies at once: commit, swap the catalog, rebuild the
@@ -516,13 +495,14 @@ impl Prefs {
     fn apply_language(self: &Rc<Self>, shell: &Rc<Shell>) {
         let tab = self.window.visible_page_name().map(|s| s.to_string());
         self.commit(shell);
-        let lang = shell.settings.borrow().language.clone();
+        let lang = shell.app.borrow().settings.language.clone();
         // The LIVE switch; "auto" makes freemkv-i18n re-detect from the
         // environment, exactly as the CLI and the startup path do.
         crate::strings::set_locale(crate::ui::locale_code(&lang));
         self.window.close();
         shell.relocalize();
-        show(shell, tab);
+        let form = shell.app.borrow().settings_form().clone();
+        show(shell, &form, tab);
     }
 
     fn toast(&self, text: &str) {
@@ -530,72 +510,32 @@ impl Prefs {
             .add_toast(adw::Toast::new(&glib::markup_escape_text(text)));
     }
 
-    // Validated by the same rule the key layer uses, so the UI cannot accept
-    // a URL the engine would later reject.
+    // The core checks the live URL and logs its verdict; shown here too.
     fn test_keyserver(&self, shell: &Rc<Shell>) {
-        let url = self.field("keyserver_url");
-        let msg = if url.trim().is_empty() {
-            g("gui.log.no_keyserver")
-        } else {
-            match freemkv_keysources::validate_keyserver_url(&url) {
-                Ok(_) => crate::strings::fmt("gui.log.keyserver_valid", &[("url", &url)]),
-                Err(e) => {
-                    crate::strings::fmt("gui.log.keyserver_rejected", &[("e", &e.to_string())])
-                }
-            }
-        };
-        shell.say(LogKind::Result, &msg);
-        self.toast(&msg);
+        shell.act(Cmd::TestKeyserver(self.field("keyserver_url")));
+        let verdict = shell.app.borrow().keyserver_verdict().map(str::to_owned);
+        if let Some(text) = verdict {
+            self.toast(&text);
+        }
     }
 
     /// Download the keydb from the LIVE fields (works before the window is
-    /// closed), on a worker thread; the shell's drain reports the result.
+    /// closed); the core runs it and reports through the view.
     fn update_keydb(&self, shell: &Rc<Shell>) {
-        if shell.keydb_updating.get() {
-            self.set_keydb_note(&crate::strings::get_or(
-                "gui.set.keydb_busy",
-                "A keydb update is already running — please wait.",
-            ));
-            return;
-        }
-        let (mut url, mut path) = (self.field("keydb_url"), self.field("keydb_path"));
-        if url.is_empty() {
-            url = shell.settings.borrow().keydb_url.clone();
-        }
-        if path.is_empty() {
-            path = shell.settings.borrow().keydb_path.clone();
-        }
-        if url.trim().is_empty() {
-            self.set_keydb_note(&g("gui.set.keydb_no_url"));
-            return;
-        }
-        shell.say(LogKind::Result, &g("gui.log.fetching_keydb"));
-        self.set_keydb_note(&g("gui.set.keydb_updating"));
-        shell.set_keydb_updating(true);
-        let inbox = shell.inbox.clone();
-        std::thread::spawn(move || {
-            // A panic must still push a terminal message, or Update stays
-            // disabled for the rest of the session.
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::settings::update_keydb(&url, &path)
-            }))
-            .unwrap_or_else(|_| {
-                Err(crate::strings::get_or(
-                    "gui.log.keydb_worker_failed",
-                    "keydb update failed — internal error",
-                ))
-            });
-            let line = glue::keydb_update_line(r);
-            inbox.lock().unwrap_or_else(|e| e.into_inner()).push(line);
-        });
-        shell.start_drain();
+        let url = self.field("keydb_url");
+        let path = self.field("keydb_path");
+        shell.act(Cmd::UpdateKeydb { url, path });
     }
 
-    pub(super) fn set_keydb_note(&self, text: &str) {
-        self.keydb_row.set_subtitle(&glib::markup_escape_text(text));
-    }
-
-    pub(super) fn set_keydb_updating(&self, updating: bool) {
-        self.keydb_row.set_sensitive(!updating);
+    /// The Keys row from the view: the update's note (else the status it was
+    /// built with), insensitive while one runs.
+    pub(super) fn paint_keydb(&self, note: Option<&str>, busy: bool) {
+        if let Some(text) = note {
+            let escaped = glib::markup_escape_text(text);
+            if self.keydb_row.subtitle().as_deref() != Some(escaped.as_str()) {
+                self.keydb_row.set_subtitle(&escaped);
+            }
+        }
+        self.keydb_row.set_sensitive(!busy);
     }
 }

@@ -314,20 +314,19 @@ fn rip_key_scope(
 }
 
 /// The engine plan for a server rip of the drive at `device_path` writing `dest` (an
-/// output URL): the server's half of the one plan parser every front end shares. The
-/// server rips the main feature, decrypts (it has no raw option), and recovers over passes
+/// output URL), its keys by the one rule every front end shares. The server rips the main feature, decrypts (it has no raw option), and recovers over passes
 /// when `max_retries` asks for them.
 pub fn server_plan(cfg: &Config, device_path: &str, dest: &str) -> freemkv_engine::Plan {
-    crate::plan_core::plan(crate::plan_core::PlanRequest {
+    freemkv_engine::Plan {
         source: format!("disc://{device_path}"),
         dest: dest.to_string(),
         titles: freemkv_engine::Selection::MainMovie,
         streams: freemkv_engine::StreamChoice::default(),
         raw: false,
         multipass: uses_multipass(cfg.max_retries),
-        keys: crate::server::keysource::key_settings(cfg),
+        keys: crate::plan_core::key_params(&crate::server::keysource::key_settings(cfg)),
         force: false,
-    })
+    }
 }
 
 /// The server's log line for the plan a rip runs. Exhaustive on purpose (anti-drift §2): a
