@@ -260,6 +260,7 @@ fn a_restored_backoff_is_clamped_to_the_longest_real_one() {
             owner: None,
             missing_folder: false,
             stall_resume: None,
+            teardown_attempts: 0,
         };
         let state = super::manifest::RetryState {
             attempts: 2,
@@ -351,7 +352,7 @@ fn a_failed_teardown_backs_off_and_its_re_pass_writes_nothing() {
     assert!(dests.iter().all(|d| d.exists()), "fixture: delivered");
     let first = first.expect("the teardown failure is shown");
     assert!(first.reason.contains("staging cleanup failed"), "{first:?}");
-    assert_eq!(first.attempts, 1, "it backs off: {first:?}");
+    assert_eq!(first.attempts, 0, "the copy budget is not spent: {first:?}");
     assert!(
         first
             .retry_after
@@ -937,4 +938,29 @@ fn a_stall_is_shown_before_its_attempt_is_written() {
         .cloned()
         .collect();
     assert_eq!(seen, vec![(key.clone(), true, true)]);
+}
+
+// A teardown that keeps failing backs off (30 s, then 2 min) and is then held for Retry,
+// on its own count: the delivery's copy budget is untouched.
+#[test]
+fn a_failing_teardown_is_held_after_its_own_backoffs() {
+    let _g = guard();
+    let key = "/test-teardown-budget/job";
+    clear_error(key);
+    let now = std::time::Instant::now();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        teardown_blocked(key, "staging cleanup failed: x", "inspect");
+        let r = row(key).unwrap();
+        seen.push((r.attempts, r.retry_held, r.retry_after.map(|t| t > now)));
+    }
+    clear_error(key);
+    assert_eq!(
+        seen,
+        vec![
+            (0, false, Some(true)),
+            (0, false, Some(true)),
+            (0, true, None)
+        ]
+    );
 }

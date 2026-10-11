@@ -154,6 +154,9 @@ pub struct MoverError {
     // A declared stall's committed backoff, applied once its blocked worker returns.
     #[serde(skip)]
     stall_resume: Option<Option<std::time::Instant>>,
+    // Failed staging teardowns of a delivered rip, counted apart from the copy budget.
+    #[serde(skip)]
+    teardown_attempts: u32,
 }
 
 fn retry_delay(attempts: u32) -> Option<std::time::Duration> {
@@ -439,6 +442,7 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             owner: None,
             missing_folder: false,
             stall_resume: None,
+            teardown_attempts: 0,
         });
     apply_retry_at(row, state, now);
     drop(errors);
@@ -470,6 +474,7 @@ fn record_error_at_stage(
         let mut m = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
         let same_reason = m.get(path).map(|e| e.reason == reason).unwrap_or(false);
         let attempts = m.get(path).map_or(0, |e| e.attempts);
+        let teardown_attempts = m.get(path).map_or(0, |e| e.teardown_attempts);
         let retry_after = m
             .get(path)
             .map_or(Some(std::time::Instant::now()), |e| e.retry_after);
@@ -490,6 +495,7 @@ fn record_error_at_stage(
                 owner: None,
                 missing_folder: false,
                 stall_resume: None,
+                teardown_attempts,
             },
         );
         same_reason
@@ -601,6 +607,8 @@ pub fn clear_move_error(path: &str) -> bool {
 }
 
 /// Operator-initiated Retry all: reset errors and their retry budgets.
+// Retry all is Retry on every row, so each missing-folder row among them consents to
+// recreating its folder, deliberately: the operator chose every row.
 pub fn clear_all_move_errors() {
     with_retry_maps(|errors, requests| {
         errors.retain(|path, e| {
@@ -1926,7 +1934,10 @@ fn check_and_move(cfg: &Config) {
                     planned_moves = saved.moves();
                 }
                 Err(e) => {
-                    remove_created(&created);
+                    // A save that failed after its rename left a journal naming these folders.
+                    if std::fs::symlink_metadata(dir.join(manifest::FILE)).is_err() {
+                        remove_created(&created);
+                    }
                     record_error(
                         &dir_str,
                         &format!("cannot persist delivery plan: {e}"),
@@ -2285,11 +2296,20 @@ fn check_and_move(cfg: &Config) {
 const SIZE_MISMATCH_HINT: &str = "Check the destination filesystem for ENOSPC / short writes. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
 const POST_COPY_INVALID_HINT: &str = "The copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); see device_system.log for the specific check. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
 
-// A delivered dir whose staging teardown cannot run: shown, and retried on the delivery's
-// backoff (then held), never re-run every tick.
+// A delivered dir whose staging teardown cannot run: shown, retried after 30 s and 2 min, then
+// held for Retry, on a count of its own (no copy is involved). In memory: a restart re-checks.
 fn teardown_blocked(dir: &str, reason: &str, hint: &str) {
     record_error(dir, reason, hint);
-    schedule_move_retry(dir);
+    if let Some(row) = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(dir)
+    {
+        row.teardown_attempts = row.teardown_attempts.saturating_add(1);
+        row.retry_after = retry_delay(row.teardown_attempts)
+            .and_then(|d| std::time::Instant::now().checked_add(d));
+        row.retry_held = row.retry_after.is_none();
+    }
 }
 
 // The move webhook's `output_path`: the media file, not the ISO archive, and the
