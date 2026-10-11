@@ -661,6 +661,9 @@ fn folders_are_created_only_below_the_checked_root() {
             movie_dir: movies.to_string_lossy().into_owned(),
             ..Config::default()
         };
+        // Held open so a recreated folder cannot reuse the old inode (ext4/tmpfs do), which
+        // would make it the same folder by identity; a real stand-in is on another device.
+        let _old_root = std::fs::File::open(&movies).unwrap();
         let dropped = movies.clone();
         let _hook = test_hooks::on_preflight(
             &movies,
