@@ -2001,9 +2001,13 @@ fn check_and_move(cfg: &Config) {
                         ),
                         &crate::strings::get_or(
                             "server.mover.folder_create_failed_hint",
-                            "Check that the destination share is mounted and writable: a share that dropped or was remounted since its check refuses this too. It is tried again on the next pass; nothing was moved.",
+                            "Check that the destination share is mounted and writable: a share that dropped or was remounted since its check refuses this too. It is tried again after 30 s, then 2 min; after that it waits for Retry. Nothing was moved.",
                         ),
                     );
+                    // Not every tick: each pass would make and remove the other folders.
+                    if delivery.is_none() {
+                        back_off_unjournaled(&dir_str);
+                    }
                     dest_ok = false;
                     break;
                 }
@@ -2015,23 +2019,30 @@ fn check_and_move(cfg: &Config) {
         }
 
         if delivery.is_none() {
-            match manifest::Manifest::create(
+            let frozen = manifest::Manifest::create(
                 &dir,
                 marker.clone(),
                 state_outputs.clone(),
                 dest_roots,
                 &planned_moves,
-            ) {
+            );
+            #[cfg(test)]
+            let frozen = frozen.and_then(|saved| test_hooks::plan_saved(&dir).map(|()| saved));
+            match frozen {
                 Ok(saved) => {
                     planned_moves = saved.moves();
                     // A frozen plan is a new delivery: earlier refusals' backoff is spent.
                     clear_error(&dir_str);
                 }
                 Err(e) => {
-                    // A save that failed after its rename left a journal naming these folders.
-                    if std::fs::symlink_metadata(dir.join(manifest::FILE)).is_err() {
-                        remove_created(&created);
+                    // A save that failed after its rename left a journal naming these folders:
+                    // the plan is frozen, so this is no delivery attempt; the next pass runs it.
+                    if std::fs::symlink_metadata(dir.join(manifest::FILE)).is_ok() {
+                        tracing::warn!(dir = %dir_str, error = %e, "mover: delivery plan journaled with an error");
+                        clear_error(&dir_str);
+                        continue;
                     }
+                    remove_created(&created);
                     record_error(
                         &dir_str,
                         &format!("cannot persist delivery plan: {e}"),
@@ -3433,6 +3444,19 @@ pub(crate) mod test_hooks {
             vec![Err(std::io::Error::other("injected listing fault"))]
         } else {
             Vec::new()
+        }
+    }
+    /// Staging dirs whose delivery plan save fails after the journal was written.
+    pub static PLAN_SAVE_FAULTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    pub fn plan_saved(dir: &Path) -> std::io::Result<()> {
+        let faulty = PLAN_SAVE_FAULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|p| p == dir);
+        match faulty {
+            true => Err(std::io::Error::other("injected directory sync fault")),
+            false => Ok(()),
         }
     }
     pub fn preflighted(root: &Path) {

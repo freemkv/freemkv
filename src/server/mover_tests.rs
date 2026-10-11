@@ -3558,6 +3558,161 @@ fn an_unreadable_journal_elsewhere_blocks_freezing_a_new_plan() {
     );
 }
 
+// A title folder that cannot be made (share full or over quota) is not retried every tick,
+// making and removing the other title folders each time: it backs off.
+#[test]
+fn a_destination_folder_that_cannot_be_created_backs_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    std::fs::write(movie_dir.join("Blocked (2024)"), b"x").unwrap();
+    let disc_dir = staging.join("Blocked");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Blocked")).unwrap();
+    write_minimal_mkv(&disc_dir.join("Blocked.mkv"), &[0xAA; 1024]);
+    let dir_str = disc_dir.to_string_lossy().to_string();
+    let _g = errors_guard();
+    clear_error(&dir_str);
+    check_and_move(&cfg);
+    let first = error_snapshot(&dir_str);
+    check_and_move(&cfg);
+    let second = error_snapshot(&dir_str);
+    clear_error(&dir_str);
+    let first = first.expect("a row");
+    assert!(
+        first
+            .reason
+            .starts_with("cannot create destination directory"),
+        "{first:?}"
+    );
+    let due = first.retry_after.expect("not held after one failure");
+    assert!(
+        due > std::time::Instant::now() + std::time::Duration::from_secs(20),
+        "retried on the next tick: {first:?}"
+    );
+    assert_eq!(
+        second.expect("a row").attempts,
+        first.attempts,
+        "not tried again"
+    );
+}
+
+// A plan save that failed after its rename left a journal: the plan is frozen, so the
+// refusal is no delivery attempt and the next pass delivers from the journal.
+#[test]
+fn a_plan_journaled_despite_its_save_error_costs_no_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let disc_dir = staging.join("Synced");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Synced")).unwrap();
+    write_minimal_mkv(&disc_dir.join("Synced.mkv"), &[0xAA; 1024]);
+    let dir_str = disc_dir.to_string_lossy().to_string();
+    let _g = errors_guard();
+    clear_error(&dir_str);
+    super::test_hooks::PLAN_SAVE_FAULTS
+        .lock()
+        .unwrap()
+        .push(disc_dir.clone());
+    check_and_move(&cfg);
+    super::test_hooks::PLAN_SAVE_FAULTS
+        .lock()
+        .unwrap()
+        .retain(|d| d != &disc_dir);
+    let after_fault = error_snapshot(&dir_str);
+    let journaled = super::manifest::Manifest::load(&disc_dir)
+        .unwrap()
+        .is_some();
+    check_and_move(&cfg);
+    let after_retry = error_snapshot(&dir_str);
+    clear_error(&dir_str);
+    assert!(journaled, "the plan was written");
+    assert!(
+        after_fault.as_ref().is_none_or(|row| row.attempts == 0),
+        "{after_fault:?}"
+    );
+    assert!(after_retry.is_none(), "{after_retry:?}");
+    assert!(
+        movie_dir.join("Synced (2024)/Synced (2024).mkv").exists(),
+        "delivered from the journal"
+    );
+}
+
+// Folders that are no rip job (a staging disk's lost+found, a NAS's @eaDir) reserve no
+// names, even when unreadable: they never block another delivery.
+#[test]
+fn a_foreign_folder_in_staging_does_not_block_deliveries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let nas = staging.join("@eaDir");
+    std::fs::create_dir_all(&nas).unwrap();
+    std::fs::write(nas.join(super::manifest::FILE), b"{ not a journal").unwrap();
+    let lost = staging.join("lost+found");
+    std::fs::create_dir_all(&lost).unwrap();
+    #[cfg(unix)]
+    let _restore = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lost, std::fs::Permissions::from_mode(0o000)).unwrap();
+        RestoreModes(vec![(lost.clone(), 0o755)])
+    };
+    let disc_dir = staging.join("Fresh");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Fresh")).unwrap();
+    write_minimal_mkv(&disc_dir.join("Fresh.mkv"), &[0xAA; 1024]);
+    let dir_str = disc_dir.to_string_lossy().to_string();
+    let foreign = [&nas, &lost].map(|d| d.to_string_lossy().to_string());
+    let _g = errors_guard();
+    clear_error(&dir_str);
+    check_and_move(&cfg);
+    let recorded = error_snapshot(&dir_str);
+    clear_error(&dir_str);
+    foreign.iter().for_each(|d| clear_error(d));
+    assert!(recorded.is_none(), "{recorded:?}");
+    assert!(
+        movie_dir.join("Fresh (2024)/Fresh (2024).mkv").exists(),
+        "delivered"
+    );
+}
+
+// A real rip job whose journal cannot be read may hold this rip's name: still held.
+#[test]
+fn a_rip_job_with_an_unreadable_journal_still_blocks_freezing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let other = staging.join("disc-0123456789abcdef");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join(super::manifest::FILE), b"{ not a journal").unwrap();
+    let disc_dir = staging.join("Fresh");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Fresh")).unwrap();
+    write_minimal_mkv(&disc_dir.join("Fresh.mkv"), &[0xAA; 1024]);
+    let dir_str = disc_dir.to_string_lossy().to_string();
+    let _g = errors_guard();
+    clear_error(&dir_str);
+    check_and_move(&cfg);
+    let recorded = error_snapshot(&dir_str);
+    clear_error(&dir_str);
+    clear_error(&other.to_string_lossy());
+    let recorded = recorded.expect("held");
+    assert!(recorded.reason.contains("reserved"), "{recorded:?}");
+    assert!(disc_dir.join("Fresh.mkv").exists(), "nothing was moved");
+}
+
 // A delivery plan that cannot be saved (staging full or read-only) is not retried every
 // tick, making and removing the title folders on the share each time: it backs off.
 #[cfg(unix)]
