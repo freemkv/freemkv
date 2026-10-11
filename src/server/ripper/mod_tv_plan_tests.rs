@@ -149,7 +149,7 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
     for media_type in ["movie", ""] {
         assert!(matches!(
             check_capture_selection(&titles, &cfg, media_type, "Show Season 1"),
-            Err(crate::server::planner::PlanError::SelectionNeedsReview(_))
+            Err(crate::server::planner::PlanError::Selection(_))
         ));
         assert!(matches!(
             resume::check_resume_selection(
@@ -160,7 +160,7 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
                 false,
                 false
             ),
-            Err(crate::server::planner::PlanError::SelectionNeedsReview(_))
+            Err(crate::server::planner::PlanError::Selection(_))
         ));
     }
     let off = Config {
@@ -199,11 +199,11 @@ fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
             let remux = plan(&cfg, &titles, &media, Path::new("Show.mkv"));
             assert!(matches!(
                 capture,
-                Err(crate::server::planner::PlanError::SelectionNeedsReview(_))
+                Err(crate::server::planner::PlanError::LaterDiscStart)
             ));
             assert!(matches!(
                 remux,
-                Err(crate::server::planner::PlanError::SelectionNeedsReview(_))
+                Err(crate::server::planner::PlanError::LaterDiscStart)
             ));
         }
     }
@@ -329,10 +329,7 @@ fn multi_disc_season_requires_confirmed_episode_numbers() {
         None,
     );
     assert!(
-        matches!(
-            plan,
-            Err(crate::server::planner::PlanError::SelectionNeedsReview(_))
-        ),
+        matches!(plan, Err(crate::server::planner::PlanError::LaterDiscStart)),
         "disc number does not establish how many episodes earlier discs held"
     );
 }
@@ -369,7 +366,7 @@ fn tmdb_runtimes_do_not_authorize_episode_numbering() {
     );
     assert!(matches!(
         plan,
-        Err(crate::server::planner::PlanError::SelectionNeedsReview(_))
+        Err(crate::server::planner::PlanError::LaterDiscStart)
     ));
 }
 
@@ -399,16 +396,15 @@ fn tv_auto_off_does_not_fan_out() {
 #[test]
 fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
     use crate::server::planner::PlanError;
-    let roster = selection_review_message(&PlanError::SelectionNeedsReview(
-        "missing-episode-roster".into(),
-    ));
+    let roster = selection_review_message(&PlanError::Selection(freemkv_engine::SelectionReview {
+        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+        candidates: vec![0, 1],
+    }));
     assert_eq!(
         roster,
-        "Title selection needs review before muxing: the disc has no authored episode list. No fallback title was selected."
+        "Title selection needs review before muxing: E9086 the disc has no authored episode list. No fallback title was selected."
     );
-    let numbering = selection_review_message(&PlanError::SelectionNeedsReview(
-        "Episode numbering is outside the supported range.".into(),
-    ));
+    let numbering = selection_review_message(&PlanError::EpisodeRange);
     assert!(!numbering.contains(".."), "{numbering}");
     for error in [
         PlanError::NoTitles,

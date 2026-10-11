@@ -47,15 +47,17 @@ pub enum PlanError {
     NoTitles,
     NoOutputs,
     DuplicateOutput(String),
-    SelectionNeedsReview(String),
+    /// The engine's episode selection needs review (E9086).
+    Selection(freemkv_engine::SelectionReview),
+    /// A later disc's episode numbering has no confirmed First episode.
+    LaterDiscStart,
+    /// The episode numbers would run past the supported range.
+    EpisodeRange,
 }
-
-pub(crate) const REVIEW_LATER_DISC_START: &str = "later-disc-episode-start";
-pub(crate) const REVIEW_EPISODE_RANGE: &str = "episode-range";
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use crate::strings::{fmt_or, get_or, review_reason_text};
+        use crate::strings::{fmt_or, get_or};
         let text = match self {
             PlanError::NoTitles => get_or("error.plan.no_titles", "the disc has no usable titles"),
             PlanError::NoOutputs => get_or("error.plan.no_outputs", "the plan has no outputs"),
@@ -64,15 +66,15 @@ impl std::fmt::Display for PlanError {
                 "two outputs would use the same file name: {name}",
                 &[("name", name)],
             ),
-            PlanError::SelectionNeedsReview(key) if key == REVIEW_LATER_DISC_START => get_or(
+            PlanError::LaterDiscStart => get_or(
                 "error.plan.later_disc_start",
                 "Later-disc episode numbering needs a confirmed First episode; disc number and runtimes do not establish it.",
             ),
-            PlanError::SelectionNeedsReview(key) if key == REVIEW_EPISODE_RANGE => get_or(
+            PlanError::EpisodeRange => get_or(
                 "error.plan.episode_range",
                 "Episode numbering is outside the supported range.",
             ),
-            PlanError::SelectionNeedsReview(key) => review_reason_text(key),
+            PlanError::Selection(review) => crate::strings::selection_review_text(review),
         };
         f.write_str(&text)
     }
@@ -130,7 +132,7 @@ pub(crate) fn check_episode_selection(
             presentation(cfg),
         )
         .map(|_| ())
-        .map_err(|review| PlanError::SelectionNeedsReview(review.reason.key().into()))
+        .map_err(PlanError::Selection)
 }
 
 pub(crate) fn episode_indices(
@@ -187,14 +189,14 @@ fn confirmed_episode_start(
 ) -> Result<u16, PlanError> {
     let start = explicit
         .or((disc <= 1).then_some(1))
-        .ok_or_else(|| PlanError::SelectionNeedsReview(REVIEW_LATER_DISC_START.into()))?;
+        .ok_or(PlanError::LaterDiscStart)?;
     if start == 0
         || count == 0
         || usize::from(start)
             .checked_add(count - 1)
             .is_none_or(|last| last > usize::from(u16::MAX))
     {
-        return Err(PlanError::SelectionNeedsReview(REVIEW_EPISODE_RANGE.into()));
+        return Err(PlanError::EpisodeRange);
     }
     Ok(start)
 }
@@ -293,7 +295,7 @@ mod tests {
         assert_eq!(confirmed_episode_start(1, 3, None), Ok(1));
         assert!(matches!(
             confirmed_episode_start(2, 2, None),
-            Err(PlanError::SelectionNeedsReview(_))
+            Err(PlanError::LaterDiscStart)
         ));
         let start = confirmed_episode_start(2, 2, Some(4)).unwrap();
         let titles = vec![title(50.0 * 60.0, 100), title(50.0 * 60.0, 200)];
@@ -331,7 +333,7 @@ mod tests {
             ..Default::default()
         };
         let result = plan(&cfg, &titles, &media, Path::new("show.mkv"));
-        assert!(matches!(result, Err(PlanError::SelectionNeedsReview(_))));
+        assert!(matches!(result, Err(PlanError::Selection(_))));
     }
 
     #[test]
@@ -557,12 +559,15 @@ mod tests {
             PlanError::NoTitles,
             PlanError::NoOutputs,
             PlanError::DuplicateOutput("a.mkv".into()),
-            PlanError::SelectionNeedsReview("missing-episode-roster".into()),
-            PlanError::SelectionNeedsReview(REVIEW_LATER_DISC_START.into()),
-            PlanError::SelectionNeedsReview(REVIEW_EPISODE_RANGE.into()),
+            PlanError::Selection(freemkv_engine::SelectionReview {
+                reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+                candidates: vec![0],
+            }),
+            PlanError::LaterDiscStart,
+            PlanError::EpisodeRange,
         ] {
             let text = error.to_string();
-            assert!(!text.contains("SelectionNeedsReview"), "{text}");
+            assert!(!text.contains("Selection"), "{text}");
             assert!(!text.contains("error.plan"), "{text}");
             assert!(!text.contains("missing-episode-roster"), "{text}");
             assert!(text.contains(' '), "{text}");

@@ -161,7 +161,11 @@ fn planner_errors_require_review_without_entering_remux_or_requeueing() {
         PlanError::NoTitles,
         PlanError::NoOutputs,
         PlanError::DuplicateOutput("episode.mkv".into()),
-        PlanError::SelectionNeedsReview("missing-episode-roster".into()),
+        PlanError::Selection(freemkv_engine::SelectionReview {
+            reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+            candidates: vec![0],
+        }),
+        PlanError::LaterDiscStart,
     ] {
         let detail = error.to_string();
         let (_t, lib, dirs) = library_with(&["B"]);

@@ -610,11 +610,7 @@ pub(crate) fn rip_titles(
 ) -> Result<Vec<usize>, String> {
     match fe::resolve_selection(disc, sel, &fe::StreamFilter::All, None) {
         Ok(indices) => Ok(indices),
-        Err(review) => {
-            let e = libfreemkv::Error::from(review.clone());
-            let msg = crate::strings::error_message_with(u32::from(e.code()), review.reason.key());
-            Err(format!("E{} {msg}", e.code()))
-        }
+        Err(review) => Err(crate::strings::selection_review_text(&review)),
     }
 }
 

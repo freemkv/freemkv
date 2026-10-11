@@ -30,21 +30,34 @@ pub fn fmt_or(key: &str, english: &str, args: &[(&str, &str)]) -> String {
     s
 }
 
-/// Localized sentence for an engine selection-review reason key
-/// (`SelectionReviewReason::key()`). An unknown key is shown as-is rather than hidden.
-// Only the server (in the lib) renders review reasons; the CLI binary compiles this module too.
+/// Localized sentence for an engine selection-review reason. Exhaustive over the engine's
+/// enum, so a new reason fails to compile until it has text.
+// The GUI and server render reviews; the CLI binary compiles this module but has none to show.
 #[allow(dead_code)]
-pub fn review_reason_text(key: &str) -> String {
-    let english = match key {
-        "missing-episode-roster" => "the disc has no authored episode list",
-        "incomplete-episode-roster" => "the disc's authored episode list is incomplete",
-        "conflicting-episode-roster" => "the disc's authored episode lists conflict",
-        "invalid-episode-roster" => "the disc's authored episode list is invalid",
-        other => return other.to_string(),
+pub fn review_reason_text(reason: freemkv_engine::SelectionReviewReason) -> String {
+    use freemkv_engine::SelectionReviewReason as R;
+    let english = match reason {
+        R::MissingEpisodeRoster => "the disc has no authored episode list",
+        R::IncompleteEpisodeRoster => "the disc's authored episode list is incomplete",
+        R::ConflictingEpisodeRoster => "the disc's authored episode lists conflict",
+        R::InvalidEpisodeRoster => "the disc's authored episode list is invalid",
     };
     get_or(
-        &format!("error.selection_review_reason.{}", key.replace('-', "_")),
+        &format!(
+            "error.selection_review_reason.{}",
+            reason.key().replace('-', "_")
+        ),
         english,
+    )
+}
+
+/// The one rendering of a selection that needs review: `E9086 <localized reason>`.
+#[allow(dead_code)]
+pub fn selection_review_text(review: &freemkv_engine::SelectionReview) -> String {
+    format!(
+        "E{} {}",
+        libfreemkv::error::E_SELECTION_REVIEW_REQUIRED,
+        review_reason_text(review.reason)
     )
 }
 

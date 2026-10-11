@@ -293,8 +293,7 @@ fn a_rip_needing_review_is_e9086() {
     let mut disc = disc(false);
     disc.titles = crate::selection_test_fixtures::separate_titles();
     let err = super::rip_titles(&disc, &Selection::Episodes).unwrap_err();
-    assert!(err.starts_with("E9086 "), "{err}");
-    assert!(err.contains("missing-episode-roster"), "{err}");
+    assert_eq!(err, "E9086 the disc has no authored episode list");
     assert_eq!(super::rip_titles(&disc, &Selection::MainMovie), Ok(vec![0]));
     assert_eq!(
         super::rip_titles(&disc, &Selection::Titles(vec![1])),
