@@ -775,6 +775,26 @@ fn a_file_arriving_during_cleanup_keeps_the_journal() {
 }
 
 #[test]
+fn ripper_bookkeeping_rewritten_after_freeze_does_not_block_cleanup() {
+    let (_temp, dir, _cfg, _) = fixture();
+    for index in 0..3 {
+        Manifest::deliver(&dir, index, &|_, _, _, _| {}).unwrap();
+    }
+    std::fs::write(
+        dir.join(".done"),
+        b"{\"rewritten\":true,\"by\":\"a restart\"}",
+    )
+    .unwrap();
+    std::fs::write(dir.join("state.json"), b"{}").unwrap();
+    let manifest = Manifest::load(&dir).unwrap().unwrap();
+    manifest.cleanup_with(&|| {}).unwrap();
+    assert!(
+        !dir.exists(),
+        "a delivered job is cleaned up whatever its bookkeeping says"
+    );
+}
+
+#[test]
 fn journal_recovery_clears_a_stale_destination_error() {
     let _guard = super::super::TEST_STATE_LOCK
         .lock()
