@@ -2828,14 +2828,8 @@ fn main_title(
     audio: &freemkv_engine::StreamFilter,
     presentation_language: Option<String>,
 ) -> Option<usize> {
-    let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
-        &freemkv_engine::Selection::MainMovie,
-        audio,
-        &freemkv_engine::SelectionPreferences {
-            presentation_language,
-        },
-    );
-    report.indices.first().copied()
+    freemkv_engine::SelectionModel::from_titles(titles)
+        .main_title(audio, presentation_language.as_deref())
 }
 
 fn normalize_title_nums(title_nums: &mut Vec<usize>, all_titles: bool) {

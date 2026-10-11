@@ -47,15 +47,43 @@ pub enum PlanError {
     NoTitles,
     NoOutputs,
     DuplicateOutput(String),
-    SelectionNeedsReview(String),
+    /// The engine's episode selection needs review (E9086).
+    Selection(freemkv_engine::SelectionReview),
+    /// A later disc's episode numbering has no confirmed First episode.
+    LaterDiscStart,
+    /// The episode numbers would run past the supported range.
+    EpisodeRange,
 }
 
-pub(crate) const REVIEW_LATER_DISC_START: &str = "later-disc-episode-start";
-pub(crate) const REVIEW_EPISODE_RANGE: &str = "episode-range";
+impl PlanError {
+    /// What the operator can do about a held selection in the server UI, if anything.
+    pub(crate) fn action(&self) -> Option<String> {
+        use crate::strings::get_or;
+        match self {
+            PlanError::Selection(_) => Some(get_or(
+                "error.plan.action.roster",
+                "If it is a film, correct its match to the movie; to rip it as one title, turn off \"Rip TV seasons automatically\" in Settings.",
+            )),
+            PlanError::LaterDiscStart | PlanError::EpisodeRange => Some(get_or(
+                "error.plan.action.first_episode",
+                "Set the First episode when you correct its match.",
+            )),
+            PlanError::NoTitles | PlanError::NoOutputs | PlanError::DuplicateOutput(_) => None,
+        }
+    }
+
+    /// `held` (a sentence naming this error) followed by [`PlanError::action`], if any.
+    pub(crate) fn with_action(&self, held: String) -> String {
+        match self.action() {
+            Some(action) => format!("{held} {action}"),
+            None => held,
+        }
+    }
+}
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use crate::strings::{fmt_or, get_or, review_reason_text};
+        use crate::strings::{fmt_or, get_or};
         let text = match self {
             PlanError::NoTitles => get_or("error.plan.no_titles", "the disc has no usable titles"),
             PlanError::NoOutputs => get_or("error.plan.no_outputs", "the plan has no outputs"),
@@ -64,15 +92,15 @@ impl std::fmt::Display for PlanError {
                 "two outputs would use the same file name: {name}",
                 &[("name", name)],
             ),
-            PlanError::SelectionNeedsReview(key) if key == REVIEW_LATER_DISC_START => get_or(
+            PlanError::LaterDiscStart => get_or(
                 "error.plan.later_disc_start",
                 "Later-disc episode numbering needs a confirmed First episode; disc number and runtimes do not establish it.",
             ),
-            PlanError::SelectionNeedsReview(key) if key == REVIEW_EPISODE_RANGE => get_or(
+            PlanError::EpisodeRange => get_or(
                 "error.plan.episode_range",
                 "Episode numbering is outside the supported range.",
             ),
-            PlanError::SelectionNeedsReview(key) => review_reason_text(key),
+            PlanError::Selection(review) => crate::strings::selection_review_text(review),
         };
         f.write_str(&text)
     }
@@ -107,17 +135,11 @@ pub fn plan(
     })
 }
 
-/// The main feature under `cfg`'s presentation language; a review reason holds it.
+/// The main feature under `cfg`'s presentation language (never a review).
 pub(crate) fn main_title(cfg: &Config, titles: &[DiscTitle]) -> Result<usize, PlanError> {
-    let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
-        &freemkv_engine::Selection::MainMovie,
-        &freemkv_engine::StreamFilter::All,
-        &selection_preferences(cfg),
-    );
-    if let Some(reason) = report.review_reason {
-        return Err(PlanError::SelectionNeedsReview(reason.key().into()));
-    }
-    report.indices.first().copied().ok_or(PlanError::NoTitles)
+    freemkv_engine::SelectionModel::from_titles(titles)
+        .main_title(&freemkv_engine::StreamFilter::All, presentation(cfg))
+        .ok_or(PlanError::NoTitles)
 }
 
 /// Automatic fan-out is a TV-only policy shared by capture and remux.
@@ -129,15 +151,14 @@ pub(crate) fn check_episode_selection(
     if !cfg.tv_auto || kind != Some(MediaKind::Tv) || titles.len() <= 1 {
         return Ok(());
     }
-    let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
-        &freemkv_engine::Selection::Episodes,
-        &freemkv_engine::StreamFilter::All,
-        &selection_preferences(cfg),
-    );
-    if let Some(reason) = report.review_reason {
-        return Err(PlanError::SelectionNeedsReview(reason.key().into()));
-    }
-    Ok(())
+    freemkv_engine::SelectionModel::from_titles(titles)
+        .select(
+            &freemkv_engine::Selection::Episodes,
+            &freemkv_engine::StreamFilter::All,
+            presentation(cfg),
+        )
+        .map(|_| ())
+        .map_err(PlanError::Selection)
 }
 
 pub(crate) fn episode_indices(
@@ -149,12 +170,12 @@ pub(crate) fn episode_indices(
         return Vec::new();
     }
     let indices = freemkv_engine::SelectionModel::from_titles(titles)
-        .select_with_preferences(
+        .select(
             &freemkv_engine::Selection::Episodes,
             &freemkv_engine::StreamFilter::All,
-            &selection_preferences(cfg),
+            presentation(cfg),
         )
-        .indices;
+        .unwrap_or_default();
     if indices.len() > 1 {
         indices
     } else {
@@ -162,11 +183,8 @@ pub(crate) fn episode_indices(
     }
 }
 
-fn selection_preferences(cfg: &Config) -> freemkv_engine::SelectionPreferences {
-    freemkv_engine::SelectionPreferences {
-        presentation_language: (!cfg.presentation_language.trim().is_empty())
-            .then(|| cfg.presentation_language.clone()),
-    }
+fn presentation(cfg: &Config) -> Option<&str> {
+    Some(cfg.presentation_language.as_str()).filter(|language| !language.trim().is_empty())
 }
 
 /// One episode assignment and staging-name policy for capture and remux.
@@ -197,14 +215,14 @@ fn confirmed_episode_start(
 ) -> Result<u16, PlanError> {
     let start = explicit
         .or((disc <= 1).then_some(1))
-        .ok_or_else(|| PlanError::SelectionNeedsReview(REVIEW_LATER_DISC_START.into()))?;
+        .ok_or(PlanError::LaterDiscStart)?;
     if start == 0
         || count == 0
         || usize::from(start)
             .checked_add(count - 1)
             .is_none_or(|last| last > usize::from(u16::MAX))
     {
-        return Err(PlanError::SelectionNeedsReview(REVIEW_EPISODE_RANGE.into()));
+        return Err(PlanError::EpisodeRange);
     }
     Ok(start)
 }
@@ -303,7 +321,7 @@ mod tests {
         assert_eq!(confirmed_episode_start(1, 3, None), Ok(1));
         assert!(matches!(
             confirmed_episode_start(2, 2, None),
-            Err(PlanError::SelectionNeedsReview(_))
+            Err(PlanError::LaterDiscStart)
         ));
         let start = confirmed_episode_start(2, 2, Some(4)).unwrap();
         let titles = vec![title(50.0 * 60.0, 100), title(50.0 * 60.0, 200)];
@@ -341,7 +359,7 @@ mod tests {
             ..Default::default()
         };
         let result = plan(&cfg, &titles, &media, Path::new("show.mkv"));
-        assert!(matches!(result, Err(PlanError::SelectionNeedsReview(_))));
+        assert!(matches!(result, Err(PlanError::Selection(_))));
     }
 
     #[test]
@@ -390,20 +408,17 @@ mod tests {
     #[test]
     fn movie_planner_preserves_shared_selection_and_empty_source_error() {
         for titles in [vec![], vec![title(120.0, 5), title(5000.0, 100)]] {
-            let selected = freemkv_engine::SelectionModel::from_titles(&titles).select(
-                &freemkv_engine::Selection::MainMovie,
-                &freemkv_engine::StreamFilter::All,
-            );
+            let selected = freemkv_engine::SelectionModel::from_titles(&titles)
+                .main_title(&freemkv_engine::StreamFilter::All, None);
             let planned = plan(
                 &Config::default(),
                 &titles,
                 &MediaMetadata::default(),
                 Path::new("film.mkv"),
             );
-            if selected.indices.is_empty() {
-                assert_eq!(planned, Err(PlanError::NoTitles));
-            } else {
-                assert_eq!(planned.unwrap().outputs[0].title_index, selected.indices[0]);
+            match selected {
+                None => assert_eq!(planned, Err(PlanError::NoTitles)),
+                Some(index) => assert_eq!(planned.unwrap().outputs[0].title_index, index),
             }
         }
     }
@@ -571,12 +586,15 @@ mod tests {
             PlanError::NoTitles,
             PlanError::NoOutputs,
             PlanError::DuplicateOutput("a.mkv".into()),
-            PlanError::SelectionNeedsReview("missing-episode-roster".into()),
-            PlanError::SelectionNeedsReview(REVIEW_LATER_DISC_START.into()),
-            PlanError::SelectionNeedsReview(REVIEW_EPISODE_RANGE.into()),
+            PlanError::Selection(freemkv_engine::SelectionReview {
+                reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+                candidates: vec![0],
+            }),
+            PlanError::LaterDiscStart,
+            PlanError::EpisodeRange,
         ] {
             let text = error.to_string();
-            assert!(!text.contains("SelectionNeedsReview"), "{text}");
+            assert!(!text.contains("Selection"), "{text}");
             assert!(!text.contains("error.plan"), "{text}");
             assert!(!text.contains("missing-episode-roster"), "{text}");
             assert!(text.contains(' '), "{text}");

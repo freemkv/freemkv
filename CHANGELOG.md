@@ -15,6 +15,9 @@
 
 ### Changed
 
+- **Opening an image checks the titles that will be ripped** (app only: the readiness line after Open): it checks the titles the list ticks for your title mode and languages, such as the German cut or every episode, instead of always the first title.
+- **A TV disc held for review says what you can do about it** (server only: the drive card, Review and Needs action rows, Library remux): the message carries E9086 and the reason, and suggests correcting the match to the movie or turning off "Rip TV seasons automatically" (or setting the First episode for numbering), instead of asking you to select episode titles, which the server cannot do.
+- **A title is labelled "Episode" only when the disc's authored episode list names it** (app only: the title list's Notes): the list no longer guesses "Play all" and "Episode" from which titles' sectors contain others, a guess the Episodes choice never used.
 - **A saved "Episodes" title mode no longer applies to the next disc you open** (app only: the selection bar): every disc starts on the default selection, and Episodes is offered when the disc has an episode roster. Audio and subtitle choices are kept as before.
 - **Reboot library restarts the server process** (server only: System page): running work stops at its next safe point (rips within 60 s, other services within 120 s), then the server starts again. On Linux and in the container it replaces itself in place (same process, so Docker's restart count is unchanged) and picks up an upgraded binary; on macOS it exits for launchd to start it again. A stop signal during the reboot still stops the server. The page waits for the new server and reconnects by itself.
 - **Reboot needs a service manager on macOS and Windows** (server only): it is refused unless the server runs as the launchd login service (`macos/install-library-service.sh`), because a server started by hand would only stop. On Windows it is not available.

@@ -143,12 +143,6 @@ impl LangPrefs {
             && !self.no_subtitles
             && !self.no_forced
     }
-
-    pub fn selection_preferences(&self) -> freemkv_engine::SelectionPreferences {
-        freemkv_engine::SelectionPreferences {
-            presentation_language: self.presentation_language.clone(),
-        }
-    }
 }
 
 /// The selection bar's subtitle choices.
@@ -202,6 +196,33 @@ fn split_langs(s: &str) -> Vec<String> {
 }
 
 /// An empty list means "no preference", which the engine spells `All`.
+/// The titles `selection` ticks by itself under `prefs`' audio and presentation languages: the
+/// engine's executable pick. A selection that needs review ticks nothing.
+pub fn automatic_titles(
+    model: &freemkv_engine::SelectionModel,
+    selection: &freemkv_engine::Selection,
+    prefs: &LangPrefs,
+) -> Vec<usize> {
+    model
+        .select(
+            selection,
+            &lang_filter(&prefs.audio),
+            prefs.presentation_language.as_deref(),
+        )
+        .unwrap_or_default()
+}
+
+// The title mode, language preferences and minimum title length an opened disc starts with.
+// Episodes is a per-disc choice offered when a roster exists, never inherited.
+fn open_picks(settings: &crate::settings::Settings) -> (String, LangPrefs, f64) {
+    let mode = match settings.selection.as_str() {
+        "Episodes" => PICK_TITLES[0].to_string(),
+        saved => saved.to_string(),
+    };
+    let min_secs = settings.min_title_secs.trim().parse::<f64>().unwrap_or(0.0);
+    (mode, LangPrefs::from_settings(settings), min_secs)
+}
+
 fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
     if tags.is_empty() {
         freemkv_engine::StreamFilter::All
@@ -382,18 +403,13 @@ impl Tree {
         // Select against the full evidence snapshot before applying visibility. Hiding the
         // main feature must not promote an unrelated title. Review candidates remain
         // available for manual ticking, but never become automatic executable choices.
-        let report = sc.selection_model.select_with_preferences(
-            &selection,
-            &lang_filter(&prefs.audio),
-            &prefs.selection_preferences(),
-        );
+        let automatic = automatic_titles(&sc.selection_model, &selection, prefs);
         let episode_order = if matches!(selection, freemkv_engine::Selection::Episodes) {
-            report.indices.clone()
+            automatic.clone()
         } else {
             Vec::new()
         };
-        let selected: std::collections::HashSet<usize> = report
-            .indices
+        let selected: std::collections::HashSet<usize> = automatic
             .into_iter()
             .filter(|i| visible.contains(i))
             .collect();
@@ -2826,6 +2842,7 @@ impl App {
         let path = path.to_owned();
         let keys = KeyConfig::from_settings(&self.settings);
         let scan = self.scan;
+        let (mode, prefs, min_secs) = open_picks(&self.settings);
         let tok = OpenToken::default();
         if let Some(old) = self.open_token.replace(tok.clone()) {
             old.halt.cancel();
@@ -2835,12 +2852,17 @@ impl App {
             .name("open-source".into())
             .spawn(move || {
                 let scanned = scan(&path, &keys, &tok);
-                // The preflight reuses Open's key set: no second key request (KU §2.5).
+                // The preflight reuses Open's key set: no second key request (KU §2.5). It
+                // checks the titles the tree will tick (none ticked: the main title).
                 let seed = scanned.as_ref().ok().and_then(|sc| sc.keys.as_ref());
+                let ticked = scanned
+                    .as_ref()
+                    .map(|sc| Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles())
+                    .unwrap_or_default();
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
                     && !crate::engine::is_disc_source(&path))
-                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &[], seed));
+                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &ticked, seed));
                 let _ = tx.send(OpenedSource {
                     path,
                     scanned,
@@ -3307,18 +3329,9 @@ impl App {
                 if sc.needs_disc {
                     self.say(LogKind::Notice, &crate::engine::insert_disc_retry());
                 }
-                let min_secs = self
-                    .settings
-                    .min_title_secs
-                    .trim()
-                    .parse::<f64>()
-                    .unwrap_or(0.0);
-                // Episodes is a per-disc choice offered when a roster exists, never inherited.
-                self.pick_mode = match self.settings.selection.as_str() {
-                    "Episodes" => PICK_TITLES[0].to_string(),
-                    saved => saved.to_string(),
-                };
-                self.pick_prefs = LangPrefs::from_settings(&self.settings);
+                let (mode, prefs, min_secs) = open_picks(&self.settings);
+                self.pick_mode = mode;
+                self.pick_prefs = prefs;
                 self.pick_min_secs = min_secs;
                 self.tree = Tree::from_scan(&sc, &self.pick_mode, min_secs, &self.pick_prefs);
                 self.pick_scan = Some(sc.clone());
@@ -3336,7 +3349,8 @@ impl App {
                     self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"));
                 } else {
                     match preflight.unwrap_or_else(|| {
-                        crate::engine::preflight_with_keys(path, "/tmp", &[], sc.keys.as_ref())
+                        let ticked = self.tree.ticked_titles();
+                        crate::engine::preflight_with_keys(path, "/tmp", &ticked, sc.keys.as_ref())
                     }) {
                         Ok(v) if v.is_empty() => {
                             self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
@@ -3775,15 +3789,9 @@ impl App {
                 (c, on)
             })
             .collect();
-        let has_episodes = !sc
-            .selection_model
-            .select_with_preferences(
-                &freemkv_engine::Selection::Episodes,
-                &lang_filter(&p.audio),
-                &p.selection_preferences(),
-            )
-            .indices
-            .is_empty();
+        let has_episodes =
+            !automatic_titles(&sc.selection_model, &freemkv_engine::Selection::Episodes, p)
+                .is_empty();
         let titles = PICK_TITLES
             .iter()
             .filter(|mode| **mode != "Episodes" || has_episodes)

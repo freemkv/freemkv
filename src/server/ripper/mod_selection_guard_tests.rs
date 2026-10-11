@@ -25,10 +25,7 @@ fn titles() -> Vec<libfreemkv::DiscTitle> {
 }
 
 fn needs_review(result: Result<(), PlanError>) {
-    assert!(
-        matches!(result, Err(PlanError::SelectionNeedsReview(_))),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(PlanError::Selection(_))), "{result:?}");
 }
 
 #[test]

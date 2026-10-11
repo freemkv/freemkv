@@ -353,11 +353,11 @@ fn a_title_row_names_its_number_and_counts_chapters_in_the_right_number() {
         12
     ];
     assert_eq!(
-        super::title_notes(&t, true, None),
+        super::title_notes(&t, true, false),
         "00800.mpls · 12 chapters"
     );
     // A DVD's made-up playlist name is never shown.
-    assert_eq!(super::title_notes(&t, false, None), "12 chapters");
+    assert_eq!(super::title_notes(&t, false, false), "12 chapters");
 }
 
 #[test]

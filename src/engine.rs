@@ -174,19 +174,12 @@ fn clips_note(n: usize) -> String {
     format!("{n} {}", crate::strings::get(word))
 }
 
-/// The Notes cell of a title row: its proven role, real playlist name, clip count and chapters.
-fn title_notes(
-    t: &libfreemkv::DiscTitle,
-    show_playlist: bool,
-    role: Option<freemkv_engine::TitleRole>,
-) -> String {
-    let play_all = crate::strings::get_or("gui.item.play_all", "Play all");
-    let episode = crate::strings::get_or("gui.item.episode", "Episode");
+/// The Notes cell of a title row: "Episode" when an authored roster names it, its real
+/// playlist name, clip count and chapters.
+fn title_notes(t: &libfreemkv::DiscTitle, show_playlist: bool, episode: bool) -> String {
     let mut parts = Vec::new();
-    match role {
-        Some(freemkv_engine::TitleRole::PlayAll) => parts.push(play_all),
-        Some(freemkv_engine::TitleRole::Episode) => parts.push(episode),
-        None => {}
+    if episode {
+        parts.push(crate::strings::get_or("gui.item.episode", "Episode"));
     }
     if show_playlist && !t.playlist.is_empty() {
         parts.push(sanitize_display(&t.playlist));
@@ -601,28 +594,23 @@ fn stopped_open<T>(
     }
 }
 
-// The titles Open resolves keys for: the main title. MainMovie never needs review today; were
-// it to, Open would scope to the candidates rather than fail.
+// The titles Open resolves keys for: the main title (MainMovie never needs review).
 pub(crate) fn open_titles(disc: &libfreemkv::Disc) -> Vec<usize> {
-    fe::resolve_selection(disc, &fe::Selection::MainMovie)
-        .unwrap_or_else(|review| review.candidates)
+    fe::SelectionModel::from_titles(&disc.titles)
+        .main_title(&fe::StreamFilter::All, None)
+        .into_iter()
+        .collect()
 }
 
-// The titles a rip runs. Automatic selection that needs review refuses as E9086 with the
-// reason; a whole-disc copy needs no title choice and measures its loss over the candidates.
+// The titles a rip runs. Automatic selection that needs review (only Episodes) refuses as
+// E9086 with the reason.
 pub(crate) fn rip_titles(
     disc: &libfreemkv::Disc,
     sel: &fe::Selection,
-    whole: bool,
 ) -> Result<Vec<usize>, String> {
-    match fe::resolve_selection(disc, sel) {
+    match fe::resolve_selection(disc, sel, &fe::StreamFilter::All, None) {
         Ok(indices) => Ok(indices),
-        Err(review) if whole => Ok(review.candidates),
-        Err(review) => {
-            let e = libfreemkv::Error::from(review.clone());
-            let msg = crate::strings::error_message_with(u32::from(e.code()), review.reason.key());
-            Err(format!("E{} {msg}", e.code()))
-        }
+        Err(review) => Err(crate::strings::selection_review_text(&review)),
     }
 }
 
@@ -739,11 +727,23 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         size_bytes: None,
     });
 
-    let roles = freemkv_engine::title_roles(&disc.titles);
+    // "Episode" marks a member of the authored roster the Episodes pick uses, only when it holds.
+    let selection_model = fe::SelectionModel::from_titles(&disc.titles);
+    let roster = selection_model
+        .select(&fe::Selection::Episodes, &fe::StreamFilter::All, None)
+        .is_ok();
     for (ti, t) in disc.titles.iter().enumerate() {
+        let episode = roster
+            && matches!(
+                t.selection_evidence.episodes,
+                libfreemkv::disc::EpisodeEvidence::Authored {
+                    ordinal: Some(_),
+                    ..
+                }
+            );
         // A DVD title's "playlist" is a name the scan makes up (VTS_xx_y.VOB), naming no file
         // on the disc, so only a real playlist name (untrusted disc bytes, sanitized) is shown.
-        let notes = title_notes(t, disc.format != libfreemkv::DiscFormat::Dvd, roles[ti]);
+        let notes = title_notes(t, disc.format != libfreemkv::DiscFormat::Dvd, episode);
         rows.push(Row {
             type_s: "Title".into(),
             item: title_item(ti),
@@ -774,7 +774,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
 
     let details = disc_details(disc, &summary);
     Scanned {
-        selection_model: fe::SelectionModel::from_disc(disc),
+        selection_model,
         label,
         volume_id: disc.volume_id.clone(),
         title_count: disc.titles.len(),
@@ -2939,7 +2939,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         } else {
             fe::Selection::Titles(req.titles.clone())
         };
-        let indices = rip_titles(&disc, &sel, false)?;
+        let indices = rip_titles(&disc, &sel)?;
         // A staged image holds only the titles it was staged for (checked by extents, so the
         // staging mux's re-mapped selection passes); anything else would mux zero-fill.
         fe::ensure_titles_staged(src_path, &disc, &indices).map_err(|e| gui_error(&e, src_path))?;
@@ -3492,7 +3492,7 @@ fn run_disc_scanning(
         fe::Selection::Titles(req.titles.clone())
     };
     let whole = matches!(kind, OutKind::DecryptedFolder | OutKind::IsoImage);
-    let indices = rip_titles(&disc, &sel, whole)?;
+    let indices = rip_titles(&disc, &sel)?;
     require_selection(whole, &indices)?;
     let scope = if whole {
         disc_copy_scope(kind, req.raw)

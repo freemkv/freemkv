@@ -273,7 +273,7 @@ fn the_image_rip_checks_the_selection_against_the_scan_it_was_made_on() {
         .expect("run_blocking definition present");
     let end = start
         + src[start..]
-            .find("\n        let indices = rip_titles(&disc, &sel, false)?;")
+            .find("\n        let indices = rip_titles(&disc, &sel)?;")
             .expect("the selection is still resolved in run_blocking");
     let body = &src[start..end];
     // Whitespace-stripped, not whitespace-collapsed: rustfmt splits this

@@ -304,7 +304,12 @@ fn a_chapter_hangs_off_its_titles_chapter_list_which_starts_closed() {
 
 // A disc like Kung Fu's: English and German play-alls, and each episode in both languages.
 fn episode_disc() -> Scanned {
-    use freemkv_engine::TitleRole::{Episode, PlayAll};
+    #[derive(Clone, Copy, PartialEq)]
+    enum Role {
+        PlayAll,
+        Episode,
+    }
+    use Role::{Episode, PlayAll};
     let mut sc = probe_scan();
     sc.rows.clear();
     let mut model_titles = Vec::new();
