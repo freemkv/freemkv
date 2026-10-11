@@ -753,13 +753,35 @@ fn remux_planned_with(
             return Ending::Failed(e);
         }
     }
+    if job.retire {
+        let roots = super::owned::roots(&super::dirs(cfg));
+        let retire = super::retire::Retire {
+            iso: &job.iso,
+            config_dir: &sink.lib.config_dir,
+            roots: &roots,
+            sink,
+            stopping: &|| cancelled_ending(sink).is_some(),
+        };
+        match super::retire::run(&retire, &owned, &targets) {
+            Ok(kept) if kept.is_empty() => {}
+            Ok(kept) => {
+                let message = super::retire::kept_message(targets.len(), &kept);
+                return Ending::Failed(std::io::Error::other(message));
+            }
+            Err(e) => return cancelled_ending(sink).unwrap_or(Ending::Failed(e)),
+        }
+    }
     Ending::Done { writing_app }
 }
 
-// The files a job may overwrite: links for its ISO under the output folders, plus
-// the row's own MKV when the job was queued to replace it.
+// The files a job may overwrite: links for its ISO under the output folders, plus the
+// row's own MKV when queued to replace it. Links that cannot be read stop a correction.
 fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<Vec<Owned>> {
-    let links = super::links::load(config_dir);
+    let links = if job.retire {
+        super::links::read(config_dir)?
+    } else {
+        super::links::load(config_dir)
+    };
     let roots = super::owned::roots(&super::dirs(cfg));
     let mut owned = super::owned::capture(&links, &job.iso, &roots)?;
     if job.replace && !owned.iter().any(|o| o.path == job.target) {
@@ -978,7 +1000,11 @@ pub(crate) fn safe_to_create(d: &super::Dirs, target: &std::path::Path) -> Resul
     safe_destination(&d.library, target, false)
 }
 
-fn safe_destination(root: &Path, target: &Path, allow_empty: bool) -> Result<(), String> {
+pub(super) fn safe_destination(
+    root: &Path,
+    target: &Path,
+    allow_empty: bool,
+) -> Result<(), String> {
     if !target.starts_with(root)
         || target
             .components()
@@ -1393,6 +1419,9 @@ fn retry_storage_fault(
 fn safe_text(job: &Job) -> &'static str {
     if job.replacement.is_some() {
         "The source ISO is retained. Replacement progress is saved for retry; already delivered files are not rolled back."
+    } else if job.retire {
+        "The source ISO is retained. Old files made from this ISO are removed only after every \
+         new file is in place, and only if unchanged; run Change match again to finish."
     } else if job.plan.as_ref().is_some_and(|plan| plan.outputs.len() > 1) {
         "The source ISO is retained. Completed outputs remain in the library; unfinished outputs can be retried."
     } else if job.replace {

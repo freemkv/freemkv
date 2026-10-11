@@ -86,6 +86,9 @@ pub struct Job {
     /// The existing files this job may overwrite, captured once before its first output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned: Option<Vec<super::owned::Owned>>,
+    /// A Change match: once every output is in place, its other owned files are removed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retire: bool,
     /// An MKV existed at `target` when the job was queued and may be replaced.
     pub replace: bool,
     pub state: JobState,
@@ -640,6 +643,7 @@ impl Queue {
                 replacement: replacement.clone(),
                 outputs,
                 owned: None,
+                retire: false,
                 replace: item.replace,
                 state: JobState::Queued,
                 queued_at: now,
@@ -1047,6 +1051,7 @@ impl Queue {
                     replacement: None,
                     outputs: Vec::new(),
                     owned: None,
+                    retire: false,
                     replace: item.replace,
                     state: JobState::Queued,
                     queued_at: now,

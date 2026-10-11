@@ -744,6 +744,7 @@ fn job_for(dir: &Path, id: u64) -> Job {
         replacement: None,
         outputs: Vec::new(),
         owned: None,
+        retire: false,
         replace: true,
         state: JobState::Running,
         queued_at: 0,
@@ -1739,3 +1740,6 @@ fn a_wrong_title_iso_corrected_to_tv_honours_tv_auto_and_takes_the_shows_name() 
         planned_target_ok(&on, &plan, target).unwrap();
     }
 }
+
+#[path = "worker_retire_tests.rs"]
+mod retire_runs;

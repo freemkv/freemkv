@@ -127,6 +127,18 @@ pub(super) fn retire_replacement(
     crate::server::ripper::staging::write_marker_durable(&config_dir.join(LINKS_FILE), &bytes)
 }
 
+/// Forget that `mkv` was made from `iso`; a link to another ISO is left alone.
+pub(super) fn forget(config_dir: &Path, mkv: &Path, iso: &Path) -> std::io::Result<()> {
+    let _g = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut links = read(config_dir)?;
+    if links.get(mkv).map(PathBuf::as_path) != Some(iso) {
+        return Ok(());
+    }
+    links.remove(mkv);
+    let json = serde_json::to_vec_pretty(&links).map_err(std::io::Error::other)?;
+    crate::server::ripper::staging::write_marker_durable(&config_dir.join(LINKS_FILE), &json)
+}
+
 fn record_many(config_dir: &Path, mkvs: &[&Path], iso: &Path) -> std::io::Result<()> {
     let _g = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     // Source provenance authorizes replacement cleanup. An unreadable map

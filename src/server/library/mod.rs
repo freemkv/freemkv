@@ -19,6 +19,7 @@ mod owned;
 pub mod probe;
 pub mod queue;
 pub mod replacement;
+mod retire;
 pub mod transcript;
 pub mod worker;
 
