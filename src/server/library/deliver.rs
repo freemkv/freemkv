@@ -76,6 +76,20 @@ impl<W: Write, F: FnMut(&mut W) -> io::Result<()>> Write for CheckpointWriter<W,
     }
 }
 
+/// The copy's writer: the bytes, then the modification time set through the same handle.
+pub(crate) trait CopyWriter: Write + Send {
+    /// Set the file's modification time, so a deferred close cannot restamp it.
+    fn set_modified(&mut self, t: SystemTime) -> io::Result<()>;
+}
+
+impl<F: FnMut(&mut std::fs::File) -> io::Result<()> + Send> CopyWriter
+    for CheckpointWriter<std::fs::File, F>
+{
+    fn set_modified(&mut self, t: SystemTime) -> io::Result<()> {
+        self.writer.set_modified(t)
+    }
+}
+
 /// A reader the verify can hand to its worker thread.
 pub(crate) trait ReadSeek: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ReadSeek for T {}
@@ -83,7 +97,7 @@ impl<T: Read + Seek + Send> ReadSeek for T {}
 /// The file primitives of a delivery; a seam so a test can stall or fail each step.
 pub(crate) trait DeliverIo: Sync {
     /// Create `path` for the copy; an existing file is refused, never truncated.
-    fn create_new(&self, path: &Path) -> io::Result<Box<dyn Write + Send>> {
+    fn create_new(&self, path: &Path) -> io::Result<Box<dyn CopyWriter>> {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -622,25 +636,37 @@ fn watch_worker<T>(
 }
 
 // The copy on a worker: a Stop within a slice, `TimedOut { op: "copy" }` after the stall
-// window with no bytes written, and a size that must match the source's.
+// window with no bytes written, and a size that must match the source's. Returns the time
+// pinned on the copy, if the source has one.
 fn copy_to(
     source: &Path,
     destination: &Path,
     stop: &Stop<'_>,
     io: &dyn DeliverIo,
-) -> io::Result<()> {
+) -> io::Result<Option<SystemTime>> {
     let timing = io.timing();
     let mut src = std::fs::File::open(source)?;
-    let total = src.metadata()?.len();
+    let meta = src.metadata()?;
+    let total = meta.len();
+    let pinned = meta.modified().map(crate::server::util::pinned_mtime);
+    let keep = pinned.as_ref().ok().copied();
     let mut dst = io.create_new(destination)?;
     let copied = Arc::new(AtomicU64::new(0));
     let quit = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
     let (count, give_up) = (copied.clone(), quit.clone());
+    let path = destination.to_path_buf();
     std::thread::Builder::new()
         .name("library-deliver-copy".into())
         .spawn(move || {
             let result = copy_all(&mut src, &mut *dst, &count, &give_up);
+            // Links and landings record size plus this explicit time; a deferred SMB close
+            // would otherwise restamp it. Best effort, as the mover does.
+            if result.is_ok()
+                && let Err(error) = pinned.and_then(|t| dst.set_modified(t))
+            {
+                tracing::warn!(%error, path = %path.display(), "library copy: cannot pin the file's time");
+            }
             drop((src, dst));
             let _ = tx.send(result);
         })?;
@@ -667,7 +693,19 @@ fn copy_to(
         let want = total;
         return Err(libfreemkv::Error::StagedCopySizeMismatch { have, want }.into());
     }
-    Ok(())
+    Ok(keep)
+}
+
+// Set the pinned time again once the sync and verify beats are over, so the file lands with it.
+fn repin(path: &Path, pinned: Option<SystemTime>) {
+    let Some(t) = pinned else { return };
+    let set = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(t));
+    if let Err(error) = set {
+        tracing::warn!(%error, path = %path.display(), "library copy: cannot pin the file's time");
+    }
 }
 
 fn copy_all(
@@ -887,14 +925,15 @@ fn deliver_steps(
     io: &dyn DeliverIo,
 ) -> Result<bool, (&'static str, io::Error)> {
     stop.sink.event(&Event::Phase { name: "copy" });
-    let copy = || -> io::Result<()> {
+    let copy = || -> io::Result<Option<SystemTime>> {
         refuse_existing(target, replace)?;
         remove_if_present(partial)?;
         copy_to(local, partial, stop, io)
     };
-    copy().map_err(|e| ("copy", e))?;
+    let pinned = copy().map_err(|e| ("copy", e))?;
     sync_file(partial, stop, io).map_err(|e| ("sync", e))?;
     verify(partial, want, stop, io).map_err(|e| ("verify", e))?;
+    repin(partial, pinned);
 
     stop.sink.event(&Event::Phase { name: "replace" });
     let replace_step = || -> io::Result<bool> {

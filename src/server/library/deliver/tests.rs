@@ -107,6 +107,12 @@ impl Write for Stuck {
     }
 }
 
+impl CopyWriter for Stuck {
+    fn set_modified(&mut self, _: std::time::SystemTime) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 // Claims every byte but writes one fewer of each chunk.
 struct Short(std::fs::File);
 
@@ -121,12 +127,18 @@ impl Write for Short {
     }
 }
 
+impl CopyWriter for Short {
+    fn set_modified(&mut self, t: std::time::SystemTime) -> io::Result<()> {
+        self.0.set_modified(t)
+    }
+}
+
 fn eio() -> io::Error {
     io::Error::from_raw_os_error(5)
 }
 
 impl DeliverIo for Faulty {
-    fn create_new(&self, path: &Path) -> io::Result<Box<dyn Write + Send>> {
+    fn create_new(&self, path: &Path) -> io::Result<Box<dyn CopyWriter>> {
         let file = OsIo.create_new(path)?;
         if self.stall_copy {
             return Ok(Box::new(Stuck));
@@ -795,4 +807,21 @@ fn a_replace_whose_start_state_was_unreadable_is_refused_and_untouched() {
         "{e}"
     );
     assert_eq!(std::fs::read(&s.target).unwrap(), b"old");
+}
+
+#[test]
+fn the_copy_pins_an_even_second_source_time_that_survives_landing() {
+    let s = setup();
+    let odd = std::time::UNIX_EPOCH + Duration::new(1_600_000_001, 700_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&s.mkv)
+        .unwrap()
+        .set_modified(odd)
+        .unwrap();
+    assert!(!run(&s, false, &Events::default(), &Halt::new(), &OsIo).unwrap());
+    assert_eq!(
+        std::fs::metadata(&s.target).unwrap().modified().unwrap(),
+        std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000)
+    );
 }
