@@ -1,9 +1,9 @@
 //! The server's side of the engine's recovery passes (one multipass implementation, the
 //! engine's, used by the CLI, the app and the server). The host owns the held drive: it
-//! brings it back after a USB bridge crash, un-wedges it before each patch pass, and keeps
-//! the passes going past a failed or wedged pass (autorip 1.7.7). The sink narrates every
-//! pass into the device log and the pass tiles, and measures the loss the abort gate
-//! decides on from the promoted mapfile.
+//! brings it back after a USB bridge crash and un-wedges it before each patch pass; keeping
+//! the passes going past a failed or wedged pass (autorip 1.7.7) is the run's
+//! `MultipassOpts`. The sink narrates every pass into the device log and the pass tiles,
+//! and measures the loss the abort gate decides on from the promoted mapfile.
 
 use super::session::{self, DriveSession, drop_session, rediscover_drive};
 use super::state::{
@@ -27,9 +27,7 @@ pub(super) struct ServerPassHost<'a> {
     pub(super) halt: Arc<AtomicBool>,
     pub(super) user_halt: Arc<AtomicBool>,
     pub(super) delay_secs: u64,
-    /// The operator's Resume: the sweep resumes the mapfile from its first attempt.
-    pub(super) resume: bool,
-    /// Pass 1's attempt count so far.
+    /// Pass 1's attempt count so far (set on a transport fault).
     pub(super) attempt: u32,
     /// The sweep's transport recovery gave up, or its attempts ran out (the
     /// recovery-exhausted messages apply).
@@ -43,26 +41,21 @@ impl freemkv_engine::PassHost for ServerPassHost<'_> {
         &mut self.session.drive
     }
 
-    fn resume_sweep(&self) -> Option<bool> {
-        Some(self.resume)
-    }
-
-    fn sweep_attempt(&mut self, attempt: u32) -> bool {
-        self.attempt = attempt;
-        if attempt > MAX_PASS1_ATTEMPTS {
-            crate::server::log::device_log(self.device, "Pass 1: max attempts reached");
-            self.gave_up = true;
-            return false;
-        }
-        true
-    }
-
     // Pass 1 with transport-failure recovery: the Initio USB-SATA bridge crashes on damaged
     // sectors, causing a USB re-enumeration (sg device renumbers). Re-open the drive at its
-    // new path; the engine sweeps again, resuming the mapfile.
+    // new path; the engine sweeps again, resuming the mapfile, while attempts remain.
     fn recover_transport(&mut self, attempt: u32, _e: &libfreemkv::Error) -> bool {
+        self.attempt = attempt;
         let recovered = self.recover(attempt);
         self.gave_up = !recovered && !self.halted;
+        if recovered {
+            // The next attempt; past `MAX_PASS1_ATTEMPTS` the engine stops sweeping.
+            self.attempt = attempt + 1;
+            if self.attempt > MAX_PASS1_ATTEMPTS {
+                crate::server::log::device_log(self.device, "Pass 1: max attempts reached");
+                self.gave_up = true;
+            }
+        }
         recovered
     }
 
@@ -92,93 +85,87 @@ impl freemkv_engine::PassHost for ServerPassHost<'_> {
             );
         }
     }
+}
 
-    // A failed patch pass ends the retries; the rip continues with what was read.
-    fn patch_failed(&mut self, pass: u32, e: &libfreemkv::Error) -> bool {
-        // Categorize the failure for debugging
-        let error_category = if e.code() == 4000 {
-            "SCSI_ERROR"
-        } else if e.code() >= 6000 && e.code() < 7000 {
-            "DISC_READ_ERROR"
-        } else if e.code() >= 1000 && e.code() < 2000 {
-            "DEVICE_ERROR"
-        } else {
-            &format!("ERROR_CODE_{}", e.code())
-        };
+// A failed patch pass ended the retries (`OnPatchFailure::Finish`); the rip continues
+// with what was read. Logs the failure's category and the action it calls for.
+fn log_patch_failure(device: &str, user_halt: &AtomicBool, pass: u32, e: &libfreemkv::Error) {
+    // Categorize the failure for debugging
+    let error_category = if e.code() == 4000 {
+        "SCSI_ERROR"
+    } else if e.code() >= 6000 && e.code() < 7000 {
+        "DISC_READ_ERROR"
+    } else if e.code() >= 1000 && e.code() < 2000 {
+        "DEVICE_ERROR"
+    } else {
+        &format!("ERROR_CODE_{}", e.code())
+    };
 
-        let sense_info = e.scsi_sense().map(|s| {
-            format!(
-                "sense_key={:02x} ASC={:02x} ASCQ={:02x}",
-                s.sense_key, s.asc, s.ascq
-            )
-        });
+    let sense_info = e.scsi_sense().map(|s| {
+        format!(
+            "sense_key={:02x} ASC={:02x} ASCQ={:02x}",
+            s.sense_key, s.asc, s.ascq
+        )
+    });
 
-        if self.user_halt.load(Ordering::Relaxed) {
-            crate::server::log::device_log(
-                self.device,
-                &format!(
-                    "PASS {} CANCELLED: user halt category={} error_code={}",
-                    pass,
-                    error_category,
-                    e.code()
-                ),
-            );
+    if user_halt.load(Ordering::Relaxed) {
+        crate::server::log::device_log(
+            device,
+            &format!(
+                "PASS {} CANCELLED: user halt category={} error_code={}",
+                pass,
+                error_category,
+                e.code()
+            ),
+        );
 
-            if let Some(info) = sense_info {
-                crate::server::log::device_log(self.device, &info);
-            }
-        } else {
-            crate::server::log::device_log(
-                self.device,
-                &format!(
-                    "PASS {} FAILED: strategy=patch_recovery category={} error_code={} {}",
-                    pass,
-                    error_category,
-                    e.code(),
-                    sense_info.unwrap_or_default()
-                ),
-            );
-
-            // Log which recovery phase failed
-            crate::server::log::device_log(
-                self.device,
-                &format!(
-                    "STRATEGY_FAILURE: patch_recovery FAILED at disc.patch() with category={} (sense_key={:?}, ASC={:?})",
-                    error_category,
-                    e.scsi_sense().map(|s| s.sense_key),
-                    e.scsi_sense().map(|s| s.asc)
-                ),
-            );
-
-            // Provide actionable guidance based on error type
-            if e.code() == 4000 && e.is_scsi_transport_failure() {
-                crate::server::log::device_log(
-                    self.device,
-                    "ACTION_REQUIRED: Transport failure detected — USB bridge crashed. Eject disc and power-cycle drive before retrying.",
-                );
-            } else if e.code() >= 6000
-                && e.scsi_sense()
-                    .map(|s| s.is_hardware_error())
-                    .unwrap_or(false)
-            {
-                crate::server::log::device_log(
-                    self.device,
-                    "ACTION_REQUIRED: Drive hardware error detected — drive may be failing. Consider replacing optical drive.",
-                );
-            } else if e.code() == 4000 && e.scsi_sense().map(|s| s.asc == 0x20).unwrap_or(false) {
-                crate::server::log::device_log(
-                    self.device,
-                    "ACTION_REQUIRED: ILLEGAL REQUEST (ASC=0x20) — drive firmware wedged. Power-cycle USB drive to clear state.",
-                );
-            }
+        if let Some(info) = sense_info {
+            crate::server::log::device_log(device, &info);
         }
+    } else {
+        crate::server::log::device_log(
+            device,
+            &format!(
+                "PASS {} FAILED: strategy=patch_recovery category={} error_code={} {}",
+                pass,
+                error_category,
+                e.code(),
+                sense_info.unwrap_or_default()
+            ),
+        );
 
-        true
-    }
+        // Log which recovery phase failed
+        crate::server::log::device_log(
+            device,
+            &format!(
+                "STRATEGY_FAILURE: patch_recovery FAILED at disc.patch() with category={} (sense_key={:?}, ASC={:?})",
+                error_category,
+                e.scsi_sense().map(|s| s.sense_key),
+                e.scsi_sense().map(|s| s.asc)
+            ),
+        );
 
-    // A wedged patch pass counts like any other: the no-progress rule decides.
-    fn continue_after_wedge(&mut self) -> bool {
-        true
+        // Provide actionable guidance based on error type
+        if e.code() == 4000 && e.is_scsi_transport_failure() {
+            crate::server::log::device_log(
+                device,
+                "ACTION_REQUIRED: Transport failure detected — USB bridge crashed. Eject disc and power-cycle drive before retrying.",
+            );
+        } else if e.code() >= 6000
+            && e.scsi_sense()
+                .map(|s| s.is_hardware_error())
+                .unwrap_or(false)
+        {
+            crate::server::log::device_log(
+                device,
+                "ACTION_REQUIRED: Drive hardware error detected — drive may be failing. Consider replacing optical drive.",
+            );
+        } else if e.code() == 4000 && e.scsi_sense().map(|s| s.asc == 0x20).unwrap_or(false) {
+            crate::server::log::device_log(
+                device,
+                "ACTION_REQUIRED: ILLEGAL REQUEST (ASC=0x20) — drive firmware wedged. Power-cycle USB drive to clear state.",
+            );
+        }
     }
 }
 
@@ -515,6 +502,9 @@ impl<'a> ServerPassSink<'a> {
                 );
             }
             RecoveryEvent::Promoted { map, intact } => self.promoted(map, intact),
+            RecoveryEvent::PatchFailed { pass, error } => {
+                log_patch_failure(device, &self.user_halt, pass, error)
+            }
             RecoveryEvent::LossUnmeasured { .. } => {
                 // The engine's verdict aborts: the loss can't be measured without the mapfile.
                 crate::server::log::device_log(

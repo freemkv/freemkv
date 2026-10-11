@@ -3560,6 +3560,7 @@ fn run_disc_scanning(
             max_passes: req.max_passes,
             abort_on_lost_secs: req.abort_lost_secs,
             is_iso_output: want_iso,
+            ..Default::default()
         };
         // An MKV deliverable stages only nav/UDF + the chosen titles (never bus-encrypted,
         // AACS BD Pre-recorded 0.953 §3.7) unless a kept, whole image can be made.
