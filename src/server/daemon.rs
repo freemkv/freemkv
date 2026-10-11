@@ -277,7 +277,6 @@ pub fn run(argv: Vec<String>) {
                 );
             }
             if drained {
-                web::stop_after_drain();
                 drained &= join_bounded(&mut web_handle, "web", WEB_JOIN_TIMEOUT);
             }
             drained
@@ -444,7 +443,6 @@ fn reset_after_drain() {
     keysource::reset_after_drain();
     mover::reset_after_drain();
     muxer::reset_after_drain();
-    web::reset_after_drain();
 }
 
 #[cfg(unix)]

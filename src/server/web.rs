@@ -135,33 +135,6 @@ const PAGES: &[&str] = &[
     "/system",
 ];
 
-static STOP_LISTENER: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn stop_after_drain() {
-    STOP_LISTENER.store(true, std::sync::atomic::Ordering::Release);
-}
-
-pub(crate) fn reset_after_drain() {
-    STOP_LISTENER.store(false, std::sync::atomic::Ordering::Release);
-    QUEUE_VIEW_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    SSE_STREAMS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    *DEBUG_ENABLED.write().unwrap_or_else(|e| e.into_inner()) = false;
-    crate::server::observe::set_debug(false);
-}
-
-fn stop_listener() -> bool {
-    STOP_LISTENER.load(std::sync::atomic::Ordering::Acquire)
-        || (crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
-            && (!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire)
-                || crate::server::TERMINATE.load(std::sync::atomic::Ordering::Acquire)))
-}
-
 pub fn run(cfg: &Arc<RwLock<Config>>) {
     let port = cfg.read().unwrap_or_else(|e| e.into_inner()).port;
     let addr = format!("0.0.0.0:{}", port);
@@ -198,7 +171,7 @@ fn serve(
         let request = match recv(std::time::Duration::from_secs(1)) {
             Ok(Some(request)) => request,
             Ok(None) => {
-                if stop_listener() {
+                if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
                     break;
                 }
                 continue;
@@ -214,18 +187,8 @@ fn serve(
                 break;
             }
         };
-        if stop_listener() {
-            break;
-        }
         if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
-            // Keep a status surface while a reboot is refused/deferred. Never
-            // dispatch application handlers or read mutable service state here.
-            json_response(
-                request,
-                503,
-                r#"{"ok":false,"rebooting":true,"status":"draining","message":"Restart is waiting for old services to drain. No replacement services will start until all workers finish."}"#,
-            );
-            continue;
+            break;
         }
         // Bound concurrent handlers so a flood can't fork the container.
         // Body-carrying requests get a lower cap: tiny_http 0.12 has no
