@@ -14,7 +14,7 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
 // The v1.8.3 settings bound to `root`, with its output folders mounted.
 fn upgraded_config(root: &Path) -> Config {
     let mut cfg = fx::config(root);
-    // The fixture's webhooks point at `.invalid` hosts; delivery is under test, not them.
+    // The fixture's webhooks point at `.test` hosts; delivery is under test, not them.
     cfg.webhook_urls.clear();
     for d in ["out/movies", "out/tv", "out/iso", "config"] {
         std::fs::create_dir_all(root.join(d)).unwrap();

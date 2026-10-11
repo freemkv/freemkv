@@ -21,13 +21,13 @@
   "transport_recovery_delay_secs": 5,
   "tmdb_api_key": "0123456789abcdef0123456789abcdef",
   "keydb_path": null,
-  "keydb_url": "https://keys.example.invalid/keydb.zip",
+  "keydb_url": "https://keys.example.test/keydb.zip",
   "key_source": "online",
-  "keyserver_url": "https://keys.example.invalid",
+  "keyserver_url": "https://keys.example.test",
   "keyserver_secret": "fixture-secret",
   "webhook_urls": [
     {
-      "url": "https://media.example.invalid/Library/Refresh",
+      "url": "https://media.example.test/Library/Refresh",
       "headers": {
         "Authorization": "MediaBrowser Token=\"00000000000000000000000000000000\""
       },
@@ -36,7 +36,7 @@
       "post_move": true
     },
     {
-      "url": "http://home.example.invalid:8123/api/webhook/fixture",
+      "url": "http://home.example.test:8123/api/webhook/fixture",
       "post_rip": true,
       "post_mux": false,
       "post_move": false

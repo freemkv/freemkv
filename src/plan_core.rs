@@ -1,6 +1,6 @@
 //! The front ends' one key rule (pipeline design §2.5; anti-drift measures 1–3). The CLI,
 //! the desktop app and the server each build the engine's `Plan` directly, taking its keys
-//! from [`key_params`], so which key sources a request asks is written once.
+//! from [`key_params`](crate::plan_core::key_params), so which key sources a request asks is written once.
 //!
 //! Every front end also renders the plan it runs through its own exhaustive destructure of
 //! `Plan` (no `..`): a field added to the engine's `Plan` fails to compile until the CLI,

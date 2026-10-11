@@ -248,8 +248,8 @@ fn only_a_keepalive_plist_restarts_the_job() {
 // refused.
 #[test]
 fn the_loaded_launchd_job_decides_over_the_installed_plist() {
-    let loaded = std::path::Path::new("/Users/me/Library/LaunchAgents/loaded.plist");
-    let stale = std::path::Path::new("/Users/me/Library/LaunchAgents/stale.plist");
+    let loaded = std::path::Path::new("/srv/svc/Library/LaunchAgents/loaded.plist");
+    let stale = std::path::Path::new("/srv/svc/Library/LaunchAgents/stale.plist");
     let keeps_alive = |p: &std::path::Path| p == loaded;
     let print = |path: &std::path::Path, props: &str| {
         format!(
@@ -290,7 +290,7 @@ fn the_loaded_launchd_job_decides_over_the_installed_plist() {
 // `launchctl print gui/501/<label>` of such an agent.
 #[test]
 fn a_conditional_keepalive_of_the_loaded_job_restarts_it() {
-    let plist = std::path::Path::new("/Users/me/Library/LaunchAgents/io.freemkv.library.plist");
+    let plist = std::path::Path::new("/srv/svc/Library/LaunchAgents/io.freemkv.library.plist");
     let print = format!(
         "gui/501/io.freemkv.library = {{\n\tactive count = 1\n\tpath = {}\n\ttype = LaunchAgent\n\
          \tstate = running\n\n\tenvironment = {{\n\t\tXPC_SERVICE_NAME => io.freemkv.library\n\t}}\n\n\
@@ -299,7 +299,7 @@ fn a_conditional_keepalive_of_the_loaded_job_restarts_it() {
          \tproperties = runatload | managed LWCR | has LWCR\n}}\n",
         plist.display()
     );
-    let missing = std::path::Path::new("/Users/me/not-installed.plist");
+    let missing = std::path::Path::new("/srv/svc/not-installed.plist");
     let job = Launchctl::Loaded(print);
     assert!(launchd_restarts(&job, missing, |p| p == plist));
     assert!(!launchd_restarts(&job, missing, |_| false));

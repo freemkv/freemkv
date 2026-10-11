@@ -66,7 +66,7 @@ fn unknown_and_removed_fields_are_tolerated() {
     );
     m.insert(
         "webhook_urls".into(),
-        serde_json::json!(["https://old.example.invalid/hook"]),
+        serde_json::json!(["https://old.example.test/hook"]),
     );
     let dir = root.join("config");
     write_settings(&dir, &saved);
@@ -79,7 +79,7 @@ fn unknown_and_removed_fields_are_tolerated() {
         "on_read_error wins over abort_on_error"
     );
     assert_eq!(cfg.webhook_urls.len(), 1);
-    assert_eq!(cfg.webhook_urls[0].url, "https://old.example.invalid/hook");
+    assert_eq!(cfg.webhook_urls[0].url, "https://old.example.test/hook");
 }
 
 #[test]
