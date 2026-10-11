@@ -543,16 +543,6 @@ pub(crate) fn staging_root_ready(
     )
 }
 
-// The ripper's rule until it holds on `staging_root_ready` instead: remove then.
-pub(crate) fn create_staging_root(cfg: &Config) -> std::io::Result<()> {
-    let staging = std::path::Path::new(&cfg.staging_dir);
-    if staging == std::path::Path::new(&cfg.autorip_dir).join("staging") {
-        std::fs::create_dir_all(staging)
-    } else {
-        crate::server::util::create_dir_on_live_parent(staging)
-    }
-}
-
 fn staging_ready(
     staging: &std::path::Path,
     default: &std::path::Path,

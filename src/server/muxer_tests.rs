@@ -1111,9 +1111,9 @@ fn muxing_marker_stamped_before_marker_read() {
         .find("let verdict = mux_dispatch_verdict(snap.as_ref());")
         .expect("muxer.rs should dispatch on the verdict");
     let end = src[start..]
-        .find("crate::server::ripper::resume::remux_from_ripped_marker(cfg_arc,")
+        .find("mux_marker(cfg_arc, &dir, &marker)")
         .map(|i| start + i)
-        .expect("muxer.rs should dispatch to remux_from_ripped_marker");
+        .expect("muxer.rs should dispatch to mux_marker");
     let region = &src[start..end];
     // The stamp is live code in the Dispatch arm, not another arm or a comment.
     let arm = &region[region
@@ -1459,4 +1459,56 @@ fn ripped_marker_media_type_reads_old_values() {
         let m: RippedMarker = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(m.tmdb_media_type, want, "{raw:?}");
     }
+}
+
+// A hand-off whose job another drive holds waits for it without the mux slot, so a
+// Library remux is not stopped for a mux that may give up and do nothing.
+#[test]
+fn a_hand_off_waiting_for_its_job_does_not_take_the_mux_slot() {
+    use crate::server::ripper::{resume, staging};
+    let _env = crate::server::log::env_guard();
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    // SAFETY: env access in tests, serialized by env_guard.
+    unsafe {
+        std::env::set_var("AUTORIP_DIR", root.path());
+    }
+    let dir = root.path().join("Heat");
+    std::fs::create_dir_all(&dir).unwrap();
+    staging::write_state(
+        &dir,
+        &staging::DiscState::new(staging::StagingState::Ripped),
+    );
+    let mut marker = sample_marker();
+    marker.iso_path = dir.join("Heat.iso").to_string_lossy().into_owned();
+    marker.mapfile_path = dir.join("Heat.iso.mapfile").to_string_lossy().into_owned();
+    let lease = staging::job_lease(&dir);
+    let held = lease.lock().unwrap();
+    resume::LEASE_WAITERS.lock().unwrap().remove("_mux");
+    let halt = libfreemkv::Halt::new();
+    crate::server::ripper::register_halt("_mux", halt.clone());
+    let cfg = std::sync::Arc::new(std::sync::RwLock::new(
+        crate::server::config::Config::default(),
+    ));
+    let worker = std::thread::spawn({
+        let dir = dir.clone();
+        move || mux_marker(&cfg, &dir, &marker)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !resume::LEASE_WAITERS.lock().unwrap().contains("_mux") {
+        assert!(std::time::Instant::now() < deadline, "the mux never waited");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let slot_taken = crate::server::library::arbiter::ARBITER.rip_active();
+    halt.cancel();
+    drop(held);
+    worker.join().unwrap();
+    crate::server::ripper::unregister_halt("_mux");
+    resume::LEASE_WAITERS.lock().unwrap().remove("_mux");
+    assert!(
+        !slot_taken,
+        "the mux slot was taken before the job was this mux's"
+    );
 }

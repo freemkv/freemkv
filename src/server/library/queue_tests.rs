@@ -934,3 +934,30 @@ fn a_queue_file_that_could_not_be_read_is_loaded_once_it_reads_again() {
     assert_eq!(q.snapshot().jobs.len(), 1);
     assert!(q.claim_next().is_some(), "the loaded queue runs");
 }
+
+#[cfg(unix)]
+#[test]
+fn nothing_changes_a_queue_whose_file_could_not_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join(QUEUE_FILE);
+    let first = Queue::open(t.path());
+    first.add(vec![job(t.path(), "A")]);
+    drop(first);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        return; // running as a user that ignores modes
+    }
+    let q = Queue::open(t.path());
+    let opened = crate::server::util::epoch_secs();
+    // An operator's Pause during the hold is refused, not kept in memory and then lost.
+    q.set_paused(true);
+    q.set_debug_log(true);
+    assert!(!q.snapshot().paused);
+    assert!(!q.snapshot().debug_log);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(q.retry_unreadable(opened + 60));
+    assert_eq!(q.snapshot().jobs.len(), 1);
+    q.set_paused(true);
+    assert!(q.snapshot().paused);
+}

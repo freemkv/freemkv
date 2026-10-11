@@ -953,11 +953,11 @@ fn deliver_steps(
     replace_step().map_err(|e| ("replace", e))
 }
 
-// A failure keeps the verified local file unless it was a Stop, or the target appeared.
-fn keeps(e: &io::Error, stop: &Stop<'_>) -> bool {
-    !libfreemkv::is_halt(e)
-        && !stop.is_cancelled()
-        && libfreemkv::error_code(e) != Some(libfreemkv::error::E_REMUX_TARGET_EXISTS)
+// A failure keeps the verified local file unless it was a Stop, or the target appeared. A
+// landing the sink could not record halts it too, and keeps it.
+fn keeps(e: &io::Error, stop: &Stop<'_>, unsaved: bool) -> bool {
+    libfreemkv::error_code(e) != Some(libfreemkv::error::E_REMUX_TARGET_EXISTS)
+        && (unsaved || (!libfreemkv::is_halt(e) && !stop.is_cancelled()))
 }
 
 /// A remux whose verified MKV is on local staging, ready to be delivered.
@@ -976,12 +976,14 @@ pub(crate) struct Finished<'a> {
 
 /// Deliver `f.file` to `f.target`. `Ok(replaced)` removes the local file; a storage failure
 /// keeps it with a sidecar and returns the cause wrapped in a [`Kept`]; a Stop or a target
-/// that appeared removes it and returns the error as is.
+/// that appeared removes it and returns the error as is. `unsaved` names a landing the sink
+/// halted because it could not record it: a storage failure, so the file is kept.
 pub(crate) fn deliver_finished(
     f: &Finished<'_>,
     sink: &dyn Sink,
     halt: &Halt,
     io: &dyn DeliverIo,
+    unsaved: &dyn Fn() -> Option<String>,
 ) -> io::Result<bool> {
     let mut local = LocalGuard(Some(f.file.to_path_buf()));
     let size = std::fs::metadata(f.file)?.len();
@@ -998,8 +1000,14 @@ pub(crate) fn deliver_finished(
             }
             Ok(replaced)
         }
-        Err((phase, e)) if keeps(&e, &stop) => Err(keep(f, &mut local, want, phase, e, sink)),
-        Err((_, e)) => Err(e),
+        Err((phase, e)) => {
+            let unsaved = unsaved();
+            if !keeps(&e, &stop, unsaved.is_some()) {
+                return Err(e);
+            }
+            let cause = unsaved.map_or(e, io::Error::other);
+            Err(keep(f, &mut local, want, phase, cause, sink))
+        }
     }
 }
 
@@ -1378,7 +1386,7 @@ pub(crate) fn resume(
                 writing_app: verified.writing_app,
             })
         }
-        Err((phase, e)) if keeps(&e, &stop) => Err(keep_again(&info, phase, e, sink)),
+        Err((phase, e)) if keeps(&e, &stop, false) => Err(keep_again(&info, phase, e, sink)),
         Err((_, e)) => Err(e),
     }
 }
@@ -1407,7 +1415,8 @@ fn keep_again(
     wrap(info.staged.clone(), info.sidecar.clone(), phase, cause)
 }
 
-// Forwards every call, noting the title the engine opened: its index and declared runtime.
+// Forwards every call but the engine's own "replace" phase, noting the title the engine
+// opened: its index and declared runtime.
 struct Capture<'a> {
     inner: &'a dyn Sink,
     title: Mutex<(Option<usize>, Option<f64>)>,
@@ -1432,8 +1441,13 @@ impl Sink for Capture<'_> {
     }
 
     fn event(&self, e: &Event<'_>) {
-        if let Event::TitleStart { idx, .. } = e {
-            self.title.lock().unwrap_or_else(|e| e.into_inner()).0 = Some(*idx);
+        match e {
+            Event::TitleStart { idx, .. } => {
+                self.title.lock().unwrap_or_else(|e| e.into_inner()).0 = Some(*idx);
+            }
+            // The engine's landing into the stage; the sink's "replace" is the library landing.
+            Event::Phase { name: "replace" } => return,
+            _ => {}
         }
         self.inner.event(e);
     }
@@ -1448,14 +1462,16 @@ pub(crate) fn stage_file(stage: &Path, job_id: u64) -> PathBuf {
     stage.join(format!("{job_id}.mkv"))
 }
 
-/// Remux `request` through local staging: the engine muxes, syncs, verifies and lands the MKV
-/// in `stage` (as `<job_id>.mkv`), then [`deliver_finished`] copies it into the library.
+/// Remux `request` through local staging: `engine` (the engine's remux, with its sink) muxes,
+/// syncs, verifies and lands the MKV in `stage` (as `<job_id>.mkv`), then
+/// [`deliver_finished`] copies it into the library; `unsaved` is passed on to it.
 pub(crate) fn remux_via_stage(
     request: &freemkv_engine::RemuxJob,
-    keys: &freemkv_engine::KeyParams,
     sink: &dyn Sink,
     stage: &Path,
     job_id: u64,
+    unsaved: &dyn Fn() -> Option<String>,
+    engine: impl FnOnce(&freemkv_engine::RemuxJob, &dyn Sink) -> io::Result<freemkv_engine::RemuxReport>,
 ) -> io::Result<freemkv_engine::RemuxReport> {
     // Refused before anything is read, as a direct remux refuses it.
     refuse_existing(&request.target, request.replace)?;
@@ -1472,7 +1488,7 @@ pub(crate) fn remux_via_stage(
         inner: sink,
         title: Mutex::new((None, None)),
     };
-    let mut report = freemkv_engine::remux_iso(&staged, keys, &capture)?;
+    let mut report = engine(&staged, &capture)?;
     let (title, expected_secs) = *capture.title.lock().unwrap_or_else(|e| e.into_inner());
     let finished = Finished {
         file: &local,
@@ -1484,7 +1500,7 @@ pub(crate) fn remux_via_stage(
         verified: &report.verified,
         target_before,
     };
-    report.replaced = deliver_finished(&finished, sink, &Halt::new(), &OsIo)?;
+    report.replaced = deliver_finished(&finished, sink, &Halt::new(), &OsIo, unsaved)?;
     Ok(report)
 }
 

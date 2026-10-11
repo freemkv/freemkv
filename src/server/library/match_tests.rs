@@ -321,3 +321,55 @@ fn a_change_match_job_shows_on_its_iso_only_row_and_unqueues_from_it() {
     assert_eq!(lib.remove_queued(&d, row.target.as_ref().unwrap()), 1);
     assert!(lib.queue.snapshot().jobs.is_empty());
 }
+
+#[test]
+fn the_match_dialog_does_not_offer_a_match_saved_for_an_earlier_disc() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Show"]);
+    lib.match_store()
+        .unwrap()
+        .save(&sources[0], 0, show())
+        .unwrap();
+    lib.rescan(&dirs(&cfg));
+    let saved = lib.match_view(&cfg, &sources[0]).unwrap().0.unwrap();
+    assert!(lib.match_is_current(&sources[0], &saved));
+    // Another disc is filed at the same path; the listing no longer shows the old match.
+    std::fs::write(&sources[0], b"a different disc").unwrap();
+    lib.rescan(&dirs(&cfg));
+    let listed = lib.listing(&dirs(&cfg));
+    let row = listed
+        .rows
+        .iter()
+        .find(|r| r.iso.as_ref() == Some(&sources[0]));
+    assert!(row.unwrap().source_match.is_none());
+    // The dialog still gets its revision to save over, flagged as not this disc's.
+    let saved = lib.match_view(&cfg, &sources[0]).unwrap().0.unwrap();
+    assert!(!lib.match_is_current(&sources[0], &saved));
+}
+
+#[test]
+fn a_change_match_queued_from_a_row_with_an_mkv_shows_there_and_can_be_unqueued() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    let mkv = index::new_mkv_target(&d.library, "Castaway");
+    std::fs::create_dir_all(mkv.parent().unwrap()).unwrap();
+    std::fs::write(&mkv, b"old remux").unwrap();
+    lib.rescan(&d);
+    let row = |lib: &Library| {
+        lib.listing(&d)
+            .rows
+            .into_iter()
+            .find(|r| r.mkv.as_ref() == Some(&mkv))
+            .unwrap()
+    };
+    assert_eq!(row(&lib).iso.as_ref(), Some(&sources[0]));
+    let (_, queued) = lib
+        .confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .unwrap();
+    assert_eq!(queued, 1);
+    let shown = row(&lib)
+        .job
+        .expect("the queued Change match shows on the row");
+    assert!(shown.retire && shown.state == queue::JobState::Queued);
+    assert_eq!(lib.remove_queued(&d, &mkv), 1);
+    assert!(lib.queue.snapshot().jobs.is_empty());
+}

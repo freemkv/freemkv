@@ -24,17 +24,14 @@ pub(crate) fn shutting_down() -> bool {
 /// The worker loop: waits while a rip holds the slot or the queue is paused.
 pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     tracing::info!("library worker starting");
-    // No remux runs yet: the one moment the staging folder may be swept.
-    if let Some(dir) = health::remux_stage_dir() {
-        let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let library = super::dirs(&snapshot).library;
-        housekeep_staging(lib, &dir, &StagingLimits::of(&snapshot, &dir), &library);
-    }
+    let stage = health::remux_stage_dir();
+    let mut swept = false;
     while !shutting_down() {
         let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
         let d = super::dirs(&snapshot);
         let output = |dir: &Path| health::preflight("output", dir);
         let now = crate::server::util::epoch_secs();
+        swept = swept || sweep_staging_once(lib, &snapshot, stage.as_deref(), now);
         let Some((job, epoch)) = next_job(lib, arbiter, &d, &output, now) else {
             crate::server::sleep_unless_shutdown(Duration::from_secs(1));
             continue;
@@ -42,6 +39,19 @@ pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
         run_job(lib, &snapshot, arbiter, epoch, job);
     }
     tracing::info!("library worker stopping");
+}
+
+// Sweep the remux staging folder before the first job: no remux has run yet. It waits for a
+// queue file that could not be loaded, which would otherwise drop the kept files it adopts.
+fn sweep_staging_once(lib: &Library, cfg: &Config, stage: Option<&Path>, now: u64) -> bool {
+    if lib.hold_for_unreadable_queue(now) {
+        return false;
+    }
+    if let Some(dir) = stage {
+        let library = super::dirs(cfg).library;
+        housekeep_staging(lib, dir, &StagingLimits::of(cfg, dir), &library);
+    }
+    true
 }
 
 /// The bounded output-folder check a job must pass before it starts.
@@ -97,9 +107,18 @@ fn problem_error(p: &Problem) -> std::io::Error {
         Fault::Unresponsive | Fault::Unmounted => K::TimedOut,
         Fault::Io | Fault::Other => K::Other,
     };
-    std::io::Error::new(
-        kind,
-        format!("{} Folder: {}. {}", p.message, p.path.display(), p.detail),
+    std::io::Error::new(kind, format!("{} {}", folder_sentence(p), p.detail))
+}
+
+// The failed folder check as one sentence: its message and the folder.
+fn folder_sentence(p: &Problem) -> String {
+    crate::strings::fmt_or(
+        "server.library.folder_failed",
+        "{message} Folder: {path}.",
+        &[
+            ("message", &p.message),
+            ("path", &p.path.display().to_string()),
+        ],
     )
 }
 
@@ -149,11 +168,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
             kept.display(),
             job.target.display()
         ),
-        None => format!(
-            "$ freemkv iso://{} mkv://{}",
-            job.iso.display(),
-            job.target.display()
-        ),
+        None => command_line(&job),
     };
     sink.emit(LineKind::Cmd, cmd);
     sink.emit(
@@ -178,16 +193,39 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
     lib.set_running(|r| *r = None);
 }
 
+// The job as the CLI command it runs: its ISO and the file it writes, or the folder its
+// files share; a Change match's queue key names no file, so it is never shown.
+fn command_line(job: &Job) -> String {
+    let iso = format!("$ freemkv iso://{}", job.iso.display());
+    let targets = job.output_targets();
+    let dest = match targets.as_slice() {
+        _ if job.retire && job.plan.is_none() => None,
+        [one] => Some(one.clone()),
+        [first, rest @ ..] => first
+            .ancestors()
+            .skip(1)
+            .find(|dir| rest.iter().all(|t| t.starts_with(dir)))
+            .map(Path::to_path_buf),
+        [] => None,
+    };
+    match dest {
+        Some(dest) => format!("{iso} mkv://{}", dest.display()),
+        None => iso,
+    }
+}
+
 /// Freeze automatic title selection before execution, including single outputs.
 /// Existing plans and retained media keep their original selection on restart.
 fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
     if job.plan.is_some() || job.staged.is_some() {
         return Ok(());
     }
+    let episode = linked_episode(&lib.config_dir, job)?;
     if let Some(saved) = lib.match_store()?.get(&job.iso) {
         let now = super::links::iso_stamp(&job.iso);
         if saved.is_for(now) {
-            return attach_corrected_plan(lib, cfg, job, &saved.media);
+            let row = (episode && !job.retire).then(|| job.target.clone());
+            return attach_corrected_plan(lib, cfg, job, &saved.media, row.as_deref());
         }
         // Confirmed for an earlier disc filed at this ISO path: not this disc's identity.
         // At the same size only the time moved, so it may be the same disc: never guess.
@@ -205,42 +243,62 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
         tracing::info!(iso = %job.iso.display(), "saved match is for an earlier disc at this path; ignored");
     }
     if !cfg.tv_auto {
-        if linked_episode(&lib.config_dir, job) {
-            return Err(episode_alone(job));
+        if episode {
+            return Err(episode_alone(&job.target));
         }
         return attach_automatic_movie_plan(lib, cfg, job);
     }
     let looked_up = if cfg.tmdb_api_key.is_empty() {
         Ok(None)
     } else {
-        crate::server::tmdb::lookup(&lookup_label(lib, job), &cfg.tmdb_api_key)
+        crate::server::tmdb::lookup(&lookup_label(job, episode), &cfg.tmdb_api_key)
     };
     attach_from_lookup(lib, cfg, job, looked_up)
 }
 
-// Whether links.json records the job's target as one episode of its ISO's split disc.
-fn linked_episode(config_dir: &Path, job: &Job) -> bool {
-    super::links::entries(config_dir)
+// Whether links.json records the job's target as one episode of its ISO's split disc. Links
+// that cannot be read fail a replace: a guess could plan a whole-disc movie over an episode.
+fn linked_episode(config_dir: &Path, job: &Job) -> std::io::Result<bool> {
+    if !job.replace {
+        return Ok(false);
+    }
+    Ok(links_for_job(config_dir)?
         .get(&job.target)
-        .is_some_and(|l| l.episode && l.iso == job.iso)
+        .is_some_and(|l| l.episode && l.iso == job.iso))
+}
+
+// Every link, or the error a job fails with when links.json cannot be read.
+fn links_for_job(
+    config_dir: &Path,
+) -> std::io::Result<std::collections::HashMap<std::path::PathBuf, super::links::Link>> {
+    super::links::read_entries(config_dir).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            crate::strings::fmt_or(
+                "server.library.links_unreadable",
+                "{file} in the config folder could not be read ({error}), so which files this ISO made is unknown; nothing was written. Fix that file or its folder's permissions, then Retry.",
+                &[("file", super::links::LINKS_FILE), ("error", &e.to_string())],
+            ),
+        )
+    })
 }
 
 // What the disc is looked up by: an episode row is named after one episode, its ISO after the disc.
-fn lookup_label(lib: &Library, job: &Job) -> String {
+fn lookup_label(job: &Job, episode: bool) -> String {
     match job.iso.file_stem() {
-        Some(stem) if linked_episode(&lib.config_dir, job) => stem.to_string_lossy().into_owned(),
+        Some(stem) if episode => stem.to_string_lossy().into_owned(),
         _ => job.title.clone(),
     }
 }
 
 // An episode row remuxes only the planned output that lands on it, never a whole-disc movie.
-fn episode_alone(job: &Job) -> std::io::Error {
+fn episode_alone(row: &Path) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         crate::strings::fmt_or(
             "server.library.episode_unplanned",
             "{path} is one episode of a disc that was split into several files, and this remux could not find which of the disc's titles it is, so nothing was written. Use Change match on its ISO to remux the whole disc.",
-            &[("path", &job.target.display().to_string())],
+            &[("path", &row.display().to_string())],
         ),
     )
 }
@@ -269,11 +327,11 @@ fn attach_from_lookup(
             "TMDB could not be reached to plan this disc; retry once it is back",
         ))
     })?;
-    let label = lookup_label(lib, job);
+    let episode = linked_episode(&lib.config_dir, job)?;
+    let label = lookup_label(job, episode);
     let tv_match = found.filter(|m| {
         m.media_type.is_tv() && crate::server::tmdb::is_confident_match(&label, &m.title, m.year)
     });
-    let episode = linked_episode(&lib.config_dir, job);
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     // TV as the ripper decides it: a TMDB TV match, or a disc label that names a season.
@@ -291,7 +349,7 @@ fn attach_from_lookup(
     .any(|l| crate::server::ripper::plan_kind(kind, l).is_some());
     if !tv {
         if episode {
-            return Err(episode_alone(job));
+            return Err(episode_alone(&job.target));
         }
         return persist_movie_plan(lib, cfg, job, &disc.titles);
     }
@@ -319,7 +377,7 @@ fn attach_from_lookup(
         let row = tv_destinations(cfg, &plan)
             .and_then(|(_, targets)| only_the_row(plan, targets, &job.target));
         let Some((plan, targets)) = row else {
-            return Err(episode_alone(job));
+            return Err(episode_alone(&job.target));
         };
         return persist_plan(lib, job, plan, Some(targets));
     }
@@ -435,11 +493,13 @@ fn with_label_numbers(
     media
 }
 
+// `row`: the episode row a plain Remux was asked for; only its output is planned.
 fn attach_corrected_plan(
     lib: &Library,
     cfg: &Config,
     job: &mut Job,
     media: &crate::server::planner::MediaMetadata,
+    row: Option<&Path>,
 ) -> std::io::Result<()> {
     if media.kind.is_none() {
         return Err(std::io::Error::other("saved match has no media type"));
@@ -452,7 +512,7 @@ fn attach_corrected_plan(
         disc.meta_title.as_deref(),
         &job.title,
     );
-    let (plan, targets) = corrected_plan(cfg, &disc.titles, media)?;
+    let (plan, targets) = corrected_plan_for(cfg, &disc.titles, media, row)?;
     if !lib
         .queue
         .set_plan_targets(job.id, plan, Some(targets))
@@ -470,6 +530,20 @@ fn attach_corrected_plan(
         .find(|j| j.id == job.id)
         .ok_or_else(|| std::io::Error::other("corrected remux job disappeared"))?;
     Ok(())
+}
+
+// The corrected plan, or for an episode `row` only the output that lands on it.
+fn corrected_plan_for(
+    cfg: &Config,
+    titles: &[libfreemkv::DiscTitle],
+    media: &crate::server::planner::MediaMetadata,
+    row: Option<&Path>,
+) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
+    let (plan, targets) = corrected_plan(cfg, titles, media)?;
+    match row {
+        None => Ok((plan, targets)),
+        Some(row) => only_the_row(plan, targets, row).ok_or_else(|| episode_alone(row)),
+    }
 }
 
 // The plan and library paths a confirmed match produces from the disc's titles.
@@ -636,18 +710,32 @@ fn remux_planned(
         if let Some(kept) = kept {
             resume_kept(kept, &request.target, sink)
         } else if let Some(dir) = &stage {
-            deliver::remux_via_stage(
-                request,
-                &keys,
-                sink,
-                dir,
-                job.id.saturating_mul(1000).saturating_add(ordinal as u64),
-            )
-            .map(|r| r.writing_app)
+            execute_staged(request, sink, dir, ordinal, |staged, capture| {
+                freemkv_engine::remux_iso(staged, &keys, capture)
+            })
         } else {
             freemkv_engine::remux_iso(request, &keys, sink).map(|r| r.writing_app)
         }
     })
+}
+
+// One output through the remux staging folder, numbered by job and output.
+fn execute_staged(
+    request: &freemkv_engine::RemuxJob,
+    sink: &JobSink<'_>,
+    dir: &Path,
+    ordinal: usize,
+    engine: impl FnOnce(
+        &freemkv_engine::RemuxJob,
+        &dyn Sink,
+    ) -> std::io::Result<freemkv_engine::RemuxReport>,
+) -> std::io::Result<Option<String>> {
+    let id = sink
+        .job_id
+        .saturating_mul(1000)
+        .saturating_add(ordinal as u64);
+    let unsaved = || sink.landing_unsaved();
+    deliver::remux_via_stage(request, sink, dir, id, &unsaved, engine).map(|r| r.writing_app)
 }
 
 fn cancelled_ending(sink: &JobSink<'_>) -> Option<Ending> {
@@ -870,16 +958,10 @@ fn remux_planned_with(
                 sink.lib
                     .queue
                     .finish_output(job.id, &output.id, OutputState::Failed);
-                return Ending::Failed(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    crate::strings::fmt_or(
-                        "server.library.changed_during",
-                        "{path} changed while this remux ran; it was not touched",
-                        &[("path", &changed.display().to_string())],
-                    ),
-                ));
+                return Ending::Failed(changed_during(&changed));
             }
-            Err(_) if let Some(why) = sink.landing_unsaved() => {
+            Err(e) if let Some(why) = sink.landing_unsaved() => {
+                keep_staged(sink, job.id, &output.id, &e);
                 sink.lib
                     .queue
                     .finish_output(job.id, &output.id, OutputState::Failed);
@@ -890,27 +972,21 @@ fn remux_planned_with(
                 )));
             }
             Err(e) => {
-                if let Some(kept) = deliver::kept_of(&e) {
-                    sink.lib
-                        .queue
-                        .set_output_staged(job.id, &output.id, Some(kept.path.clone()));
-                    sink.lib
-                        .queue
-                        .set_staged(job.id, still_kept(Some(&kept.path)));
-                }
+                keep_staged(sink, job.id, &output.id, &e);
                 sink.lib
                     .queue
                     .finish_output(job.id, &output.id, OutputState::Failed);
                 return cancelled_ending(sink).unwrap_or(Ending::Failed(e));
             }
         };
+        // The link carries the landing recorded before the rename, not a later look.
+        let landed = sink.landed_stamp();
         sink.lib.note_landed(&target, writing_app.clone());
         sink.lib.queue.set_output_staged(job.id, &output.id, None);
         sink.lib.queue.set_staged(job.id, None);
         sink.lib
             .queue
             .finish_output(job.id, &output.id, OutputState::Done);
-        let landed = crate::server::util::Stamp::read(&target).ok();
         if let Err(e) =
             super::links::record_output(&sink.lib.config_dir, &target, &job.iso, landed, episode)
         {
@@ -931,7 +1007,10 @@ fn remux_planned_with(
             sink,
             stopping: &|| cancelled_ending(sink).is_some(),
         };
-        match super::retire::run(&retire, &owned, &targets) {
+        let retired = super::retire::run(&retire, &owned, &targets);
+        // A scan that listed the removed files may commit after this; one more follows it.
+        sink.lib.wake_indexer();
+        match retired {
             Ok(kept) if kept.is_empty() => {}
             Ok(kept) => {
                 let message = super::retire::kept_message(targets.len(), &kept);
@@ -941,6 +1020,15 @@ fn remux_planned_with(
         }
     }
     Ending::Done { writing_app }
+}
+
+// Record the file a failed output's delivery kept, so a Retry only copies it in.
+fn keep_staged(sink: &JobSink<'_>, job_id: u64, output_id: &str, e: &std::io::Error) {
+    if let Some(kept) = deliver::kept_of(e) {
+        let queue = &sink.lib.queue;
+        queue.set_output_staged(job_id, output_id, Some(kept.path.clone()));
+        queue.set_staged(job_id, still_kept(Some(&kept.path)));
+    }
 }
 
 // A landed output whose link could not be saved: the file is there, and the config folder is not.
@@ -986,13 +1074,13 @@ fn landed_by_this_job(config_dir: &Path, iso: &Path, target: &Path) -> bool {
 }
 
 // The files a job may overwrite: links for its ISO under the output folders, plus the
-// row's own MKV when queued to replace it, unless a link says that file is no longer the
-// one this ISO made. Links that cannot be read stop a correction.
+// row's own MKV when queued to replace it unless a link disowns it. Unreadable links stop a
+// correction or a replace; a new file's job then owns nothing.
 fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<Vec<Owned>> {
-    let links = if job.retire {
-        super::links::read_entries(config_dir)?
-    } else {
-        super::links::entries(config_dir)
+    let links = match links_for_job(config_dir) {
+        Ok(links) => links,
+        Err(e) if job.retire || job.replace => return Err(e),
+        Err(_) => Default::default(),
     };
     let roots = super::owned::roots(&super::dirs(cfg));
     let targets = job.output_targets();
@@ -1038,14 +1126,20 @@ fn may_replace(target: &Path, owned: &[Owned]) -> std::io::Result<bool> {
     match super::owned::present(target)? {
         super::owned::Present::File(stamp) if stamp == ours.stamp => Ok(true),
         super::owned::Present::Gone => Ok(false),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "{} changed since this remux was planned; it was not touched",
-                target.display()
-            ),
-        )),
+        _ => Err(changed_during(target)),
     }
+}
+
+// An owned library file that changed after it was captured: it is not overwritten.
+fn changed_during(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        crate::strings::fmt_or(
+            "server.library.changed_during",
+            "{path} changed while this remux ran; it was not touched",
+            &[("path", &path.display().to_string())],
+        ),
+    )
 }
 
 // A planned output must sit under the root its plan files into.
@@ -1720,8 +1814,13 @@ pub(crate) fn failure_message(
     if let Some(words) = phase.and_then(phase_words) {
         out.push_str(&format!(" It stopped while {words}."));
     }
-    if let Some(p) = folder {
-        out.push_str(&format!(" {} Folder: {}.", p.message, p.path.display()));
+    // A job that failed on this folder's check already names it.
+    if let Some(sentence) = folder
+        .map(folder_sentence)
+        .filter(|s| !out.contains(s.as_str()))
+    {
+        out.push(' ');
+        out.push_str(&sentence);
     }
     out.push(' ');
     out.push_str(&safe_text(job));
@@ -1859,6 +1958,8 @@ struct Landing {
     refused: bool,
     /// Why the landing could not be recorded durably; it must not land then.
     unsaved: Option<String>,
+    /// The new file's stamp as recorded durably just before the rename.
+    recorded: Option<crate::server::util::Stamp>,
 }
 
 impl JobSink<'_> {
@@ -1875,7 +1976,14 @@ impl JobSink<'_> {
             replaces,
             refused: false,
             unsaved: None,
+            recorded: None,
         });
+    }
+
+    // The stamp the landing about to happen, or just done, was recorded with.
+    fn landed_stamp(&self) -> Option<crate::server::util::Stamp> {
+        let landing = self.landing.lock().unwrap_or_else(|e| e.into_inner());
+        landing.as_ref().and_then(|l| l.recorded)
     }
 
     // Why the landing about to happen could not be recorded, if it could not.
@@ -1915,8 +2023,12 @@ impl JobSink<'_> {
             self.lib
                 .queue
                 .set_output_landing(self.job_id, &landing.output_id, stamp)
+                .map(|()| stamp)
         });
-        landing.unsaved = recorded.err().map(|e| e.to_string());
+        match recorded {
+            Ok(stamp) => landing.recorded = Some(stamp),
+            Err(e) => landing.unsaved = Some(e.to_string()),
+        }
     }
     fn preempted(&self) -> bool {
         self.arbiter.rip_active() || self.arbiter.rip_started_since(self.epoch)

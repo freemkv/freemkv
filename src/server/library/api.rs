@@ -12,6 +12,19 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+// Operator edits of the remux queue; adding jobs refuses through `queue_block`.
+const QUEUE_EDITS: &[&str] = &[
+    "/api/library/queue/remove",
+    "/api/library/queue/stop-all",
+    "/api/library/queue/clear-queued",
+    "/api/library/queue/clear",
+    "/api/library/queue/pause",
+    "/api/library/queue/resume",
+    "/api/library/staged/retry",
+    "/api/library/staged/discard",
+    "/api/library/debug",
+];
+
 fn snapshot(cfg: &Arc<RwLock<Config>>) -> Config {
     cfg.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -79,6 +92,14 @@ pub fn handle(
             &json!({"ok": true, "queued": n, "eligible": eligible}).to_string(),
         )
     };
+    // Loading the queue file replaces the queue: a change made before it loads would be lost.
+    if post
+        && QUEUE_EDITS.contains(&path.as_str())
+        && let Some(why) = lib.queue.unreadable()
+    {
+        err(request, 409, &why);
+        return None;
+    }
     match (get, post, path.as_str()) {
         (true, _, "/api/library") if query_param(&url, "download").is_some() => {
             download(request, &library_json(&lib, &c));
@@ -99,7 +120,8 @@ pub fn handle(
                     Ok((saved, linked, checked)) => json_response(
                         request,
                         200,
-                        &json!({"source": source, "saved": saved, "linked": linked, "unchecked": !checked}).to_string(),
+                        &json!({"source": source, "saved": saved, "linked": linked, "unchecked": !checked,
+                            "stale": saved.as_ref().is_some_and(|m| !lib.match_is_current(&source, m))}).to_string(),
                     ),
                     Err(error) => err(request, 409, &error.to_string()),
                 }
@@ -296,23 +318,9 @@ pub fn handle(
             if let Some(remux_stage) = crate::server::health::remux_stage_dir()
                 && remux_stage != root
             {
-                let targets: Vec<PathBuf> = lib
-                    .queue
-                    .snapshot()
-                    .jobs
-                    .iter()
-                    .filter(|j| j.staged.is_some())
-                    .map(|j| j.target.clone())
-                    .collect();
-                for target in targets {
-                    match discard_kept(&lib, &target, Some(&remux_stage)) {
-                        Ok(()) => discarded += 1,
-                        Err((_, msg)) => {
-                            failed += 1;
-                            tracing::warn!(target = %target.display(), error = %msg, "legacy remux staging file was not cleared");
-                        }
-                    }
-                }
+                let (gone, kept) = clear_kept_remuxes(&lib, &remux_stage);
+                discarded += gone;
+                failed += kept;
             }
             // 1.8.3 folders no disc can match again are listed for the operator, never deleted.
             let legacy = crate::server::ripper::staging::unmatchable_legacy_jobs(&root);
@@ -381,6 +389,30 @@ pub fn handle(
 // Clear staging deletes only what holds nothing undelivered; staging owns the rule.
 fn clear_idle_staging(root: &std::path::Path) -> (usize, usize) {
     crate::server::ripper::staging::clear_abandoned_staging(root)
+}
+
+// Delete the finished remuxes kept for Library jobs that failed or finished; one still
+// queued to be copied in is not abandoned. Returns how many went and how many could not.
+fn clear_kept_remuxes(lib: &Library, stage: &std::path::Path) -> (usize, usize) {
+    let targets: Vec<PathBuf> = lib
+        .queue
+        .snapshot()
+        .jobs
+        .iter()
+        .filter(|j| j.staged.is_some() && matches!(j.state, JobState::Failed | JobState::Done))
+        .map(|j| j.target.clone())
+        .collect();
+    let (mut discarded, mut failed) = (0, 0);
+    for target in targets {
+        match discard_kept(lib, &target, Some(stage)) {
+            Ok(()) => discarded += 1,
+            Err((_, msg)) => {
+                failed += 1;
+                tracing::warn!(target = %target.display(), error = %msg, "kept remux was not cleared");
+            }
+        }
+    }
+    (discarded, failed)
 }
 
 // Delete the finished file kept for `target`. Only a kept pair directly in the staging folder

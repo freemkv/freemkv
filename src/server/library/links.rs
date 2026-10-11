@@ -148,6 +148,7 @@ fn write(config_dir: &Path, links: &HashMap<PathBuf, Link>) -> std::io::Result<(
 }
 
 /// Remember that `mkv` was muxed from `iso`, as both are on disk now.
+#[cfg(test)]
 pub fn record(config_dir: &Path, mkv: &Path, iso: &Path) -> std::io::Result<()> {
     let stamp = Stamp::read(mkv).ok();
     record_many(config_dir, &[(mkv, stamp)], iso, false, true)
@@ -228,8 +229,8 @@ fn record_many(
     write(config_dir, &links)
 }
 
-/// Link every MKV in one completed delivery batch to its sole source ISO, each as it is
-/// on disk now.
+/// Link every MKV in one completed delivery batch to its sole source ISO, each stamped as
+/// it is on disk now; [`record_delivery_stamped`] takes the stamps the delivery verified.
 pub fn record_delivery<'a>(
     config_dir: &str,
     delivered: impl IntoIterator<Item = &'a str>,
@@ -244,7 +245,8 @@ pub fn record_delivery<'a>(
 }
 
 /// [`record_delivery`] with each file's stamp as the delivery verified it (`None` for an
-/// ISO, or a file whose stamp is unknown). Several MKVs from one ISO are its episodes.
+/// ISO, or a file whose stamp is unknown). The batch carries no plan, so its MKVs are linked
+/// as episodes only when it holds more than one; a lone MKV is linked as a single title.
 pub fn record_delivery_stamped<'a>(
     config_dir: &str,
     delivered: impl IntoIterator<Item = (&'a str, Option<Stamp>)>,

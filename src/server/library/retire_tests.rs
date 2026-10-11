@@ -13,7 +13,11 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
-    let t = tempfile::tempdir().unwrap();
+    fixture_in(&std::env::temp_dir())
+}
+
+fn fixture_in(base: &Path) -> Fixture {
+    let t = tempfile::tempdir_in(base).unwrap();
     let config = t.path().join("config");
     let root = t.path().join("movies");
     std::fs::create_dir_all(&config).unwrap();
@@ -189,15 +193,24 @@ fn an_owned_file_swapped_for_a_symlink_is_kept_and_disowned_not_a_failed_pass() 
 #[test]
 fn an_old_file_on_a_nested_filesystem_below_its_root_is_retired() {
     use std::os::unix::fs::MetadataExt;
-    let f = fixture();
+    // Linux (where CI runs it) always has one: tmpfs /dev/shm below devtmpfs /dev.
+    let shm = Path::new("/dev/shm");
+    let f = if shm.is_dir() {
+        fixture_in(shm)
+    } else {
+        fixture()
+    };
     let dev = |p: &Path| std::fs::metadata(p).unwrap().dev();
-    let Some(root) = f
+    let nested = f
         .root
         .ancestors()
         .find(|a| dev(a) != dev(&f.root))
-        .map(Path::to_path_buf)
-    else {
-        return; // every ancestor is on one filesystem here
+        .map(Path::to_path_buf);
+    #[cfg(target_os = "linux")]
+    let root = nested.expect("a nested filesystem on Linux");
+    #[cfg(not(target_os = "linux"))]
+    let Some(root) = nested else {
+        return; // no writable nested filesystem on this host
     };
     let old = f.old("Old.mkv", Some(&f.iso));
     let roots = [root];

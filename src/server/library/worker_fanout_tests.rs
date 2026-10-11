@@ -526,11 +526,22 @@ fn planned_and_legacy_targets_both_obey_current_library_root() {
     assert!(!job.target.parent().unwrap().exists());
     // Without a plan only a kept file is copied in, and only under the current library.
     job.plan = None;
+    job.staged = Some(write_kept(
+        &t.path().join("stage"),
+        "A.1",
+        &job.target,
+        &movie(),
+        1,
+    ));
     for replace in [false, true] {
         job.replace = replace;
-        let Ending::Failed(_) = remux(&job, &cfg, &sink) else {
+        let Ending::Failed(e) = remux(&job, &cfg, &sink) else {
             panic!("foreign target accepted")
         };
+        assert!(
+            e.to_string().contains("is not under the library folder"),
+            "{e}"
+        );
         assert!(!job.target.parent().unwrap().exists());
     }
 }
@@ -701,7 +712,7 @@ fn a_linked_target_changed_after_capture_is_not_overwritten() {
         },
     );
     assert!(
-        matches!(&ending, Ending::Failed(e) if e.to_string().contains("changed since")),
+        matches!(&ending, Ending::Failed(e) if e.to_string().contains("changed while this remux ran")),
         "{ending:?}"
     );
     assert_eq!(
@@ -741,7 +752,10 @@ fn overwrite_authority_is_size_and_mtime_not_inode() {
         .set_modified(modified + Duration::from_secs(60))
         .unwrap();
     let e = may_replace(&path, &owned).unwrap_err();
-    assert!(e.to_string().contains("changed since"), "{e}");
+    assert!(
+        e.to_string().contains("changed while this remux ran"),
+        "{e}"
+    );
     std::fs::remove_file(&path).unwrap();
     assert!(
         !may_replace(&path, &owned).unwrap(),

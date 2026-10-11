@@ -572,16 +572,34 @@ fn unified_proceed_and_retitle_are_left_to_the_correction_path() {
 // Cancel's first read (Review -> Ripped for a replan) is not overwritten with Failed.
 #[test]
 fn cancel_after_a_concurrent_confirmation_leaves_the_confirmed_job() {
-    use crate::server::ripper::staging::{StagingState, cancel_held, mutate_state, read_state};
+    use crate::server::ripper::staging::{STATE_FILE, StagingState, read_state, state_lock_of};
     let tmp = scratch("cancel-race");
     let held = tmp.join("Show S05");
     write_review_state(&held, "tv");
-    mutate_state(&held, StagingState::Review, |s| {
-        s.state = StagingState::Ripped;
-        s.replan_required = true;
-    })
+    let lock = state_lock_of(&held);
+    let guard = lock.lock().unwrap();
+    let root = tmp.to_string_lossy().into_owned();
+    let cancel = std::thread::spawn(move || resolve(&root, "Show S05", Resolve::Cancel));
+    // Cancel has read the hold without the lock and now waits for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::sync::Arc::strong_count(&lock) < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Cancel never asked for the lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    // The confirmation commits in that window.
+    let mut confirmed = read_state(&held).unwrap();
+    confirmed.state = StagingState::Ripped;
+    confirmed.replan_required = true;
+    std::fs::write(
+        held.join(STATE_FILE),
+        serde_json::to_vec_pretty(&confirmed).unwrap(),
+    )
     .unwrap();
-    assert!(!cancel_held(&held).unwrap());
+    drop(guard);
+    assert_eq!(cancel.join().unwrap(), Err("not a held rip".into()));
     let after = read_state(&held).unwrap();
     assert_eq!(after.state, StagingState::Ripped);
     assert_eq!(after.failure_reason, None);

@@ -31,6 +31,10 @@ fn corrected_job(dir: &Path) -> (PathBuf, PathBuf) {
 
 #[test]
 fn a_refused_replan_is_held_for_review_and_not_redispatched() {
+    // The `_mux` row is shared with the lease-wait tests.
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = scratch("refused");
     let (iso, map) = corrected_job(&dir);
     let reason =
@@ -55,6 +59,10 @@ fn a_refused_replan_is_held_for_review_and_not_redispatched() {
 
 #[test]
 fn an_operator_correction_of_the_hold_replans_once() {
+    // The `_mux` row is shared with the lease-wait tests.
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = scratch("corrected");
     let (iso, map) = corrected_job(&dir);
     hold_plan_for_review("_mux", (&dir, &iso, &map), "Show", "held".into());
@@ -71,4 +79,67 @@ fn an_operator_correction_of_the_hold_replans_once() {
     let st = staging::read_state(&dir).unwrap();
     assert_eq!(st.state, staging::StagingState::Ripped);
     assert!(st.replan_required);
+}
+
+// A Ripped job whose saved state asks for a replan as TV from `label`, over the disc image
+// `image`, resumed by the mux worker.
+fn resume_replan(tag: &str, image: &[u8], label: &str) -> (PathBuf, staging::DiscState) {
+    let dir = scratch(tag);
+    let iso = dir.join("Show.iso");
+    let map = dir.join("Show.iso.mapfile");
+    std::fs::write(&iso, image).unwrap();
+    std::fs::write(&map, b"# map").unwrap();
+    let mut st = staging::DiscState::new(staging::StagingState::Ripped);
+    st.replan_required = true;
+    st.media_type = crate::server::planner::MediaKind::Tv;
+    st.disc_label = label.into();
+    st.title = "Show".into();
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.mapfile_path = map.to_string_lossy().into_owned();
+    staging::try_write_state(&dir, &st).unwrap();
+    let class = ResumeClass::Remux {
+        iso_path: iso,
+        mapfile_path: map,
+        display_name: "Show".into(),
+        title_confident: Some(true),
+    };
+    let device = format!("plan-hold-{tag}");
+    let cfg = Arc::new(RwLock::new(Config::default()));
+    resume_remux_within(&cfg, &device, class, std::time::Duration::ZERO, || ());
+    super::super::STATE.lock().unwrap().remove(&device);
+    crate::server::muxer::MUX_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(dir.to_string_lossy().as_ref());
+    let st = staging::read_state(&dir).unwrap();
+    (dir, st)
+}
+
+#[test]
+fn resume_holds_a_selection_it_cannot_make_in_review() {
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Three titles and no authored episode list: TV planning cannot pick the episodes.
+    let k = crate::ku_fixture::K1;
+    let image = crate::ku_fixtures::bd_image(&[Some(k), Some(k), Some(k)], 1)
+        .img
+        .image;
+    let (dir, st) = resume_replan("selection", &image, "SHOW_S1_D1");
+    assert_eq!(
+        st.state,
+        staging::StagingState::Review,
+        "{:?}",
+        st.failure_reason
+    );
+    assert!(
+        st.failure_reason
+            .unwrap_or_default()
+            .contains("authored episode list")
+    );
+    let snap = staging::snapshot_staging_disc(&dir);
+    assert_ne!(
+        crate::server::muxer::mux_dispatch_verdict(snap.as_ref()),
+        crate::server::muxer::MuxVerdict::Dispatch
+    );
 }

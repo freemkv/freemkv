@@ -37,11 +37,14 @@ fn capture_keeps_only_this_isos_regular_mkvs_under_the_roots_sorted() {
     );
     link(&t.path().join("elsewhere/E.mkv"), &iso, Some(b"e"));
     link(&root.join("Show/../Show/A.mkv"), &iso, None);
+    // A symlink is never ours, even linked with the stamp of the file it points to.
     #[cfg(unix)]
     {
         let alias = root.join("Show/alias.mkv");
         std::os::unix::fs::symlink(&a, &alias).unwrap();
-        link(&alias, &iso, None);
+        let linked = self::link(&a, &iso);
+        assert!(linked.stamp.is_some());
+        links.insert(alias, linked);
     }
     let owned = capture(&links, &iso, std::slice::from_ref(&root)).unwrap();
     let paths: Vec<_> = owned.iter().map(|o| o.path.clone()).collect();

@@ -66,7 +66,8 @@ pub fn retitle_staging_for_device(
             "the staging network share is not mounted; the correction was not saved",
         ));
     }
-    create_job_dir(&c, &dir)
+    crate::server::config::staging_root_ready(&c).map_err(|p| std::io::Error::other(p.message))?;
+    create_job_dir(&dir)
         .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create staging: {e}")))?;
     staging::save_user_metadata_for_device(
         &dir,
@@ -1365,6 +1366,13 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                     }
                 };
 
+                // A rip held for its staging folder starts again, as an insert, once it is there.
+                if presence == libfreemkv::DiscPresence::Present && staging_held(&device) {
+                    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+                    if staging_hold_lifted(&device, &c, crate::server::util::epoch_secs()) {
+                        had_disc.remove(&device);
+                    }
+                }
                 let is_new_insert = !had_disc.contains(&device);
                 // One is_in_cooldown read for both halves: asking twice could
                 // straddle the expiry and dispatch without latching.
@@ -1393,6 +1401,10 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                             tracing::info!(device = %device, "disc removed");
                             drop_session(&device);
                         }
+                        STAGING_HELD
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&device);
                         continue;
                     }
                 };
@@ -1728,6 +1740,10 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             }
         }
         Err(e) => {
+            if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
+                hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+                return;
+            }
             let job = match jobs::fresh_unverified_job(&cfg_read) {
                 Ok(job) => job,
                 Err(alloc) => {
@@ -2344,14 +2360,69 @@ fn stand_down_idle(device: &str, loss_aborted: bool) {
     drop_session(device);
 }
 
-// Create staging job folder `dir`, one level under the staging root, making the root as
-// `create_staging_root` does, so neither lands on an unmounted share's mount point.
-fn create_job_dir(cfg: &Config, dir: &std::path::Path) -> std::io::Result<()> {
-    crate::server::config::create_staging_root(cfg)?;
+// Create staging job folder `dir`, one level under a staging root `staging_root_ready` passed:
+// a missing root is never made here.
+fn create_job_dir(dir: &std::path::Path) -> std::io::Result<()> {
     match std::fs::create_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
         other => other,
     }
+}
+
+/// How often a rip held for its staging folder looks for it again, in seconds.
+const STAGING_HOLD_RECHECK_SECS: u64 = 10;
+
+// Drives whose rip waits for the staging folder, with when it was last looked for.
+static STAGING_HELD: std::sync::Mutex<std::collections::BTreeMap<String, u64>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+// Hold `device`'s rip until the staging folder `problem` names is there; the drive shows why.
+fn hold_for_staging(device: &str, problem: &crate::server::health::Problem, now: u64) {
+    STAGING_HELD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(device.to_string(), now);
+    crate::server::log::device_log(device, &problem.message);
+    update_state_with(device, |s| {
+        s.status = "error".into();
+        s.last_error = problem.message.clone();
+    });
+}
+
+fn staging_held(device: &str) -> bool {
+    STAGING_HELD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(device)
+}
+
+// Whether `device`'s held rip may start again: its staging folder is ready, looked for at
+// most every `STAGING_HOLD_RECHECK_SECS` on a bounded probe, so a hung share stalls nothing.
+fn staging_hold_lifted(device: &str, cfg: &Config, now: u64) -> bool {
+    {
+        let mut held = STAGING_HELD.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(last) = held.get_mut(device) else {
+            return false;
+        };
+        if now < last.saturating_add(STAGING_HOLD_RECHECK_SECS) {
+            return false;
+        }
+        *last = now;
+    }
+    let owned = cfg.clone();
+    let probe = crate::server::health::bounded(
+        std::path::Path::new(&cfg.staging_dir),
+        Duration::from_secs(2),
+        move || crate::server::config::staging_root_ready(&owned).is_ok(),
+    );
+    let ready = matches!(probe, crate::server::health::Bounded::Done(true));
+    if ready {
+        STAGING_HELD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(device);
+    }
+    ready
 }
 
 // List the immediate-child basenames of the staging root with the same NFS cold-cache
@@ -2939,12 +3010,16 @@ fn rip_disc_inner(
     // Freeze actual execution mode before a correction can alter the plan. The
     // scan's verified identity lands in the same first write, so an early return
     // never leaves an identity-less job that location refuses for good.
+    if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
+        hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+        return;
+    }
     let started = if crate::server::health::share_unmounted(&job_path) {
         Err(std::io::Error::other(
             "staging network share is not mounted",
         ))
     } else {
-        create_job_dir(&cfg_read, &job_path).and_then(|()| {
+        create_job_dir(&job_path).and_then(|()| {
             staging::begin_capture(&job_path, cfg_read.max_retries, &verified_identity)
         })
     };
@@ -3260,10 +3335,15 @@ fn rip_disc_inner(
     }
     let staging = cfg_read.staging_device_dir(&job_id);
     // Under an unmounted share the dir would be made on the container's own disk.
+    if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
+        hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+        unregister_halt(device);
+        return;
+    }
     let made = if crate::server::health::share_unmounted(std::path::Path::new(&staging)) {
         Err(std::io::Error::other("its network share is not mounted"))
     } else {
-        create_job_dir(&cfg_read, std::path::Path::new(&staging))
+        create_job_dir(std::path::Path::new(&staging))
     };
     if let Err(e) = made {
         // Bail loudly instead of pressing on: a missing staging dir
@@ -4125,32 +4205,21 @@ fn rip_disc_inner(
         };
         let staging_path = std::path::Path::new(&staging);
         let inline_fallback = inline_mux_delivers(&plan);
-        if let Err(e) = hand_off_to_mux_worker(staging_path, &marker, rip_keys.as_ref().ok(), |s| {
-            s.tmdb_id = tmdb_id;
-            s.episode_start = episode_start;
-            s.disc_name = disc_name.clone();
-            s.season = crate::server::tmdb::season_from_label(&disc_name);
-            s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
-            s.outputs = plan;
-        }) {
-            // Couldn't hand off: fall back to the inline mux below, which muxes one
-            // title, so never for an episode fan-out (the capture stays resumable).
-            if !inline_fallback {
-                abort_post_mux_preserving_staging(
-                    device,
-                    &format!(
-                        ".ripped marker write failed ({e}); the episode set is kept staged for Resume"
-                    ),
-                    &format!("hand-off to the mux worker failed: {e}"),
-                );
-                unregister_halt(device);
-                return;
-            }
-            crate::server::log::device_log(
-                device,
-                &format!(".ripped marker write failed ({e}); falling back to inline mux"),
-            );
-        } else {
+        let handed = hand_off_or_keep(device, inline_fallback, || {
+            hand_off_to_mux_worker(staging_path, &marker, rip_keys.as_ref().ok(), |s| {
+                s.tmdb_id = tmdb_id;
+                s.episode_start = episode_start;
+                s.disc_name = disc_name.clone();
+                s.season = crate::server::tmdb::season_from_label(&disc_name);
+                s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
+                s.outputs = plan;
+            })
+        });
+        if handed == HandOff::Kept {
+            unregister_halt(device);
+            return;
+        }
+        if handed == HandOff::Handed {
             crate::server::log::device_log(
                 device,
                 "Sweep + patch complete; handed off to mux worker via .ripped marker.",
@@ -5192,9 +5261,9 @@ fn hand_off_to_mux_worker(
     written
 }
 
-// Hold a finished capture whose plan only the operator can settle in Review, keeping
-// the rip's keys for the remux its correction triggers. A hold that did not land is
-// surfaced; the capture stays resumable (Stopped) either way.
+// Hold a finished capture whose plan only the operator can settle in Review, as a resume
+// holds one (`resume::hold_in_review`), keeping the rip's keys for the remux its correction
+// triggers. A hold that did not land leaves the capture as it was, and its card says so.
 fn hold_capture_for_review(
     device: &str,
     staging_path: &std::path::Path,
@@ -5202,32 +5271,22 @@ fn hold_capture_for_review(
     keys: Option<&libfreemkv::keys::KeyRing>,
     reason: &str,
 ) {
-    crate::server::log::device_log(device, reason);
     let iso = std::path::Path::new(iso);
-    match staging::hold_title_identity_review(
-        staging_path,
-        iso,
-        std::path::Path::new(mapfile),
-        reason,
-    ) {
+    let hint = crate::strings::get_or(
+        "error.plan.review_retained",
+        "The saved ISO and plan are retained.",
+    );
+    let paths = (staging_path, iso, std::path::Path::new(mapfile));
+    match resume::hold_in_review(device, paths, reason, &hint) {
         Ok(()) => {
             if let Some(set) = keys {
                 crate::server::keysource::hold_rip_keys(iso, set.clone());
             }
         }
-        Err(e) => {
-            crate::server::log::syslog(&format!(
-                "Review hold for {} did not persist: {e}",
-                staging_path.display()
-            ));
-            crate::server::muxer::record_error(
-                &staging_path.to_string_lossy(),
-                reason,
-                &format!(
-                    "the review hold could not be saved ({e}); the capture is kept — fix the staging share, then Resume the disc"
-                ),
-            );
-        }
+        Err(e) => crate::server::log::syslog(&format!(
+            "Review hold for {} did not persist: {e}",
+            staging_path.display()
+        )),
     }
 }
 
@@ -5451,6 +5510,45 @@ pub(crate) fn staged_output_name(display_name: &str, ext: &str) -> String {
         "{}.{ext}",
         crate::server::util::sanitize_path_compact(display_name)
     )
+}
+
+// What a capture's hand-off to the mux worker came to.
+#[derive(Debug, PartialEq, Eq)]
+enum HandOff {
+    Handed,
+    /// It failed; the one-title plan is muxed inline instead.
+    Inline,
+    /// It failed for an episode fan-out: nothing is muxed, the capture stays staged.
+    Kept,
+}
+
+// Hand the capture off. If that fails, only a plan the inline mux delivers (`inline`) falls
+// back to it; an episode fan-out is never muxed as one title and stays staged for Resume.
+fn hand_off_or_keep(
+    device: &str,
+    inline: bool,
+    hand_off: impl FnOnce() -> std::io::Result<()>,
+) -> HandOff {
+    match hand_off() {
+        Ok(()) => HandOff::Handed,
+        Err(e) if !inline => {
+            abort_post_mux_preserving_staging(
+                device,
+                &format!(
+                    ".ripped marker write failed ({e}); the episode set is kept staged for Resume"
+                ),
+                &format!("hand-off to the mux worker failed: {e}"),
+            );
+            HandOff::Kept
+        }
+        Err(e) => {
+            crate::server::log::device_log(
+                device,
+                &format!(".ripped marker write failed ({e}); falling back to inline mux"),
+            );
+            HandOff::Inline
+        }
+    }
 }
 
 // Whether the inline mux (one title) can deliver `plan`: never an episode fan-out.
@@ -6483,6 +6581,9 @@ mod held_eject_tests;
 #[path = "mod_key_retry_tests.rs"]
 mod key_retry_tests;
 
+#[cfg(test)]
+#[path = "mod_staging_hold_tests.rs"]
+mod staging_hold_tests;
 #[cfg(test)]
 #[path = "mod_staging_scope_tests.rs"]
 mod staging_scope_tests;

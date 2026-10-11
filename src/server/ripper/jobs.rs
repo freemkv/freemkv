@@ -74,10 +74,12 @@ pub(super) fn dir_matches_identity(dir: &Path, identity: &str) -> bool {
 pub(super) fn fresh_unverified_job(cfg: &crate::server::config::Config) -> Result<String, String> {
     let root = Path::new(&cfg.staging_dir);
     if crate::server::health::share_unmounted(root) {
-        return Err("cannot create staging: its network share is not mounted".into());
+        return Err(crate::strings::get_or(
+            "error.staging.share_unmounted",
+            "cannot create staging: its network share is not mounted",
+        ));
     }
-    crate::server::config::create_staging_root(cfg)
-        .map_err(|e| format!("cannot create staging: {e}"))?;
+    crate::server::config::staging_root_ready(cfg).map_err(|p| p.message)?;
     let stamp = crate::server::util::epoch_secs();
     for n in 0..1000u32 {
         let prefix = staging::UNVERIFIED_JOB_PREFIX;
@@ -149,7 +151,10 @@ fn locate_listed(
             return Ok(format!("disc-{identity}"));
         }
         None => {
-            return Err("cannot inspect staging: the staging folder could not be listed".into());
+            return Err(crate::strings::get_or(
+                "error.staging.unlisted",
+                "cannot inspect staging: the staging folder could not be listed",
+            ));
         }
     };
     let mut found = None;
@@ -167,7 +172,10 @@ fn locate_listed(
         }
         if dir_matches_identity(&dir, identity) {
             if found.is_some() {
-                return Err("more than one staging entry matches this disc; keep both and resolve the duplicate before continuing".into());
+                return Err(crate::strings::get_or(
+                    "error.staging.duplicate_match",
+                    "more than one staging entry matches this disc; keep both and resolve the duplicate before continuing",
+                ));
             }
             found = Some(name);
         }

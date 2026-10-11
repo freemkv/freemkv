@@ -487,6 +487,22 @@ fn spawn_mux_watchdog(
     wd_last_frame: Arc<AtomicU64>,
     wd_bytes: Arc<AtomicU64>,
 ) {
+    spawn_mux_watchdog_with(inputs, wd_active, wd_last_frame, wd_bytes, |watch| {
+        std::thread::Builder::new()
+            .name("mux-watchdog".into())
+            .spawn(watch)
+            .map(drop)
+    });
+}
+
+// `spawn_mux_watchdog` with the thread start passed in.
+fn spawn_mux_watchdog_with(
+    inputs: &MuxInputs<'_>,
+    wd_active: Arc<AtomicBool>,
+    wd_last_frame: Arc<AtomicU64>,
+    wd_bytes: Arc<AtomicU64>,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
     let active = wd_active.clone();
     let last_frame = wd_last_frame.clone();
     let wbytes = wd_bytes.clone();
@@ -502,7 +518,7 @@ fn spawn_mux_watchdog(
     let wd_tmdb_year = inputs.tmdb_year;
     let wd_filename = inputs.filename.clone();
     let wd_staging_disc_dir = inputs.staging_disc_dir.clone();
-    let spawned = std::thread::Builder::new().name("mux-watchdog".into()).spawn(move || {
+    let spawned = spawn(Box::new(move || {
         let mut was_stalled = false;
         let mut last_log_secs: u64 = 0;
         let mut clock = StallClock::new(
@@ -620,7 +636,7 @@ fn spawn_mux_watchdog(
                 last_log_secs = 0;
             }
         }
-    });
+    }));
     if let Err(e) = spawned {
         report_watchdog_spawn_failure(inputs.device, &e);
     }

@@ -238,3 +238,27 @@ fn discard_finds_a_planned_jobs_kept_file_by_its_output_target() {
     discard_kept(&lib, &episode, Some(&stage)).unwrap();
     assert!(!mkv.exists());
 }
+
+#[test]
+fn clear_staging_keeps_a_kept_remux_still_waiting_to_be_copied_in() {
+    let t = tempfile::tempdir().unwrap();
+    let stage = t.path().join("stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    let (_, mkv) = kept_job(&lib, &stage);
+    // Queued to be copied in once the output folder answers: not abandoned.
+    assert_eq!(clear_kept_remuxes(&lib, &stage), (0, 0));
+    assert!(mkv.exists());
+    let job = lib.queue.claim_next().unwrap();
+    lib.queue.finish(
+        job.id,
+        super::super::queue::JobResult::Failed {
+            code: None,
+            message: "the copy failed".into(),
+            finished_at: 0,
+        },
+    );
+    assert_eq!(clear_kept_remuxes(&lib, &stage), (1, 0));
+    assert!(!mkv.exists());
+}

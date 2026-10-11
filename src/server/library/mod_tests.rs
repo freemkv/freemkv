@@ -616,6 +616,21 @@ fn tv_folder_partials_no_job_owns_are_swept() {
     assert!(season.join("Show S01E03.mkv").exists());
 }
 
+#[test]
+fn episode_partials_under_a_tv_layout_in_the_library_are_swept() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    // The default layout: TV files under the library itself, so there is no separate TV folder.
+    let d = dirs_in(t.path());
+    let season = d.library.join("Show (2001)/Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    let orphan = season.join("Show S01E04.mkv.partial");
+    std::fs::write(&orphan, b"half an episode").unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    assert_eq!(lib.sweep_partials(&d), 1);
+    assert!(!orphan.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn the_unreadable_queue_hold_clears_once_the_file_reads() {
@@ -632,9 +647,46 @@ fn the_unreadable_queue_hold_clears_once_the_file_reads() {
     let lib = Library::open(&cfg, &t.path().join("logs"));
     let now = crate::server::util::epoch_secs();
     assert!(lib.hold_for_unreadable_queue(now));
-    assert!(lib.hold().is_some());
+    // A file, not a folder to wait for, and nothing is queued over it.
+    let hold = lib.hold().unwrap();
+    assert_eq!(hold.role, QUEUE_FILE_ROLE);
+    assert!(
+        hold.hint.contains("until this file can be read"),
+        "{}",
+        hold.hint
+    );
+    let refused = lib.queue_block(&dirs(&Config::default()), false).unwrap();
+    assert!(refused.ends_with("Nothing was queued."), "{refused}");
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(!lib.hold_for_unreadable_queue(now + 120));
     assert!(lib.hold().is_none());
     assert!(lib.queue.unreadable().is_none());
+}
+
+#[test]
+fn an_iso_whose_share_hangs_is_refused_without_waiting_on_it() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    let iso = d.isos.as_ref().unwrap().join("Hung.iso");
+    let started = std::time::Instant::now();
+    let hung = |_: &Path| {
+        std::thread::sleep(Duration::from_secs(5));
+        None
+    };
+    let e = iso_stamp_within(&d, &iso, Duration::from_millis(100), hung).unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the caller did not wait"
+    );
+    assert!(e.to_string().contains("not responding"), "{e}");
+    assert!(e.to_string().ends_with("Nothing was queued."), "{e}");
+    let stamp = crate::server::util::Stamp {
+        size: 1,
+        modified: std::time::UNIX_EPOCH,
+    };
+    // Another share answers; the hung probe holds only its own folder's slot.
+    let other = dirs_in(&t.path().join("other"));
+    let iso = other.isos.as_ref().unwrap().join("Fine.iso");
+    let answered = iso_stamp_within(&other, &iso, Duration::from_secs(3), move |_| Some(stamp));
+    assert_eq!(answered.unwrap(), Some(stamp));
 }

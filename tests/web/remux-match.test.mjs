@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { title: 'Old', season: 1 }, linked = ['/tv/<old>.mkv']) {
+async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { title: 'Old', season: 1 }, linked = ['/tv/<old>.mkv'], stale = false) {
   const source = await readFile(new URL('../../src/server/web/assets/remux.js', import.meta.url), 'utf8');
   const context = vm.createContext({});
   const calls = [], nodes = {};
@@ -21,7 +21,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
         ? { ok: true, queued }
         : { ok: true, queued, saved: { revision: payload.expected_revision + 1, media: payload.media } };
       if (url.startsWith('/api/tmdb/search')) return searchApi ? searchApi(url) : [choice];
-      return { saved: savedMedia === null ? null : { revision: 7, media: savedMedia }, linked };
+      return { saved: savedMedia === null ? null : { revision: 7, media: savedMedia }, linked, stale };
     },
     modal: options => {
       body = options.body;
@@ -211,4 +211,38 @@ test('a source with no saved match leaves the TV season to the disc labels', asy
   const post = h.calls.find(c => c.method === 'POST');
   assert.equal(post.payload.media.season, null);
   assert.equal(post.payload.expected_revision, 0);
+});
+
+test('a queue file that cannot be read is not shown as a folder to wait for', async () => {
+  const source = await readFile(new URL('../../src/server/web/assets/remux.js', import.meta.url), 'utf8');
+  const context = vm.createContext({});
+  const module = new vm.SourceTextModule(source + '\nexport { holdLines };', { context });
+  await module.link(async specifier => {
+    const names = [...source.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)]
+      .find(m => m[2] === specifier)[1].split(',').map(s => s.trim());
+    return new vm.SyntheticModule(names, function () {
+      for (const name of names) this.setExport(name, name === 'esc' ? String : name === 'plural' ? (n, w) => n + ' ' + w + 's' : () => {});
+    }, { context });
+  });
+  await module.evaluate();
+  const { holdLines } = module.namespace;
+  const [title, sub] = holdLines({ role: 'queue file', message: 'q.json cannot be read.', hint: 'Nothing runs until it can.' }, 0);
+  assert.equal(title, 'Queue held');
+  assert.equal(sub, 'q.json cannot be read. Nothing runs until it can.');
+  assert.ok(!sub.includes('folder answers'));
+  assert.equal(holdLines({ role: 'output', message: 'Gone.' }, 2)[0], 'Waiting for the output folder');
+});
+
+test('a match saved for an earlier disc at the path fills nothing but its revision', async () => {
+  const h = await harness('tv', undefined, 1, { title: 'Old Show', season: 2, disc: 1, episode_start: 5 }, [], true);
+  await h.ui.changeMatch({ iso: '/iso/Show.iso', title: 'New Disc', target: '/tv/x.mkv' }, {});
+  assert.equal(h.nodes.season.value, '');
+  assert.equal(h.nodes.disc.value, '');
+  assert.equal(h.nodes['episode-start'].value, '');
+  assert.ok(h.body.includes('value="New Disc"'), 'searches by the row, not the old match');
+  await h.nodes.search.onclick();
+  await h.nodes.results.onclick({ target: { closest: () => ({ dataset: { pick: '0' } }) } });
+  const post = h.calls.find(c => c.method === 'POST');
+  assert.equal(post.payload.expected_revision, 7);
+  assert.equal(post.payload.media.season, null);
 });

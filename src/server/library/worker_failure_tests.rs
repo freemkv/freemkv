@@ -52,9 +52,9 @@ fn links_that_cannot_be_saved_after_landing_say_the_file_is_in_place() {
         .join("config")
         .join(super::super::super::links::LINKS_FILE);
     std::fs::write(&links, b"{}").unwrap();
-    std::fs::set_permissions(&links, std::fs::Permissions::from_mode(0o000)).unwrap();
-    if std::fs::read(&links).is_ok() {
-        return; // running as a user that ignores modes
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root ignores modes
     }
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
@@ -69,6 +69,8 @@ fn links_that_cannot_be_saved_after_landing_say_the_file_is_in_place() {
         &cfg,
         &sink,
         |request, _, _| {
+            // The links file becomes unreadable once the owned files were captured.
+            std::fs::set_permissions(&links, std::fs::Permissions::from_mode(0o000))?;
             std::fs::write(&request.target, movie())?;
             Ok(Some(current_stamp()))
         },
@@ -88,9 +90,59 @@ fn saved_matches_unreadable_at_start_are_read_again_once_repaired() {
     let file = t.path().join("library-matches.json");
     std::fs::write(&file, b"broken").unwrap();
     let lib = Library::open(t.path(), &t.path().join("logs"));
+    let now = crate::server::util::epoch_secs();
     let iso = t.path().join("source.iso");
     let error = lib.source_match(&iso).unwrap_err();
     assert!(error.contains("library-matches.json"), "{error}");
     std::fs::write(&file, b"{}").unwrap();
+    // A failed read is not repeated on every call, only once a minute.
+    let error = lib.match_store_at(now + 1).err().unwrap().to_string();
+    assert!(error.contains("library-matches.json"), "{error}");
+    assert_eq!(lib.match_store_at(now + 60).unwrap().get(&iso), None);
     assert_eq!(lib.source_match(&iso).unwrap(), None);
+}
+
+#[test]
+fn a_failed_folder_check_is_named_once_in_the_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let job = super::job_for(dir.path(), 1);
+    let p = super::stale();
+    let text = failure_message(&problem_error(&p).to_string(), None, Some(&p), &job, None);
+    let folder = p.path.display().to_string();
+    assert_eq!(text.matches(&p.message).count(), 1, "{text}");
+    assert_eq!(text.matches(&folder).count(), 1, "{text}");
+    assert!(text.contains(&p.detail), "{text}");
+}
+
+#[test]
+fn a_change_match_console_names_its_iso_and_planned_files_not_its_queue_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = super::job_for(dir.path(), 1);
+    job.retire = true;
+    job.target = dir
+        .path()
+        .join("lib/Heat [3fa2b1c0d9e8]/Heat [3fa2b1c0d9e8].mkv");
+    let unplanned = command_line(&job);
+    assert!(!unplanned.contains("3fa2b1c0d9e8"), "{unplanned}");
+    assert!(
+        unplanned.contains(&*job.iso.to_string_lossy()),
+        "{unplanned}"
+    );
+    let season = dir.path().join("tv/Show/Season 01");
+    job.plan = Some(one_output());
+    job.outputs = (1..=2)
+        .map(|e| super::super::super::queue::OutputProgress {
+            id: format!("e{e}"),
+            target: season.join(format!("Show S01E0{e}.mkv")),
+            state: OutputState::Pending,
+            staged: None,
+            landing: None,
+        })
+        .collect();
+    let planned = command_line(&job);
+    assert!(!planned.contains("3fa2b1c0d9e8"), "{planned}");
+    assert!(
+        planned.ends_with(&format!("mkv://{}", season.display())),
+        "{planned}"
+    );
 }

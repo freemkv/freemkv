@@ -6,7 +6,7 @@ import vm from 'node:vm';
 async function system() {
   const context = vm.createContext({});
   const source = await readFile(new URL('../../src/server/web/assets/system.js', import.meta.url), 'utf8');
-  const module = new vm.SourceTextModule(source + '\nexport {staleLegacyNote, CLEAR_STAGING_NOTE};', {context});
+  const module = new vm.SourceTextModule(source + '\nexport {staleLegacyNote, CLEAR_STAGING_NOTE, CLEAR_STAGING_CONFIRM};', {context});
   await module.link(name => {
     const names = name === './ui.js' ? ['esc', '$', 'put', 'api', 'act', 'toast', 'bytes', 'ago', 'twoStep']
       : name === './ripper.js' ? ['openDeviceTerminal'] : ['stagedLine'];
@@ -30,4 +30,11 @@ test('Clear staging says unverified stopped captures go even when corrected', as
   const {CLEAR_STAGING_NOTE} = await system();
   assert.match(CLEAR_STAGING_NOTE, /could not be verified .*even when their match was corrected/);
   assert.match(CLEAR_STAGING_NOTE, /Anything else .*corrected .* is kept/);
+});
+
+test('Clear staging says which kept remuxes it removes and which it keeps', async () => {
+  const {CLEAR_STAGING_NOTE, CLEAR_STAGING_CONFIRM} = await system();
+  assert.match(CLEAR_STAGING_NOTE, /finished remuxes kept on local staging whose Library job failed/);
+  assert.match(CLEAR_STAGING_NOTE, /a kept remux still queued to be copied in/);
+  assert.match(CLEAR_STAGING_CONFIRM, /kept remuxes of failed jobs/);
 });

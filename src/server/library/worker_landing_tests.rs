@@ -137,7 +137,10 @@ fn may_replace_refuses_an_owned_path_that_is_now_a_symlink_as_changed() {
     std::os::unix::fs::symlink(&real, &target).unwrap();
     let e = may_replace(&target, &owned).unwrap_err();
     assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}");
-    assert!(e.to_string().contains("changed since"), "{e}");
+    assert!(
+        e.to_string().contains("changed while this remux ran"),
+        "{e}"
+    );
 }
 
 #[cfg(unix)]
@@ -173,4 +176,147 @@ fn a_landing_that_cannot_be_recorded_durably_is_not_landed() {
     };
     assert!(e.to_string().contains("could not be recorded"), "{e}");
     assert_eq!(std::fs::read(&target).unwrap(), before);
+}
+
+// The engine muxing into the remux staging folder: its own "replace" phase lands the local file.
+fn engine_into_stage(
+    staged: &freemkv_engine::RemuxJob,
+    sink: &dyn Sink,
+) -> std::io::Result<freemkv_engine::RemuxReport> {
+    let partial = super::super::super::queue::partial_path(&staged.target);
+    std::fs::write(&partial, movie())?;
+    sink.event(&Event::Phase { name: "replace" });
+    if sink.should_cancel() {
+        std::fs::remove_file(&partial)?;
+        return Err(libfreemkv::Error::Halted.into());
+    }
+    std::fs::rename(&partial, &staged.target)?;
+    let verified = libfreemkv::probe_mkv_with_cues(std::fs::File::open(&staged.target)?)
+        .map_err(std::io::Error::other)?;
+    Ok(freemkv_engine::RemuxReport {
+        outcome: libfreemkv::MuxOutcome {
+            halted: false,
+            completed: true,
+            output_opened: true,
+            bytes_written: movie().len() as u64,
+            errors: 0,
+            lost_bytes: 0,
+            streams: 1,
+            undelivered_streams: Vec::new(),
+        },
+        writing_app: verified.writing_app.clone(),
+        verified,
+        replaced: false,
+    })
+}
+
+fn link_stamp(t: &tempfile::TempDir, target: &Path) -> Option<crate::server::util::Stamp> {
+    links::read_entries(&t.path().join("config")).unwrap()[target].stamp
+}
+
+#[test]
+fn a_staged_remux_lands_in_the_library() {
+    let (t, lib, dirs, job, target) = replacing();
+    let stage = t.path().join("remux-stage");
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, ordinal| execute_staged(request, &sink, &stage, ordinal, engine_into_stage),
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(std::fs::read(&target).unwrap(), movie());
+    let landed = crate::server::util::Stamp::read(&target).unwrap();
+    assert_eq!(link_stamp(&t, &target), Some(landed));
+    assert!(deliver::pending(&stage).is_empty());
+}
+
+#[test]
+fn a_direct_remux_lands_in_the_library() {
+    let (t, lib, dirs, job, target) = replacing();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| land_like_the_engine(&sink, &request.target, &movie()),
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(std::fs::read(&target).unwrap(), movie());
+    let landed = crate::server::util::Stamp::read(&target).unwrap();
+    assert_eq!(link_stamp(&t, &target), Some(landed));
+}
+
+#[test]
+fn the_link_carries_the_recorded_landing_not_a_later_look() {
+    let (t, lib, dirs, job, target) = replacing();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let mut landed = None;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| {
+            let app = land_like_the_engine(&sink, &request.target, &movie())?;
+            landed = Some(crate::server::util::Stamp::read(&request.target)?);
+            // Another client replaces the file right after the rename.
+            std::fs::write(&request.target, b"a media manager's transcode")?;
+            Ok(app)
+        },
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(link_stamp(&t, &target), landed);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_staged_landing_that_cannot_be_recorded_keeps_the_verified_file() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root ignores modes
+    }
+    let (t, lib, dirs, job, target) = replacing();
+    let before = std::fs::read(&target).unwrap();
+    let (config, stage) = (t.path().join("config"), t.path().join("remux-stage"));
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, ordinal| {
+            let engine = |staged: &freemkv_engine::RemuxJob, s: &dyn Sink| {
+                let report = engine_into_stage(staged, s);
+                // The config folder stops taking writes before the library copy lands.
+                std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o500))?;
+                report
+            };
+            let landed = execute_staged(request, &sink, &stage, ordinal, engine);
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755))?;
+            landed
+        },
+    );
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let Ending::Failed(e) = ending else {
+        panic!("{ending:?}")
+    };
+    assert!(e.to_string().contains("could not be recorded"), "{e}");
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    let kept = deliver::pending(&stage);
+    assert_eq!(kept.len(), 1, "the verified remux is kept");
+    let staged = lib.queue.snapshot().jobs[0].outputs[0].staged.clone();
+    assert_eq!(staged.as_deref(), Some(kept[0].staged.as_path()));
 }
