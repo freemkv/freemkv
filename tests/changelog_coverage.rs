@@ -97,7 +97,7 @@ fn no_unreleased_section_means_nothing_to_check() {
 
 #[test]
 fn an_unreleased_section_is_still_checked() {
-    for heading in ["## Unreleased", "## [1.9.0] — Unreleased"] {
+    for heading in ["## Unreleased", "## [1.8.4] — Unreleased"] {
         let bad = format!("# Changelog\n\n{heading}\n\n- untagged\n\n## [1.8.0] — 2026-10-05\n");
         assert_eq!(unreleased_problems(&bad).len(), 1, "{heading}");
         let good = bad.replace("- untagged", "- tagged (CLI, app, server)");

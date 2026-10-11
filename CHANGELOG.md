@@ -1,8 +1,8 @@
 # Changelog
 
-## [1.9.0] — 2026-10-11
+## [1.8.4] — 2026-10-11
 
-### Breaking / Upgrade notes (1.8.3 → 1.9.0)
+### Breaking / Upgrade notes (1.8.3 → 1.8.4)
 
 - **The Library's files from 1.8.3 load as they are** (server only: the Library's state is the server's): `settings.json`, `library-queue.json` and `library-links.json` are read unchanged. New are `library-matches.json` in the config folder (saved Change match corrections) and a `.delivery.json` journal in a rip's staging folder while it is delivered; new rips stage in `disc-<identity>` folders named by the disc, not by its title.
 - **Rips 1.8.3 handed to the mux worker but had not muxed wait in Review** (server only: Review): 1.8.3 recorded no proof of which titles its plan named, so confirm the match once; the rip is then muxed from its saved image without reading the disc again.
@@ -13,8 +13,8 @@
 - **Reboot library on macOS needs the login service with `KeepAlive`** (server only: the macOS service): the server exits 75 for launchd to start it again, so `KeepAlive` must be true, or conditions that include `SuccessfulExit` false. `macos/install-library-service.sh` sets `KeepAlive` true on a new install and says so when an existing plist would not restart the job.
 - **Allow 130 s for the server to stop** (server only: service and container stop): any stop now ends within 116 s. Re-run `macos/install-library-service.sh` to add launchd `ExitTimeOut` 130 to an installed service, then reload it (log out and back in, or `launchctl bootout gui/$(id -u)/io.freemkv.library` then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.freemkv.library.plist`; this stops running work). The Docker example sets `stop_grace_period: 130s`; without compose use `docker run --stop-timeout 130`.
 - **Configured staging and output folders must exist** (server only: Library startup): they are no longer created at startup (see Fixed). Create them, or mount the share, yourself; the defaults under the config folder are still created.
-- **Builds against libfreemkv 1.9.0 and freemkv-engine 1.9.0** (CLI, app, server): their new title-selection and output-identity interfaces are required, so 1.8.x does not build. With a freemkv-i18n older than 1.9.0 the new messages show in English.
-- **A delivery held by a pre-release 1.9.0 build after an SMB remount needs one Retry** (server only: development builds' delivery journals): their journals load as they are; files are now known by size and pinned modification time, which survive a remount.
+- **Builds against libfreemkv 1.8.4 and freemkv-engine 1.8.4** (CLI, app, server): their new title-selection and output-identity interfaces are required, so 1.8.3 and older do not build. With a freemkv-i18n older than 1.8.4 the new messages show in English.
+- **A delivery held by a pre-release 1.8.4 build after an SMB remount needs one Retry** (server only: development builds' delivery journals): their journals load as they are; files are now known by size and pinned modification time, which survive a remount.
 
 ### Added
 

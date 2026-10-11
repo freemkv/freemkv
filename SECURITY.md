@@ -4,10 +4,10 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 1.9.x   | Yes       |
-| < 1.9   | No        |
+| 1.8.x   | Yes       |
+| < 1.8   | No        |
 
-Only the current 1.9.x line receives security fixes.
+Only the current 1.8.x line receives security fixes.
 
 ## Reporting a vulnerability
 
