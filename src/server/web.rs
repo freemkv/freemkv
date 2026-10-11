@@ -2795,11 +2795,12 @@ fn relaunch_supported() -> bool {
             .join("Library/LaunchAgents")
             .join(format!("{name}.plist"))
     });
-    installed.is_some_and(|plist| launchd_restarts(&launchctl_print(name), &plist))
+    installed
+        .is_some_and(|plist| launchd_restarts(&launchctl_print(name), &plist, plist_keeps_alive))
 }
 
 /// What `launchctl print gui/<uid>/<label>` says about this job.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 enum Launchctl {
     /// launchctl could not be run: the installed plist alone decides.
     Unavailable,
@@ -2831,12 +2832,16 @@ fn launchctl_print(_: &str) -> Launchctl {
 }
 
 // Whether launchd starts the job again after the exit-75 shutdown. A listed job: its
-// "keepalive" property (unconditional), or its loaded plist's KeepAlive (a conditional one is
-// not listed as a property). Else the installed `plist`.
-#[cfg(target_os = "macos")]
-fn launchd_restarts(job: &Launchctl, plist: &std::path::Path) -> bool {
+// "keepalive" property (unconditional), else `keeps_alive` of the plist file at its `path`,
+// as that file reads now (a conditional KeepAlive is not listed). Else the installed `plist`.
+#[cfg(any(target_os = "macos", test))]
+fn launchd_restarts(
+    job: &Launchctl,
+    plist: &std::path::Path,
+    keeps_alive: impl Fn(&std::path::Path) -> bool,
+) -> bool {
     match job {
-        Launchctl::Unavailable => plist_keeps_alive(plist),
+        Launchctl::Unavailable => keeps_alive(plist),
         Launchctl::NotLoaded => false,
         Launchctl::Loaded(out) => {
             let field = |name: &str| {
@@ -2846,13 +2851,19 @@ fn launchd_restarts(job: &Launchctl, plist: &std::path::Path) -> bool {
             };
             let kept = field("properties = ")
                 .is_some_and(|p| p.split('|').any(|f| f.trim() == "keepalive"));
-            kept || field("path = ").is_some_and(|p| plist_keeps_alive(std::path::Path::new(p)))
+            kept || field("path = ").is_some_and(|p| keeps_alive(std::path::Path::new(p)))
         }
     }
 }
 
-// KeepAlive true, or conditions that include SuccessfulExit = false (restart after a
-// non-zero exit). Other conditions alone do not restart a job that exited 75.
+// From `plutil -extract … raw` of KeepAlive and KeepAlive.SuccessfulExit: true, or conditions
+// that include SuccessfulExit = false (restart after a non-zero exit). Other conditions alone
+// do not restart a job that exited 75.
+#[cfg(any(target_os = "macos", test))]
+fn keep_alive_restarts(keep_alive: Option<&str>, successful_exit: Option<&str>) -> bool {
+    keep_alive == Some("true") || successful_exit == Some("false")
+}
+
 #[cfg(target_os = "macos")]
 fn plist_keeps_alive(plist: &std::path::Path) -> bool {
     let plutil = |args: &[&str]| {
@@ -2864,8 +2875,10 @@ fn plist_keeps_alive(plist: &std::path::Path) -> bool {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
-    plutil(&["-extract", "KeepAlive", "raw"]).as_deref() == Some("true")
-        || plutil(&["-extract", "KeepAlive.SuccessfulExit", "raw"]).as_deref() == Some("false")
+    keep_alive_restarts(
+        plutil(&["-extract", "KeepAlive", "raw"]).as_deref(),
+        plutil(&["-extract", "KeepAlive.SuccessfulExit", "raw"]).as_deref(),
+    )
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -2891,7 +2904,7 @@ fn relaunch_supported() -> bool {
 // launchd sets XPC_SERVICE_NAME to the job label; a terminal inherits "0" or the label
 // of the app it runs in ("application.…"), and neither restarts a server. The parent
 // must be launchd (pid 1) too, or a script under another job would pass.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn launchd_job(xpc_service_name: Option<&std::ffi::OsStr>, ppid: i32) -> bool {
     ppid == 1
         && xpc_service_name

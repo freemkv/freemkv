@@ -78,7 +78,6 @@ fn wait_for_zero_waits_for_held_handlers_within_its_bound() {
 }
 
 // Only a launchd job label means a service manager will start the daemon again.
-#[cfg(target_os = "macos")]
 #[test]
 fn only_a_launchd_job_label_counts_as_a_service_manager() {
     use std::ffi::OsStr;
@@ -95,7 +94,6 @@ fn only_a_launchd_job_label_counts_as_a_service_manager() {
 
 // A job label with a non-launchd parent (a script run under another job) is unsupervised,
 // so the reboot route answers 409.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_job_label_without_a_launchd_parent_is_not_supervised() {
     use std::ffi::OsStr;
@@ -187,6 +185,17 @@ fn reboots_are_spaced_a_minute_apart() {
     );
 }
 
+// KeepAlive true, or conditions with SuccessfulExit false, as plutil extracts them: a
+// condition dict is no raw scalar, so only its SuccessfulExit answers.
+#[test]
+fn only_keepalive_true_or_a_failed_exit_condition_restarts_the_job() {
+    assert!(keep_alive_restarts(Some("true"), None));
+    assert!(keep_alive_restarts(None, Some("false")));
+    for (keep, exit) in [(Some("false"), None), (None, None), (None, Some("true"))] {
+        assert!(!keep_alive_restarts(keep, exit), "{keep:?} {exit:?}");
+    }
+}
+
 // Only KeepAlive true (or conditions) makes launchd start the job again after it exits.
 #[cfg(target_os = "macos")]
 #[test]
@@ -234,64 +243,54 @@ fn only_a_keepalive_plist_restarts_the_job() {
     assert!(!plist_keeps_alive(&dir.path().join("missing.plist")));
 }
 
-// The loaded job decides when launchctl knows it: its keepalive property or the plist it
-// was loaded from. A job launchctl does not list in the user's domain (a LaunchDaemon) is
+// The loaded job decides when launchctl knows it: its keepalive property, else the plist
+// file at its path. A job launchctl does not list in the user's domain (a LaunchDaemon) is
 // refused.
-#[cfg(target_os = "macos")]
 #[test]
 fn the_loaded_launchd_job_decides_over_the_installed_plist() {
-    let dir = tempfile::tempdir().unwrap();
-    let write = |name: &str, keep: &str| {
-        let p = dir.path().join(name);
-        std::fs::write(
-            &p,
-            format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>KeepAlive</key>{keep}</dict></plist>"),
-        )
-        .unwrap();
-        p
-    };
-    let loaded = write("loaded.plist", "<true/>");
-    let stale = write("stale.plist", "<false/>");
+    let loaded = std::path::Path::new("/Users/me/Library/LaunchAgents/loaded.plist");
+    let stale = std::path::Path::new("/Users/me/Library/LaunchAgents/stale.plist");
+    let keeps_alive = |p: &std::path::Path| p == loaded;
     let print = |path: &std::path::Path, props: &str| {
         format!(
             "gui/501/io.freemkv.library = {{\n\tpath = {}\n\ttype = LaunchAgent\n\tenvironment = {{\n\t\tpath = /nope\n\t}}\n\tproperties = {props}\n}}\n",
             path.display()
         )
     };
-    let job = Launchctl::Loaded(print(&loaded, "keepalive | runatload | inferred program"));
+    let job = Launchctl::Loaded(print(loaded, "runatload | inferred program"));
     assert!(
-        launchd_restarts(&job, &stale),
-        "the loaded plist, not the stale file"
+        launchd_restarts(&job, stale, keeps_alive),
+        "the loaded job's plist, not the installed one"
     );
-    let listed_kept = Launchctl::Loaded(print(&stale, "keepalive | runatload"));
+    let listed_kept = Launchctl::Loaded(print(stale, "keepalive | runatload"));
     assert!(
-        launchd_restarts(&listed_kept, &stale),
+        launchd_restarts(&listed_kept, stale, keeps_alive),
         "launchd lists the loaded job as kept alive"
     );
-    let not_kept_anywhere = Launchctl::Loaded(print(&stale, "runatload"));
-    assert!(!launchd_restarts(&not_kept_anywhere, &loaded));
+    let not_kept_anywhere = Launchctl::Loaded(print(stale, "runatload"));
+    assert!(!launchd_restarts(&not_kept_anywhere, loaded, keeps_alive));
     assert!(
-        !launchd_restarts(&Launchctl::NotLoaded, &loaded),
+        !launchd_restarts(&Launchctl::NotLoaded, loaded, keeps_alive),
         "a LaunchDaemon"
     );
-    assert!(launchd_restarts(&Launchctl::Unavailable, &loaded));
-    assert!(!launchd_restarts(&Launchctl::Unavailable, &stale));
+    assert!(launchd_restarts(
+        &Launchctl::Unavailable,
+        loaded,
+        keeps_alive
+    ));
+    assert!(!launchd_restarts(
+        &Launchctl::Unavailable,
+        stale,
+        keeps_alive
+    ));
 }
 
 // launchd lists no "keepalive" property for a conditional KeepAlive {SuccessfulExit =
 // false} (it shows a semaphores block): the loaded job's plist decides. Shape captured from
 // `launchctl print gui/501/<label>` of such an agent.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_conditional_keepalive_of_the_loaded_job_restarts_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let plist = dir.path().join("io.freemkv.library.plist");
-    std::fs::write(
-        &plist,
-        "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>KeepAlive</key>\
-         <dict><key>SuccessfulExit</key><false/></dict></dict></plist>",
-    )
-    .unwrap();
+    let plist = std::path::Path::new("/Users/me/Library/LaunchAgents/io.freemkv.library.plist");
     let print = format!(
         "gui/501/io.freemkv.library = {{\n\tactive count = 1\n\tpath = {}\n\ttype = LaunchAgent\n\
          \tstate = running\n\n\tenvironment = {{\n\t\tXPC_SERVICE_NAME => io.freemkv.library\n\t}}\n\n\
@@ -300,8 +299,10 @@ fn a_conditional_keepalive_of_the_loaded_job_restarts_it() {
          \tproperties = runatload | managed LWCR | has LWCR\n}}\n",
         plist.display()
     );
-    let missing = dir.path().join("not-installed.plist");
-    assert!(launchd_restarts(&Launchctl::Loaded(print), &missing));
+    let missing = std::path::Path::new("/Users/me/not-installed.plist");
+    let job = Launchctl::Loaded(print);
+    assert!(launchd_restarts(&job, missing, |p| p == plist));
+    assert!(!launchd_restarts(&job, missing, |_| false));
 }
 
 // A metadata refusal is a conflict (409); storage that may answer again is 503, other
