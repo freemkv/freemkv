@@ -85,7 +85,7 @@ pub(super) fn run(
             tracing::warn!(path = %old.path.display(), error = %e, "retire lock could not be removed");
         }
         if removed? {
-            remove_emptied_folders(&old.path, root);
+            remove_emptied_folders(&old.path, root, r.roots);
         } else {
             kept.push(old.path.clone());
         }
@@ -94,10 +94,14 @@ pub(super) fn run(
 }
 
 // The title folder (and a show folder above a season folder) a removed file leaves empty;
-// never `root`, and never a folder with anything left in it (remove_dir refuses those).
-fn remove_emptied_folders(removed: &Path, root: &Path) {
+// never a configured root (`roots`; a TV root may sit inside `root`), and never a folder
+// with anything left in it (remove_dir refuses those).
+fn remove_emptied_folders(removed: &Path, root: &Path, roots: &[PathBuf]) {
     for dir in removed.ancestors().skip(1).take(2) {
-        if dir == root || !dir.starts_with(root) || std::fs::remove_dir(dir).is_err() {
+        if !dir.starts_with(root)
+            || roots.iter().any(|r| r == dir)
+            || std::fs::remove_dir(dir).is_err()
+        {
             return;
         }
         if let Some(parent) = dir.parent() {

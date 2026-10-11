@@ -217,3 +217,35 @@ fn an_old_file_on_a_nested_filesystem_below_its_root_is_retired() {
     assert!(kept.is_empty());
     assert!(!old.path.exists());
 }
+
+#[test]
+fn emptied_folders_are_removed_up_to_any_configured_root_never_past_it() {
+    let f = fixture();
+    let tv = f.root.join("tv");
+    let path = tv.join("Old Show/Old Show.mkv");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"old").unwrap();
+    links::record(&f.config, &path, &f.iso).unwrap();
+    let old = Owned {
+        stamp: Stamp::read(&path).unwrap(),
+        path,
+    };
+    let roots = [f.root.clone(), tv.clone()];
+    let r = Retire {
+        iso: &f.iso,
+        config_dir: &f.config,
+        roots: &roots,
+        sink: &Quiet,
+        stopping: &|| false,
+    };
+    assert!(
+        run(&r, &[old], std::slice::from_ref(&f.target))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !tv.join("Old Show").exists(),
+        "the emptied title folder goes"
+    );
+    assert!(tv.is_dir(), "the TV root stays though it is empty");
+}
