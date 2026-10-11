@@ -550,7 +550,7 @@ fn lookup_empty_api_key_returns_none_without_network() {
     // No api_key configured: must short-circuit before ever building a
     // request (an empty key would otherwise round-trip to TMDB and get
     // a 401 on every single insert).
-    assert!(lookup("Some Movie", "").is_none());
+    assert!(lookup("Some Movie", "").unwrap().is_none());
 }
 
 #[test]
@@ -558,8 +558,8 @@ fn lookup_blank_query_returns_none_without_network() {
     // A separator-only volume label reduces to an empty query after
     // clean_title; must short-circuit rather than firing a bare
     // `query=&...` request that TMDB answers with HTTP 422.
-    assert!(lookup("", "some_api_key").is_none());
-    assert!(lookup("   ", "some_api_key").is_none());
+    assert!(lookup("", "some_api_key").unwrap().is_none());
+    assert!(lookup("   ", "some_api_key").unwrap().is_none());
 }
 
 // --- TV season-marker stripping ------------------------------------------
@@ -878,24 +878,26 @@ fn results_for(title: &str, year: &str, kind: &str) -> serde_json::Value {
 fn lookup_returns_the_first_confident_variant_else_the_first_fallback() {
     // "Heat UE" peels to "Heat". The full label finds a loose, undated guess; the
     // peeled variant finds the exact dated film, which must win.
-    let found = lookup_with("HEAT_UE", |q| match q {
+    let found = lookup_using("HEAT_UE", |q| match q {
         "Heat Ue" => Some(results_for("Heat Wave", "", "movie")),
         "Heat" => Some(results_for("Heat", "1995-12-15", "movie")),
         _ => None,
     })
+    .unwrap()
     .unwrap();
     assert_eq!((found.title.as_str(), found.year), ("Heat", 1995));
     // No variant is confident: the first variant's guess is kept, not a later one.
-    let guess = lookup_with("HEAT_UE", |q| match q {
+    let guess = lookup_using("HEAT_UE", |q| match q {
         "Heat Ue" => Some(results_for("Heat Wave", "2001-01-01", "movie")),
         "Heat" => Some(results_for("Heated", "2002-02-02", "movie")),
         _ => None,
     })
+    .unwrap()
     .unwrap();
     assert_eq!(guess.title, "Heat Wave");
     // An exact title with no year is not confident either.
-    let undated = lookup_with("HEAT", |_| Some(results_for("Heat", "", "movie")));
-    assert_eq!(undated.unwrap().year, 0);
+    let undated = lookup_using("HEAT", |_| Some(results_for("Heat", "", "movie")));
+    assert_eq!(undated.unwrap().unwrap().year, 0);
 }
 
 #[test]
@@ -905,21 +907,25 @@ fn lookup_prefers_the_series_for_a_season_marked_label() {
              "popularity": 500.0},
             {"media_type": "tv", "name": "Longacre", "first_air_date": "2012-01-08",
              "popularity": 30.0}]});
-    let tv = lookup_with("Longacre Season 5", |_| Some(both.clone())).unwrap();
+    let tv = lookup_using("Longacre Season 5", |_| Some(both.clone()))
+        .unwrap()
+        .unwrap();
     assert_eq!(tv.media_type, "tv");
-    let film = lookup_with("Longacre", |_| Some(both.clone())).unwrap();
+    let film = lookup_using("Longacre", |_| Some(both.clone()))
+        .unwrap()
+        .unwrap();
     assert_eq!(film.media_type, "movie");
 }
 
 #[test]
 fn checked_lookup_reports_a_failed_query_unless_another_is_confident() {
-    assert!(lookup_with_checked("HEAT_UE", |_| None).is_err());
+    assert!(lookup_using("HEAT_UE", |_| None).is_err());
     let empty = serde_json::json!({"results": []});
     assert!(matches!(
-        lookup_with_checked("HEAT_UE", |_| Some(empty.clone())),
+        lookup_using("HEAT_UE", |_| Some(empty.clone())),
         Ok(None)
     ));
-    let found = lookup_with_checked("HEAT_UE", |q| match q {
+    let found = lookup_using("HEAT_UE", |q| match q {
         "Heat" => Some(results_for("Heat", "1995-12-15", "movie")),
         _ => None,
     })
@@ -927,7 +933,7 @@ fn checked_lookup_reports_a_failed_query_unless_another_is_confident() {
     .unwrap();
     assert_eq!(found.year, 1995);
     // A guess that is not confident is no answer while a query failed.
-    let guess = lookup_with_checked("HEAT_UE", |q| match q {
+    let guess = lookup_using("HEAT_UE", |q| match q {
         "Heat Ue" => Some(results_for("Heat Wave", "2001-01-01", "movie")),
         _ => None,
     });
