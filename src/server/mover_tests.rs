@@ -221,6 +221,7 @@ fn a_journaled_publication_reports_that_it_published() {
 
 #[test]
 fn copy_pins_an_even_second_source_time_that_survives_publication() {
+    let _g = errors_guard();
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.iso");
     let destination = dir.path().join("destination.iso");
@@ -2178,6 +2179,7 @@ fn dest_with_variant_suffixes_the_stem_and_leaves_variant_one_alone() {
 
 #[test]
 fn copy_counting_copies_bytes_and_publishes_total() {
+    let _g = errors_guard();
     use std::sync::atomic::{AtomicU64, Ordering};
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src.bin");
@@ -2202,6 +2204,7 @@ fn copy_counting_copies_bytes_and_publishes_total() {
 
 #[test]
 fn copy_counting_errors_on_missing_source() {
+    let _g = errors_guard();
     use std::sync::atomic::AtomicU64;
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("nope.bin");
@@ -2214,6 +2217,7 @@ fn copy_counting_errors_on_missing_source() {
 // at the FINAL dest name.
 #[test]
 fn copy_counting_failure_leaves_no_file_at_final_name() {
+    let _g = errors_guard();
     use std::sync::atomic::AtomicU64;
     let tmp = tempfile::tempdir().unwrap();
     // Missing source → the copy errors out. (The same no-final-file
@@ -2245,6 +2249,7 @@ fn copy_counting_failure_leaves_no_file_at_final_name() {
 /// `.part-` temp behind.
 #[test]
 fn copy_counting_success_renames_atomically_and_cleans_temp() {
+    let _g = errors_guard();
     use std::sync::atomic::AtomicU64;
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src.bin");
@@ -2273,6 +2278,7 @@ fn copy_counting_success_renames_atomically_and_cleans_temp() {
 
 #[test]
 fn copy_counting_clears_orphaned_part_temps_from_other_pids() {
+    let _g = errors_guard();
     use std::sync::atomic::AtomicU64;
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src.bin");
@@ -3852,4 +3858,73 @@ fn check_configured_destinations_keeps_the_roots_own_reason() {
         problems[0].1.contains("not an absolute path"),
         "{problems:?}"
     );
+}
+
+fn staged_rip(tmp: &Path, title: &str) -> (Config, std::path::PathBuf, std::path::PathBuf) {
+    let staging = tmp.join("staging");
+    let movie_dir = tmp.join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let disc_dir = staging.join(title);
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json(title)).unwrap();
+    let mut rip = vec![0x1A, 0x45, 0xDF, 0xA3];
+    rip.extend_from_slice(&[0x66u8; 4096]);
+    std::fs::write(disc_dir.join(format!("{title}.mkv")), &rip).unwrap();
+    (cfg, disc_dir, movie_dir)
+}
+
+fn persisted_attempts(disc_dir: &Path) -> Option<u32> {
+    super::manifest::Manifest::load(disc_dir)
+        .unwrap()
+        .and_then(|m| m.retry().map(|r| r.attempts))
+}
+
+// A restart while waiting for the delivery lock must not spend the retry budget.
+#[test]
+fn a_shutdown_while_waiting_for_the_delivery_lock_is_not_a_failed_attempt() {
+    let _g = errors_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, disc_dir, movie_dir) = staged_rip(tmp.path(), "Restarted");
+    let key = disc_dir.to_string_lossy().to_string();
+    clear_error(&key);
+    let dest_dir = movie_dir.join("Restarted (2024)");
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let halt = libfreemkv::Halt::new();
+    let held =
+        libfreemkv::io::ArtifactLock::acquire(&dest_dir.join("Restarted (2024).mkv"), &[], &halt)
+            .unwrap();
+
+    crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    check_and_move(&cfg);
+    crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    assert!(error_snapshot(&key).is_none(), "no Needs Action row");
+    assert_eq!(persisted_attempts(&disc_dir), None, "no persisted attempt");
+    assert!(disc_dir.join("Restarted.mkv").exists(), "source retained");
+
+    // The next start delivers it normally.
+    drop(held);
+    check_and_move(&cfg);
+    assert!(dest_dir.join("Restarted (2024).mkv").exists());
+    clear_error(&key);
+}
+
+// A shutdown-cancelled copy is an interruption; the same error without shutdown is not.
+#[test]
+fn only_a_shutdown_makes_an_interrupted_copy_an_interruption() {
+    let _g = errors_guard();
+    let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled");
+    crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        super::copy_failure_outcome(&interrupted),
+        MoveOutcome::Failed
+    );
+    crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    let outcome = super::copy_failure_outcome(&interrupted);
+    let io_error = super::copy_failure_outcome(&std::io::Error::other("disk"));
+    crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(outcome, MoveOutcome::Interrupted);
+    assert_eq!(io_error, MoveOutcome::Failed, "real I/O errors still fail");
 }
