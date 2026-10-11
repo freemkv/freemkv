@@ -60,6 +60,12 @@ pub fn retitle_staging_for_device(
     }
     let dir = jobs::path(std::path::Path::new(&c.staging_dir), &row.job_id)
         .map_err(std::io::Error::other)?;
+    // As rip_disc: under an unmounted share the correction would land on local disk.
+    if crate::server::health::share_unmounted(&dir) {
+        return Err(std::io::Error::other(
+            "the staging network share is not mounted; the correction was not saved",
+        ));
+    }
     std::fs::create_dir_all(&dir)
         .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create staging: {e}")))?;
     staging::save_user_metadata_for_device(
