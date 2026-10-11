@@ -23,16 +23,15 @@ fn files_under(dir: &Path) -> Vec<(PathBuf, u64)> {
 
 // `case` (capture-crashed, capture-stopped, capture-ripped) installed as `root/staging`.
 fn upgraded(case: &str) -> (tempfile::TempDir, PathBuf, Config) {
-    let (t, root) = fx::root();
-    fx::install(&format!("v1.8.3/{case}/staging"), &root, "staging");
-    let list: Vec<(String, u64, String)> =
-        serde_json::from_str(&fx::text("v1.8.3/media.json", &root)).unwrap();
-    for (rel, size, _) in list.into_iter().filter(|m| m.0.starts_with(case)) {
-        let p = root
-            .join("staging")
-            .join(rel.split_once("/staging/").unwrap().1);
-        std::fs::write(p, vec![0u8; size as usize]).unwrap();
-    }
+    let (t, top) = fx::root();
+    // Where v1.8.3 wrote it, so the paths its state records still resolve.
+    fx::install(
+        &format!("v1.8.3/{case}/staging"),
+        &top,
+        &format!("{case}/staging"),
+    );
+    fx::media(&top, case);
+    let root = top.join(case);
     let cfg = Config {
         staging_dir: root.join("staging").to_string_lossy().into_owned(),
         ..Config::default()
@@ -94,10 +93,11 @@ fn a_v1_8_3_bd_capture_is_found_by_its_disc_hash_and_resumes() {
 }
 
 // A capture v1.8.3 finished but never muxed has no title identity proof (v1.8.3 never
-// wrote one): its mux holds it for one Review confirmation, keeping the ISO.
+// wrote one). Through the mux worker: held for one Review confirmation with the ISO kept,
+// then, once confirmed, muxed from the saved ISO without the disc.
 #[test]
-fn a_v1_8_3_capture_awaiting_mux_is_held_for_review_not_lost() {
-    let (_t, root, cfg) = upgraded("capture-ripped");
+fn a_v1_8_3_capture_awaiting_mux_is_held_for_review_then_muxes() {
+    let (t, root, mut cfg) = upgraded("capture-ripped");
     let job = root.join("staging/Ember Falls");
     staging::resume_or_quarantine_staging(&cfg.staging_dir);
     let mut reader = libfreemkv::test_util::MemSource::new(crate::ku_fixture::bd_image().img.image);
@@ -109,17 +109,91 @@ fn a_v1_8_3_capture_awaiting_mux_is_held_for_review_not_lost() {
     // The mux worker owns a Ripped capture; an insert does not race it.
     assert_eq!(super::super::resumable_for_job(&cfg, "Ember Falls"), None);
     let st = staging::read_state(&job).expect("v1.8.3 state reads");
-    assert_eq!(st.state, staging::StagingState::Ripped);
-    assert_eq!(st.title, "Ember Falls");
-    let err = rebind_resume_outputs(&bd_disc().titles, &st.outputs).unwrap_err();
-    assert!(err.contains("predates title identity proof"), "{err}");
-    let (iso, map) = find_iso_and_mapfile(&job).unwrap();
-    staging::hold_title_identity_review(&job, &iso, &map, &err).unwrap();
-    let held = staging::read_state(&job).unwrap();
-    assert_eq!(held.state, staging::StagingState::Review);
-    assert!(held.title_identity_review);
-    assert_eq!(std::fs::metadata(&iso).unwrap().len(), 32768);
-    assert!(map.exists());
+    assert_eq!(
+        (st.state, st.title.as_str()),
+        (staging::StagingState::Ripped, "Ember Falls")
+    );
+    assert!(st.outputs.iter().all(|o| o.title_identity.is_none()));
+
+    // The fixture's image stands in for the captured bytes (v1.8.3's state is kept as is),
+    // with the clip's unit key so the mux can run.
+    let fx_image = crate::ku_fixture::bd_image();
+    let iso = job.join("Ember Falls.iso");
+    std::fs::write(&iso, &fx_image.img.image).unwrap();
+    let mapfile = crate::ku_fixture::write_sidecar(&fx_image, &iso, true);
+    let keydb = t.path().join("keydb.cfg");
+    let hash = libfreemkv::hex::strip_hex_prefix(&fx_image.disc.aacs.as_ref().unwrap().disc_hash)
+        .to_owned();
+    let k1: String = crate::ku_fixture::K1
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    std::fs::write(&keydb, format!("0x{hash} = KU | U | 1-0x{k1}\n")).unwrap();
+    cfg.keydb_path = Some(keydb.to_string_lossy().into_owned());
+    cfg.keep_iso = true;
+    let before = (
+        std::fs::read(&iso).unwrap(),
+        std::fs::read(&mapfile).unwrap(),
+    );
+    let cfg = Arc::new(RwLock::new(cfg));
+    let mux = |marker: &crate::server::muxer::RippedMarker| {
+        let _env = crate::server::log::env_guard();
+        let _g = crate::server::mover::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env access in tests, serialized by env_guard.
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", t.path());
+        }
+        remux_from_ripped_marker(&cfg, &job, marker)
+    };
+
+    let held = mux(&st.to_ripped_marker());
+    assert!(!held.success);
+    assert!(
+        held.failure_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("Review queue")),
+        "{:?}",
+        held.failure_reason
+    );
+    let st = staging::read_state(&job).unwrap();
+    assert_eq!(st.state, staging::StagingState::Review);
+    assert!(st.title_identity_review);
+    assert_eq!(
+        (
+            std::fs::read(&iso).unwrap(),
+            std::fs::read(&mapfile).unwrap()
+        ),
+        before
+    );
+
+    // One confirmation in the Review queue, and the mux finishes from the saved ISO.
+    staging::save_review_metadata(
+        &job,
+        staging::UserMetadata {
+            title: "Ember Falls".into(),
+            year: 2021,
+            media_type: crate::server::planner::MediaKind::Movie,
+            tmdb_id: 0,
+            episode_start: None,
+            poster_url: String::new(),
+            overview: String::new(),
+        },
+    )
+    .unwrap();
+    let marker = staging::read_state(&job).unwrap().to_ripped_marker();
+    let done = mux(&marker);
+    assert!(done.success, "{:?}", done.failure_reason);
+    let st = staging::read_state(&job).unwrap();
+    assert!(st.outputs.iter().all(|o| o.title_identity.is_some()));
+    assert_eq!(
+        (
+            std::fs::read(&iso).unwrap(),
+            std::fs::read(&mapfile).unwrap()
+        ),
+        before
+    );
 }
 
 #[test]

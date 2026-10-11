@@ -252,56 +252,208 @@ fn a_v1_8_3_delivery_cut_off_after_the_mkv_moved_files_the_rest() {
     assert!(!job.exists(), "staging cleaned");
 }
 
-// What v1.8.3 did not file is not taken over: a different file of the same size is
-// another disc's (filed beside it as `_2`), and a moved-away output found nowhere holds.
-#[test]
-fn a_v1_8_3_cut_off_claims_only_its_own_files() {
-    let _g = guard();
-    let (_t, root) = fx::root();
+// The staged Night Harbor hand-off v1.8.3 wrote, mounted under a fresh root.
+fn night_harbor() -> (tempfile::TempDir, PathBuf, Config, PathBuf) {
+    let (t, root) = fx::root();
     fx::install("v1.8.3/staging/Night Harbor", &root, "staging/Night Harbor");
     fx::media(&root, "staging/Night Harbor/");
     let cfg = upgraded_config(&root);
     let job = root.join("staging/Night Harbor");
-    let base = root.join("out/movies/Night Harbor (2017)/Night Harbor (2017).mkv");
-    std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(root.join("out/movies/Night Harbor (2017)")).unwrap();
+    (t, root, cfg, job)
+}
+
+const BASE_MKV: &str = "out/movies/Night Harbor (2017)/Night Harbor (2017).mkv";
+const SECOND_MKV: &str = "out/movies/Night Harbor (2017)/Night Harbor (2017)_2.mkv";
+const BASE_ISO: &str = "out/iso/Night Harbor (2017).iso";
+const SECOND_ISO: &str = "out/iso/Night Harbor (2017)_2.iso";
+
+// A file at the base name that is not byte-for-byte the staged one is another file:
+// it stays, and the rip is filed beside it as `_2`.
+fn filed_beside(root: &Path, job: &Path, other: &[u8]) {
+    no_error(job);
+    assert_eq!(
+        std::fs::read(root.join(BASE_MKV)).unwrap(),
+        other,
+        "untouched"
+    );
+    assert_eq!(std::fs::read(root.join(SECOND_MKV)).unwrap(), fx::old_mkv());
+    assert_eq!(
+        std::fs::metadata(root.join(SECOND_ISO)).unwrap().len(),
+        16384
+    );
+    assert!(!job.exists(), "staging cleaned");
+}
+
+// Larger than the two 64 KiB windows a head/tail check reads.
+fn big_iso() -> Vec<u8> {
+    (0..300 * 1024).map(|i| (i % 251) as u8).collect()
+}
+
+#[test]
+fn a_same_size_file_differing_only_in_the_middle_is_not_claimed() {
+    let _g = guard();
+    let (_t, root, cfg, job) = night_harbor();
     let mut other = fx::old_mkv();
     let n = other.len();
     other[n / 2] ^= 0xFF;
-    other[n - 1] ^= 0xFF;
-    std::fs::write(&base, &other).unwrap();
+    std::fs::write(root.join(BASE_MKV), &other).unwrap();
+    check_and_move(&cfg);
+    filed_beside(&root, &job, &other);
+
+    // Same size, same first and last 64 KiB, one byte apart in the middle.
+    let (_t, root, cfg, job) = night_harbor();
+    std::fs::write(job.join("Night Harbor.iso"), big_iso()).unwrap();
+    let mut old_iso = big_iso();
+    old_iso[150 * 1024] ^= 0xFF;
+    std::fs::write(root.join(BASE_ISO), &old_iso).unwrap();
+    std::fs::write(root.join(BASE_MKV), fx::old_mkv()).unwrap();
     check_and_move(&cfg);
     no_error(&job);
-    assert_eq!(
-        std::fs::read(&base).unwrap(),
-        other,
-        "the other file is untouched"
+    assert_eq!(std::fs::read(root.join(BASE_ISO)).unwrap(), old_iso);
+    assert_eq!(std::fs::read(root.join(SECOND_ISO)).unwrap(), big_iso());
+    assert!(!job.exists());
+}
+
+#[test]
+fn a_truncated_copy_at_the_base_name_is_not_claimed() {
+    let _g = guard();
+    let (_t, root, cfg, job) = night_harbor();
+    let mut short = fx::old_mkv();
+    short.truncate(short.len() - 16);
+    std::fs::write(root.join(BASE_MKV), &short).unwrap();
+    check_and_move(&cfg);
+    filed_beside(&root, &job, &short);
+}
+
+// An output v1.8.3 already moved away is never claimed: whatever sits at its base name
+// (another disc's MKV here) stays unlinked, and what is still staged is delivered.
+#[test]
+fn a_moved_away_output_is_dropped_never_claimed_or_linked() {
+    let _g = guard();
+    let (_t, root, cfg, job) = night_harbor();
+    std::fs::remove_file(job.join("Night Harbor.mkv")).unwrap();
+    let mut foreign = fx::old_mkv();
+    foreign[100] ^= 0xFF;
+    std::fs::write(root.join(BASE_MKV), &foreign).unwrap();
+    crate::server::ripper::staging::resume_or_quarantine_staging(&cfg.staging_dir);
+    check_and_move(&cfg);
+    no_error(&job);
+    assert_eq!(std::fs::read(root.join(BASE_MKV)).unwrap(), foreign);
+    assert_eq!(std::fs::metadata(root.join(BASE_ISO)).unwrap().len(), 16384);
+    assert!(!root.join(SECOND_MKV).exists());
+    assert!(links(&root).is_empty(), "nothing links to the foreign MKV");
+    assert!(!job.exists(), "staging cleaned");
+}
+
+// A re-rip of a title already in the library: v1.8.3 filed the new MKV as `_2` and was
+// cut off before the ISO. The old ISO (same size, other middle) is not this rip's.
+#[test]
+fn a_re_rip_iso_is_filed_beside_the_old_one_not_matched_to_it() {
+    let _g = guard();
+    let (_t, root, cfg, job) = night_harbor();
+    std::fs::write(root.join(BASE_MKV), fx::old_mkv()).unwrap();
+    // The two rips of one disc share their first and last 64 KiB.
+    std::fs::write(job.join("Night Harbor.iso"), big_iso()).unwrap();
+    let mut old_iso = big_iso();
+    old_iso[150 * 1024] ^= 0xFF;
+    std::fs::write(root.join(BASE_ISO), &old_iso).unwrap();
+    std::fs::rename(job.join("Night Harbor.mkv"), root.join(SECOND_MKV)).unwrap();
+    check_and_move(&cfg);
+    no_error(&job);
+    assert_eq!(std::fs::read(root.join(BASE_ISO)).unwrap(), old_iso);
+    assert_eq!(std::fs::read(root.join(SECOND_ISO)).unwrap(), big_iso());
+    assert!(
+        links(&root).is_empty(),
+        "no MKV is paired with the re-rip ISO"
     );
+    assert!(!job.exists(), "staging cleaned once the ISO is in place");
+}
+
+// A title folder that is a link into staging: its "copy" is the staged source itself,
+// never claimed. The plan is refused and nothing is removed.
+#[cfg(unix)]
+#[test]
+fn a_title_folder_linked_into_staging_is_never_claimed() {
+    let _g = guard();
+    let (_t, root, cfg, job) = night_harbor();
+    let folder = root.join("out/movies/Night Harbor (2017)");
+    std::fs::remove_dir(&folder).unwrap();
+    std::os::unix::fs::symlink(&job, &folder).unwrap();
+    // An identical copy, not the source's inode: only its place inside staging betrays it.
+    std::fs::copy(
+        job.join("Night Harbor.mkv"),
+        job.join("Night Harbor (2017).mkv"),
+    )
+    .unwrap();
+    let staging = root.join("staging").canonicalize();
+    let base = root.join(BASE_MKV).to_string_lossy().into_owned();
     assert_eq!(
-        std::fs::read(root.join("out/movies/Night Harbor (2017)/Night Harbor (2017)_2.mkv"))
-            .unwrap(),
+        legacy_dest_claim(&job.join("Night Harbor.mkv"), &base, &staging),
+        DestClaim::OtherFile
+    );
+    let landed = manifest::Manifest::create(
+        &job,
+        serde_json::json!({}),
+        Vec::new(),
+        vec![root.join("out/movies").to_string_lossy().into_owned()],
+        &[(job.join("Night Harbor.mkv"), base)],
+        &[job.join("Night Harbor.mkv")],
+    );
+    assert!(landed.is_err(), "the journal refuses it too");
+    check_and_move(&cfg);
+    assert_eq!(
+        std::fs::read(job.join("Night Harbor.mkv")).unwrap(),
         fx::old_mkv()
     );
-    assert!(root.join("out/iso/Night Harbor (2017)_2.iso").exists());
+    assert!(job.join("Night Harbor.iso").exists());
+    assert!(!root.join(BASE_ISO).exists());
+    let key = job.to_string_lossy().to_string();
+    let error = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&key);
+    assert!(error.is_some(), "held with a reason");
+}
 
-    let (_t, root) = fx::root();
-    fx::install("v1.8.3/staging/Night Harbor", &root, "staging/Night Harbor");
-    fx::media(&root, "staging/Night Harbor/");
-    let cfg = upgraded_config(&root);
-    let job = root.join("staging/Night Harbor");
-    std::fs::remove_file(job.join("Night Harbor.mkv")).unwrap();
+// A hard link of the staged file at the base name is the source, not a delivered copy.
+#[cfg(unix)]
+#[test]
+fn the_staged_file_itself_at_the_base_name_is_not_claimed() {
+    let _g = guard();
+    let (_t, root, cfg, job) = night_harbor();
+    std::fs::hard_link(job.join("Night Harbor.mkv"), root.join(BASE_MKV)).unwrap();
     check_and_move(&cfg);
+    filed_beside(&root, &job, &fx::old_mkv());
+}
+
+// A destination that cannot be examined holds the rip this tick; no base name is assumed.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_destination_holds_instead_of_assuming_a_name() {
+    use std::os::unix::fs::PermissionsExt;
+    let _g = guard();
+    let (_t, root, cfg, job) = night_harbor();
+    let folder = root.join("out/movies/Night Harbor (2017)");
+    std::fs::write(root.join(BASE_MKV), fx::old_mkv()).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+    check_and_move(&cfg);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
     let key = job.to_string_lossy().to_string();
     let error = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&key);
     assert!(
-        error.is_some_and(|e| e.reason.contains("a planned output is missing")),
-        "a lost output with nothing filed holds"
+        error.is_some_and(|e| e.reason.contains("could not be examined")),
+        "held this tick, with the reason"
     );
-    assert!(
-        job.join("Night Harbor.iso").exists(),
-        "the rest stays staged"
-    );
-    assert!(!root.join("out/iso/Night Harbor (2017).iso").exists());
+    assert!(job.join("Night Harbor.mkv").exists() && job.join("Night Harbor.iso").exists());
+    assert!(!job.join(".delivery.json").exists(), "no plan frozen");
+    assert!(!root.join(BASE_ISO).exists() && !root.join(SECOND_ISO).exists());
+    assert!(!root.join(SECOND_MKV).exists());
+    // Once it can be read, the identical copy is recognised.
+    check_and_move(&cfg);
+    no_error(&job);
+    assert!(!job.exists() && root.join(BASE_ISO).exists() && !root.join(SECOND_MKV).exists());
 }

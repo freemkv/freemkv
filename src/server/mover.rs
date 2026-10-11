@@ -1325,22 +1325,24 @@ fn check_and_move(cfg: &Config) {
             planned_moves = saved.moves();
         }
         // A hand-off from before delivery journals (v1.8.3) may have been cut off mid-delivery.
-        // What that build already filed is recognised the way it recognised it.
+        // Like that build's next pass, only what is still staged is planned: an output it
+        // already moved away is never claimed, linked or delivered again.
         let legacy = delivery.is_none() && pre_journal_handoff(&dir);
-        let mut moved_away: Vec<std::path::PathBuf> = Vec::new();
-        for output in state_outputs.iter().filter(|_| legacy) {
-            let src = dir.join(&output.filename);
-            if Path::new(&output.filename).file_name() != Some(output.filename.as_ref())
-                || ripped_files.contains(&src)
-            {
-                continue;
-            }
-            let leaf = tv_episode_leaf(&tmdb_result, &state_outputs, &output.filename, season)
-                .unwrap_or_else(|| output.filename.clone());
-            let dest = build_destination(cfg, &tmdb_result, &leaf, season);
-            planned_moves.push((src.clone(), dest));
-            moved_away.push(src);
-        }
+        let (state_outputs, moved_away): (Vec<_>, Vec<_>) =
+            state_outputs.into_iter().partition(|output| {
+                !legacy
+                    || ripped_files
+                        .iter()
+                        .any(|p| p.file_name().is_some_and(|n| n == output.filename.as_str()))
+            });
+        let moved_away: Vec<String> = moved_away
+            .iter()
+            .map(|output| {
+                let leaf = tv_episode_leaf(&tmdb_result, &moved_away, &output.filename, season)
+                    .unwrap_or_else(|| output.filename.clone());
+                build_destination(cfg, &tmdb_result, &leaf, season)
+            })
+            .collect();
 
         // Nothing below touches a destination root before it passes a bounded write test:
         // a stale or hung share holds the move (output kept in staging) and never blocks here.
@@ -1390,18 +1392,17 @@ fn check_and_move(cfg: &Config) {
         if delivery.is_none() {
             let mut uncertain = false;
             let mut residue = None;
+            let staging_canonical = Path::new(staging_root).canonicalize();
             let variant = crate::server::util::disc_variant(|n| {
                 if uncertain || residue.is_some() {
                     return false;
                 }
                 for (src, dest) in planned_moves.iter() {
                     let candidate = dest_with_variant(dest, n);
-                    let claim = if !legacy {
-                        unowned_dest_claim(&candidate)
-                    } else if moved_away.contains(src) {
-                        landed_claim(&candidate)
+                    let claim = if legacy {
+                        legacy_dest_claim(src, &candidate, &staging_canonical)
                     } else {
-                        legacy_dest_claim(src, &candidate)
+                        unowned_dest_claim(&candidate)
                     };
                     match claim {
                         DestClaim::Claimable => {}
@@ -1436,17 +1437,18 @@ fn check_and_move(cfg: &Config) {
                         *dest = dest_with_variant(dest, n);
                     }
                 }
+                None if uncertain && legacy => {
+                    // Never fall back to base names: hold this tick and look again next tick.
+                    record_error(
+                        &dir_str,
+                        "a destination could not be examined, so nothing was moved",
+                        "Check the output folder's permissions and mount; the rip stays in staging and is tried again on the next pass.",
+                    );
+                    continue;
+                }
                 None if uncertain => {
                     // Left to the collision guard's stat-error branch, which logs
                     // the deferral and retries next tick.
-                }
-                None if !moved_away.is_empty() => {
-                    record_error(
-                        &dir_str,
-                        "a planned output is missing before delivery",
-                        "Restore the staged output; existing library files cannot establish ownership without a delivery journal.",
-                    );
-                    continue;
                 }
                 None => {
                     // Every variant name is held by a different file: hold, never overwrite.
@@ -1548,7 +1550,6 @@ fn check_and_move(cfg: &Config) {
             if state_outputs.iter().any(|output| {
                 !ripped_files
                     .iter()
-                    .chain(&moved_away)
                     .any(|p| p.file_name().is_some_and(|n| n == output.filename.as_str()))
             }) {
                 record_error(
@@ -1558,12 +1559,17 @@ fn check_and_move(cfg: &Config) {
                 );
                 continue;
             }
-            // Destinations a legacy hand-off already filed: claimed above as its own.
+            for dest in &moved_away {
+                tracing::info!(
+                    dir = %dir.display(),
+                    destination = %absolute_for_log(dest),
+                    "mover: an output of this 1.8.3 hand-off is no longer staged; its earlier delivery is not repeated"
+                );
+            }
+            // Destinations a legacy hand-off already filed: proved identical above.
             let landed: Vec<std::path::PathBuf> = planned_moves
                 .iter()
-                .filter(|(src, dest)| {
-                    legacy && (moved_away.contains(src) || std::fs::symlink_metadata(dest).is_ok())
-                })
+                .filter(|(_, dest)| legacy && std::fs::symlink_metadata(dest).is_ok())
                 .map(|(src, _)| src.clone())
                 .collect();
             match manifest::Manifest::create(
@@ -2032,35 +2038,84 @@ fn pre_journal_handoff(dir: &Path) -> bool {
     })
 }
 
-// v1.8.3's rule for its own earlier copy: same size, head and tail, and a valid file.
-fn legacy_dest_claim(src: &Path, dest: &str) -> DestClaim {
+// v1.8.3 recognised its own earlier copy; here only a byte-for-byte identical, valid file
+// outside staging counts, never the staged source itself (a link or a folder into staging).
+fn legacy_dest_claim(
+    src: &Path,
+    dest: &str,
+    staging: &std::io::Result<std::path::PathBuf>,
+) -> DestClaim {
     let path = Path::new(dest);
     match unowned_dest_claim(dest) {
-        DestClaim::OtherFile
-            if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
-                && check_post_copy(src, path).is_ok()
-                && manifest::same_head_and_tail(src, path).unwrap_or(false) =>
-        {
-            DestClaim::Claimable
-        }
-        claim => claim,
+        DestClaim::OtherFile => {}
+        claim => return claim,
+    }
+    let (Ok(staging), Ok(found), Ok(source)) = (
+        staging,
+        std::fs::symlink_metadata(path),
+        std::fs::metadata(src),
+    ) else {
+        return DestClaim::Unknown;
+    };
+    let Ok(canonical) = path.canonicalize() else {
+        return DestClaim::Unknown;
+    };
+    #[cfg(unix)]
+    let same_file = {
+        use std::os::unix::fs::MetadataExt;
+        found.dev() == source.dev() && found.ino() == source.ino()
+    };
+    #[cfg(not(unix))]
+    let same_file = src.canonicalize().is_ok_and(|s| s == canonical);
+    if !found.is_file()
+        || same_file
+        || canonical.starts_with(staging)
+        || check_post_copy(src, path).is_err()
+    {
+        return DestClaim::OtherFile;
+    }
+    match same_bytes(src, path) {
+        Ok(true) => DestClaim::Claimable,
+        Ok(false) => DestClaim::OtherFile,
+        Err(_) => DestClaim::Unknown,
     }
 }
 
-// A staged output v1.8.3 already moved away: its destination must be a valid media file
-// (v1.8.3's own test). Absent means it was not filed under this name.
-fn landed_claim(dest: &str) -> DestClaim {
-    let path = Path::new(dest);
-    match unowned_dest_claim(dest) {
-        DestClaim::Claimable => DestClaim::OtherFile,
-        DestClaim::OtherFile
-            if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
-                && structural_check(path).is_some_and(|check| check(path).is_ok()) =>
-        {
-            DestClaim::Claimable
-        }
-        claim => claim,
+// Whether two files hold the same bytes, read in chunks; stops at the first difference
+// and gives up (Interrupted) once shutdown begins.
+fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
+    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    if a.metadata()?.len() != b.metadata()?.len() {
+        return Ok(false);
     }
+    let (mut x, mut y) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "comparison cancelled by shutdown",
+            ));
+        }
+        let n = read_full(&mut a, &mut x)?;
+        if read_full(&mut b, &mut y[..n.max(1)])? != n || x[..n] != y[..n] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn read_full(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    let mut done = 0;
+    while done < buf.len() {
+        match file.read(&mut buf[done..])? {
+            0 => break,
+            n => done += n,
+        }
+    }
+    Ok(done)
 }
 
 // A new plan owns no existing files, even when their bytes happen to match.

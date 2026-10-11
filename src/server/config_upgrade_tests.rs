@@ -83,9 +83,17 @@ fn unknown_and_removed_fields_are_tolerated() {
 }
 
 #[test]
-fn any_presentation_language_value_boots_and_plans() {
+fn a_refused_presentation_language_loads_as_unset_and_boots() {
     let (_t, root) = fx::root();
-    for value in [None, Some("all"), Some("none"), Some(""), Some("de")] {
+    // Values this build refuses at save load as unset instead of blocking boot.
+    for (value, loaded) in [
+        (None, ""),
+        (Some("all"), ""),
+        (Some("none"), ""),
+        (Some("und"), ""),
+        (Some(""), ""),
+        (Some("de"), "de"),
+    ] {
         let mut saved: serde_json::Value =
             serde_json::from_str(&fx::text("v1.8.3/config/settings.json", &root)).unwrap();
         if let Some(v) = value {
@@ -98,11 +106,7 @@ fn any_presentation_language_value_boots_and_plans() {
             cfg.tmdb_api_key, "0123456789abcdef0123456789abcdef",
             "{value:?}"
         );
-        assert!(
-            crate::ui::valid_presentation_language(&cfg.presentation_language),
-            "{value:?} loaded as {:?}",
-            cfg.presentation_language
-        );
+        assert_eq!(cfg.presentation_language, loaded, "{value:?}");
         let plan = crate::server::planner::plan(
             &cfg,
             &crate::selection_test_fixtures::variant_titles(),

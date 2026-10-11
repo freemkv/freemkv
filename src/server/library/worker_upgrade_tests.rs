@@ -3,7 +3,6 @@
 use super::super::queue::JobState;
 use super::*;
 use crate::server::upgrade_fixture as fx;
-use std::path::PathBuf;
 
 struct Lines;
 
@@ -182,21 +181,31 @@ fn v1_8_3_queue_opens_and_its_queued_work_runs() {
     );
 }
 
-// The post-1.8.3 build's saved matches and plan-carrying queue open too.
+// The post-1.8.3 build's whole config folder (its plan-carrying queue and saved matches)
+// over a Library holding what that queue names: the TV discs it planned and filed.
 #[test]
-fn dev_build_matches_and_queue_open_without_losing_rows() {
+fn a_dev_build_config_folder_opens_without_losing_rows() {
     let (_t, root) = fx::root();
     fx::install("dev-0eb9fd5/config", &root, "config");
-    let (_cfg, lib, d) = upgraded(&root);
-    // `upgraded` laid the v1.8.3 queue over the dev one: open the dev queue on its own.
-    let dev = root.join("dev");
-    fx::install(
-        "dev-0eb9fd5/config/library-queue.json",
-        &root,
-        "dev/library-queue.json",
-    );
-    let q = super::super::queue::Queue::open(&dev).snapshot();
-    assert!(!dev.join("library-queue.json.unreadable").exists());
+    fx::install("v1.8.3/config/settings.json", &root, "config/settings.json");
+    fx::library_tree(&root);
+    let show = "Coastline II (2016)";
+    let disc2 = "Coastline II (2016) - Disc 2";
+    for iso in [show, disc2] {
+        std::fs::write(root.join(format!("out/iso/{iso}.iso")), b"iso").unwrap();
+    }
+    for e in 1..=3 {
+        let mkv = root.join(format!("out/movies/{show}/{show}_S01E{e:02}.mkv"));
+        std::fs::create_dir_all(mkv.parent().unwrap()).unwrap();
+        std::fs::write(mkv, fx::old_mkv()).unwrap();
+    }
+    let cfg = fx::config(&root);
+    let lib = Library::open(&root.join("config"), &root.join("config/logs"));
+    let d = super::super::dirs(&cfg);
+
+    let config = root.join("config");
+    assert!(!config.join("library-queue.json.unreadable").exists());
+    let q = lib.queue.snapshot();
     assert_eq!(q.jobs.len(), 2);
     assert!(
         q.jobs
@@ -204,27 +213,48 @@ fn dev_build_matches_and_queue_open_without_losing_rows() {
             .all(|j| j.plan.is_some() && j.outputs.len() == 3)
     );
     assert_eq!(q.results.len(), 2);
-
     let saved = lib
         .source_match(&root.join("out/iso/Bravo (2002).iso"))
         .unwrap()
         .expect("the saved correction");
     assert_eq!(saved.revision, 2);
+
     let rows = listed(&lib, &d);
-    let keys: Vec<_> = rows.iter().map(|r| r["key"].clone()).collect();
-    let mut before: Vec<_> = recorded(&root).iter().map(|r| r["key"].clone()).collect();
-    before.push("show".into());
-    assert_eq!(keys, before, "the same rows");
-    let titles: Vec<PathBuf> = rows
-        .iter()
-        .filter(|r| r["key"] == "bravo" || r["key"] == "delta")
-        .map(|r| PathBuf::from(r["title"].as_str().unwrap()))
-        .collect();
+    // Every row v1.8.3 listed for these files is still there (its queue columns aside).
+    let place = |r: &serde_json::Value| {
+        (
+            r["key"].clone(),
+            r["kind"].clone(),
+            r["mkv"].clone(),
+            r["iso"].clone(),
+        )
+    };
+    let now: Vec<_> = rows.iter().map(place).collect();
+    for before in recorded(&root) {
+        assert!(now.contains(&place(&before)), "lost {before}");
+    }
+    for r in &rows {
+        for side in ["mkv", "iso"] {
+            if let Some(p) = r[side].as_str() {
+                assert!(Path::new(p).is_file(), "phantom {r}");
+            }
+        }
+    }
+    let title = |key: &str| rows.iter().find(|r| r["key"] == key).unwrap()["title"].clone();
+    assert_eq!(title("bravo"), "Bravo Corrected (2003)");
+    assert_eq!(title("delta"), "Delta Show (2004)");
+    // The dev build's Done and Failed fan-out jobs show on their source rows.
+    let row = |key: &str| rows.iter().find(|r| r["key"] == key).unwrap();
     assert_eq!(
-        titles,
-        [
-            PathBuf::from("Bravo Corrected (2003)"),
-            PathBuf::from("Delta Show (2004)")
-        ]
+        (
+            &row("coastlineii")["job_state"],
+            &row("coastlineii")["result"]
+        ),
+        (&"done".into(), &"done".into())
+    );
+    let d2 = row("coastlineiidisc2");
+    assert_eq!(
+        (&d2["job_state"], &d2["result"]),
+        (&"failed".into(), &"failed".into())
     );
 }

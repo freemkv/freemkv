@@ -501,12 +501,9 @@ impl Manifest {
     }
 }
 
-// A destination a pre-journal build already published for `source` (which it may have
-// moved away). One still staged must be that same file: size, head and tail.
+// A destination a pre-journal build (v1.8.3) already published for the staged `source`:
+// the mover proved them identical; checked again here, and never the source itself.
 fn landed_entry(directory: &Path, source: &Path, destination: &str) -> io::Result<Entry> {
-    let name = source
-        .file_name()
-        .ok_or_else(|| io::Error::other("delivery source has no filename"))?;
     let target = Path::new(destination);
     let parent = target
         .parent()
@@ -518,20 +515,22 @@ fn landed_entry(directory: &Path, source: &Path, destination: &str) -> io::Resul
             .ok_or_else(|| io::Error::other("delivery target has no filename"))?,
     );
     let prepared = Stamp::read(&entry_destination)?;
-    let staged = directory.join(name);
-    let source_identity = match Stamp::read(&staged) {
-        Ok(found) => {
-            if found.size != prepared.size || !same_head_and_tail(&staged, &entry_destination)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "unowned delivery destination exists",
-                ));
-            }
-            found
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => prepared,
-        Err(e) => return Err(e),
+    let source_identity = Stamp::read(source)?;
+    let staged = source.canonicalize()?;
+    let unowned = || {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "unowned delivery destination exists",
+        )
     };
+    if staged.parent() != Some(directory)
+        || entry_destination.starts_with(directory)
+        || entry_destination.canonicalize()? == staged
+        || source_identity.size != prepared.size
+        || !same_head_and_tail(&staged, &entry_destination)?
+    {
+        return Err(unowned());
+    }
     Ok(Entry {
         source: staged,
         destination: entry_destination,
