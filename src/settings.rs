@@ -189,6 +189,30 @@ fn settings_path() -> PathBuf {
     support_dir().join("gui-settings.json")
 }
 
+// Remove `save`'s temp files (`gui-settings.json.tmp.<pid>`) older than `max_age` from
+// `dir`: a process killed mid-save leaves one, with the key-service token in it.
+fn remove_stale_temps(dir: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let ours = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("gui-settings.json.tmp."))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if ours && old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 // Create with mode 0600 up front so the `keyserver_token` secret is never
 // briefly readable at the process umask before a follow-up chmod.
 // `create_new` refuses to reuse a path; only called on a fresh temp filename.
@@ -374,6 +398,7 @@ impl Settings {
     /// is configured FROM the settings, so it is necessarily installed after
     /// this call and the warning emitted here reaches no log file.
     pub fn load_reporting() -> (Self, LoadOutcome) {
+        remove_stale_temps(&support_dir(), std::time::Duration::from_secs(3600));
         let (mut s, outcome) = Self::load_from(&settings_path());
         s.normalize();
         (s, outcome)
@@ -764,3 +789,7 @@ mod update_check_tests;
 #[cfg(test)]
 #[path = "settings_keydb_tests.rs"]
 mod keydb_tests;
+
+#[cfg(test)]
+#[path = "settings_temp_tests.rs"]
+mod temp_tests;

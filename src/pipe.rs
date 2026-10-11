@@ -831,6 +831,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         Some(j) => j,
         None => return 1,
     };
+    #[cfg(test)]
+    RAN_TITLES.with(|r| *r.borrow_mut() = Some(jobs.iter().map(|(t, _)| *t).collect()));
 
     // Show summary for multi-title
     if let Some(ref t) = titles
@@ -1537,7 +1539,22 @@ pub(crate) fn resolve_info_keys(
     set.ok().map(|s| s.status())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The scan `scan_iso` answers with on this thread (tests have no image).
+    pub(crate) static TEST_SCAN: std::cell::RefCell<Option<fn() -> libfreemkv::Disc>> =
+        const { std::cell::RefCell::new(None) };
+    /// The titles `run` built its jobs for on this thread.
+    pub(crate) static RAN_TITLES: std::cell::RefCell<Option<Vec<Option<usize>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
+    #[cfg(test)]
+    if let Some(scan) = TEST_SCAN.with(|t| *t.borrow()) {
+        let reader = libfreemkv::test_util::MemSource::new(Vec::new());
+        return Some((scan(), Box::new(reader)));
+    }
     // `dir://` is an image-level source too: `scan_dir` synthesizes a UDF
     // volume and returns the same pair `scan_iso` does. Without this arm,
     // opening a source "as an image" silently rejected folders.

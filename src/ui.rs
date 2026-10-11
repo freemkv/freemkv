@@ -2101,6 +2101,17 @@ const KEYSERVER_CHECK: fn(&str) -> Result<(), String> = if cfg!(test) {
     freemkv_keysources::validate_keyserver_url
 };
 
+// One Settings write at a time, in the order asked (`order` is the App's): a later write
+// waits for an earlier one still running, so the newest settings land last.
+fn ordered_write(
+    order: &Mutex<()>,
+    save: fn(&Settings) -> Result<(), String>,
+    settings: &Settings,
+) -> Result<(), String> {
+    let _order = order.lock().unwrap_or_else(|e| e.into_inner());
+    save(settings)
+}
+
 // Run `job` on a named worker thread; its answer arrives on the returned channel.
 fn spawn_worker<T: Send + 'static>(
     name: &str,
@@ -2261,6 +2272,10 @@ pub struct App {
     save_queued: Option<bool>,
     /// The last Settings write failed: committing the form again retries it.
     settings_unsaved: bool,
+    /// Held by the Settings write running, so writes land in the order asked.
+    write_order: Arc<Mutex<()>>,
+    /// An open preflight checked again for changed ticks: its source, Stop and verdict.
+    recheck: Option<(String, libfreemkv::Halt, std::sync::mpsc::Receiver<Recheck>)>,
     /// The operator chose "Stop & Quit": the close that follows is not asked again.
     quit_confirmed: bool,
     /// The Settings write — a seam so tests never touch the shared settings file.
@@ -2357,6 +2372,12 @@ struct PendingOpen {
 
 /// The titles a background open's preflight checked, and its verdict.
 type CheckedPreflight = (Vec<usize>, Result<Vec<String>, String>);
+
+/// A recheck's answer: the key set it judged with (topped up), and its verdict.
+type Recheck = (
+    Option<libfreemkv::keys::KeyRing>,
+    Result<Vec<String>, String>,
+);
 
 struct OpenedSource {
     path: String,
@@ -2477,6 +2498,8 @@ impl App {
             saving: None,
             save_queued: None,
             settings_unsaved: false,
+            write_order: Arc::default(),
+            recheck: None,
             quit_confirmed: false,
             save_fn: SAVE_SETTINGS,
             reported_bad: 0,
@@ -2747,7 +2770,10 @@ impl App {
             return vec![Effect::StartTicking];
         }
         let (save, settings) = (self.save_fn, self.settings.clone());
-        match spawn_worker("settings-save", move || save(&settings)) {
+        let order = self.write_order.clone();
+        match spawn_worker("settings-save", move || {
+            ordered_write(&order, save, &settings)
+        }) {
             Ok(rx) => {
                 self.saving = Some((rx, announce));
                 vec![Effect::StartTicking]
@@ -2798,18 +2824,31 @@ impl App {
         fx
     }
 
-    // Quitting: wait (briefly) for the write in flight and make the queued one here, so a
-    // choice made just before Quit is not lost with the process.
+    // Quitting: wait (bounded) for the write in flight, then write the queued latest
+    // settings after it (bounded), so a choice made just before Quit is not lost.
     fn flush_settings(&mut self) {
-        if let Some((rx, announce)) = self.saving.take() {
-            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                Ok(r) => self.settings_written(r, announce),
-                // Still writing: a second write now would race it on the temp file.
-                Err(_) => return,
-            }
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+        if let Some((rx, announce)) = self.saving.take()
+            && let Ok(r) = rx.recv_timeout(BOUND)
+        {
+            self.settings_written(r, announce);
         }
-        if self.save_queued.take().is_some() {
-            let r = (self.save_fn)(&self.settings);
+        if self.save_queued.take().is_none() {
+            return;
+        }
+        let (save, settings) = (self.save_fn, self.settings.clone());
+        let order = self.write_order.clone();
+        let r = match spawn_worker("settings-save", move || {
+            ordered_write(&order, save, &settings)
+        }) {
+            Ok(rx) => rx.recv_timeout(BOUND).ok(),
+            Err(_) => Some(ordered_write(
+                &self.write_order,
+                self.save_fn,
+                &self.settings,
+            )),
+        };
+        if let Some(r) = r {
             self.settings_written(r, false);
         }
     }
@@ -3000,6 +3039,9 @@ impl App {
 
     // Cancel every open in flight: the source changing, the window closing, or Quit (§4.3).
     fn stop_opens(&mut self) {
+        if let Some((_, halt, _)) = self.recheck.take() {
+            halt.cancel();
+        }
         if let Some(tok) = self.open_token.take() {
             tok.halt.cancel();
         }
@@ -3530,21 +3572,15 @@ impl App {
                     // A Settings commit during a background scan can change the ticks:
                     // the worker's verdict stands only for the titles the tree ticks now.
                     let ticked = self.tree.ticked_titles();
-                    let checked = preflight.filter(|(titles, _)| *titles == ticked);
-                    match checked.map(|(_, v)| v).unwrap_or_else(|| {
-                        crate::engine::preflight_with_keys(path, "/tmp", &ticked, sc.keys.as_ref())
-                    }) {
-                        Ok(v) if v.is_empty() => {
-                            self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
-                        }
-                        Ok(v) => self.say(
-                            LogKind::Notice,
-                            &crate::strings::fmt(
-                                "gui.log.cannot_rip",
-                                &[("reasons", &v.join(", "))],
-                            ),
-                        ),
-                        Err(e) => self.say(LogKind::Notice, &e),
+                    match preflight {
+                        Some((titles, v)) if titles == ticked => self.say_preflight(v),
+                        Some(_) => return self.recheck_preflight(path, ticked, sc.keys),
+                        None => self.say_preflight(crate::engine::preflight_with_keys(
+                            path,
+                            "/tmp",
+                            &ticked,
+                            sc.keys.as_ref(),
+                        )),
                     }
                 }
             }
@@ -3563,6 +3599,81 @@ impl App {
                     self.disc_present = Some(false);
                 }
             }
+        }
+        vec![Effect::Redraw]
+    }
+
+    fn say_preflight(&mut self, verdict: Result<Vec<String>, String>) {
+        match verdict {
+            Ok(v) if v.is_empty() => {
+                self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
+            }
+            Ok(v) => self.say(
+                LogKind::Notice,
+                &crate::strings::fmt("gui.log.cannot_rip", &[("reasons", &v.join(", "))]),
+            ),
+            Err(e) => self.say(LogKind::Notice, &e),
+        }
+    }
+
+    // Judge the ticked titles again on a worker, looking up keys Open did not resolve.
+    fn recheck_preflight(
+        &mut self,
+        path: &str,
+        titles: Vec<usize>,
+        seed: Option<libfreemkv::keys::KeyRing>,
+    ) -> Vec<Effect> {
+        let sources = crate::engine::key_sources(&KeyConfig::from_settings(&self.settings));
+        let halt = libfreemkv::Halt::new();
+        let (owned, stop) = (path.to_owned(), halt.clone());
+        let job =
+            move || crate::engine::preflight_ticked(&owned, &titles, seed.as_ref(), sources, &stop);
+        match spawn_worker("open-recheck", job) {
+            Ok(rx) => {
+                self.recheck = Some((path.to_owned(), halt, rx));
+                vec![Effect::Redraw, Effect::StartTicking]
+            }
+            Err(e) => {
+                self.say(
+                    LogKind::Notice,
+                    &crate::strings::fmt_or(
+                        "gui.log.scan_not_started",
+                        "Could not start scanning the source: {detail}",
+                        &[("detail", &e.to_string())],
+                    ),
+                );
+                vec![Effect::Redraw]
+            }
+        }
+    }
+
+    // Report a finished recheck for the source still open; Start reuses its key set.
+    fn poll_recheck(&mut self) -> Vec<Effect> {
+        let answer = match self.recheck.as_ref().map(|(_, _, rx)| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(answer)) => Some(answer),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => None,
+        };
+        let Some((path, _, _)) = self.recheck.take() else {
+            return Vec::new();
+        };
+        if path != self.source {
+            return Vec::new();
+        }
+        match answer {
+            Some((set, verdict)) => {
+                if set.is_some() {
+                    self.seed = set;
+                }
+                self.say_preflight(verdict);
+            }
+            None => self.say(
+                LogKind::Notice,
+                &crate::strings::get_or(
+                    "gui.log.scan_worker_stopped",
+                    "Source scan worker stopped before returning a result.",
+                ),
+            ),
         }
         vec![Effect::Redraw]
     }
@@ -3825,6 +3936,7 @@ impl App {
         probe_fx.extend(self.poll_update());
         probe_fx.extend(self.poll_keydb());
         probe_fx.extend(self.poll_keyserver());
+        probe_fx.extend(self.poll_recheck());
         probe_fx.extend(self.poll_save());
         probe_fx.extend(self.poll_presence());
         if let Some(rx) = &self.opening {
@@ -3863,6 +3975,7 @@ impl App {
                 && self.keydb.is_none()
                 && self.keyserver_check.is_none()
                 && self.saving.is_none()
+                && self.recheck.is_none()
             {
                 // An idle disc keeps the tick for its watch, without a redraw per tick.
                 if self.presence.is_none() && !self.watching_disc() {

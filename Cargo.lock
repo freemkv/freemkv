@@ -399,7 +399,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "socket2",
  "tempfile",
  "tiny_http",
  "tracing",

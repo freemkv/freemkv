@@ -497,11 +497,11 @@ export function openDeviceTerminal(dev, debugOn, snapshot, ownerName = '', sourc
   return t;
 }
 
-// The toast for a cleared row. A move Retry the server could not record (its delivery is
-// running now) says so; a server that does not report it took the request.
+// The toast for a cleared row. A move Retry the server did not record (its delivery is
+// running, or the error is gone) says so; a server that does not report it took it.
 function clearedToast(kind, r) {
   if (kind !== 'move') return ['Cleared. It comes back if the problem is still there.', 'info'];
-  if (r && r.scheduled === false) return ['Not retried: this delivery is running now. It is retried by itself if it fails again.', 'warn'];
+  if (r && r.scheduled === false) return ['Not retried: this delivery is running now, or its error has already cleared.', 'warn'];
   return ['Delivery retry requested.', 'info'];
 }
 

@@ -68,7 +68,10 @@ else
   launchctl bootstrap "gui/$(id -u)" "$plist"
   echo 'Library started. Open http://localhost:8080/drives (or your configured PORT).'
 fi
+# Reboot library exits 75: launchd starts the job again only for KeepAlive true or
+# KeepAlive conditions with SuccessfulExit false (the server checks the same rule).
 keepalive=$(/usr/bin/plutil -extract KeepAlive raw "$plist" 2>/dev/null || true)
-if [[ $keepalive != true && $(/usr/bin/plutil -type KeepAlive "$plist" 2>/dev/null) != dictionary ]]; then
-  echo 'Note: this service does not set KeepAlive, so Reboot library is refused (nothing would start Library again). Set KeepAlive to true to allow it.'
+on_failure=$(/usr/bin/plutil -extract KeepAlive.SuccessfulExit raw "$plist" 2>/dev/null || true)
+if [[ $keepalive != true && $on_failure != false ]]; then
+  echo 'Note: this service would not be started again after it exits, so Reboot library is refused. Set KeepAlive to true to allow it.'
 fi

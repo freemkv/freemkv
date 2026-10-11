@@ -1420,6 +1420,41 @@ pub fn preflight_with_keys(
     }
 }
 
+/// The key sources a request asks, from the user's settings (for a worker to carry).
+pub fn key_sources(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
+    key_factory(keys)
+}
+
+/// The open preflight of `titles` once the ticks changed: Open's set (`seed`) topped up for
+/// them from `sources`, asking only for what it lacks, then judged. Returns the set used.
+pub fn preflight_ticked(
+    path: &str,
+    titles: &[usize],
+    seed: Option<&libfreemkv::keys::KeyRing>,
+    sources: libfreemkv::KeySourceFactory,
+    halt: &libfreemkv::Halt,
+) -> (
+    Option<libfreemkv::keys::KeyRing>,
+    Result<Vec<String>, String>,
+) {
+    let scope = libfreemkv::keys::KeyScope::Titles(titles.to_vec());
+    let set = if titles.is_empty() || seed.is_some_and(|s| s.covers(&scope)) {
+        seed.cloned()
+    } else {
+        let o = crate::rip_keys::ImageOpen {
+            scope,
+            seed: seed.cloned(),
+            drive_disc: None,
+            halt: Some(halt.clone()),
+        };
+        let src = fe::ImageSource::from_path(path);
+        let (opened, _trace) = crate::rip_keys::open_image(&src, sources, o);
+        opened.ok().map(|o| o.keys).or_else(|| seed.cloned())
+    };
+    let verdict = preflight_with_keys(path, "/tmp", titles, set.as_ref());
+    (set, verdict)
+}
+
 // A preflight reason as the GUI lists it: its stable key, `=detail` when it carries one (the
 // review reason of `selection-review-required`, an out-of-range index).
 fn reason_text(r: &fe::Reason) -> String {

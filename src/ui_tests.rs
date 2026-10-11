@@ -3239,8 +3239,8 @@ fn a_saved_episodes_mode_does_not_apply_to_a_newly_opened_disc() {
     assert_eq!(app.pick_mode, "Main film only");
 }
 
-// Default selection "All titles": Open keys every title the tree ticks, so its preflight
-// does not refuse a source the rip decrypts (encrypted-no-key for title 2).
+// With the Default selection set to "All titles", Open keys every title the tree ticks, so
+// its preflight does not refuse a source the rip decrypts (encrypted-no-key for title 2).
 #[test]
 fn open_preflight_is_keyed_for_every_ticked_title() {
     use crate::ku_fixtures::*;
@@ -3261,22 +3261,64 @@ fn open_preflight_is_keyed_for_every_ticked_title() {
 }
 
 // A Settings commit while the background scan ran changes the ticks: the worker's verdict
-// was for other titles, so apply_opened checks the titles the tree ticks now.
+// was for other titles, so they are checked again on a worker, with keys looked up for the
+// titles Open did not key, and the UI thread never re-scans the image.
 #[test]
-fn a_stale_background_preflight_is_rechecked_for_the_current_ticks() {
+fn a_stale_background_preflight_is_rechecked_with_keys_for_the_new_ticks() {
+    use crate::ku_fixtures::*;
+    let fx = bd_image(&[Some(K1), Some(K1)], 1);
+    let dir = TempDir::new("stale-recheck");
+    let iso = fx.write(dir.path(), "disc.iso").display().to_string();
+    let f = || factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+    let only_main: &dyn Fn(&Scanned) -> Vec<usize> = &|_| vec![0];
+    let scanned = crate::rip_keys::with_sources(f(), || {
+        crate::engine::scan_with_keys_under(
+            &iso,
+            &KeyConfig::default(),
+            &OpenToken::default(),
+            only_main,
+        )
+    })
+    .unwrap();
     let mut app = App::new();
+    app.settings.selection = "All titles".into();
+    app.settings.min_title_secs = "0".into();
     let (tx, rx) = std::sync::mpsc::channel();
     app.opening = Some(rx);
     tx.send(OpenedSource {
-        path: "/nonexistent/scanned.iso".into(),
-        scanned: Ok(probe_scan()),
-        preflight: Some((vec![7, 8], Ok(vec![]))),
+        path: iso.clone(),
+        scanned: Ok(scanned),
+        preflight: Some((vec![0], Ok(vec![]))),
     })
     .unwrap();
-    app.tick();
+    let ready = crate::strings::get("gui.log.ready_rip");
+    let cannot = crate::strings::fmt("gui.log.cannot_rip", &[("reasons", "")]);
+    let fx = crate::rip_keys::with_sources(f(), || app.tick());
+    assert_eq!(app.tree.ticked_titles(), vec![0, 1]);
+    assert!(fx.contains(&Effect::StartTicking), "{fx:?}");
     assert!(
-        !logged(&app, &crate::strings::get("gui.log.ready_rip")),
-        "a verdict for titles 8 and 9 is not one for the ticked title"
+        !logged(&app, &ready) && !logged(&app, cannot.trim_end()),
+        "judged on the UI thread"
+    );
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.recheck.is_some() {
+        assert!(
+            std::time::Instant::now() < until,
+            "the recheck never answered"
+        );
+        app.tick();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let log: Vec<&str> = app.log.iter().map(|l| l.text.as_str()).collect();
+    assert!(logged(&app, &ready), "{log:?}");
+    assert!(
+        !log.iter().any(|l| l.contains("encrypted-no-key")),
+        "{log:?}"
+    );
+    let both = libfreemkv::keys::KeyScope::Titles(vec![0, 1]);
+    assert!(
+        app.seed.as_ref().is_some_and(|k| k.covers(&both)),
+        "Start reuses the topped-up set"
     );
 }
 
@@ -3400,4 +3442,81 @@ fn a_keydb_worker_that_cannot_start_says_so_in_the_note() {
         Some((LogKind::Notice, want))
     );
     assert!(app.keydb.is_none() && !app.view().keydb_busy);
+}
+
+// Quit with a remembered pick queued behind a slow write (>2 s) still writes the latest
+// settings: the queued write follows the one in flight instead of being dropped.
+#[test]
+fn quit_writes_the_queued_latest_settings_after_a_slow_write() {
+    static OPEN: AtomicBool = AtomicBool::new(false);
+    static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut app = picking(pick_disc());
+    app.save_fn = |s| {
+        while !OPEN.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        WRITTEN.lock().unwrap().push(s.audio_langs.clone());
+        Ok(())
+    };
+    app.pick_audio(Some("deu"));
+    app.pick_audio(Some("eng"));
+    let latest = app.settings.audio_langs.clone();
+    let release = std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(2600));
+        OPEN.store(true, Ordering::SeqCst);
+    });
+    assert_eq!(app.dispatch(Cmd::Quit), vec![Effect::Quit]);
+    release.join().unwrap();
+    assert_eq!(
+        WRITTEN.lock().unwrap().last(),
+        Some(&latest),
+        "the latest was lost"
+    );
+}
+
+// A writer that died (panicked) does not take the queued latest settings with it.
+#[test]
+fn quit_writes_the_queued_settings_when_the_writer_died() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut app = picking(pick_disc());
+    app.save_fn = |s| {
+        if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            panic!("writer died");
+        }
+        WRITTEN.lock().unwrap().push(s.audio_langs.clone());
+        Ok(())
+    };
+    app.pick_audio(Some("deu"));
+    app.pick_audio(Some("eng"));
+    let latest = app.settings.audio_langs.clone();
+    app.dispatch(Cmd::Quit);
+    assert_eq!(WRITTEN.lock().unwrap().last(), Some(&latest));
+}
+
+// Picks made during a write are written once it ends, the latest settings last.
+#[test]
+fn a_queued_save_writes_the_latest_settings() {
+    static GATE: Mutex<()> = Mutex::new(());
+    static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut app = picking(pick_disc());
+    app.save_fn = |s| {
+        let _slow = GATE.lock().unwrap_or_else(|e| e.into_inner());
+        WRITTEN.lock().unwrap().push(s.audio_langs.clone());
+        Ok(())
+    };
+    let held = GATE.lock().unwrap();
+    app.pick_audio(Some("deu"));
+    app.pick_audio(Some("eng"));
+    app.pick_audio(None);
+    drop(held);
+    settle_workers(&mut app);
+    let written = WRITTEN.lock().unwrap().clone();
+    assert_eq!(
+        written.len(),
+        2,
+        "{written:?}: one write in flight, one queued"
+    );
+    assert_eq!(written.last(), Some(&app.settings.audio_langs));
 }

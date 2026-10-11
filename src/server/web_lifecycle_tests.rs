@@ -151,17 +151,21 @@ fn a_client_that_stops_reading_times_the_write_out() {
         std::time::Duration::from_millis(200)
     ));
     let mut stream = request.upgrade("sse", tiny_http::Response::empty(200));
-    let chunk = vec![0u8; 64 * 1024];
-    let started = std::time::Instant::now();
-    let err = loop {
-        if let Err(e) = stream.write_all(&chunk).and_then(|_| stream.flush()) {
-            break e;
-        }
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(20),
-            "never timed out"
-        );
-    };
+    // The writer runs on its own thread: without the timeout it blocks for good, and the
+    // test fails at the bound instead of hanging.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let chunk = vec![0u8; 64 * 1024];
+        let err = loop {
+            if let Err(e) = stream.write_all(&chunk).and_then(|_| stream.flush()) {
+                break e;
+            }
+        };
+        let _ = tx.send(err);
+    });
+    let err = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the blocked write never timed out");
     assert!(
         matches!(
             err.kind(),
@@ -214,11 +218,70 @@ fn only_a_keepalive_plist_restarts_the_job() {
     );
     let off = plist("f.plist", "<key>KeepAlive</key><false/>");
     let none = plist("n.plist", "<key>Label</key><string>x</string>");
+    // launchd does not start these again after an exit 75.
+    let only_success = plist(
+        "s.plist",
+        "<key>KeepAlive</key><dict><key>SuccessfulExit</key><true/></dict>",
+    );
+    let crashed = plist(
+        "k.plist",
+        "<key>KeepAlive</key><dict><key>Crashed</key><true/></dict>",
+    );
+    let network = plist(
+        "w.plist",
+        "<key>KeepAlive</key><dict><key>NetworkState</key><true/></dict>",
+    );
+    let with_more = plist(
+        "m.plist",
+        "<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/><key>Crashed</key><true/></dict>",
+    );
     assert!(plist_keeps_alive(&keep));
     assert!(plist_keeps_alive(&cond));
-    assert!(!plist_keeps_alive(&off));
-    assert!(!plist_keeps_alive(&none));
+    assert!(plist_keeps_alive(&with_more));
+    for p in [&off, &none, &only_success, &crashed, &network] {
+        assert!(!plist_keeps_alive(p), "{}", p.display());
+    }
     assert!(!plist_keeps_alive(&dir.path().join("missing.plist")));
+}
+
+// The loaded job decides when launchctl knows it: its plist path and keepalive property.
+// A job launchctl does not list in the user's domain (a LaunchDaemon) is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_loaded_launchd_job_decides_over_the_installed_plist() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, keep: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(
+            &p,
+            format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>KeepAlive</key>{keep}</dict></plist>"),
+        )
+        .unwrap();
+        p
+    };
+    let loaded = write("loaded.plist", "<true/>");
+    let stale = write("stale.plist", "<false/>");
+    let print = |path: &std::path::Path, props: &str| {
+        format!(
+            "gui/501/io.freemkv.library = {{\n\tpath = {}\n\ttype = LaunchAgent\n\tenvironment = {{\n\t\tpath = /nope\n\t}}\n\tproperties = {props}\n}}\n",
+            path.display()
+        )
+    };
+    let job = Launchctl::Loaded(print(&loaded, "keepalive | runatload | inferred program"));
+    assert!(
+        launchd_restarts(&job, &stale),
+        "the loaded plist, not the stale file"
+    );
+    let not_kept = Launchctl::Loaded(print(&loaded, "runatload | inferred program"));
+    assert!(!launchd_restarts(&not_kept, &loaded));
+    let wrong_plist = Launchctl::Loaded(print(&stale, "keepalive | runatload"));
+    assert!(!launchd_restarts(&wrong_plist, &loaded));
+    assert!(
+        !launchd_restarts(&Launchctl::NotLoaded, &loaded),
+        "a LaunchDaemon"
+    );
+    assert!(launchd_restarts(&Launchctl::Unavailable, &loaded));
+    assert!(!launchd_restarts(&Launchctl::Unavailable, &stale));
 }
 
 // A metadata refusal is a conflict (409); storage that may answer again is 503, other

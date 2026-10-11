@@ -44,23 +44,43 @@ fn presentation_language_cli_is_independent_of_audio_all() {
     assert_eq!(super::main_title(&[], &de, None), None);
 }
 
-// The rip path's automatic title: `--presentation-language de` picks the German cut (title 2),
-// through the parsed flags themselves, not a binding run() keeps of its own.
+// The rip path's automatic title: `--presentation-language de` makes run() rip the German
+// cut (title 2) of a scanned variant disc; without it, the first title.
 #[test]
 fn the_rip_path_picks_the_main_title_with_the_presentation_language() {
-    let titles = crate::selection_test_fixtures::variant_titles();
-    let flags = parse_flags(&["--presentation-language".into(), "de".into()]).unwrap();
-    assert_eq!(super::MainPick::of(&flags).title(&titles), Some(1));
-    let none = parse_flags(&[]).unwrap();
-    assert_eq!(super::MainPick::of(&none).title(&titles), Some(0));
-    let src = include_str!("pipe.rs").replace("\r\n", "\n");
-    let at = src.find("\npub fn run(").expect("run");
-    let run = &src[at..at + src[at..].find("\n}\n").expect("end of run")];
-    let pick = run
-        .find("let main_pick = MainPick::of(&flags);")
-        .expect("built from flags");
-    assert!(pick < run.find("let ParsedFlags {").expect("destructure"));
-    assert!(run.contains("scanned.and_then(|disc| main_pick.title(&disc.titles))"));
+    fn variant_disc() -> libfreemkv::Disc {
+        libfreemkv::Disc {
+            volume_id: "VARIANT".into(),
+            meta_title: None,
+            format: libfreemkv::DiscFormat::BluRay,
+            capacity_sectors: 0,
+            capacity_bytes: 0,
+            layers: 1,
+            titles: crate::selection_test_fixtures::variant_titles(),
+            region: libfreemkv::disc::DiscRegion::Free,
+            aacs: None,
+            css: None,
+            encrypted: false,
+            aacs_error: None,
+            css_error: None,
+            content_format: libfreemkv::ContentFormat::BdTs,
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("variant.iso");
+    std::fs::write(&iso, vec![0u8; 2048]).unwrap();
+    let source = format!("iso://{}", iso.display());
+    let dest = format!("mkv://{}/out.mkv", dir.path().display());
+    let ran = |flags: &[&str]| {
+        super::TEST_SCAN.with(|t| *t.borrow_mut() = Some(variant_disc));
+        super::RAN_TITLES.with(|r| r.borrow_mut().take());
+        let args: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+        let _ = crate::output::capture(|| super::run(&source, &dest, &args));
+        super::TEST_SCAN.with(|t| t.borrow_mut().take());
+        super::RAN_TITLES.with(|r| r.borrow_mut().take())
+    };
+    assert_eq!(ran(&["--presentation-language", "de"]), Some(vec![Some(1)]));
+    assert_eq!(ran(&[]), Some(vec![Some(0)]));
 }
 
 // A tag selection cannot match is refused as the flag is read, not silently ripped as title 0.

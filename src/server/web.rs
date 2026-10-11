@@ -416,14 +416,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         if target.is_empty() {
             return json_response(request, 400, r#"{"ok":false,"error":"missing path"}"#);
         }
-        // The mover records no Retry for a row whose delivery is running; say which it was.
-        let running = crate::server::mover::MOVE_ERRORS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&target)
-            .is_some_and(|e| e.worker_active);
-        crate::server::mover::clear_move_error(&target);
-        let body = serde_json::json!({ "ok": true, "scheduled": !running });
+        let body = serde_json::json!({ "ok": true, "scheduled": retry_move_error(&target) });
         json_response(request, 200, &body.to_string());
     } else if is_post && url == "/api/mux-errors/clear-all" {
         crate::server::muxer::clear_all_mux_errors();
@@ -2714,6 +2707,18 @@ fn roll_back_settings(
     }
 }
 
+// Clear one delivery error; whether a Retry was recorded. The mover records none for a row
+// whose delivery is running or that is gone.
+fn retry_move_error(target: &str) -> bool {
+    let recorded = crate::server::mover::MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(target)
+        .is_some_and(|e| !e.worker_active);
+    crate::server::mover::clear_move_error(target);
+    recorded
+}
+
 // POST /api/system/reboot: drain, then relaunch (see daemon::run). Refused (409) where
 // nothing would start the daemon again after it exits, and (429) too soon after the last.
 fn handle_reboot(request: tiny_http::Request) {
@@ -2788,29 +2793,74 @@ fn relaunch_supported() -> bool {
 #[cfg(target_os = "macos")]
 fn relaunch_supported() -> bool {
     let label = std::env::var_os("XPC_SERVICE_NAME");
-    launchd_job(label.as_deref(), parent_pid())
-        && label
-            .as_deref()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(launch_agent_keeps_alive)
-}
-
-// Whether launchd starts job `label` again after it exits: the LaunchAgent plist (where
-// macos/install-library-service.sh writes it) sets KeepAlive true or to conditions.
-#[cfg(target_os = "macos")]
-fn launch_agent_keeps_alive(label: &str) -> bool {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(name) = label.as_deref().and_then(std::ffi::OsStr::to_str) else {
         return false;
     };
-    if label.contains('/') || label.starts_with('.') {
+    if !launchd_job(label.as_deref(), parent_pid()) || name.contains('/') || name.starts_with('.') {
         return false;
     }
-    let plist = std::path::Path::new(&home)
-        .join("Library/LaunchAgents")
-        .join(format!("{label}.plist"));
-    plist_keeps_alive(&plist)
+    let installed = std::env::var_os("HOME").map(|home| {
+        std::path::Path::new(&home)
+            .join("Library/LaunchAgents")
+            .join(format!("{name}.plist"))
+    });
+    installed.is_some_and(|plist| launchd_restarts(&launchctl_print(name), &plist))
 }
 
+/// What `launchctl print gui/<uid>/<label>` says about this job.
+#[cfg(target_os = "macos")]
+enum Launchctl {
+    /// launchctl could not be run: the installed plist alone decides.
+    Unavailable,
+    /// Not a job in the user's GUI domain (a LaunchDaemon, say): refused.
+    NotLoaded,
+    /// Its output.
+    Loaded(String),
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn launchctl_print(label: &str) -> Launchctl {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    match std::process::Command::new("/bin/launchctl")
+        .arg("print")
+        .arg(format!("gui/{uid}/{label}"))
+        .output()
+    {
+        Err(_) => Launchctl::Unavailable,
+        Ok(o) if !o.status.success() => Launchctl::NotLoaded,
+        Ok(o) => Launchctl::Loaded(String::from_utf8_lossy(&o.stdout).into_owned()),
+    }
+}
+
+// Test seam: the route tests never ask the real launchd (this machine may run the job).
+#[cfg(all(target_os = "macos", test))]
+fn launchctl_print(_: &str) -> Launchctl {
+    Launchctl::Unavailable
+}
+
+// Whether launchd starts the job again after the exit-75 shutdown: the loaded job's
+// keepalive property and plist when launchctl lists it, else the installed `plist`.
+#[cfg(target_os = "macos")]
+fn launchd_restarts(job: &Launchctl, plist: &std::path::Path) -> bool {
+    match job {
+        Launchctl::Unavailable => plist_keeps_alive(plist),
+        Launchctl::NotLoaded => false,
+        Launchctl::Loaded(out) => {
+            let field = |name: &str| {
+                out.lines()
+                    .find_map(|l| l.strip_prefix('\t')?.strip_prefix(name))
+                    .map(str::trim)
+            };
+            let kept = field("properties = ")
+                .is_some_and(|p| p.split('|').any(|f| f.trim() == "keepalive"));
+            kept && field("path = ").is_some_and(|p| plist_keeps_alive(std::path::Path::new(p)))
+        }
+    }
+}
+
+// KeepAlive true, or conditions that include SuccessfulExit = false (restart after a
+// non-zero exit). Other conditions alone do not restart a job that exited 75.
 #[cfg(target_os = "macos")]
 fn plist_keeps_alive(plist: &std::path::Path) -> bool {
     let plutil = |args: &[&str]| {
@@ -2823,7 +2873,7 @@ fn plist_keeps_alive(plist: &std::path::Path) -> bool {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
     plutil(&["-extract", "KeepAlive", "raw"]).as_deref() == Some("true")
-        || plutil(&["-type", "KeepAlive"]).as_deref() == Some("dictionary")
+        || plutil(&["-extract", "KeepAlive.SuccessfulExit", "raw"]).as_deref() == Some("false")
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -2911,16 +2961,68 @@ fn set_write_timeout_for_peer(peer: std::net::SocketAddr, timeout: std::time::Du
     let fds = dir
         .flatten()
         .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok());
+    let tv = libc::timeval {
+        tv_sec: libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX),
+        tv_usec: libc::suseconds_t::try_from(timeout.subsec_micros()).unwrap_or(0),
+    };
     let mut set = false;
-    for raw in fds {
-        // SAFETY: borrowed for two calls only; a descriptor closed meanwhile fails them.
-        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) };
-        let sock = socket2::SockRef::from(&fd);
-        if sock.peer_addr().ok().and_then(|a| a.as_socket()) == Some(peer) {
-            set |= sock.set_write_timeout(Some(timeout)).is_ok();
-        }
+    for fd in fds.filter(|&fd| socket_peer(fd) == Some(peer)) {
+        // SAFETY: `tv` is a live timeval of the size passed; a descriptor closed since only
+        // fails the call, and one reused would have to be the same connection to match.
+        let r = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDTIMEO,
+                (&tv as *const libc::timeval).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        set |= r == 0;
+    }
+    if !set {
+        tracing::debug!(%peer, "no socket found for the SSE client; its writes have no timeout");
     }
     set
+}
+
+// The remote address of socket `fd`, or None for anything else.
+#[cfg(unix)]
+fn socket_peer(fd: i32) -> Option<std::net::SocketAddr> {
+    // SAFETY: sockaddr_storage is plain data, valid all-zero.
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: getpeername writes at most `len` bytes into `ss`; a non-socket fails it.
+    let r = unsafe {
+        libc::getpeername(
+            fd,
+            (&mut ss as *mut libc::sockaddr_storage).cast(),
+            &mut len,
+        )
+    };
+    if r != 0 {
+        return None;
+    }
+    match i32::from(ss.ss_family) {
+        libc::AF_INET => {
+            // SAFETY: the family says `ss` holds a sockaddr_in, which it is large enough for.
+            let a = unsafe { &*(&ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            let ip = std::net::Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr));
+            Some(std::net::SocketAddr::from((ip, u16::from_be(a.sin_port))))
+        }
+        libc::AF_INET6 => {
+            // SAFETY: as above, for sockaddr_in6.
+            let a =
+                unsafe { &*(&ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
+            Some(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                std::net::Ipv6Addr::from(a.sin6_addr.s6_addr),
+                u16::from_be(a.sin6_port),
+                a.sin6_flowinfo,
+                a.sin6_scope_id,
+            )))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(not(unix))]

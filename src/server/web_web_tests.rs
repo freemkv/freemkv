@@ -4654,7 +4654,7 @@ mod http {
         let (c3, b3) = roundtrip(&cfg, "POST", "/api/move-errors/clear?x=1", None, &[]);
         assert_eq!(c3, 400);
         assert!(b3.contains("missing path"));
-        // A row with no delivery running gets its Retry recorded, and the answer says so.
+        // A row that is gone records no Retry, and the answer says so.
         let (c4, b4) = roundtrip(
             &cfg,
             "POST",
@@ -4664,7 +4664,7 @@ mod http {
         );
         assert_eq!(c4, 200);
         let v: serde_json::Value = serde_json::from_str(&b4).unwrap();
-        assert_eq!(v["scheduled"], true, "{b4}");
+        assert_eq!(v["scheduled"], false, "{b4}");
     }
 
     // ── SSE first frame (GET /events): it loops forever, so roundtrip
