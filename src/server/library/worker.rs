@@ -309,7 +309,7 @@ fn linked_episode(config_dir: &Path, job: &Job, strict: bool) -> std::io::Result
 }
 
 // Every link, or the error a job fails with when links.json cannot be read.
-fn links_for_job(
+pub(super) fn links_for_job(
     config_dir: &Path,
 ) -> std::io::Result<std::collections::HashMap<std::path::PathBuf, super::links::Link>> {
     super::links::read_entries(config_dir).map_err(|e| {

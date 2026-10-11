@@ -276,3 +276,32 @@ fn an_episode_row_admitted_with_a_saved_match_plans_only_that_episode() {
     assert!(error.to_string().contains("Change match"), "{error}");
     assert!(job.plan.is_none());
 }
+
+// Remux on several episode rows of a matched ISO while links.json cannot be read refuses
+// with that reason; it never drops all but one row as a whole-disc job.
+#[test]
+fn matched_episode_rows_are_refused_while_links_cannot_be_read() {
+    let (t, lib, dirs) = library_with(&[]);
+    let iso = image_iso(&dirs, "Show");
+    let episodes: Vec<PathBuf> = (1..=3)
+        .map(|e| dirs.library.join(format!("Show/Show S01E0{e}.mkv")))
+        .collect();
+    delivered_episodes(&t, &iso, &episodes);
+    let media = MediaMetadata {
+        title: "Show".into(),
+        year: 2001,
+        tmdb_id: 7,
+        season: Some(1),
+        kind: Some(MediaKind::Tv),
+        ..Default::default()
+    };
+    lib.match_store().unwrap().save(&iso, 0, media).unwrap();
+    lib.index_now(&dirs);
+    std::fs::write(t.path().join("config").join(links::LINKS_FILE), b"{damaged").unwrap();
+    let refused = lib
+        .enqueue_checked(&dirs, |r| r.iso.as_deref() == Some(iso.as_path()))
+        .unwrap_err();
+    assert!(refused.contains(links::LINKS_FILE), "{refused}");
+    assert!(refused.ends_with("Nothing was queued."), "{refused}");
+    assert!(lib.queue.snapshot().jobs.is_empty(), "no row was queued");
+}
