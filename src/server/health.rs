@@ -476,30 +476,37 @@ fn release(key: &Path) {
     IN_FLIGHT.done.notify_all();
 }
 
-/// Run `probe` for the folder `key` on its own thread and wait at most `limit`.
-/// A probe of `key` already running is waited for within the same limit; one past its own
-/// limit means the folder hangs, and the answer is `Busy` at once. A probe that outlives
-/// its caller is left running: it may touch only its own probe artifacts.
-pub fn bounded<T, F>(key: &Path, limit: Duration, probe: F) -> Bounded<T>
+/// A started probe: wait for it with [`Pending::wait`].
+pub struct Pending<T> {
+    rx: Option<std::sync::mpsc::Receiver<T>>,
+    deadline: Instant,
+}
+
+/// Begin `probe` for the folder `key` on its own thread. A probe of `key` already running is
+/// waited for within `limit`; one past its own limit means the folder hangs, and the answer is
+/// `Busy` at once. A probe that outlives its caller is left running: it may touch only its own
+/// probe artifacts.
+pub fn begin<T, F>(key: &Path, limit: Duration, probe: F) -> Pending<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
     let deadline = Instant::now() + limit;
+    let busy = Pending { rx: None, deadline };
     {
-        let mut busy = IN_FLIGHT.folders.lock().unwrap_or_else(|e| e.into_inner());
-        while let Some(late_at) = busy.iter().find(|(p, _)| p == key).map(|(_, t)| *t) {
+        let mut held = IN_FLIGHT.folders.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(late_at) = held.iter().find(|(p, _)| p == key).map(|(_, t)| *t) {
             let now = Instant::now();
             if now >= deadline || now >= late_at {
-                return Bounded::Busy;
+                return busy;
             }
-            busy = IN_FLIGHT
+            held = IN_FLIGHT
                 .done
-                .wait_timeout(busy, deadline.min(late_at) - now)
+                .wait_timeout(held, deadline.min(late_at) - now)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
-        busy.push((key.to_path_buf(), deadline));
+        held.push((key.to_path_buf(), deadline));
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let owned = key.to_path_buf();
@@ -519,12 +526,53 @@ where
         });
     if spawned.is_err() {
         release(key);
-        return Bounded::Busy;
+        return busy;
     }
-    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(v) => Bounded::Done(v),
-        Err(_) => Bounded::TimedOut,
+    Pending {
+        rx: Some(rx),
+        deadline,
     }
+}
+
+impl<T> Pending<T> {
+    /// The probe's answer, or `TimedOut` once its limit has run out; `Busy` if none started.
+    pub fn wait(self) -> Bounded<T> {
+        let Some(rx) = self.rx else {
+            return Bounded::Busy;
+        };
+        match rx.recv_timeout(self.deadline.saturating_duration_since(Instant::now())) {
+            Ok(v) => Bounded::Done(v),
+            Err(_) => Bounded::TimedOut,
+        }
+    }
+}
+
+/// [`begin`] and wait: `probe` for `key` within `limit`.
+pub fn bounded<T, F>(key: &Path, limit: Duration, probe: F) -> Bounded<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    begin(key, limit, probe).wait()
+}
+
+/// Run `f` on every item at once, each bounded by `limit` on its folder, so folders on one
+/// dead mount cost one timeout between them. Results keep the input order.
+pub fn bounded_each<I, T, F>(items: Vec<(PathBuf, I)>, limit: Duration, f: F) -> Vec<Bounded<T>>
+where
+    I: Send + 'static,
+    T: Send + 'static,
+    F: Fn(I) -> T + Send + Sync + 'static,
+{
+    let f = Arc::new(f);
+    let started: Vec<_> = items
+        .into_iter()
+        .map(|(key, item)| {
+            let f = f.clone();
+            begin(&key, limit, move || f(item))
+        })
+        .collect();
+    started.into_iter().map(Pending::wait).collect()
 }
 
 // Keep stale-handle evidence even when its probe finishes after the caller timed out.
@@ -565,19 +613,32 @@ fn report_fault(generation: u64, path: &Path, fault: Option<Fault>) {
         .record(generation, path, fault);
 }
 
-// `check` through `bounded`, abandoned after CHECK_TIMEOUT.
-fn check_bounded(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
-    let p = path.clone();
+// `check` for one folder, reporting a stale handle even when the caller gave up on it.
+fn check_reporting(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
     let generation = probe_generation();
-    match bounded(&path, CHECK_TIMEOUT, move || {
-        let result = check(role, &p, want_write);
-        report_fault(generation, &p, result.fault);
-        tracing::debug!(role, path = %p.display(), fault = ?result.fault, "folder probe completed");
-        result
-    }) {
-        Bounded::Done(m) => m,
-        Bounded::TimedOut | Bounded::Busy => not_responding(role, &path, CHECK_TIMEOUT),
-    }
+    let result = check(role, &path, want_write);
+    report_fault(generation, &path, result.fault);
+    tracing::debug!(role, path = %path.display(), fault = ?result.fault, "folder probe completed");
+    result
+}
+
+// Check every folder at once, each abandoned after CHECK_TIMEOUT; results keep the input order.
+fn check_folders(folders: Vec<(&'static str, PathBuf, bool)>) -> Vec<Mount> {
+    let items = folders
+        .iter()
+        .map(|(role, path, w)| (path.clone(), (*role, path.clone(), *w)))
+        .collect();
+    let results = bounded_each(items, CHECK_TIMEOUT, |(role, path, w)| {
+        check_reporting(role, path, w)
+    });
+    folders
+        .iter()
+        .zip(results)
+        .map(|((role, path, _), r)| match r {
+            Bounded::Done(m) => m,
+            Bounded::TimedOut | Bounded::Busy => not_responding(role, path, CHECK_TIMEOUT),
+        })
+        .collect()
 }
 
 fn not_responding(role: &'static str, path: &Path, after: Duration) -> Mount {
@@ -588,40 +649,6 @@ fn not_responding(role: &'static str, path: &Path, after: Duration) -> Mount {
             after.as_secs()
         ),
     )
-}
-
-/// Whether the last check of `path` found it usable. `None` if never checked.
-pub fn folder_ok(path: &Path) -> Option<bool> {
-    LAST.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find(|m| m.path == path)
-        .map(|m| m.ok)
-}
-
-// Run `check` for every folder at once, so folders on one dead mount cost one timeout between
-// them, not one each. Results keep the input order.
-fn check_each<F>(folders: Vec<(&'static str, PathBuf, bool)>, check: F) -> Vec<Mount>
-where
-    F: Fn(&'static str, PathBuf, bool) -> Mount + Sync,
-{
-    std::thread::scope(|scope| {
-        let running: Vec<_> = folders
-            .into_iter()
-            .map(|(role, path, w)| {
-                let check = &check;
-                let again = path.clone();
-                (role, again, scope.spawn(move || check(role, path, w)))
-            })
-            .collect();
-        running
-            .into_iter()
-            .map(|(role, path, h)| {
-                h.join()
-                    .unwrap_or_else(|_| not_responding(role, &path, CHECK_TIMEOUT))
-            })
-            .collect()
-    })
 }
 
 // Carry a folder's history (since, last good, last error) from its previous check.
@@ -685,7 +712,8 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
 
 /// Check every folder once and publish the result.
 pub fn refresh(cfg: &Config) {
-    publish(check_each(folders(cfg), check_bounded), true);
+    let mounts = check_folders(folders(cfg));
+    publish(mounts, true);
 }
 
 /// Why a folder failed its preflight, in words the UI shows as they are.

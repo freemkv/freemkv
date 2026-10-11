@@ -2346,50 +2346,30 @@ fn check_destinations_with<F>(
     validate: F,
 ) -> Vec<(String, String)>
 where
-    F: Fn(&str) -> Result<(), String> + Clone + Send + 'static,
+    F: Fn(&str) -> Result<(), String> + Send + Sync + 'static,
 {
+    use crate::server::health::{Bounded, bounded_each};
     let roots = configured_destination_roots(cfg);
-    std::thread::scope(|scope| {
-        let running: Vec<_> = roots
-            .into_iter()
-            .map(|root| {
-                let validate = validate.clone();
-                let r = root.clone();
-                (
-                    root,
-                    scope.spawn(move || validate_bounded(&r, limit, validate)),
-                )
-            })
-            .collect();
-        running
-            .into_iter()
-            .filter_map(|(root, h)| match h.join() {
-                Ok(Ok(())) => None,
-                Ok(Err(reason)) => Some((root, reason)),
-                Err(_) => Some((
-                    root.clone(),
-                    format!("destination root '{root}' could not be checked"),
-                )),
-            })
-            .collect()
-    })
-}
-
-// `validate` on `root` through the folder health check's `bounded`: a root that does not
-// answer within `limit` fails as not responding, its probe left to finish on its own.
-fn validate_bounded<F>(root: &str, limit: std::time::Duration, validate: F) -> Result<(), String>
-where
-    F: Fn(&str) -> Result<(), String> + Send + 'static,
-{
-    use crate::server::health::{Bounded, bounded};
-    let owned = root.to_string();
-    match bounded(Path::new(root), limit, move || validate(&owned)) {
-        Bounded::Done(result) => result,
-        Bounded::TimedOut | Bounded::Busy => Err(format!(
-            "destination root '{root}' is not responding after {}s (a stale network mount?)",
-            limit.as_secs().max(1)
-        )),
-    }
+    let items = roots
+        .iter()
+        .map(|r| (std::path::PathBuf::from(r), r.clone()))
+        .collect();
+    let results = bounded_each(items, limit, move |r| validate(&r));
+    roots
+        .into_iter()
+        .zip(results)
+        .filter_map(|(root, r)| match r {
+            Bounded::Done(Ok(())) => None,
+            Bounded::Done(Err(reason)) => Some((root, reason)),
+            Bounded::TimedOut | Bounded::Busy => {
+                let reason = format!(
+                    "destination root '{root}' is not responding after {}s (a stale network mount?)",
+                    limit.as_secs().max(1)
+                );
+                Some((root, reason))
+            }
+        })
+        .collect()
 }
 
 // The distinct resolved destination roots `check_configured_destinations` validates.

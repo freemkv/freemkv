@@ -170,7 +170,7 @@ fn a_stuck_check_is_never_doubled() {
     let late = Instant::now() - Duration::from_secs(1);
     IN_FLIGHT.folders.lock().unwrap().push((p.clone(), late));
     let started = Instant::now();
-    let m = check_bounded("Library", p.clone(), false);
+    let m = check_folders(vec![("Library", p.clone(), false)]).remove(0);
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "a hung folder answers at once"
@@ -187,7 +187,7 @@ fn a_stuck_check_is_never_doubled() {
         .count();
     assert_eq!(n, 1);
     release(&p);
-    let fine = check_bounded("Library", t.path().to_path_buf(), false);
+    let fine = check_folders(vec![("Library", t.path().to_path_buf(), false)]).remove(0);
     assert!(fine.ok);
     assert!(
         !IN_FLIGHT
@@ -394,22 +394,34 @@ fn a_folder_keeps_its_history_across_checks() {
 
 #[test]
 fn folders_are_checked_concurrently_in_order() {
-    let folders: Vec<_> = (0..5)
-        .map(|i| ("Output", PathBuf::from(format!("/dead/{i}")), false))
+    let items: Vec<_> = (0..5)
+        .map(|i| (PathBuf::from(format!("/dead/{i}")), i))
         .collect();
     let started = Instant::now();
-    let out = check_each(folders, |role, path, _| {
+    let out = bounded_each(items, Duration::from_secs(2), |i| {
         std::thread::sleep(Duration::from_millis(300));
-        ok_mount(role, &path)
+        i
     });
     assert!(
         started.elapsed() < Duration::from_millis(900),
         "5 x 300ms checks ran one after another: {:?}",
         started.elapsed()
     );
-    let paths: Vec<_> = out.iter().map(|m| m.path.clone()).collect();
-    assert_eq!(paths[0], Path::new("/dead/0"));
-    assert_eq!(paths[4], Path::new("/dead/4"));
+    assert_eq!(out, (0..5).map(Bounded::Done).collect::<Vec<_>>());
+}
+
+#[test]
+fn hung_folders_in_one_batch_cost_one_timeout() {
+    let items: Vec<_> = (0..3)
+        .map(|i| (PathBuf::from(format!("/hung-batch/{i}")), i))
+        .collect();
+    let started = Instant::now();
+    let out = bounded_each(items, Duration::from_millis(300), |i| {
+        std::thread::sleep(Duration::from_secs(2));
+        i
+    });
+    assert!(started.elapsed() < Duration::from_millis(900));
+    assert!(out.iter().all(|r| *r == Bounded::TimedOut), "{out:?}");
 }
 
 #[cfg(unix)]
