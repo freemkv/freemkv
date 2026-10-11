@@ -714,7 +714,7 @@ pub(super) fn wait_for_job_lease<'a>(
                     waited,
                 };
             }
-            Err(std::sync::TryLockError::WouldBlock) => {}
+            Err(std::sync::TryLockError::WouldBlock) => note_lease_waiter(device),
         }
         let stopped = super::device_halt(device).is_some_and(|h| h.is_cancelled())
             || crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed);
@@ -741,35 +741,71 @@ fn lease_busy_message(device: &str) -> String {
     }
 }
 
-// Whether a job a resume waited for changed lifecycle meanwhile (e.g. the other
-// drive's mux finished it), so the resume's classification no longer holds.
-pub(super) fn changed_while_waiting(
-    before: Option<staging::StagingState>,
-    after: Option<staging::StagingState>,
-) -> bool {
+/// What a resume classified a job by: its lifecycle, its state file as written, and the
+/// capture files' sizes. A Start over that fails back to the same lifecycle still moves
+/// the state file and drops the capture.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct JobFingerprint {
+    state: Option<staging::StagingState>,
+    state_file: Option<(u64, Option<std::time::SystemTime>)>,
+    iso: Option<u64>,
+    mapfile: Option<u64>,
+}
+
+pub(super) fn job_fingerprint(staging_dir: &Path, iso: &Path, mapfile: &Path) -> JobFingerprint {
+    let size = |p: &Path| std::fs::metadata(p).ok().map(|m| m.len());
+    JobFingerprint {
+        state: staging::read_state(staging_dir).map(|s| s.state),
+        state_file: std::fs::metadata(staging_dir.join(staging::STATE_FILE))
+            .ok()
+            .map(|m| (m.len(), m.modified().ok())),
+        iso: size(iso),
+        mapfile: size(mapfile),
+    }
+}
+
+// Whether a job a resume waited for changed meanwhile (the other drive's mux finished it,
+// or a Start over wiped it), so the resume's classification no longer holds.
+pub(super) fn changed_while_waiting(before: &JobFingerprint, after: &JobFingerprint) -> bool {
     before != after
+}
+
+/// Hold a job in Review for `reason`, its capture and plan kept, and surface it the same way
+/// from every path: the device log and a System-tab card with `hint`. A hold that could not
+/// be saved says so on the card instead. `Ok` once the hold is saved.
+pub(super) fn hold_in_review(
+    device: &str,
+    (staging_dir, iso, mapfile): (&Path, &Path, &Path),
+    reason: &str,
+    hint: &str,
+) -> std::io::Result<()> {
+    crate::server::log::device_log(device, reason);
+    let held = staging::hold_title_identity_review(staging_dir, iso, mapfile, reason);
+    let hint = match &held {
+        Ok(()) => hint.to_string(),
+        Err(error) => crate::strings::fmt_or(
+            "error.plan.review_unsaved",
+            "The review hold could not be saved ({error}); the capture is kept. Fix the staging share, then Resume the disc.",
+            &[("error", &error.to_string())],
+        ),
+    };
+    crate::server::muxer::record_error(&staging_dir.to_string_lossy(), reason, &hint);
+    held
 }
 
 // A plan only the operator can settle (E9086, numbering): hold it in Review with the
 // ISO and outputs kept, so the mux worker stops re-dispatching it until a correction.
 fn hold_plan_for_review(
     device: &str,
-    (staging_dir, iso, mapfile): (&Path, &Path, &Path),
+    paths: (&Path, &Path, &Path),
     display_name: &str,
-    mut reason: String,
+    reason: String,
 ) {
-    if let Err(error) = staging::hold_title_identity_review(staging_dir, iso, mapfile, &reason) {
-        reason.push_str(&format!(" Could not save the review hold: {error}"));
-    }
-    crate::server::log::device_log(device, &reason);
-    crate::server::muxer::record_error(
-        &staging_dir.to_string_lossy(),
-        &reason,
-        &crate::strings::get_or(
-            "error.plan.review_retained",
-            "The saved ISO and plan are retained.",
-        ),
+    let hint = crate::strings::get_or(
+        "error.plan.review_retained",
+        "The saved ISO and plan are retained.",
     );
+    let _ = hold_in_review(device, paths, &reason, &hint);
     reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
 }
 
@@ -1031,11 +1067,11 @@ fn resume_remux_within<S>(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from(&cfg_read.staging_dir));
     let job_lease = staging::job_lease(&staging_dir);
-    let lifecycle = || staging::read_state(&staging_dir).map(|s| s.state);
-    let before = lifecycle();
+    let fingerprint = || job_fingerprint(&staging_dir, &iso_path, &mapfile_path);
+    let before = fingerprint();
     let _job_owner = match wait_for_job_lease(device, &job_lease, lease_wait) {
         LeaseWait::Acquired { guard, waited } => {
-            if waited && changed_while_waiting(before, lifecycle()) {
+            if waited && changed_while_waiting(&before, &fingerprint()) {
                 let msg = "this rip changed while another drive or the mux worker finished with it; nothing was re-muxed".to_string();
                 crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
                 reset_status_after_ripping(device, "idle", &display_name, "", "", Some(msg));
@@ -1278,19 +1314,12 @@ fn resume_remux_within<S>(
         plan_outputs = match rebind_resume_outputs(&disc.titles, &plan_outputs) {
             Ok(outputs) => outputs,
             Err(reason) => {
-                let mut reason = format!(
+                let reason = format!(
                     "{reason}. Use the Review queue to confirm or change the match and rebuild the plan from the saved ISO. No disc reread is needed."
                 );
-                if let Err(error) = staging::hold_title_identity_review(
-                    &staging_dir,
-                    &iso_path,
-                    &mapfile_path,
-                    &reason,
-                ) {
-                    reason.push_str(&format!(" Could not save the review hold: {error}"));
-                }
-                crate::server::muxer::record_error(
-                    &staging_dir.to_string_lossy(),
+                let _ = hold_in_review(
+                    device,
+                    (&staging_dir, &iso_path, &mapfile_path),
                     &reason,
                     "The saved ISO and outputs are unchanged. Confirm the match in the Review queue to replan without rereading the disc.",
                 );
@@ -2612,3 +2641,19 @@ mod capture_plan_tests;
 #[cfg(test)]
 #[path = "resume_lease_wait_tests.rs"]
 mod lease_wait_tests;
+
+#[cfg(not(test))]
+fn note_lease_waiter(_device: &str) {}
+
+// Devices seen waiting for a held job lease: a test's owner acts only once one waits.
+#[cfg(test)]
+pub(crate) static LEASE_WAITERS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+#[cfg(test)]
+fn note_lease_waiter(device: &str) {
+    LEASE_WAITERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(device.to_string());
+}

@@ -36,8 +36,19 @@ fn a_plan_hold_keeps_the_rip_keys_for_the_corrected_remux() {
     crate::server::keysource::forget_rip_keys(&iso);
 }
 
+// Cards are process-wide: a clear-all elsewhere must not run between the hold and the look.
+fn card_for(dir: &std::path::Path) -> Option<crate::server::muxer::MuxerError> {
+    crate::server::muxer::MUX_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(dir.to_string_lossy().as_ref())
+}
+
 #[test]
 fn a_hold_that_cannot_be_written_raises_a_card() {
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = scratch("unwritable");
     std::fs::write(dir.join(staging::STATE_FILE), b"{not json").unwrap();
     hold_capture_for_review(
@@ -47,14 +58,36 @@ fn a_hold_that_cannot_be_written_raises_a_card() {
         None,
         "held",
     );
-    let cards = crate::server::muxer::MUX_ERRORS
+    let card = card_for(&dir).expect("no card for the lost hold");
+    assert_eq!(card.reason, "held");
+    assert!(card.hint.contains("could not be saved"), "{}", card.hint);
+}
+
+// A capture held at the hand-off is surfaced as a resume's hold is: a card naming why.
+#[test]
+fn a_capture_held_for_review_is_surfaced_like_a_resume_hold() {
+    let _g = crate::server::mover::TEST_STATE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let card = cards.get(dir.to_string_lossy().as_ref());
-    assert!(
-        card.is_some_and(|c| c.reason == "held"),
-        "no card for the lost hold"
+    let dir = scratch("surfaced");
+    staging::try_write_state(
+        &dir,
+        &staging::DiscState::new(staging::StagingState::Sweeping),
+    )
+    .unwrap();
+    hold_capture_for_review(
+        "dev-hold-3",
+        &dir,
+        ("/x/Show.iso", "/x/Show.iso.mapfile"),
+        None,
+        "held",
     );
+    assert_eq!(
+        staging::read_state(&dir).unwrap().state,
+        staging::StagingState::Review
+    );
+    let card = card_for(&dir).expect("no card for the hold");
+    assert_eq!(card.reason, "held");
 }
 
 // The rip-time hold as a capture leaves it: Sweeping, its failed plan's outputs cleared,

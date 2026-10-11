@@ -619,10 +619,7 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
         // A fresh dispatch may produce a new/different error — lift any prior
         // operator dismissal so a genuinely new failure can surface again.
         undismiss(&dir.to_string_lossy());
-        let mux_slot = crate::server::library::arbiter::claim_for_rip();
-        let outcome =
-            crate::server::ripper::resume::remux_from_ripped_marker(cfg_arc, &dir, &marker);
-        drop(mux_slot);
+        let outcome = mux_marker(cfg_arc, &dir, &marker);
         if outcome.success {
             clear_error(&dir.to_string_lossy());
             tracing::info!(staging = %dir.display(), title = %title, "mux worker: completed");
@@ -828,6 +825,16 @@ pub fn pending_queue(staging_dir: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+// Mux one hand-off. Its resume takes the mux slot (which stops a Library remux) only once
+// the job's lease is its own, never while it waits for another owner.
+pub(crate) fn mux_marker(
+    cfg: &std::sync::Arc<std::sync::RwLock<crate::server::config::Config>>,
+    dir: &std::path::Path,
+    marker: &RippedMarker,
+) -> crate::server::ripper::resume::MuxHandoffOutcome {
+    crate::server::ripper::resume::remux_from_ripped_marker(cfg, dir, marker)
 }
 
 #[cfg(test)]

@@ -5272,9 +5272,9 @@ fn hand_off_to_mux_worker(
     written
 }
 
-// Hold a finished capture whose plan only the operator can settle in Review, keeping
-// the rip's keys for the remux its correction triggers. A hold that did not land is
-// surfaced; the capture stays resumable (Stopped) either way.
+// Hold a finished capture whose plan only the operator can settle in Review, as a resume
+// holds one (`resume::hold_in_review`), keeping the rip's keys for the remux its correction
+// triggers. A hold that did not land leaves the capture as it was, and its card says so.
 fn hold_capture_for_review(
     device: &str,
     staging_path: &std::path::Path,
@@ -5282,32 +5282,22 @@ fn hold_capture_for_review(
     keys: Option<&libfreemkv::keys::KeyRing>,
     reason: &str,
 ) {
-    crate::server::log::device_log(device, reason);
     let iso = std::path::Path::new(iso);
-    match staging::hold_title_identity_review(
-        staging_path,
-        iso,
-        std::path::Path::new(mapfile),
-        reason,
-    ) {
+    let hint = crate::strings::get_or(
+        "error.plan.review_retained",
+        "The saved ISO and plan are retained.",
+    );
+    let paths = (staging_path, iso, std::path::Path::new(mapfile));
+    match resume::hold_in_review(device, paths, reason, &hint) {
         Ok(()) => {
             if let Some(set) = keys {
                 crate::server::keysource::hold_rip_keys(iso, set.clone());
             }
         }
-        Err(e) => {
-            crate::server::log::syslog(&format!(
-                "Review hold for {} did not persist: {e}",
-                staging_path.display()
-            ));
-            crate::server::muxer::record_error(
-                &staging_path.to_string_lossy(),
-                reason,
-                &format!(
-                    "the review hold could not be saved ({e}); the capture is kept — fix the staging share, then Resume the disc"
-                ),
-            );
-        }
+        Err(e) => crate::server::log::syslog(&format!(
+            "Review hold for {} did not persist: {e}",
+            staging_path.display()
+        )),
     }
 }
 
