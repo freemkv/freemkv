@@ -2331,9 +2331,10 @@ fn check_and_move(cfg: &Config) {
         // webhook happen once per delivery: `announced` records both, so a re-pass whose
         // teardown failed earlier neither rewrites the links nor wakes the indexer again.
         if !delivered.announced() {
-            if let Err(error) = crate::server::library::links::record_delivery(
+            let stamps = delivered.delivered_stamps();
+            if let Err(error) = crate::server::library::links::record_delivery_stamped(
                 &cfg.autorip_dir,
-                planned_moves.iter().map(|(_, d)| d.as_str()),
+                stamps.iter().map(|(d, s)| (d.as_str(), *s)),
             ) {
                 record_error(
                     &dir_str,

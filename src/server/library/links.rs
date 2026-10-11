@@ -231,6 +231,7 @@ fn record_many(
 
 /// Link every MKV in one completed delivery batch to its sole source ISO, each stamped as
 /// it is on disk now; [`record_delivery_stamped`] takes the stamps the delivery verified.
+#[cfg(test)]
 pub fn record_delivery<'a>(
     config_dir: &str,
     delivered: impl IntoIterator<Item = &'a str>,

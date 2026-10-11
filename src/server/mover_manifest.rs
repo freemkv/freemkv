@@ -278,6 +278,20 @@ impl Manifest {
             .collect()
     }
 
+    /// Each planned destination with the stamp its delivery verified.
+    pub fn delivered_stamps(&self) -> Vec<(String, Option<Stamp>)> {
+        self.entries
+            .iter()
+            .map(|e| {
+                let planned = e.planned.clone();
+                (
+                    planned.unwrap_or_else(|| e.destination.to_string_lossy().into_owned()),
+                    e.prepared,
+                )
+            })
+            .collect()
+    }
+
     pub fn moves(&self) -> Vec<(PathBuf, String)> {
         self.entries
             .iter()
