@@ -17,7 +17,7 @@ function storageFolderRow(m) {
   const tone = state === 'ok' ? 'ok' : state === 'unresponsive' ? 'warn' : 'bad';
   const health = state === 'ok' ? 'Accessible' : (m.message || state);
   return '<tr><td class="title"><b>' + esc(m.role) + '</b><span class="path mono" title="' + esc(m.path) + '">' + esc(m.path) + '</span></td>'
-    + '<td><span class="dot dot-' + tone + '"></span> ' + esc(health) + '</td>'
+    + '<td><span class="health"><span class="dot dot-' + tone + '"></span><span>' + esc(health) + '</span></span></td>'
     + '<td>' + (used != null ? '<div class="bar"><i style="width:' + used.toFixed(1) + '%;' + (tone === 'warn' ? 'background:#d97706' : '') + '"></i></div><span class="note">' + bytes(m.free_bytes) + ' free of ' + bytes(m.total_bytes) + '</span>' : '<span class="muted small">–</span>') + '</td>'
     + '<td class="nowrap"><span class="muted small">' + esc(m.last_ok ? ago(m.last_ok) : 'never') + '</span></td>'
     + '<td>' + (m.last_error ? '<span class="small">' + esc(m.last_error) + '</span><span class="note">' + esc(ago(m.last_error_at)) + '</span>' : '<span class="muted small">–</span>') + '</td>'

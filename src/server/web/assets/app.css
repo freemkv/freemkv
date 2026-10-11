@@ -166,6 +166,7 @@ table.list td.title b { font-weight: 650; }
 table.list td.title .path { display: block; font-size: 0.76rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 26rem; }
 table.list td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.list td.nowrap { white-space: nowrap; }
+table.list .health { display: flex; gap: 0.4rem; align-items: baseline; }
 table.list td.act { text-align: right; white-space: nowrap; }
 table.list th.center, table.list td.center { text-align: center; }
 table.list tr.grey td { color: var(--muted); }
