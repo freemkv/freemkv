@@ -345,7 +345,6 @@ fn episode_disc() -> Scanned {
         title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
             roster: "fixture:episode-menu".into(),
             title_count: titles.len(),
-            member: role == Episode,
             ordinal: (role == Episode).then(|| ti / 2 - 1),
         };
         model_titles.push(title);

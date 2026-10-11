@@ -510,7 +510,6 @@ mod tests {
             title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
                 roster: "test-menu".into(),
                 title_count: 3,
-                member: true,
                 ordinal: Some(ordinal),
             };
         }
@@ -570,7 +569,6 @@ mod tests {
             title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
                 roster: "test-menu".into(),
                 title_count,
-                member: (1..=6).contains(&index),
                 ordinal: (1..=6).contains(&index).then(|| (index - 1) / 2),
             };
         }
@@ -637,7 +635,6 @@ mod tests {
                 title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
                     roster: "test-menu".into(),
                     title_count: 2,
-                    member: index < members,
                     ordinal: (index < members).then_some(index),
                 };
             }
@@ -662,7 +659,6 @@ mod tests {
             t.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
                 roster: "test-menu".into(),
                 title_count: 2,
-                member: true,
                 ordinal: Some(index),
             };
         }

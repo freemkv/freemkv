@@ -89,7 +89,6 @@ fn authored(titles: &mut [DiscTitle], members: &[usize]) {
         title.selection_evidence.episodes = EpisodeEvidence::Authored {
             roster: "fixture:verified-menu".into(),
             title_count,
-            member: members.contains(&index),
             ordinal: orders.get(&index).copied(),
         };
     }
