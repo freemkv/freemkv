@@ -241,16 +241,22 @@ fn commit_stall(path: &str) {
     schedule_move_retry_with(path, |_| {});
 }
 
-// The stalled worker returned: the backoff committed at the stall applies from now on.
+// The stalled worker returned: the stall's attempt stands, and its backoff runs from now (a
+// share back from a long hang is not copied to again at once), recorded afresh.
 fn finish_stall(path: &str) {
     let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
     match errors
         .get_mut(path)
         .and_then(|row| Some((row.stall_resume.take()?, row)))
     {
-        Some((resume, row)) => {
-            row.retry_after = resume;
-            row.retry_held = resume.is_none();
+        Some((Some(_), row)) => {
+            let attempts = row.attempts;
+            drop(errors);
+            commit_retry(path, attempts, retry_delay(attempts));
+        }
+        Some((None, row)) => {
+            row.retry_after = None;
+            row.retry_held = true;
         }
         None => {
             drop(errors);
