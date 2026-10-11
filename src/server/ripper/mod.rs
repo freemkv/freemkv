@@ -4294,15 +4294,13 @@ fn rip_disc_inner(
         let plan = match planned {
             Ok(plan) => plan,
             Err(error) => {
-                let reason = selection_review_message(&error);
-                hold_capture_for_review(
+                hold_failed_plan(
                     device,
                     std::path::Path::new(&staging),
                     (&iso_path_str, &mapfile_path_str),
                     rip_keys.as_ref().ok(),
-                    &reason,
+                    &error,
                 );
-                unregister_halt(device);
                 return;
             }
         };
@@ -5391,6 +5389,25 @@ fn hold_capture_for_review(
         s.status = "error".into();
         s.last_error = status;
     });
+}
+
+// The capture's plan failed: hold it in Review and release the rip's halt. Nothing after the
+// hold may rewrite the drive row, or a hold that was not saved loses its say.
+fn hold_failed_plan(
+    device: &str,
+    staging_path: &std::path::Path,
+    paths: (&str, &str),
+    keys: Option<&libfreemkv::keys::KeyRing>,
+    error: &crate::server::planner::PlanError,
+) {
+    hold_capture_for_review(
+        device,
+        staging_path,
+        paths,
+        keys,
+        &selection_review_message(error),
+    );
+    unregister_halt(device);
 }
 
 // The sweep damage figures the passes pushed into `device`'s STATE row.

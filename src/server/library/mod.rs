@@ -1530,13 +1530,7 @@ impl Library {
             matched.push(job);
         }
         // Matched rows go first: links that cannot be read refuse the whole request.
-        added += self.add_matched(matched).map_err(|why| {
-            crate::strings::fmt_or(
-                "server.library.nothing_queued",
-                "{reason} Nothing was queued.",
-                &[("reason", &why)],
-            )
-        })?;
+        added += self.add_matched(matched)?;
         if !plain.is_empty() {
             added += self.queue.add(plain);
         }
@@ -1549,7 +1543,17 @@ impl Library {
         if rows.is_empty() {
             return Ok(0);
         }
-        let links = worker::links_for_job(&self.config_dir).map_err(|e| e.to_string())?;
+        // No job exists yet, so this refusal says nothing was queued rather than "Retry".
+        let links = links::read_entries(&self.config_dir).map_err(|e| {
+            crate::strings::fmt_or(
+                "server.library.links_unreadable_nothing_queued",
+                "{path} cannot be read ({error}); nothing was queued. Fix that file or its folder's permissions, then try again.",
+                &[
+                    ("path", &self.config_dir.join(links::LINKS_FILE).display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            )
+        })?;
         let episode = |j: &NewJob| {
             links
                 .get(&j.target)
