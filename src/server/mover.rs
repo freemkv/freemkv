@@ -219,19 +219,31 @@ fn hold_for_operator(path: &str) {
 static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(Default::default);
 
+// The longest backoff [`retry_delay`] gives: no restored wait is ever longer.
+const LONGEST_BACKOFF: std::time::Duration = std::time::Duration::from_secs(120);
+
 // Derive the row's retry fields from a retry state, the journal's record of them.
 fn apply_retry(row: &mut MoverError, state: &manifest::RetryState) {
+    apply_retry_at(row, state, std::time::Instant::now());
+}
+
+// `apply_retry` as of `now`. The journal's wall-clock time is staging data: a far-future
+// value (corruption, a clock stepped back) is clamped, never added unchecked.
+fn apply_retry_at(row: &mut MoverError, state: &manifest::RetryState, now: std::time::Instant) {
     row.attempts = state.attempts;
     row.retry_after = state.not_before.map(|t| {
-        std::time::Instant::now()
-            + t.duration_since(std::time::SystemTime::now())
-                .unwrap_or_default()
+        let left = t
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default()
+            .min(LONGEST_BACKOFF);
+        now.checked_add(left).unwrap_or(now)
     });
     row.retry_held = row.retry_after.is_none();
 }
 
 // A journaled dir's retry state is written first and is authoritative, so neither a
-// restart nor a reboot buys another full-file copy; the row is then derived from it.
+// restart nor a reboot buys another full-file copy; the row is then derived from it. A
+// state that cannot be saved holds the delivery: the stale journal would reset the count.
 fn commit_retry(path: &str, attempts: u32, delay: Option<std::time::Duration>) {
     let Some(row) = MOVE_ERRORS
         .lock()
@@ -247,16 +259,26 @@ fn commit_retry(path: &str, attempts: u32, delay: Option<std::time::Duration>) {
         reason: row.reason,
         hint: row.hint,
     };
-    if let Err(error) = manifest::Manifest::record_retry(Path::new(path), Some(state.clone())) {
-        tracing::warn!(%error, dir = path, "mover: retry state not persisted");
-    }
-    if let Some(row) = MOVE_ERRORS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_mut(path)
-    {
-        apply_retry(row, &state);
-    }
+    let saved = manifest::Manifest::record_retry(Path::new(path), Some(state.clone()));
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(row) = errors.get_mut(path) else {
+        return;
+    };
+    apply_retry(row, &state);
+    let Err(error) = saved else {
+        return;
+    };
+    tracing::warn!(%error, dir = path, "mover: retry state not persisted");
+    row.retry_after = None;
+    row.retry_held = true;
+    row.reason = format!(
+        "{}; automatic retries stopped because the retry state could not be saved: {error}",
+        row.reason
+    );
+    row.hint = "Free space on the staging storage or make it writable, then choose Retry. Staged source files are retained.".into();
+    let line = format!("Move held: {path} — {}", row.reason);
+    drop(errors);
+    crate::server::log::syslog(&line);
 }
 
 // Whether a journaled dir may attempt delivery now, and whether the operator asked.
@@ -290,11 +312,27 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             Attempt::Requested
         };
     }
-    let Some(state) = saved.retry() else {
-        return Attempt::Due;
-    };
     let now = std::time::Instant::now();
+    let Some(state) = saved.retry() else {
+        return if move_retry_ready(path, now) {
+            Attempt::Due
+        } else {
+            Attempt::Wait
+        };
+    };
     let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    // A count ahead of the journal's is one the journal failed to record: it stands.
+    if errors
+        .get(path)
+        .is_some_and(|row| row.attempts > state.attempts)
+    {
+        drop(errors);
+        return if move_retry_ready(path, now) {
+            Attempt::Due
+        } else {
+            Attempt::Wait
+        };
+    }
     let row = errors
         .entry(path.to_string())
         .or_insert_with(|| MoverError {
@@ -311,7 +349,7 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             retry_after: None,
             owner: None,
         });
-    apply_retry(row, state);
+    apply_retry_at(row, state, now);
     drop(errors);
     if move_retry_ready(path, now) {
         Attempt::Due
