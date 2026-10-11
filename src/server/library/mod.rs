@@ -214,8 +214,7 @@ pub fn folder_views(d: &Dirs) -> Vec<FolderView> {
             // A folder whose check is still out is not usable yet, but has not failed.
             let (message, hint) = match health.as_ref() {
                 Some(m) if m.state == health::State::Checking => {
-                    let waited = std::time::Duration::from_millis(m.latency_ms.unwrap_or(0));
-                    (Some(health::checking_message(role, waited)), m.hint.clone())
+                    (Some(health::checking_message(role)), m.hint.clone())
                 }
                 Some(m) if m.state != health::State::Ok => {
                     let f = m.fault.unwrap_or(health::Fault::Other);

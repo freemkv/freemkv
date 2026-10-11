@@ -1342,6 +1342,10 @@ fn check_and_move(cfg: &Config) {
         } else {
             unreachable_root(cfg, &tmdb_result, &planned_moves, &mut root_checks)
         };
+        // A check the server's stop cut short says nothing about the folder: no row, no log.
+        if root_checks.stopped {
+            continue;
+        }
         if let Some(p) = unavailable {
             record_error_at_stage(
                 &dir_str,
@@ -1452,6 +1456,9 @@ fn check_and_move(cfg: &Config) {
                 .err()
                 .map(|reason| (r.clone(), reason))
         });
+        if root_checks.stopped {
+            continue;
+        }
         if let Some((dest_root, reason)) = blocked_root {
             // Health already logged an unusable root; the error row still updates.
             let logged = crate::server::health::already_reported(Path::new(&dest_root));
@@ -2222,6 +2229,8 @@ fn validate_root_checked(root: &str, checks: &mut RootChecks) -> Result<(), Stri
 
 // The bounded write test of each destination root, run at most once per move attempt.
 struct RootChecks {
+    // A check was cut short by the server stopping.
+    stopped: bool,
     limit: std::time::Duration,
     probe: fn(&Path) -> std::io::Result<()>,
     done: Vec<(
@@ -2243,6 +2252,7 @@ impl RootChecks {
     // The limit and the probe given (the tests inject a slow one).
     fn with(limit: std::time::Duration, probe: fn(&Path) -> std::io::Result<()>) -> Self {
         RootChecks {
+            stopped: false,
             limit,
             probe,
             done: Vec::new(),
@@ -2256,6 +2266,7 @@ impl RootChecks {
         #[cfg(test)]
         test_hooks::preflighted(root);
         let result = crate::server::health::preflight_with("output", root, self.limit, self.probe);
+        self.stopped |= result.as_ref().is_err_and(|p| p.stopped());
         self.done.push((root.to_path_buf(), result.clone()));
         result
     }

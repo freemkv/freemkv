@@ -338,9 +338,10 @@ fn stop_services(
             move || ripper::staging::clear_inprogress_markers(&staging),
         )
     };
-    // Rips and services share one budget from here: time the rips leave goes to the services.
-    let services_deadline = Instant::now() + bounds.rips + bounds.services;
     let mut done = clear_markers(progress);
+    // Rips and services share one budget from here (the marker sweep has its own): time the
+    // rips leave goes to the services.
+    let services_deadline = Instant::now() + bounds.rips + bounds.services;
     progress.start("rip threads");
     for (name, _) in &workers {
         progress.start(name);

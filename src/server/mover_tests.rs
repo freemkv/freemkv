@@ -3756,3 +3756,34 @@ fn a_move_write_tests_its_root_once() {
     );
     assert_eq!(probes.count(), 1);
 }
+
+// A delivery whose folder check the server's stop cut short is neither blocked nor logged:
+// the check said nothing about the folder.
+#[test]
+fn a_stop_during_the_folder_check_records_nothing() {
+    let _g = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let disc_dir = staging.join("Stopped");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Stopped")).unwrap();
+    std::fs::write(disc_dir.join("Stopped.mkv"), [0x1A, 0x45, 0xDF, 0xA3]).unwrap();
+    crate::server::health::tests::STOPPING.with(|s| s.set(true));
+    check_and_move(&cfg);
+    crate::server::health::tests::STOPPING.with(|s| s.set(false));
+    assert!(disc_dir.join("Stopped.mkv").exists(), "kept in staging");
+    assert!(
+        MOVE_ERRORS
+            .lock()
+            .unwrap()
+            .get(&*disc_dir.to_string_lossy())
+            .is_none(),
+        "no error row for a stop"
+    );
+}

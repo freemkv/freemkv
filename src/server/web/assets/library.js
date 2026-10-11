@@ -249,7 +249,9 @@ export default {
       let b = a.querySelector('.nav-badge');
       if ((running || held) && !b) { b = document.createElement('span'); a.appendChild(b); }
       if (b) {
-        b.className = 'nav-badge dot' + (held ? ' bad' : '');
+        // Red only for a failed folder; one still being checked is merely slow.
+        const failed = bad || (held && held.state !== 'checking');
+        b.className = 'nav-badge dot' + (failed ? ' bad' : '');
         b.setAttribute('aria-label', held ? 'Remuxes are waiting for a folder' : 'A remux is running');
       }
       if (!running && !held && b) b.remove();

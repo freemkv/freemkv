@@ -8,6 +8,20 @@ thread_local! {
     pub(crate) static STOPPING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+// Folders some caller has waited on for an earlier probe.
+static WAITED_ON: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+pub(crate) fn waiting(key: &Path) {
+    let mut w = WAITED_ON.lock().unwrap_or_else(|e| e.into_inner());
+    if !w.iter().any(|p| p == key) {
+        w.push(key.to_path_buf());
+    }
+}
+
+fn someone_waited_on(key: &Path) -> bool {
+    WAITED_ON.lock().unwrap().iter().any(|p| p == key)
+}
+
 // Whether a probe of `path` is in flight on its current mount.
 fn probing(path: &Path) -> bool {
     in_flight_for(path, mount_key(path)).is_some()
@@ -125,6 +139,7 @@ fn stuck_probe(path: &Path, mount: MountKey, started: Option<Instant>) -> HungPr
         path: path.to_path_buf(),
         mount,
         started,
+        seq: observed_now(),
     });
     HungProbe(id)
 }
@@ -145,7 +160,7 @@ pub(crate) fn ok_mount(role: &'static str, path: &Path) -> Mount {
 }
 
 pub(crate) fn checking_mount(role: &'static str, path: &Path) -> Mount {
-    Mount::checking(role, path, CHECK_TIMEOUT)
+    Mount::checking(role, path)
 }
 
 pub(crate) fn bad_mount(role: &'static str, path: &Path, fault: Fault) -> Mount {
@@ -712,17 +727,22 @@ fn a_preflight_waiting_to_the_hang_bound_publishes_the_hang() {
     let t = tempfile::tempdir().unwrap();
     let dir = t.path().to_path_buf();
     publish(vec![ok_mount("Movies", &dir)], false);
-    let hang = Duration::from_millis(300);
+    let hang = Duration::from_secs(2);
     // Someone else's probe answers part-way through the wait: our own probe starts late, and
     // still gets the whole hang bound before it counts as hung.
     let earlier = stuck_probe(&dir, mount_key(&dir), Some(Instant::now()));
-    let answers = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(150));
-        drop(earlier);
-    });
     let (probe, open) = gated();
-    let p = preflight_hanging_after("output", &dir, hang, hang, probe).unwrap_err();
-    answers.join().unwrap();
+    let caller = {
+        let dir = dir.clone();
+        std::thread::spawn(move || preflight_hanging_after("output", &dir, hang, hang, probe))
+    };
+    eventually("the caller waits on the earlier probe", || {
+        someone_waited_on(&dir)
+    });
+    // Well into the wait (far from the earlier probe's own hang bound), it answers.
+    std::thread::sleep(hang / 4);
+    drop(earlier);
+    let p = caller.join().unwrap().unwrap_err();
     assert_eq!(p.fault, Fault::Unresponsive);
     assert!(p.detail.starts_with("no answer for"), "{}", p.detail);
     assert_eq!(status_for(&dir).unwrap().state, State::Unresponsive);
@@ -749,7 +769,7 @@ fn a_slow_check_reads_checking_until_it_hangs() {
     .expect("a verdict");
     assert_eq!(m.state, State::Checking);
     assert!(!m.ok && !m.state.failed());
-    assert!(m.latency_ms.unwrap() >= 30);
+    assert_eq!(m.latency_ms, None, "not known yet");
     assert!(m.message.unwrap().contains("still checking"));
     drop(young);
     let _old = stuck_probe(&p, mount_key(&p), None);
@@ -775,7 +795,7 @@ fn older_evidence_never_replaces_a_newer_row() {
     assert!(status_for(p).unwrap().ok, "a late single publish");
     publish_slots(vec![Slot::New(Box::new(hung))], true);
     assert!(status_for(p).unwrap().ok, "a late full publish");
-    let checking = Mount::checking("Movies", p, CHECK_TIMEOUT);
+    let checking = Mount::checking("Movies", p);
     publish(vec![checking], false);
     assert_eq!(status_for(p).unwrap().state, State::Checking, "newer wins");
     set_mounts(Vec::new());
@@ -803,15 +823,61 @@ fn a_probe_stuck_on_a_replaced_mount_does_not_hold_the_new_one() {
         begin_keyed(p, new, soon(), HANG_AFTER, || 2).wait(),
         Bounded::Done(2)
     );
-    let renewed = MountKey {
-        generation: 1,
-        mount: Some(1),
-    };
+    // Without a kernel mount id, health's own remount generation tells the mounts apart.
+    let q = Path::new("/test/remounted-no-id");
+    let _stuck = stuck_probe(q, key_for(0, None), None);
     assert_eq!(
-        begin_keyed(p, renewed, soon(), HANG_AFTER, || 3).wait(),
+        begin_keyed(q, key_for(1, None), soon(), HANG_AFTER, || 3).wait(),
         Bounded::Done(3),
-        "health's own remount counts too"
+        "health's own remount counts there"
     );
+}
+
+// Health remounting its own share must not re-key folders on other mounts: a probe hung on
+// an unrelated share stays the only one for its folder.
+#[test]
+fn a_remount_of_one_share_does_not_double_probes_on_another() {
+    let p = Path::new("/test/other-share");
+    let _stuck = stuck_probe(p, key_for(0, Some(7)), None);
+    let after_remount = key_for(1, Some(7));
+    assert_eq!(after_remount, key_for(0, Some(7)));
+    let soon = Wait::Until(Instant::now() + Duration::from_secs(5));
+    assert_eq!(
+        begin_keyed(p, after_remount, soon, HANG_AFTER, || 1).wait(),
+        Bounded::Busy,
+        "a second thread stuck on the same hung share"
+    );
+}
+
+// A verdict drawn from a probe being out ranks below that probe's own answer, even when the
+// verdict is built (and published) after the answer landed.
+#[test]
+fn a_verdict_about_a_probe_never_outranks_its_answer() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let p = PathBuf::from("/test/answer-vs-verdict");
+    let probe = stuck_probe(&p, mount_key(&p), Some(Instant::now()));
+    // The probe answers (its answer is seen after it started)...
+    publish(vec![answered(ok_mount("Movies", &p))], false);
+    // ...and a round that found it still out publishes its verdict afterwards.
+    let row = vec![("Movies", p.clone(), false)];
+    let hung = check_folders(row.clone(), Duration::ZERO, Duration::ZERO).remove(0);
+    let hung = hung.expect("hung");
+    assert_eq!(hung.state, State::Unresponsive);
+    publish(vec![hung], false);
+    assert!(
+        status_for(&p).unwrap().ok,
+        "the hang verdict overwrote the answer"
+    );
+    let checking = check_folders(row, Duration::ZERO, Duration::from_secs(3600)).remove(0);
+    let checking = checking.expect("checking");
+    assert_eq!(checking.state, State::Checking);
+    publish(vec![checking], false);
+    assert!(
+        status_for(&p).unwrap().ok,
+        "the checking verdict overwrote the answer"
+    );
+    drop(probe);
+    set_mounts(Vec::new());
 }
 
 // Every path resolves to the mount holding it, from the mount table alone.
