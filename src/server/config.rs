@@ -503,7 +503,9 @@ fn boot_dirs(cfg: &Config, output_relocated: bool) -> Vec<String> {
         format!("{}/freemkv", cfg.autorip_dir),
         cfg.staging_dir.clone(),
     ];
-    if output_relocated {
+    // The relocated default is ours to create, also once Settings has persisted it.
+    let default_output = std::path::Path::new(&cfg.autorip_dir).join("output");
+    if output_relocated || std::path::Path::new(&cfg.output_dir) == default_output {
         dirs.push(cfg.output_dir.clone());
     }
     dirs

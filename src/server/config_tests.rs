@@ -902,3 +902,15 @@ fn boot_still_creates_the_relocated_default_output() {
     };
     assert!(boot_dirs(&cfg, true).contains(&cfg.output_dir));
 }
+
+#[test]
+fn boot_recreates_the_persisted_relocated_default_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        autorip_dir: temp.path().to_string_lossy().into_owned(),
+        output_dir: temp.path().join("output").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    // A saved Settings page persisted the relocated default; the next boot does not relocate.
+    assert!(boot_dirs(&cfg, false).contains(&cfg.output_dir));
+}
