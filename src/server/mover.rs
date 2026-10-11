@@ -265,6 +265,17 @@ fn finish_stall(path: &str) {
     }
 }
 
+// A delivery refused before its journal exists has none to count in: its row carries the
+// backoff (30 s, 2 min, then held for Retry). In memory: a restart tries again.
+fn back_off_unjournaled(path: &str) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(row) = errors.get_mut(path) {
+        row.attempts = row.attempts.saturating_add(1);
+        row.retry_after = retry_delay(row.attempts).map(|d| std::time::Instant::now() + d);
+        row.retry_held = row.retry_after.is_none();
+    }
+}
+
 fn schedule_failed_delivery(path: &str, outcomes: &[MoveOutcome]) {
     if outcomes.iter().any(|outcome| {
         matches!(
@@ -1466,11 +1477,17 @@ fn check_and_move(cfg: &Config) {
             Some(saved) => restore_retry(&dir.to_string_lossy(), saved),
             None => {
                 // Nothing to reset without a journal: the Retry is spent on this pass.
-                RETRY_REQUESTS
+                let requested = RETRY_REQUESTS
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .remove(dir.to_string_lossy().as_ref());
-                Attempt::Due
+                    .remove(dir.to_string_lossy().as_ref())
+                    .is_some();
+                if requested || move_retry_ready(&dir.to_string_lossy(), std::time::Instant::now())
+                {
+                    Attempt::Due
+                } else {
+                    Attempt::Wait
+                }
             }
         };
         if attempt == Attempt::Wait {
@@ -1943,6 +1960,12 @@ fn check_and_move(cfg: &Config) {
             Some(saved) if attempt == Attempt::Recreate => saved.folders(),
             Some(_) => Vec::new(),
         };
+        // Every episode of a season shares one folder: made (or checked) once.
+        let mut distinct = std::collections::HashSet::new();
+        let folders: Vec<_> = folders
+            .into_iter()
+            .filter(|f| distinct.insert(f.clone()))
+            .collect();
         let mut created = Vec::new();
         let mut dest_ok = true;
         for (root, folder) in &folders {
@@ -1980,6 +2003,8 @@ fn check_and_move(cfg: &Config) {
             ) {
                 Ok(saved) => {
                     planned_moves = saved.moves();
+                    // A frozen plan is a new delivery: earlier refusals' backoff is spent.
+                    clear_error(&dir_str);
                 }
                 Err(e) => {
                     // A save that failed after its rename left a journal naming these folders.
@@ -1991,6 +2016,7 @@ fn check_and_move(cfg: &Config) {
                         &format!("cannot persist delivery plan: {e}"),
                         "Staged sources are retained; repair storage or the conflicting destination and retry.",
                     );
+                    back_off_unjournaled(&dir_str);
                     continue;
                 }
             }

@@ -3520,6 +3520,58 @@ fn check_and_move_card_carries_the_create_dir_error() {
     assert!(disc_dir.join("Blocked.mkv").exists(), "staging preserved");
 }
 
+// A delivery plan that cannot be saved (staging full or read-only) is not retried every
+// tick, making and removing the title folders on the share each time: it backs off.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_delivery_plan_backs_off() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let disc_dir = staging.join("Unsaved");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Unsaved")).unwrap();
+    write_minimal_mkv(&disc_dir.join("Unsaved.mkv"), &[0xAA; 1024]);
+    let restore = RestoreModes(vec![(disc_dir.clone(), 0o755)]);
+    std::fs::set_permissions(&disc_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::File::create(disc_dir.join("root-check")).is_ok() {
+        eprintln!("SKIP an_unsaved_delivery_plan_backs_off: running as root");
+        return;
+    }
+    let dir_str = disc_dir.to_string_lossy().to_string();
+    let _g = errors_guard();
+    clear_error(&dir_str);
+    check_and_move(&cfg);
+    let first = error_snapshot(&dir_str);
+    check_and_move(&cfg);
+    let second = error_snapshot(&dir_str);
+    clear_error(&dir_str);
+    drop(restore);
+    let first = first.expect("a row");
+    assert!(
+        first.reason.starts_with("cannot persist delivery plan"),
+        "{first:?}"
+    );
+    let due = first.retry_after.expect("not held after one failure");
+    assert!(
+        due > std::time::Instant::now() + std::time::Duration::from_secs(20),
+        "retried on the next tick: {first:?}"
+    );
+    assert_eq!(
+        second.expect("a row").attempts,
+        first.attempts,
+        "not tried again"
+    );
+    assert!(
+        !movie_dir.join("Unsaved (2024)").exists(),
+        "its folder is not left behind"
+    );
+}
+
 // A copy that fails post-copy validation must not leave its broken file at
 // the library name (the next tick's variant search would file around it).
 #[cfg(unix)]
