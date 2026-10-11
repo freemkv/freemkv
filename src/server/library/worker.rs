@@ -9,6 +9,7 @@ use super::queue::{Failure, Job, JobNote, JobResult, NewJob, OutputState, Staged
 use super::{Dirs, Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use crate::server::health::{self, Fault, Problem};
+use crate::server::planner::MediaKind;
 use freemkv_engine::{Event, Level, Progress, Sink};
 use std::io::Write as _;
 use std::path::Path;
@@ -162,7 +163,7 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     if !cfg.tv_auto || cfg.tmdb_api_key.is_empty() {
         return attach_automatic_movie_plan(lib, cfg, job);
     }
-    let looked_up = crate::server::tmdb::lookup_checked(&job.title, &cfg.tmdb_api_key);
+    let looked_up = crate::server::tmdb::lookup(&job.title, &cfg.tmdb_api_key);
     attach_from_lookup(lib, cfg, job, looked_up)
 }
 
@@ -173,12 +174,15 @@ fn attach_from_lookup(
     looked_up: Result<Option<crate::server::tmdb::TmdbResult>, crate::server::tmdb::LookupFailed>,
 ) -> std::io::Result<()> {
     let Some(match_) = looked_up.map_err(|_| {
-        std::io::Error::other("TMDB could not be reached to plan this disc; retry once it is back")
+        std::io::Error::other(crate::strings::get_or(
+            "remux.tmdb_unreachable",
+            "TMDB could not be reached to plan this disc; retry once it is back",
+        ))
     })?
     else {
         return attach_automatic_movie_plan(lib, cfg, job);
     };
-    if match_.media_type != "tv"
+    if !match_.media_type.is_tv()
         || !crate::server::tmdb::is_confident_match(&job.title, &match_.title, match_.year)
     {
         return attach_automatic_movie_plan(lib, cfg, job);
@@ -316,7 +320,6 @@ fn corrected_plan(
     titles: &[libfreemkv::DiscTitle],
     media: &crate::server::planner::MediaMetadata,
 ) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
-    use crate::server::planner::MediaKind;
     let Some(kind) = media.kind else {
         return Err(std::io::Error::other("saved match has no media type"));
     };
@@ -324,11 +327,7 @@ fn corrected_plan(
         title: media.title.clone(),
         year: media.year,
         tmdb_id: media.tmdb_id,
-        media_type: match kind {
-            MediaKind::Movie => "movie",
-            MediaKind::Tv => "tv",
-        }
-        .into(),
+        media_type: kind,
         poster_url: String::new(),
         overview: String::new(),
     });
@@ -372,7 +371,7 @@ fn tv_metadata(media: &crate::server::planner::MediaMetadata) -> crate::server::
     crate::server::tmdb::TmdbResult {
         title: media.title.clone(),
         year: media.year,
-        media_type: "tv".into(),
+        media_type: MediaKind::Tv,
         tmdb_id: media.tmdb_id,
         poster_url: String::new(),
         overview: String::new(),

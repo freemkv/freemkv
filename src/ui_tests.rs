@@ -387,6 +387,28 @@ fn the_selection_bar_picks_episodes_and_the_film_in_the_chosen_languages() {
     assert_eq!(ticked("Episodes", &langs(&["jpn"])), vec![2, 4]);
 }
 
+// The Open preflight checks the titles the opened tree ticks: the settings' pick, with Episodes
+// a per-disc choice that is never inherited.
+#[test]
+fn the_open_preflight_covers_the_titles_the_settings_tick() {
+    let sc = episode_disc();
+    let mut settings = crate::settings::Settings::default();
+    for (selection, audio, want) in [
+        ("Main film only", "", vec![0]),
+        ("Episodes", "", vec![0]),
+        ("Main film only", "deu", vec![1]),
+        ("No titles", "", vec![]),
+    ] {
+        settings.selection = selection.into();
+        settings.audio_langs = audio.into();
+        assert_eq!(
+            open_preflight_titles(&sc, &settings),
+            want,
+            "{selection} {audio}"
+        );
+    }
+}
+
 // `episode_disc` with, on every title, a regular French subtitle (0x40+) and a forced
 // English one (0x60+), so the subtitle choices have both kinds to keep or drop.
 fn pick_disc() -> Scanned {
@@ -2804,6 +2826,16 @@ fn settings_commit_takes_picks_the_form_did_change() {
 // The Settings form's presentation language is checked on commit: a tag that is not a
 // language keeps the previous value and says why, in every shell.
 #[test]
+fn presentation_language_all_and_none_are_not_languages() {
+    for bad in ["all", "none", "None", " ALL ", "und", "MUL", "zxx", "mis"] {
+        assert!(!valid_presentation_language(bad), "{bad}");
+    }
+    for ok in ["", "  ", "de", "fra", "German"] {
+        assert!(valid_presentation_language(ok), "{ok}");
+    }
+}
+
+#[test]
 fn settings_commit_refuses_a_presentation_language_that_is_not_a_language() {
     let mut app = picking(pick_disc());
     app.settings.presentation_language = "de".into();
@@ -2819,7 +2851,10 @@ fn settings_commit_refuses_a_presentation_language_that_is_not_a_language() {
         .last()
         .map(|line| line.text.clone())
         .unwrap_or_default();
-    assert!(last.contains("E9083") && last.contains("xx"), "{last}");
+    assert!(
+        last.contains("Unknown presentation language \"xx\"") && !last.contains("E9083"),
+        "{last}"
+    );
     let mut edited = merged.clone();
     edited.presentation_language = "fr".into();
     assert_eq!(

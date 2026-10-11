@@ -319,3 +319,36 @@ fn preflight_reasons_keep_their_detail() {
     };
     assert_eq!(super::reason_text(&bare), "encrypted-no-key");
 }
+
+// The Episode note marks only members of a valid authored roster; a held selection labels
+// no title, and no title is ever called "Play all".
+#[test]
+fn title_notes_label_episodes_only_from_a_valid_roster() {
+    let episode = crate::strings::get_or("gui.item.episode", "Episode");
+    let notes_of = |scan: &crate::engine::Scanned| {
+        scan.rows
+            .iter()
+            .filter(|r| r.type_s == "Title")
+            .map(|r| r.notes.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut disc = disc(false);
+    disc.titles = vec![
+        title(1, "all", 5400.0, "eng"),
+        title(2, "a", 2400.0, "eng"),
+        title(3, "b", 2400.0, "eng"),
+    ];
+    authored(&mut disc.titles, &[1, 2]);
+    let notes = notes_of(&scanned_from_disc(&disc, "none".into()));
+    assert!(!notes[0].contains(&episode), "{notes:?}");
+    assert!(
+        notes[1].contains(&episode) && notes[2].contains(&episode),
+        "{notes:?}"
+    );
+    disc.titles[2].selection_evidence.episodes = EpisodeEvidence::Unknown;
+    let held = notes_of(&scanned_from_disc(&disc, "none".into()));
+    assert!(held.iter().all(|n| !n.contains(&episode)), "{held:?}");
+    for n in notes.iter().chain(&held) {
+        assert!(!n.to_lowercase().contains("play all"), "{n}");
+    }
+}

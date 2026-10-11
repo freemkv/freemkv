@@ -82,6 +82,7 @@ use std::time::Duration;
 
 use crate::server::config::Config;
 use crate::server::keysource::KeyReads;
+use crate::server::planner::MediaKind;
 
 // Live-drive structure scan options: lookup-free, plus AACS host credentials for the
 // handshake. With capture_without_keys an unreadable AACS key file does not stop the
@@ -295,7 +296,7 @@ fn resolve_rip_keys(
 fn rip_key_scope(
     disc: &libfreemkv::Disc,
     cfg: &Config,
-    media_type: &str,
+    media_type: MediaKind,
     disc_name: &str,
 ) -> libfreemkv::keys::KeyScope {
     if output_is_iso_image(&cfg.output_format) {
@@ -1726,7 +1727,13 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     let tmdb = saved_state
         .clone()
         .and_then(jobs::metadata_from_state)
-        .or_else(|| crate::server::tmdb::lookup(&id_name, &cfg_read.tmdb_api_key));
+        // A TMDB outage must not block a rip: keep the best guess it did give.
+        .or_else(|| {
+            crate::server::tmdb::best_effort(crate::server::tmdb::lookup(
+                &id_name,
+                &cfg_read.tmdb_api_key,
+            ))
+        });
     let display_name = tmdb
         .as_ref()
         .map(|m| m.title.clone())
@@ -1751,7 +1758,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     // The rip's key set, resolved ONCE here, right after the scan, for every title the rip
     // produces (KU §2.1); memory only, it keys the whole rip. Online can take a minute or
     // two, so the status says so. A DVD's CSS needs no key source (the resolve is a no-op).
-    let media_type = tmdb.as_ref().map(|t| t.media_type.as_str()).unwrap_or("");
+    let media_type = tmdb.as_ref().map(|t| t.media_type).unwrap_or_default();
     let scan_name = disc
         .meta_title
         .clone()
@@ -1887,10 +1894,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             disc_format,
             tmdb_title: tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default(),
             tmdb_year: tmdb.as_ref().map(|t| t.year).unwrap_or(0),
-            tmdb_media_type: tmdb
-                .as_ref()
-                .map(|t| t.media_type.clone())
-                .unwrap_or_default(),
+            tmdb_media_type: tmdb.as_ref().map(|t| t.media_type),
             tmdb_poster: tmdb
                 .as_ref()
                 .map(|t| t.poster_url.clone())
@@ -2791,10 +2795,14 @@ fn rip_disc_inner(
                 .unwrap_or(&disc.volume_id)
                 .to_string();
 
-            let tmdb = crate::server::tmdb::lookup(&disc_name, &cfg_read.tmdb_api_key);
+            // A TMDB outage must not block a rip: keep the best guess it did give.
+            let tmdb = crate::server::tmdb::best_effort(crate::server::tmdb::lookup(
+                &disc_name,
+                &cfg_read.tmdb_api_key,
+            ));
 
             // The rip's key set, once, right after the scan (KU §2.1); see scan_disc.
-            let media_type = tmdb.as_ref().map(|t| t.media_type.as_str()).unwrap_or("");
+            let media_type = tmdb.as_ref().map(|t| t.media_type).unwrap_or_default();
             let scope = rip_key_scope(&disc, &cfg_read, media_type, &disc_name);
             scan_wd.enter_resolve();
             let mut key_reads = KeyReads::default();
@@ -2913,13 +2921,8 @@ fn rip_disc_inner(
         .as_ref()
         .map(|t| t.overview.clone())
         .unwrap_or_default();
-    // No TMDB result → EMPTY string, the mover's documented no-match sentinel:
-    // routing_media_type coalesces "" to the movie root. A literal "unknown"
-    // here previously fell through to the output-root dump instead.
-    let tmdb_media_type = tmdb
-        .as_ref()
-        .map(|t| t.media_type.clone())
-        .unwrap_or_default();
+    // No TMDB result routes as a movie.
+    let tmdb_media_type = tmdb.as_ref().map(|t| t.media_type).unwrap_or_default();
     // TMDB numeric id (0 = no match). Persisted in the hand-off marker so a
     // consumer can enrich metadata by id later; the mover reads it back.
     let tmdb_id = tmdb.as_ref().map(|t| t.tmdb_id).unwrap_or(0);
@@ -2967,7 +2970,7 @@ fn rip_disc_inner(
     // Missing authored episode evidence must not turn a TV capture into one
     // movie-style output. Whole-disc ISO capture does not select mux titles.
     if let Err(error) =
-        check_capture_selection(&disc.titles, &cfg_read, &tmdb_media_type, &disc_name)
+        check_capture_selection(&disc.titles, &cfg_read, tmdb_media_type, &disc_name)
     {
         let reason = selection_review_message(&error);
         crate::server::log::device_log(device, &reason);
@@ -2979,8 +2982,7 @@ fn rip_disc_inner(
     }
 
     // The main movie, picked by the engine exactly as the CLI and GUI pick it.
-    let main_idx = match capture_title_index(&disc.titles, &cfg_read, &tmdb_media_type, &disc_name)
-    {
+    let main_idx = match capture_title_index(&disc.titles, &cfg_read, tmdb_media_type, &disc_name) {
         Ok(index) => index,
         Err(error) => {
             let reason = selection_review_message(&error);
@@ -3005,7 +3007,7 @@ fn rip_disc_inner(
     let mut seed_verdict = rip_seed_verdict(resume_decode_reach, banked_verdict);
     // The rip's key set, resolved once at the scan (KU §2.1). A scope that outgrew the scan's
     // (a title override made it a TV rip) tops up only the titles it lacks.
-    let key_scope = rip_key_scope(&disc, &cfg_read, &tmdb_media_type, &disc_name);
+    let key_scope = rip_key_scope(&disc, &cfg_read, tmdb_media_type, &disc_name);
     // The scan's key reads: every resolve below is served what the scan already read.
     let mut key_reads = std::mem::take(&mut session.key_reads);
     // The scan's set when it covers the rip, forensic keys aside (a multipass rip asks for
@@ -3245,7 +3247,7 @@ fn rip_disc_inner(
         s.origin_device = device.to_string();
         s.title = display_name.clone();
         s.year = tmdb_year;
-        s.media_type = tmdb_media_type.clone();
+        s.media_type = tmdb_media_type;
         s.tmdb_id = tmdb_id;
         s.tmdb_poster = tmdb_poster.clone();
         s.tmdb_overview = tmdb_overview.clone();
@@ -3298,7 +3300,7 @@ fn rip_disc_inner(
             output_file: delivered_file.clone(),
             tmdb_title: tmdb_title.clone(),
             tmdb_year,
-            tmdb_media_type: tmdb_media_type.clone(),
+            tmdb_media_type: tmdb.as_ref().map(|t| t.media_type),
             tmdb_poster: tmdb_poster.clone(),
             tmdb_overview: tmdb_overview.clone(),
             duration: duration.clone(),
@@ -3450,7 +3452,7 @@ fn rip_disc_inner(
             let title_output_bytes = mux_output_reserve_bytes(
                 &disc.titles,
                 &cfg_read,
-                &tmdb_media_type,
+                tmdb_media_type,
                 &disc_name,
                 title.size_bytes,
             );
@@ -3492,7 +3494,7 @@ fn rip_disc_inner(
         let staged = staged_titles(
             &disc.titles,
             &cfg_read,
-            &tmdb_media_type,
+            tmdb_media_type,
             &disc_name,
             main_idx,
         );
@@ -3543,7 +3545,7 @@ fn rip_disc_inner(
             tmdb_year,
             tmdb_poster: tmdb_poster.clone(),
             tmdb_overview: tmdb_overview.clone(),
-            tmdb_media_type: tmdb_media_type.clone(),
+            tmdb_media_type: tmdb.as_ref().map(|t| t.media_type),
             duration: duration.clone(),
             codecs: codecs.clone(),
             filename: delivered_file.clone(),
@@ -3875,7 +3877,7 @@ fn rip_disc_inner(
                 s.disc_name = disc_name.clone();
                 s.disc_format = disc_format.clone();
                 s.year = tmdb_year;
-                s.media_type = tmdb_media_type.clone();
+                s.media_type = tmdb_media_type;
                 s.tmdb_id = tmdb_id;
                 s.tmdb_poster = tmdb_poster.clone();
                 s.tmdb_overview = tmdb_overview.clone();
@@ -3952,7 +3954,7 @@ fn rip_disc_inner(
             tmdb_year,
             tmdb_poster: tmdb_poster.clone(),
             tmdb_overview: tmdb_overview.clone(),
-            tmdb_media_type: tmdb_media_type.clone(),
+            tmdb_media_type,
             max_retries: cfg_read.max_retries,
             abort_on_lost_secs: cfg_read.abort_on_lost_secs as u32,
             rip_elapsed_secs: 0.0, // mux worker re-derives elapsed from its own start
@@ -3986,7 +3988,7 @@ fn rip_disc_inner(
         let plan = match plan_mux_outputs(
             &disc.titles,
             &cfg_read,
-            &tmdb_media_type,
+            tmdb_media_type,
             &disc_name,
             tmdb_id,
             &filename,
@@ -4621,7 +4623,7 @@ fn rip_disc_inner(
                 s.disc_name = disc_name.clone();
                 s.disc_format = disc_format.clone();
                 s.year = tmdb_year;
-                s.media_type = tmdb_media_type.clone();
+                s.media_type = tmdb_media_type;
                 s.tmdb_id = tmdb_id;
                 s.tmdb_poster = tmdb_poster.clone();
                 s.tmdb_overview = tmdb_overview.clone();
@@ -5130,7 +5132,7 @@ fn handoff_marker_name(title_confident: bool) -> &'static str {
 fn check_capture_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: &str,
+    media_type: MediaKind,
     disc_name: &str,
 ) -> Result<(), crate::server::planner::PlanError> {
     if output_is_iso_image(&cfg.output_format) {
@@ -5143,7 +5145,7 @@ fn check_capture_selection(
 fn capture_title_index(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: &str,
+    media_type: MediaKind,
     disc_name: &str,
 ) -> Result<usize, crate::server::planner::PlanError> {
     if output_is_iso_image(&cfg.output_format) && !titles.is_empty() {
@@ -5171,7 +5173,7 @@ fn selection_review_message(error: &crate::server::planner::PlanError) -> String
 fn fanout_episode_indices(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: &str,
+    media_type: MediaKind,
     disc_name: &str,
 ) -> Vec<usize> {
     crate::server::planner::episode_indices(titles, cfg, plan_kind(media_type, disc_name))
@@ -5180,11 +5182,11 @@ fn fanout_episode_indices(
 // Whether a disc is TV for `tv_auto` planning (1.7.7): TMDB says tv, or its label
 // names a season even without a TMDB tv match. Evidence gates still apply.
 pub(super) fn plan_kind(
-    media_type: &str,
+    media_type: MediaKind,
     disc_name: &str,
 ) -> Option<crate::server::planner::MediaKind> {
-    (media_type == "tv" || crate::server::tmdb::season_from_label(disc_name).is_some())
-        .then_some(crate::server::planner::MediaKind::Tv)
+    (media_type.is_tv() || crate::server::tmdb::season_from_label(disc_name).is_some())
+        .then_some(MediaKind::Tv)
 }
 
 // The titles a fresh rip's staged image must hold for its mux: the main feature, the TV plan's
@@ -5192,7 +5194,7 @@ pub(super) fn plan_kind(
 fn staged_titles(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: &str,
+    media_type: MediaKind,
     disc_name: &str,
     main_idx: usize,
 ) -> Vec<usize> {
@@ -5232,7 +5234,7 @@ fn scope_bytes(scope: &[(u32, u32)]) -> u64 {
 fn mux_output_reserve_bytes(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: &str,
+    media_type: MediaKind,
     disc_name: &str,
     selected_title_bytes: u64,
 ) -> u64 {
@@ -5276,7 +5278,7 @@ pub(crate) fn staged_output_name(display_name: &str, ext: &str) -> String {
 fn plan_mux_outputs(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: &str,
+    media_type: MediaKind,
     disc_name: &str,
     tmdb_id: u64,
     movie_filename: &str,

@@ -9,17 +9,30 @@ fn presentation_preference_capture_freezes_the_chosen_cut_and_never_holds() {
             presentation_language: language.into(),
             ..Default::default()
         };
-        let plan = plan_mux_outputs(&titles, &cfg, "movie", "Movie", 0, "movie.mkv", None).unwrap();
+        let plan = plan_mux_outputs(
+            &titles,
+            &cfg,
+            crate::server::planner::MediaKind::Movie,
+            "Movie",
+            0,
+            "movie.mkv",
+            None,
+        )
+        .unwrap();
         assert_eq!(plan[0].title_index, expected);
         assert_eq!(
             plan[0].title_identity,
             Some(crate::title_identity::TitleIdentity::of(&titles[expected]))
         );
         assert_eq!(
-            capture_title_index(&titles, &cfg, "movie", "").unwrap(),
+            capture_title_index(&titles, &cfg, crate::server::planner::MediaKind::Movie, "")
+                .unwrap(),
             expected
         );
-        assert!(check_capture_selection(&titles, &cfg, "movie", "").is_ok());
+        assert!(
+            check_capture_selection(&titles, &cfg, crate::server::planner::MediaKind::Movie, "")
+                .is_ok()
+        );
     }
 }
 
@@ -43,7 +56,7 @@ fn later_disc_confirmed_first_episode_plans_and_rejects_overflow() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        "tv",
+        crate::server::planner::MediaKind::Tv,
         "Show Season 1 Disc 2",
         0,
         "Show.mkv",
@@ -57,7 +70,7 @@ fn later_disc_confirmed_first_episode_plans_and_rejects_overflow() {
         plan_mux_outputs(
             &titles,
             &cfg,
-            "tv",
+            crate::server::planner::MediaKind::Tv,
             "Show Season 1 Disc 2",
             0,
             "Show.mkv",
@@ -95,7 +108,7 @@ fn movie_yields_a_single_untouched_output() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        "movie",
+        crate::server::planner::MediaKind::Movie,
         "The Matrix",
         0,
         "The Matrix.mkv",
@@ -119,7 +132,7 @@ fn a_season_label_is_tv_for_fan_out_without_a_tmdb_tv_match() {
         let plan = plan_mux_outputs(
             &titles,
             &cfg,
-            media_type,
+            media_type.into(),
             "Show Season 1",
             0,
             "Show.mkv",
@@ -129,13 +142,22 @@ fn a_season_label_is_tv_for_fan_out_without_a_tmdb_tv_match() {
         assert_eq!(plan.len(), 2, "{media_type:?}");
         assert!(plan[0].filename.contains("S01E01"), "{}", plan[0].filename);
         assert!(plan[1].filename.contains("S01E02"), "{}", plan[1].filename);
-        assert!(check_capture_selection(&titles, &cfg, media_type, "Show Season 1").is_ok());
+        assert!(check_capture_selection(&titles, &cfg, media_type.into(), "Show Season 1").is_ok());
     }
     let off = Config {
         tv_auto: false,
         ..Config::default()
     };
-    let plan = plan_mux_outputs(&titles, &off, "", "Show Season 1", 0, "Show.mkv", None).unwrap();
+    let plan = plan_mux_outputs(
+        &titles,
+        &off,
+        crate::server::planner::MediaKind::Movie,
+        "Show Season 1",
+        0,
+        "Show.mkv",
+        None,
+    )
+    .unwrap();
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].filename, "Show.mkv");
 }
@@ -148,14 +170,14 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
     let cfg = Config::default();
     for media_type in ["movie", ""] {
         assert!(matches!(
-            check_capture_selection(&titles, &cfg, media_type, "Show Season 1"),
+            check_capture_selection(&titles, &cfg, media_type.into(), "Show Season 1"),
             Err(crate::server::planner::PlanError::Selection(_))
         ));
         assert!(matches!(
             resume::check_resume_selection(
                 &titles,
                 &cfg,
-                media_type,
+                media_type.into(),
                 "Show Season 1",
                 false,
                 false
@@ -167,9 +189,25 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
         tv_auto: false,
         ..Config::default()
     };
-    assert!(check_capture_selection(&titles, &off, "", "Show Season 1").is_ok());
     assert!(
-        resume::check_resume_selection(&titles, &off, "", "Show Season 1", false, false).is_ok()
+        check_capture_selection(
+            &titles,
+            &off,
+            crate::server::planner::MediaKind::Movie,
+            "Show Season 1"
+        )
+        .is_ok()
+    );
+    assert!(
+        resume::check_resume_selection(
+            &titles,
+            &off,
+            crate::server::planner::MediaKind::Movie,
+            "Show Season 1",
+            false,
+            false
+        )
+        .is_ok()
     );
 }
 
@@ -195,7 +233,15 @@ fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
                 kind: Some(MediaKind::Tv),
                 ..Default::default()
             };
-            let capture = plan_mux_outputs(&titles, &cfg, "tv", &label, 0, "Show.mkv", None);
+            let capture = plan_mux_outputs(
+                &titles,
+                &cfg,
+                crate::server::planner::MediaKind::Tv,
+                &label,
+                0,
+                "Show.mkv",
+                None,
+            );
             let remux = plan(&cfg, &titles, &media, Path::new("Show.mkv"));
             assert!(matches!(
                 capture,
@@ -225,7 +271,7 @@ fn tv_disc_fans_out_one_output_per_episode() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        "tv",
+        crate::server::planner::MediaKind::Tv,
         "Endeavour Season 5",
         44264,
         "Endeavour.mkv",
@@ -257,11 +303,26 @@ fn mux_reserve_sums_every_planned_episode() {
     authored_roster(&mut titles, 0..6);
     let sum: u64 = titles.iter().map(|t| t.size_bytes).sum();
     let selected = titles[0].size_bytes;
-    let plan = plan_mux_outputs(&titles, &cfg, "tv", "Show Season 1", 0, "Show.mkv", None).unwrap();
+    let plan = plan_mux_outputs(
+        &titles,
+        &cfg,
+        crate::server::planner::MediaKind::Tv,
+        "Show Season 1",
+        0,
+        "Show.mkv",
+        None,
+    )
+    .unwrap();
     let planned: u64 = plan.iter().map(|o| titles[o.title_index].size_bytes).sum();
     assert_eq!(planned, sum, "plan muxes all six episodes");
     assert_eq!(
-        mux_output_reserve_bytes(&titles, &cfg, "tv", "Show Season 1", selected),
+        mux_output_reserve_bytes(
+            &titles,
+            &cfg,
+            crate::server::planner::MediaKind::Tv,
+            "Show Season 1",
+            selected
+        ),
         planned,
         "reserve equals the sum of planned outputs"
     );
@@ -272,7 +333,13 @@ fn mux_reserve_sums_every_planned_episode() {
     let big = with_playall[0].size_bytes;
     assert!(big > sum);
     assert_eq!(
-        mux_output_reserve_bytes(&with_playall, &cfg, "tv", "Show Season 1", big),
+        mux_output_reserve_bytes(
+            &with_playall,
+            &cfg,
+            crate::server::planner::MediaKind::Tv,
+            "Show Season 1",
+            big
+        ),
         sum
     );
     // ISO output / network sink: nothing muxed lands in staging.
@@ -289,14 +356,26 @@ fn mux_reserve_sums_every_planned_episode() {
             ..Config::default()
         };
         assert_eq!(
-            mux_output_reserve_bytes(&titles, &c, "tv", "Show Season 1", selected),
+            mux_output_reserve_bytes(
+                &titles,
+                &c,
+                crate::server::planner::MediaKind::Tv,
+                "Show Season 1",
+                selected
+            ),
             0,
             "{fmt}"
         );
     }
     // Movie / tv_auto off: one output, the selected title.
     assert_eq!(
-        mux_output_reserve_bytes(&titles, &cfg, "movie", "Some Film", selected),
+        mux_output_reserve_bytes(
+            &titles,
+            &cfg,
+            crate::server::planner::MediaKind::Movie,
+            "Some Film",
+            selected
+        ),
         selected
     );
     let off = Config {
@@ -304,7 +383,13 @@ fn mux_reserve_sums_every_planned_episode() {
         ..Config::default()
     };
     assert_eq!(
-        mux_output_reserve_bytes(&titles, &off, "tv", "Show Season 1", selected),
+        mux_output_reserve_bytes(
+            &titles,
+            &off,
+            crate::server::planner::MediaKind::Tv,
+            "Show Season 1",
+            selected
+        ),
         selected
     );
 }
@@ -322,7 +407,7 @@ fn multi_disc_season_requires_confirmed_episode_numbers() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        "tv",
+        crate::server::planner::MediaKind::Tv,
         "Endeavour Season 5 Disc 2",
         44264,
         "Endeavour.mkv",
@@ -339,7 +424,16 @@ fn multi_disc_season_requires_confirmed_episode_numbers() {
 fn a_single_feature_tv_disc_stays_one_output() {
     let cfg = Config::default(); // tv_auto = true
     let titles = vec![title(95.0 * 60.0, 1000), title(90.0, 5)];
-    let plan = plan_mux_outputs(&titles, &cfg, "tv", "Show Season 2", 0, "Show.mkv", None).unwrap();
+    let plan = plan_mux_outputs(
+        &titles,
+        &cfg,
+        crate::server::planner::MediaKind::Tv,
+        "Show Season 2",
+        0,
+        "Show.mkv",
+        None,
+    )
+    .unwrap();
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].filename, "Show.mkv");
     assert!(plan[0].episode.is_none());
@@ -382,7 +476,7 @@ fn tv_auto_off_does_not_fan_out() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        "tv",
+        crate::server::planner::MediaKind::Tv,
         "Endeavour Season 5",
         44264,
         "Endeavour.mkv",

@@ -464,11 +464,12 @@ pub fn load() -> Arc<RwLock<Config>> {
             .to_string_lossy()
             .into_owned();
     }
-    if should_relocate_bare_run_dir(
+    let output_relocated = should_relocate_bare_run_dir(
         &cfg.output_dir,
         "/output",
         std::path::Path::new("/output").exists(),
-    ) {
+    );
+    if output_relocated {
         cfg.output_dir = std::path::Path::new(&cfg.autorip_dir)
             .join("output")
             .to_string_lossy()
@@ -476,12 +477,7 @@ pub fn load() -> Arc<RwLock<Config>> {
     }
     // Bounded: staging and output may sit on a network mount that has stopped answering,
     // and startup (the web server with it) must not wait on it.
-    let dirs = vec![
-        cfg.log_dir(),
-        format!("{}/freemkv", cfg.autorip_dir),
-        cfg.staging_dir.clone(),
-        cfg.output_dir.clone(),
-    ];
+    let dirs = boot_dirs(&cfg, output_relocated);
     let created = ensure_dirs_bounded(dirs, crate::server::health::CHECK_TIMEOUT, |p| {
         std::fs::create_dir_all(p)
     });
@@ -496,6 +492,23 @@ pub fn load() -> Arc<RwLock<Config>> {
     apply_decrypt_threads(cfg.decrypt_threads);
 
     Arc::new(RwLock::new(cfg))
+}
+
+// Directories created at startup. A configured output root is never one of them: an
+// unmounted share's root would be created on the local disk and then accepted as a
+// destination. Only the relocated bare-run default (under the config dir) is ours to create.
+fn boot_dirs(cfg: &Config, output_relocated: bool) -> Vec<String> {
+    let mut dirs = vec![
+        cfg.log_dir(),
+        format!("{}/freemkv", cfg.autorip_dir),
+        cfg.staging_dir.clone(),
+    ];
+    // The relocated default is ours to create, also once Settings has persisted it.
+    let default_output = std::path::Path::new(&cfg.autorip_dir).join("output");
+    if output_relocated || std::path::Path::new(&cfg.output_dir) == default_output {
+        dirs.push(cfg.output_dir.clone());
+    }
+    dirs
 }
 
 // Create every one of `dirs` at once through `bounded_each`, each given up on after `limit`

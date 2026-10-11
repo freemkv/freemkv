@@ -6,7 +6,7 @@ fn selection(title: &str) -> UserMetadata {
         episode_start: None,
         title: title.into(),
         year: 2000,
-        media_type: "movie".into(),
+        media_type: crate::server::planner::MediaKind::Movie,
         tmdb_id: 8358,
         poster_url: String::new(),
         overview: "Selected by the operator".into(),

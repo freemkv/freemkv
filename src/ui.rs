@@ -195,7 +195,6 @@ fn split_langs(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// An empty list means "no preference", which the engine spells `All`.
 /// The titles `selection` ticks by itself under `prefs`' audio and presentation languages: the
 /// engine's executable pick. A selection that needs review ticks nothing.
 pub fn automatic_titles(
@@ -223,6 +222,14 @@ fn open_picks(settings: &crate::settings::Settings) -> (String, LangPrefs, f64) 
     (mode, LangPrefs::from_settings(settings), min_secs)
 }
 
+// The titles an opened source's tree ticks under the settings' picks: what the preflight
+// checks (none ticked: the main title).
+fn open_preflight_titles(sc: &Scanned, settings: &crate::settings::Settings) -> Vec<usize> {
+    let (mode, prefs, min_secs) = open_picks(settings);
+    Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles()
+}
+
+/// An empty list means "no preference", which the engine spells `All`.
 fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
     if tags.is_empty() {
         freemkv_engine::StreamFilter::All
@@ -885,7 +892,7 @@ pub fn lang_selection(stored: &str) -> Vec<String> {
 /// Whether a typed presentation language is usable: blank (no preference) or a tag title
 /// selection understands. Selection never reports a tag it cannot match, so check it here.
 pub fn valid_presentation_language(tag: &str) -> bool {
-    tag.trim().is_empty() || freemkv_engine::is_language_tag(tag)
+    crate::strings::is_presentation_language(tag)
 }
 
 /// Settings row label for the presentation-language field, shared by all shells.
@@ -2842,7 +2849,7 @@ impl App {
         let path = path.to_owned();
         let keys = KeyConfig::from_settings(&self.settings);
         let scan = self.scan;
-        let (mode, prefs, min_secs) = open_picks(&self.settings);
+        let settings = self.settings.clone();
         let tok = OpenToken::default();
         if let Some(old) = self.open_token.replace(tok.clone()) {
             old.halt.cancel();
@@ -2853,11 +2860,11 @@ impl App {
             .spawn(move || {
                 let scanned = scan(&path, &keys, &tok);
                 // The preflight reuses Open's key set: no second key request (KU §2.5). It
-                // checks the titles the tree will tick (none ticked: the main title).
+                // checks the titles the tree will tick.
                 let seed = scanned.as_ref().ok().and_then(|sc| sc.keys.as_ref());
                 let ticked = scanned
                     .as_ref()
-                    .map(|sc| Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles())
+                    .map(|sc| open_preflight_titles(sc, &settings))
                     .unwrap_or_default();
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
@@ -3201,9 +3208,10 @@ impl App {
                 &mut edited.presentation_language,
                 cur.presentation_language.clone(),
             );
-            let e = libfreemkv::Error::StreamLanguageUnknown { tag: tag.clone() };
-            let msg = crate::strings::error_message_with(u32::from(e.code()), &tag);
-            self.say(LogKind::Notice, &format!("E{} {msg}", e.code()));
+            self.say(
+                LogKind::Notice,
+                &crate::strings::presentation_language_unknown(&tag),
+            );
         }
         self.settings = edited.clone();
         edited
