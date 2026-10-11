@@ -3972,7 +3972,7 @@ mod http {
                     status: "ripping".into(),
                     disc_present: true,
                     job_id: "job".into(),
-                    tmdb_media_type: current_type.into(),
+                    tmdb_media_type: Some(current_type.into()),
                     ..Default::default()
                 },
             );
@@ -4052,7 +4052,7 @@ mod http {
                 disc_present: true,
                 job_id: "job".into(),
                 disc_identity: "verified-disc".into(),
-                tmdb_media_type: crate::server::planner::MediaKind::Tv,
+                tmdb_media_type: Some(crate::server::planner::MediaKind::Tv),
                 ..Default::default()
             },
         );
@@ -4097,7 +4097,7 @@ mod http {
                 tmdb_title: "Film A".to_string(),
                 tmdb_poster: "https://image.tmdb.org/t/p/w185/a.jpg".to_string(),
                 tmdb_overview: "About A".to_string(),
-                tmdb_media_type: crate::server::planner::MediaKind::Movie,
+                tmdb_media_type: Some(crate::server::planner::MediaKind::Movie),
                 ..Default::default()
             },
         );
@@ -4115,7 +4115,10 @@ mod http {
             assert_eq!(rs.tmdb_title, "Show B");
             assert_eq!(rs.tmdb_poster, "", "A's poster must not stay on B's card");
             assert_eq!(rs.tmdb_overview, "");
-            assert_eq!(rs.tmdb_media_type, "tv");
+            assert_eq!(
+                rs.tmdb_media_type,
+                Some(crate::server::planner::MediaKind::Tv)
+            );
         }
         // A second override omitting media_type keeps the first one's tv.
         let (code, _) = roundtrip(
@@ -4192,7 +4195,7 @@ mod http {
                 disc_present: true,
                 job_id: "job".into(),
                 disc_identity: "verified-disc".into(),
-                tmdb_media_type: crate::server::planner::MediaKind::Movie,
+                tmdb_media_type: Some(crate::server::planner::MediaKind::Movie),
                 ..Default::default()
             },
         );

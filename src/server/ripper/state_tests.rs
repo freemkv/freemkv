@@ -606,7 +606,7 @@ fn minimal_pass_ctx(device: &str) -> PassContext {
         tmdb_year: 0,
         tmdb_poster: String::new(),
         tmdb_overview: String::new(),
-        tmdb_media_type: crate::server::planner::MediaKind::Movie,
+        tmdb_media_type: Some(crate::server::planner::MediaKind::Movie),
         duration: String::new(),
         codecs: String::new(),
         filename: "test.mkv".to_string(),
@@ -1168,7 +1168,7 @@ fn push_pass_state_preserves_every_damage_indicator_field() {
     ctx.tmdb_year = 2024;
     ctx.tmdb_poster = "https://example/poster.jpg".to_string();
     ctx.tmdb_overview = "An example overview.".to_string();
-    ctx.tmdb_media_type = "movie".into();
+    ctx.tmdb_media_type = Some("movie".into());
     ctx.duration = "2:15:00".to_string();
     ctx.codecs = "HEVC/DTS-HD".to_string();
     let pass_state = std::sync::Mutex::new(PassProgressState::new());
@@ -1327,7 +1327,8 @@ fn push_pass_state_preserves_every_damage_indicator_field() {
         "tmdb_overview field dropped to Default"
     );
     assert_eq!(
-        snap.tmdb_media_type, "movie",
+        snap.tmdb_media_type,
+        Some(crate::server::planner::MediaKind::Movie),
         "tmdb_media_type field dropped to Default"
     );
     assert_eq!(
@@ -1522,4 +1523,13 @@ fn a_scoped_sweep_is_sized_by_its_scope() {
     // A whole-disc sweep keeps the read head where it is.
     ctx.bytes_sweep = ctx.bytes_total_disc;
     assert_eq!(map_head_bytes(&ctx, 123 * S), 123 * S);
+}
+
+#[test]
+fn an_unresolved_tmdb_media_type_is_absent_from_the_broadcast_not_movie() {
+    let mut rs = RipState::default();
+    let v = serde_json::to_value(&rs).unwrap();
+    assert!(v.get("tmdb_media_type").is_none(), "{v}");
+    rs.tmdb_media_type = Some(crate::server::planner::MediaKind::Tv);
+    assert_eq!(serde_json::to_value(&rs).unwrap()["tmdb_media_type"], "tv");
 }

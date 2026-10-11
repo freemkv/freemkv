@@ -1894,7 +1894,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             disc_format,
             tmdb_title: tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default(),
             tmdb_year: tmdb.as_ref().map(|t| t.year).unwrap_or(0),
-            tmdb_media_type: tmdb.as_ref().map(|t| t.media_type).unwrap_or_default(),
+            tmdb_media_type: tmdb.as_ref().map(|t| t.media_type),
             tmdb_poster: tmdb
                 .as_ref()
                 .map(|t| t.poster_url.clone())
@@ -3300,7 +3300,7 @@ fn rip_disc_inner(
             output_file: delivered_file.clone(),
             tmdb_title: tmdb_title.clone(),
             tmdb_year,
-            tmdb_media_type,
+            tmdb_media_type: tmdb.as_ref().map(|t| t.media_type),
             tmdb_poster: tmdb_poster.clone(),
             tmdb_overview: tmdb_overview.clone(),
             duration: duration.clone(),
@@ -3545,7 +3545,7 @@ fn rip_disc_inner(
             tmdb_year,
             tmdb_poster: tmdb_poster.clone(),
             tmdb_overview: tmdb_overview.clone(),
-            tmdb_media_type,
+            tmdb_media_type: tmdb.as_ref().map(|t| t.media_type),
             duration: duration.clone(),
             codecs: codecs.clone(),
             filename: delivered_file.clone(),

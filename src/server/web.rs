@@ -584,7 +584,7 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(device)
-                .map(|rs| rs.tmdb_media_type)
+                .and_then(|rs| rs.tmdb_media_type)
                 .unwrap_or_default()
         }
     };

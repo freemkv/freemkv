@@ -161,8 +161,9 @@ pub struct RipState {
     /// auto-resume mux path can write a correct `media_type` into the
     /// `.done`/`.review` hand-off marker — otherwise the mover defaults
     /// every resumed rip to "movie" and files TV shows under the movie
-    /// library. Empty string when unresolved.
-    pub tmdb_media_type: crate::server::planner::MediaKind,
+    /// library. Absent until TMDB resolves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmdb_media_type: Option<crate::server::planner::MediaKind>,
     pub duration: String,
     pub codecs: String,
 
@@ -270,7 +271,7 @@ impl RipState {
         self.tmdb_year = m.year;
         self.tmdb_poster = m.poster_url.clone();
         self.tmdb_overview = m.overview.clone();
-        self.tmdb_media_type = m.media_type;
+        self.tmdb_media_type = Some(m.media_type);
     }
 }
 
@@ -320,7 +321,7 @@ impl Default for RipState {
             tmdb_year: 0,
             tmdb_poster: String::new(),
             tmdb_overview: String::new(),
-            tmdb_media_type: Default::default(),
+            tmdb_media_type: None,
             duration: String::new(),
             codecs: String::new(),
             pass_progress_pct: 0,
@@ -629,7 +630,7 @@ pub(super) struct PassContext {
     pub(super) tmdb_year: u16,
     pub(super) tmdb_poster: String,
     pub(super) tmdb_overview: String,
-    pub(super) tmdb_media_type: crate::server::planner::MediaKind,
+    pub(super) tmdb_media_type: Option<crate::server::planner::MediaKind>,
     pub(super) duration: String,
     pub(super) codecs: String,
     pub(super) filename: String,

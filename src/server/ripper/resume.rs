@@ -985,7 +985,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(device)
-                .map(|s| s.tmdb_media_type)
+                .and_then(|s| s.tmdb_media_type)
                 .unwrap_or_default()
         });
     let replan_required = saved_state.as_ref().is_some_and(|s| s.replan_required);
@@ -1469,7 +1469,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             m.tmdb_year,
             m.tmdb_poster.clone(),
             m.tmdb_overview.clone(),
-            m.tmdb_media_type,
+            Some(m.tmdb_media_type),
         ),
         None => state_tmdb
             .as_ref()
@@ -1484,7 +1484,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             })
             .unwrap_or_default(),
     };
-    let media_type = tmdb_media_type;
+    let media_type = tmdb_media_type.unwrap_or_default();
 
     // Title-confidence gate — routes through the SAME `title_is_confident`
     // (mod.rs) the fresh-rip completion path uses (the Done/Review hand-off is
@@ -2256,7 +2256,7 @@ pub(crate) fn remux_from_ripped_marker(
             tmdb_year: marker.tmdb_year,
             tmdb_poster: marker.tmdb_poster.clone(),
             tmdb_overview: marker.tmdb_overview.clone(),
-            tmdb_media_type: marker.tmdb_media_type,
+            tmdb_media_type: Some(marker.tmdb_media_type),
             ..Default::default()
         },
     );

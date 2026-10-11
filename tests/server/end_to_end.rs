@@ -63,7 +63,7 @@ fn test_state_json_serialization_round_trip() {
         tmdb_year: 2024,
         tmdb_poster: "https://image.tmdb.org/p/abc.jpg".to_string(),
         tmdb_overview: "An overview.".to_string(),
-        tmdb_media_type: freemkv::server::planner::MediaKind::Movie,
+        tmdb_media_type: Some(freemkv::server::planner::MediaKind::Movie),
         duration: "1h 47m".to_string(),
         codecs: "H.264 1080p / DTS-HD MA 5.1".to_string(),
         pass_progress_pct: 42,
