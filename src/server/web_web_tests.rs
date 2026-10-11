@@ -4461,12 +4461,29 @@ mod http {
 
     // Run `name` (in `http`) alone in a child process with `env` applied: a reboot sets
     // the process-wide SHUTDOWN, which refuses every rip spawn.
-    fn reboot_route_in_child(name: &str, env: Option<&str>, ppid: &str) -> bool {
+    // `keep_alive`: the job's LaunchAgent plist in the child's HOME sets KeepAlive so.
+    fn reboot_route_in_child(
+        name: &str,
+        env: Option<&str>,
+        ppid: &str,
+        keep_alive: Option<bool>,
+    ) -> bool {
         const CHILD: &str = "FREEMKV_TEST_REBOOT_ROUTE_CHILD";
         if std::env::var_os(CHILD).is_some() {
             return true;
         }
+        let home = tempfile::tempdir().unwrap();
+        if let (Some(label), Some(keep)) = (env, keep_alive) {
+            let agents = home.path().join("Library/LaunchAgents");
+            std::fs::create_dir_all(&agents).unwrap();
+            std::fs::write(
+                agents.join(format!("{label}.plist")),
+                launch_agent(label, keep),
+            )
+            .unwrap();
+        }
         let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.env("HOME", home.path());
         child
             .args([
                 "--exact",
@@ -4482,6 +4499,18 @@ mod http {
         let status = child.status().unwrap();
         assert!(status.success(), "{name}: {status}");
         false
+    }
+
+    fn launch_agent(label: &str, keep_alive: bool) -> String {
+        let keep = if keep_alive {
+            "<key>KeepAlive</key><true/>"
+        } else {
+            ""
+        };
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+             <key>Label</key><string>{label}</string>{keep}</dict></plist>\n"
+        )
     }
 
     fn version_boot(cfg: &Arc<RwLock<Config>>) -> String {
@@ -4508,6 +4537,7 @@ mod http {
             "system_reboot_requests_a_relaunch",
             Some("io.freemkv.library"),
             "1",
+            Some(true),
         ) {
             return;
         }
@@ -4521,6 +4551,31 @@ mod http {
         assert!(!v["message"].as_str().unwrap_or_default().is_empty());
         assert!(crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
         assert!(crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+        // A second request within the spacing is refused: a hostile page cannot loop it.
+        let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
+        assert_eq!(code, 429, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(!v["error"].as_str().unwrap_or_default().is_empty());
+    }
+
+    // A launchd job whose plist lacks KeepAlive is not started again after the exit.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_reboot_is_refused_when_launchd_would_not_restart_the_job() {
+        if !reboot_route_in_child(
+            "system_reboot_is_refused_when_launchd_would_not_restart_the_job",
+            Some("io.freemkv.library"),
+            "1",
+            Some(false),
+        ) {
+            return;
+        }
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
+        assert_eq!(code, 409, "{body}");
+        assert!(!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
     }
 
     // A bare macOS run has no launchd job to start it again, so a reboot would only stop it.
@@ -4531,6 +4586,7 @@ mod http {
             "system_reboot_is_refused_without_a_service_manager",
             None,
             "1",
+            None,
         ) {
             return;
         }
@@ -4552,6 +4608,7 @@ mod http {
             "system_reboot_is_refused_when_the_parent_is_not_launchd",
             Some("io.freemkv.library"),
             "4242",
+            Some(true),
         ) {
             return;
         }
@@ -4597,6 +4654,17 @@ mod http {
         let (c3, b3) = roundtrip(&cfg, "POST", "/api/move-errors/clear?x=1", None, &[]);
         assert_eq!(c3, 400);
         assert!(b3.contains("missing path"));
+        // A row with no delivery running gets its Retry recorded, and the answer says so.
+        let (c4, b4) = roundtrip(
+            &cfg,
+            "POST",
+            "/api/move-errors/clear?path=%2Fstaging%2Fno-such-row",
+            None,
+            &[],
+        );
+        assert_eq!(c4, 200);
+        let v: serde_json::Value = serde_json::from_str(&b4).unwrap();
+        assert_eq!(v["scheduled"], true, "{b4}");
     }
 
     // ── SSE first frame (GET /events): it loops forever, so roundtrip

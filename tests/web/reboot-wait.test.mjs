@@ -70,19 +70,28 @@ test('the boot id to wait past is read before the reboot is requested', async ()
   const calls = [];
   const before = await requestReboot(async (method, url) => {
     calls.push(method + ' ' + url);
-    return url === '/api/version' ? {version: '1', boot: 'old'} : {ok: true, boot: 'old'};
+    return url === '/api/version' ? {version: '1', boot: 'old'} : {ok: true, rebooting: true, boot: 'old'};
   });
   assert.deepEqual(calls, ['GET /api/version', 'POST /api/system/reboot']);
   assert.deepEqual({...before}, {version: '1', boot: 'old'});
 });
 
-test('a reboot answer lost to the restart still waits for the new server', async () => {
+// The server answers 202 before it stops, so a POST with no answer may never have arrived:
+// it is reported, not waited for (the page would else say "Restarting" for a healthy server).
+test('a reboot request that got no answer is reported, not waited for', async () => {
   const {requestReboot} = await system();
-  const before = await requestReboot(async (method) => {
+  await assert.rejects(requestReboot(async (method) => {
     if (method === 'GET') return {version: '1', boot: 'old'};
     throw new Error('the server did not answer');
-  });
-  assert.equal(before.boot, 'old');
+  }), /did not answer/);
+});
+
+test('only an accepted reboot (202, rebooting) is waited for', async () => {
+  const {requestReboot} = await system();
+  await assert.rejects(requestReboot(async (method) => {
+    if (method === 'GET') return {version: '1', boot: 'old'};
+    return {ok: true};
+  }), /not accepted/);
 });
 
 test('a refused reboot is reported, not waited for', async () => {

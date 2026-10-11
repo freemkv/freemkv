@@ -497,6 +497,14 @@ export function openDeviceTerminal(dev, debugOn, snapshot, ownerName = '', sourc
   return t;
 }
 
+// The toast for a cleared row. A move Retry the server could not record (its delivery is
+// running now) says so; a server that does not report it took the request.
+function clearedToast(kind, r) {
+  if (kind !== 'move') return ['Cleared. It comes back if the problem is still there.', 'info'];
+  if (r && r.scheduled === false) return ['Not retried: this delivery is running now. It is retried by itself if it fails again.', 'warn'];
+  return ['Delivery retry requested.', 'info'];
+}
+
 // ── The page ───────────────────────────────────────────────────────────────
 
 export default {
@@ -609,9 +617,8 @@ export default {
       const c = e.target.closest('[data-clear]');
       if (c) {
         const kind = c.dataset.clear;
-        if (await act(c, () => api('POST', ownedUrl('/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path))), kind === 'move' ? 'Retry' : 'Clear') !== undefined) {
-          toast(kind === 'move' ? 'Delivery retry requested.' : 'Cleared. It comes back if the problem is still there.', 'info');
-        }
+        const r = await act(c, () => api('POST', ownedUrl('/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path))), kind === 'move' ? 'Retry' : 'Clear');
+        if (r !== undefined) toast(...clearedToast(kind, r));
         reload();
         return;
       }

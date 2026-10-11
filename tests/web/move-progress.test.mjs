@@ -57,3 +57,31 @@ test('a stalled active filesystem call keeps its reason and disables Retry', asy
   assert.match(html, /disabled data-clear="move"/);
   assert.doesNotMatch(html, /MB\/s/);
 });
+
+async function clearedToast(kind, response) {
+  const context = vm.createContext({});
+  const source = await readFile(new URL('../../src/server/web/assets/ripper.js', import.meta.url), 'utf8');
+  const module = new vm.SourceTextModule(source + '\nexport { clearedToast };', { context });
+  await module.link(specifier => {
+    const names = specifier === './ui.js'
+      ? ['esc', 'escLinks', '$', 'put', 'fill', 'api', 'act', 'toast', 'twoStep', 'terminal', 'modal', 'bytes', 'plural', 'ICON']
+      : specifier === './bus.js' ? ['subscribe']
+      : ['connections', 'subscribeConnections', 'driveState', 'busyDriveCount'];
+    return new vm.SyntheticModule(names, function () {
+      for (const name of names) this.setExport(name, name === 'esc' ? String : () => {});
+    }, { context });
+  });
+  await module.evaluate();
+  return [...module.namespace.clearedToast(kind, response)];
+}
+
+test('Retry says a retry was requested only when the server scheduled one', async () => {
+  assert.deepEqual(await clearedToast('move', {ok: true, scheduled: true}), ['Delivery retry requested.', 'info']);
+  const [text, tone] = await clearedToast('move', {ok: true, scheduled: false});
+  assert.doesNotMatch(text, /retry requested/i);
+  assert.match(text, /running/);
+  assert.equal(tone, 'warn');
+  // A peer on an older server does not say; its 200 still means the request was taken.
+  assert.deepEqual(await clearedToast('move', {ok: true}), ['Delivery retry requested.', 'info']);
+  assert.equal((await clearedToast('mux', {ok: true}))[1], 'info');
+});
