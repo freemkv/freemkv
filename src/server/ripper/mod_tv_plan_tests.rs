@@ -512,3 +512,58 @@ fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
         assert!(!text.contains(&format!("{error:?}")), "{text}");
     }
 }
+
+// 1.8.3: a single-pass rip muxes the main title as one output and never fans out, so
+// it must not pick the first episode and deliver it as the show.
+#[test]
+fn a_single_pass_tv_rip_muxes_the_main_title_not_the_first_episode() {
+    // The play-all first, as a scan lists it, then the two authored episodes.
+    let mut titles = vec![title(5290.0, 300), title(2640.0, 100), title(2650.0, 200)];
+    authored_roster(&mut titles, 1..3);
+    let single = Config {
+        max_retries: 0,
+        ..Default::default()
+    };
+    let kind = crate::server::planner::MediaKind::Tv;
+    let main = crate::server::planner::main_title(&single, &titles).unwrap();
+    assert_ne!(
+        main,
+        fanout_episode_indices(&titles, &single, kind, "Show Season 1")[0]
+    );
+    assert_eq!(
+        capture_title_index(&titles, &single, kind, "Show Season 1").unwrap(),
+        main
+    );
+    assert!(check_capture_selection(&titles, &single, kind, "Show Season 1").is_ok());
+    // Multipass still captures the episode set for its fan-out.
+    let multi = Config::default();
+    assert_eq!(
+        capture_title_index(&titles, &multi, kind, "Show Season 1").unwrap(),
+        fanout_episode_indices(&titles, &multi, kind, "Show Season 1")[0]
+    );
+}
+
+// A failed hand-off falls back to the inline mux of one title only for a one-output plan.
+#[test]
+fn an_episode_fan_out_never_falls_back_to_the_one_title_inline_mux() {
+    let out = |name: &str| staging::Output {
+        filename: name.into(),
+        ..Default::default()
+    };
+    assert!(inline_mux_delivers(&[out("Movie.mkv")]));
+    assert!(!inline_mux_delivers(&[
+        out("Show_S01E01.mkv"),
+        out("Show_S01E02.mkv")
+    ]));
+}
+
+// The single-pass log names the title the rip muxes, not the engine's MainMovie pick.
+#[test]
+fn the_single_pass_plan_line_names_the_muxed_title() {
+    let cfg = Config {
+        max_retries: 0,
+        ..Default::default()
+    };
+    let line = plan_line(&single_pass_plan(&cfg, "/dev/sr0", "mkv:///s/Show.mkv", 2));
+    assert!(line.contains("Titles([2])"), "{line}");
+}

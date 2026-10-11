@@ -315,8 +315,9 @@ fn rip_key_scope(
 }
 
 /// The engine plan for a server rip of the drive at `device_path` writing `dest` (an
-/// output URL), its keys by the one rule every front end shares. The server rips the main feature, decrypts (it has no raw option), and recovers over passes
-/// when `max_retries` asks for them.
+/// output URL), its keys by the one rule every front end shares. It selects the main
+/// feature as the CLI and app do, decrypts (the server has no raw option), and recovers
+/// over passes when `max_retries` asks for them.
 pub fn server_plan(cfg: &Config, device_path: &str, dest: &str) -> freemkv_engine::Plan {
     freemkv_engine::Plan {
         source: format!("disc://{device_path}"),
@@ -327,6 +328,19 @@ pub fn server_plan(cfg: &Config, device_path: &str, dest: &str) -> freemkv_engin
         multipass: uses_multipass(cfg.max_retries),
         keys: crate::plan_core::key_params(&crate::server::keysource::key_settings(cfg)),
         force: false,
+    }
+}
+
+// The plan a single-pass rip runs: the server plan, muxing the title the rip chose.
+fn single_pass_plan(
+    cfg: &Config,
+    device_path: &str,
+    dest: &str,
+    title: usize,
+) -> freemkv_engine::Plan {
+    freemkv_engine::Plan {
+        titles: freemkv_engine::Selection::Titles(vec![title]),
+        ..server_plan(cfg, device_path, dest)
     }
 }
 
@@ -3314,11 +3328,16 @@ fn rip_disc_inner(
         device,
         &format!("Ripping {} to {}", display_name, delivered_file),
     );
-    // A single-pass rip runs the server plan as parsed; multipass logs the plan it runs below.
+    // A single-pass rip logs the server plan with the title it muxes; multipass logs below.
     if !uses_multipass(cfg_read.max_retries) {
         crate::server::log::device_log(
             device,
-            &plan_line(&server_plan(&cfg_read, device_path, &dest_url)),
+            &plan_line(&single_pass_plan(
+                &cfg_read,
+                device_path,
+                &dest_url,
+                main_idx,
+            )),
         );
     }
 
@@ -4053,6 +4072,7 @@ fn rip_disc_inner(
             }
         };
         let staging_path = std::path::Path::new(&staging);
+        let inline_fallback = inline_mux_delivers(&plan);
         if let Err(e) = hand_off_to_mux_worker(staging_path, &marker, rip_keys.as_ref().ok(), |s| {
             s.tmdb_id = tmdb_id;
             s.episode_start = episode_start;
@@ -4061,9 +4081,19 @@ fn rip_disc_inner(
             s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
             s.outputs = plan;
         }) {
-            // Couldn't hand off — fall back to the inline mux below
-            // by NOT taking the early-return branch. Log the failure
-            // so the cause is on the device log.
+            // Couldn't hand off: fall back to the inline mux below, which muxes one
+            // title, so never for an episode fan-out (the capture stays resumable).
+            if !inline_fallback {
+                abort_post_mux_preserving_staging(
+                    device,
+                    &format!(
+                        ".ripped marker write failed ({e}); the episode set is kept staged for Resume"
+                    ),
+                    &format!("hand-off to the mux worker failed: {e}"),
+                );
+                unregister_halt(device);
+                return;
+            }
             crate::server::log::device_log(
                 device,
                 &format!(".ripped marker write failed ({e}); falling back to inline mux"),
@@ -5209,7 +5239,8 @@ fn handoff_marker_name(title_confident: bool) -> &'static str {
     if title_confident { ".done" } else { ".review" }
 }
 
-// Capture may preserve a whole-disc ISO without committing to any mux titles.
+// Capture may preserve a whole-disc ISO without committing to any mux titles. A single-pass
+// rip muxes one title and never fans out (1.8.3), so no episode selection applies to it.
 fn check_capture_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
@@ -5218,6 +5249,9 @@ fn check_capture_selection(
 ) -> Result<(), crate::server::planner::PlanError> {
     if output_is_iso_image(&cfg.output_format) {
         return Ok(());
+    }
+    if !uses_multipass(cfg.max_retries) {
+        return capture_title_index(titles, cfg, media_type, disc_name).map(|_| ());
     }
     crate::server::planner::check_episode_selection(titles, cfg, plan_kind(media_type, disc_name))?;
     capture_title_index(titles, cfg, media_type, disc_name).map(|_| ())
@@ -5232,7 +5266,10 @@ fn capture_title_index(
     if output_is_iso_image(&cfg.output_format) && !titles.is_empty() {
         return Ok(0); // Whole-disc capture makes no presentation choice.
     }
-    if let Some(index) = fanout_episode_indices(titles, cfg, media_type, disc_name).first() {
+    // Only a multipass capture fans out; single-pass muxes the main title as one output.
+    if uses_multipass(cfg.max_retries)
+        && let Some(index) = fanout_episode_indices(titles, cfg, media_type, disc_name).first()
+    {
         return Ok(*index);
     }
     crate::server::planner::main_title(cfg, titles)
@@ -5352,6 +5389,11 @@ pub(crate) fn staged_output_name(display_name: &str, ext: &str) -> String {
         "{}.{ext}",
         crate::server::util::sanitize_path_compact(display_name)
     )
+}
+
+// Whether the inline mux (one title) can deliver `plan`: never an episode fan-out.
+fn inline_mux_delivers(plan: &[staging::Output]) -> bool {
+    plan.len() <= 1
 }
 
 // A multipass MKV capture's deliverable plan, decided at capture start: recorded then so a
