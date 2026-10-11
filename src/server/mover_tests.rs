@@ -3724,3 +3724,32 @@ fn a_root_whose_health_check_answered_late_still_takes_the_move() {
     assert_eq!(validate_destination_root(r.to_str().unwrap()), Ok(()));
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+// One bounded write test per destination root per move attempt: on a NAS taking seconds per
+// call, a second probe doubled the wait before every delivery.
+#[test]
+fn a_move_write_tests_its_root_once() {
+    let _g = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let disc_dir = staging.join("Probed Once");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Probed Once")).unwrap();
+    let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
+    mkv.extend_from_slice(&[0xAAu8; 1024]);
+    std::fs::write(disc_dir.join("Probed Once.mkv"), &mkv).unwrap();
+    check_and_move(&cfg);
+    assert!(
+        movie_dir
+            .join("Probed Once (2024)/Probed Once (2024).mkv")
+            .exists(),
+        "moved"
+    );
+    assert_eq!(test_hooks::preflights(&movie_dir), 1);
+}

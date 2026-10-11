@@ -1326,18 +1326,20 @@ fn check_and_move(cfg: &Config) {
 
         // Nothing below touches a destination root before it passes a bounded write test:
         // a stale or hung share holds the move (output kept in staging) and never blocks here.
+        // Each root is tested once per attempt.
+        let mut root_checks = RootChecks::default();
         let unavailable = if let Some(saved) = &delivery {
             saved
                 .roots
                 .iter()
-                .find_map(|root| crate::server::health::preflight("output", Path::new(root)).err())
+                .find_map(|root| root_checks.check(Path::new(root)).err())
                 .or_else(|| {
                     (attempt != Attempt::Recreate)
                         .then(|| missing_folder(&planned_moves))
                         .flatten()
                 })
         } else {
-            unreachable_root(cfg, &tmdb_result, &planned_moves)
+            unreachable_root(cfg, &tmdb_result, &planned_moves, &mut root_checks)
         };
         if let Some(p) = unavailable {
             record_error_at_stage(
@@ -1445,7 +1447,7 @@ fn check_and_move(cfg: &Config) {
             dest_roots = saved.roots.clone();
         }
         let blocked_root = dest_roots.iter().find_map(|r| {
-            validate_destination_root(r)
+            validate_root_checked(r, &mut root_checks)
                 .err()
                 .map(|reason| (r.clone(), reason))
         });
@@ -2214,15 +2216,43 @@ fn destination_root_for(cfg: &Config, tmdb: &Option<tmdb::TmdbResult>, filename:
 // Fail-loud destination-root validation, so the caller preserves output in staging on failure.
 // A relative or empty root is refused without touching a disk; the rest is health's bounded
 // preflight (the root must already exist as a writable folder; it is never created).
+#[cfg(test)]
 fn validate_destination_root(root: &str) -> Result<(), String> {
-    validate_destination_root_with(
-        root,
-        crate::server::health::PREFLIGHT_TIMEOUT,
-        crate::server::health::probe_write,
-    )
+    validate_root_checked(root, &mut RootChecks::default())
+}
+
+// `validate_destination_root` reusing a write test `checks` already ran for `root`.
+fn validate_root_checked(root: &str, checks: &mut RootChecks) -> Result<(), String> {
+    root_shape(root)?;
+    checks
+        .check(Path::new(root))
+        .map_err(|p| root_reason(root, &p))
+}
+
+// The bounded write test of each destination root, run at most once per move attempt.
+#[derive(Default)]
+struct RootChecks(
+    Vec<(
+        std::path::PathBuf,
+        Result<(), crate::server::health::Problem>,
+    )>,
+);
+
+impl RootChecks {
+    fn check(&mut self, root: &Path) -> Result<(), crate::server::health::Problem> {
+        if let Some((_, done)) = self.0.iter().find(|(p, _)| p == root) {
+            return done.clone();
+        }
+        #[cfg(test)]
+        test_hooks::preflighted(root);
+        let result = crate::server::health::preflight("output", root);
+        self.0.push((root.to_path_buf(), result.clone()));
+        result
+    }
 }
 
 // `validate_destination_root` with the limit and the probe given (the tests inject a slow one).
+#[cfg(test)]
 fn validate_destination_root_with<F>(
     root: &str,
     limit: std::time::Duration,
@@ -2323,10 +2353,11 @@ fn unreachable_root(
     cfg: &Config,
     tmdb: &Option<tmdb::TmdbResult>,
     planned: &[(std::path::PathBuf, String)],
+    checks: &mut RootChecks,
 ) -> Option<crate::server::health::Problem> {
-    use crate::server::health::{self, Fault};
+    use crate::server::health::Fault;
     planned_roots(cfg, tmdb, planned).iter().find_map(|r| {
-        health::preflight("output", Path::new(r)).err().filter(|p| {
+        checks.check(Path::new(r)).err().filter(|p| {
             matches!(
                 p.fault,
                 Fault::Stale | Fault::Io | Fault::Unresponsive | Fault::Unmounted
@@ -2631,6 +2662,22 @@ pub(crate) mod test_hooks {
         if let Some(hook) = HOOK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             hook();
         }
+    }
+    static PREFLIGHTS: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+    pub fn preflighted(root: &std::path::Path) {
+        PREFLIGHTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(root.to_path_buf());
+    }
+    /// How many write tests `root` has had.
+    pub fn preflights(root: &std::path::Path) -> usize {
+        PREFLIGHTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|p| *p == root)
+            .count()
     }
 }
 
