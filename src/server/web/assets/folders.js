@@ -27,20 +27,25 @@ function bannerOne(message, path, since, hint, waits, slow) {
 export const QUEUE_FILE_ROLE = 'queue file';
 
 /** One banner per failed folder, then one per folder still being checked, or the queue's hold
-    when a preflight found the problem before the next check did; '' when every folder answers. */
+    when a preflight found the problem before the next check did; '' when every folder answers.
+    A queue file that cannot be read is its own hold: its banner comes first, beside any folder's,
+    and nothing then waits to start on its own. */
 export function folderBanner(folders, hold, waits) {
-  const bad = unhealthy(folders).map(f => bannerOne(f.message || 'The ' + f.role + ' folder cannot be used.', f.path, f.health.since, f.hint, waits, false));
-  const slow = checking(folders).map(f => bannerOne(f.message || 'The ' + f.role + ' folder has not answered yet — still checking.', f.path, f.health.since, f.hint, waits, true));
-  if (bad.length || slow.length) return bad.concat(slow).join('');
-  if (!hold) return '';
-  const held = hold.role === QUEUE_FILE_ROLE;
-  return bannerOne(hold.message, hold.path, hold.since, hold.hint, waits && !held, hold.state === 'checking');
+  const fileHeld = !!hold && hold.role === QUEUE_FILE_ROLE;
+  const own = waits && !fileHeld;
+  const bad = unhealthy(folders).map(f => bannerOne(f.message || 'The ' + f.role + ' folder cannot be used.', f.path, f.health.since, f.hint, own, false));
+  const slow = checking(folders).map(f => bannerOne(f.message || 'The ' + f.role + ' folder has not answered yet — still checking.', f.path, f.health.since, f.hint, own, true));
+  const held = hold && (fileHeld || !(bad.length || slow.length))
+    ? [bannerOne(hold.message, hold.path, hold.since, hold.hint, own, hold.state === 'checking')] : [];
+  return held.concat(bad, slow).join('');
 }
 
-/** The Library's Remux link while remuxes wait: its tooltip and its badge's label. */
+/** The Library's Remux link while remuxes wait: its tooltip and its badge's label. A held
+    queue file is named even while a folder fails too. */
 export function remuxLinkLabel(hold, bad) {
-  if (!bad && hold && hold.role === QUEUE_FILE_ROLE) {
-    return { title: 'The remux queue is held: ' + hold.message, aria: 'The remux queue is held until its file can be read' };
+  if (hold && hold.role === QUEUE_FILE_ROLE) {
+    const also = bad ? ' Remuxes are also waiting: ' + bad.message : '';
+    return { title: 'The remux queue is held: ' + hold.message + also, aria: 'The remux queue is held until its file can be read' };
   }
   return { title: 'Remuxes are waiting: ' + (bad || hold).message, aria: 'Remuxes are waiting for a folder' };
 }

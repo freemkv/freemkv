@@ -163,3 +163,23 @@ test('a queue file that cannot be read is a held queue, not a folder to wait for
   assert.equal(folder.aria, 'Remuxes are waiting for a folder');
   assert.equal(folder.title, 'Remuxes are waiting: gone');
 });
+
+test('a held queue file is shown beside a failed or slow folder, never hidden by it', async () => {
+  const f = await load();
+  const hold = {
+    role: 'queue file', path: '/config/library-queue.json', since: 3,
+    message: 'The remux queue file could not be read.',
+    hint: 'Nothing in the remux queue runs or changes until this file can be read.',
+  };
+  const slow = { role: 'source ISO', path: '/isos', health: { state: 'checking', since: 2 } };
+  for (const folders of [[stale], [slow], [stale, slow]]) {
+    const html = f.folderBanner(folders, hold, true);
+    assert.match(html, /queue file could not be read/, html);
+    assert.match(html, /library-queue\.json/, html);
+    assert.ok(!html.includes('start on their own'), html);
+  }
+  const label = f.remuxLinkLabel(hold, stale);
+  assert.equal(label.aria, 'The remux queue is held until its file can be read');
+  assert.match(label.title, /queue is held/);
+  assert.match(label.title, /stale file handle/);
+});
