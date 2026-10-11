@@ -17,7 +17,8 @@ pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub static TERMINATE: AtomicBool = AtomicBool::new(false);
 
 /// Set by the System-panel reboot. After the bounded drain the daemon relaunches
-/// itself: exit 75 for the service manager to start it again.
+/// itself: exec of the startup binary on Linux, exit 75 for the service manager
+/// elsewhere.
 pub static REBOOT: AtomicBool = AtomicBool::new(false);
 
 /// Full build label: package version + git short hash (e.g. `1.1.1 (g2014a41)`),

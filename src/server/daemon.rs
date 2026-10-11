@@ -5,7 +5,8 @@ use super::{
     ripper, web,
 };
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -16,6 +17,8 @@ const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 const WEB_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 // EX_TEMPFAIL: the service manager (launchd KeepAlive) starts the daemon again.
 const RESTART_EXIT_CODE: i32 = 75;
+// Slack past the drain bounds before a stalled reboot tail (a hung log disk) is cut short.
+const RELAUNCH_SLACK: Duration = Duration::from_secs(30);
 // Cadence of the KEYDB refresh and log prune threads, in one-second SHUTDOWN polls.
 const DAILY_SECS: u64 = 24 * 3600;
 
@@ -23,9 +26,12 @@ const DAILY_SECS: u64 = 24 * 3600;
 ///
 /// Every terminal path either exits the process (`--healthcheck`,
 /// `--version`, `--help`, an unknown argument) or returns once the daemon has
-/// drained after SIGTERM/SIGINT, or, after a reboot request, exits 75 for the
-/// service manager to start it again.
+/// drained after SIGTERM/SIGINT, or, after a reboot request, replaces itself
+/// (exec, Linux) or exits 75 for the service manager to start it again.
 pub fn run(argv: Vec<String>) {
+    // Before anything else: once a package upgrade replaces the binary, /proc/self/exe
+    // no longer names the path to exec.
+    let relaunch_info = Relaunch::capture();
     // v0.25.7: tiny built-in subcommands so the image doesn't need curl or a
     // separate entrypoint script. Each exits before observe::init so they
     // don't spam the tracing sinks on every 30-second healthcheck.
@@ -250,6 +256,10 @@ pub fn run(argv: Vec<String>) {
     ripper::drive_poll_loop(&cfg);
 
     SHUTDOWN.store(true, Ordering::Release);
+    let bound = RIP_DRAIN_TIMEOUT + SERVICE_DRAIN_TIMEOUT + WEB_JOIN_TIMEOUT + RELAUNCH_SLACK;
+    if let Err(e) = spawn_relaunch_deadline(bound, exit_now) {
+        tracing::warn!(error = %e, "could not start the relaunch deadline");
+    }
     let workers = vec![
         ("mover", Some(mover_handle)),
         ("muxer", Some(muxer_handle)),
@@ -274,8 +284,7 @@ pub fn run(argv: Vec<String>) {
         },
     );
     if relaunch_requested() {
-        log::syslog("autorip reboot: exiting 75 for the service manager to restart");
-        std::process::exit(RESTART_EXIT_CODE);
+        relaunch(&relaunch_info);
     }
 }
 
@@ -317,6 +326,98 @@ fn stop_services(
 // A reboot was requested and no stop signal has overridden it.
 fn relaunch_requested() -> bool {
     REBOOT.load(Ordering::Acquire) && !TERMINATE.load(Ordering::Acquire)
+}
+
+// The binary and full argv (argv[0] included) the daemon was started with.
+struct Relaunch {
+    exe: std::io::Result<PathBuf>,
+    argv: Vec<OsString>,
+}
+
+impl Relaunch {
+    fn capture() -> Self {
+        Self {
+            exe: std::env::current_exe(),
+            argv: std::env::args_os().collect(),
+        }
+    }
+}
+
+// The exit code to use when `exec` did not replace the process: 0 if a stop signal
+// arrived meanwhile, else 75 for the service manager.
+fn relaunch_with(
+    relaunch: &Relaunch,
+    exec: impl FnOnce(&Path, &[OsString]) -> std::io::Error,
+) -> i32 {
+    if TERMINATE.load(Ordering::Acquire) {
+        return 0;
+    }
+    let exe = match (&relaunch.exe, relaunch.argv.is_empty()) {
+        (Ok(exe), false) => exe,
+        _ => {
+            log::syslog(
+                "autorip reboot: startup binary unknown; exiting 75 for the service manager",
+            );
+            return RESTART_EXIT_CODE;
+        }
+    };
+    let e = exec(exe, &relaunch.argv);
+    log::syslog(&format!(
+        "autorip reboot: not re-executed ({e}); exiting 75 for the service manager to restart"
+    ));
+    RESTART_EXIT_CODE
+}
+
+// Replace the process image in place; returns only on failure. Every fd is CLOEXEC.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn exec_in_place(exe: &Path, argv: &[OsString]) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let Some((arg0, rest)) = argv.split_first() else {
+        return std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty argv");
+    };
+    std::process::Command::new(exe).arg0(arg0).args(rest).exec()
+}
+
+// macOS: process exit is the sure way to drop the drive's IOKit exclusive access.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn exec_in_place(_: &Path, _: &[OsString]) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "relaunch is left to the service manager on this platform",
+    )
+}
+
+fn relaunch(relaunch: &Relaunch) -> ! {
+    log::syslog("autorip reboot: relaunching");
+    observe::flush_before_exit();
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(relaunch_with(relaunch, exec_in_place))
+}
+
+// Backstop for the reboot tail itself (log writes can hang on a dead /config): past
+// `after`, a still-pending relaunch exits 75 through `exit` regardless.
+fn spawn_relaunch_deadline(
+    after: Duration,
+    exit: impl FnOnce(i32) + Send + 'static,
+) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("relaunch-deadline".into())
+        .spawn(move || {
+            std::thread::sleep(after);
+            if relaunch_requested() {
+                exit(RESTART_EXIT_CODE);
+            }
+        })
+}
+
+// Exit without running atexit handlers or taking any lock a wedged thread may hold.
+fn exit_now(code: i32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::_exit(code)
+    };
+    #[cfg(not(unix))]
+    std::process::exit(code);
 }
 
 // Fetch KEYDB from `url` through the address guard and save it. `boot` picks the

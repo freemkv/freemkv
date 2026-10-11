@@ -660,6 +660,10 @@ fn sigterm_during_reboot_drain_returns_without_relaunch() {
         &short_bounds()
     ));
     assert!(!relaunch_requested());
+    let code = relaunch_with(&Relaunch::capture(), |_, _| {
+        panic!("a stopped daemon must not re-exec")
+    });
+    assert_eq!(code, 0);
 }
 
 // A second stop signal force-exits with status 1 instead of waiting for the drain.
@@ -713,7 +717,143 @@ fn wedged_worker_still_reaches_relaunch_after_timeout() {
         started.elapsed()
     );
     assert!(relaunch_requested());
+    let mut execs = 0;
+    let code = relaunch_with(&Relaunch::capture(), |_, _| {
+        execs += 1;
+        std::io::Error::other("test")
+    });
+    assert_eq!((code, execs), (RESTART_EXIT_CODE, 1));
     drop(release);
+}
+
+// An idle reboot re-execs the binary and the full argv (argv[0] included) the daemon
+// was started with; an exec that returns means exit 75 for the service manager.
+#[test]
+fn idle_reboot_relaunches_with_the_startup_binary_and_argv() {
+    if !in_child("idle_reboot_relaunches_with_the_startup_binary_and_argv") {
+        return;
+    }
+    let staging = tempfile::tempdir().unwrap();
+    REBOOT.store(true, Ordering::Release);
+    SHUTDOWN.store(true, Ordering::Release);
+    assert!(stop_services(
+        staging.path(),
+        |_| true,
+        vec![],
+        None,
+        &short_bounds()
+    ));
+    assert!(relaunch_requested());
+    let mut calls = Vec::new();
+    let code = relaunch_with(&Relaunch::capture(), |exe, argv| {
+        calls.push((exe.to_path_buf(), argv.to_vec()));
+        std::io::Error::other("test")
+    });
+    assert_eq!(code, RESTART_EXIT_CODE);
+    let expected_argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    assert_eq!(
+        calls,
+        vec![(std::env::current_exe().unwrap(), expected_argv)]
+    );
+}
+
+// With no binary or no argv to re-exec there is nothing to try: exit 75 at once.
+#[test]
+fn exec_failure_or_unknown_binary_exits_75() {
+    if !in_child("exec_failure_or_unknown_binary_exits_75") {
+        return;
+    }
+    REBOOT.store(true, Ordering::Release);
+    let never = |_: &std::path::Path, _: &[std::ffi::OsString]| -> std::io::Error {
+        panic!("nothing to exec")
+    };
+    let unknown = Relaunch {
+        exe: Err(std::io::Error::other("no /proc")),
+        argv: std::env::args_os().collect(),
+    };
+    assert_eq!(relaunch_with(&unknown, never), RESTART_EXIT_CODE);
+    let no_argv = Relaunch {
+        exe: Ok(std::env::current_exe().unwrap()),
+        argv: Vec::new(),
+    };
+    assert_eq!(relaunch_with(&no_argv, never), RESTART_EXIT_CODE);
+}
+
+// A reboot tail that stalls past its bound (a hung log write) still exits 75; a stop
+// signal disarms it.
+#[test]
+fn relaunch_deadline_exits_75_unless_a_stop_signal_vetoed_it() {
+    if !in_child("relaunch_deadline_exits_75_unless_a_stop_signal_vetoed_it") {
+        return;
+    }
+    REBOOT.store(true, Ordering::Release);
+    let (tx, fired) = std::sync::mpsc::channel();
+    let deadline = spawn_relaunch_deadline(Duration::from_millis(50), move |code| {
+        let _ = tx.send(code);
+    })
+    .unwrap();
+    assert_eq!(
+        fired.recv_timeout(Duration::from_secs(5)),
+        Ok(RESTART_EXIT_CODE)
+    );
+    deadline.join().unwrap();
+
+    TERMINATE.store(true, Ordering::Release);
+    let (tx, fired) = std::sync::mpsc::channel();
+    spawn_relaunch_deadline(Duration::from_millis(50), move |code| {
+        let _ = tx.send(code);
+    })
+    .unwrap()
+    .join()
+    .unwrap();
+    assert!(
+        fired.try_recv().is_err(),
+        "a stop signal must disarm the deadline"
+    );
+}
+
+// End to end on Linux: exec keeps the pid and closes the CLOEXEC listener, so the
+// new image can bind the same port.
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_in_place_replaces_the_process_and_frees_the_port() {
+    const NAME: &str =
+        "server::daemon::tests::exec_in_place_replaces_the_process_and_frees_the_port";
+    if !in_child("exec_in_place_replaces_the_process_and_frees_the_port") {
+        return;
+    }
+    if std::env::var_os("FREEMKV_TEST_EXEC_STAGE").is_some() {
+        let pid: u32 = std::env::var("FREEMKV_TEST_EXEC_PID")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let port = std::env::var("FREEMKV_TEST_EXEC_PORT").unwrap();
+        assert_eq!(std::process::id(), pid, "exec must keep the pid");
+        std::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+            .expect("exec must close the old listener");
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // SAFETY: this isolated child process is single-threaded at this point.
+    unsafe {
+        std::env::set_var("FREEMKV_TEST_EXEC_STAGE", "2");
+        std::env::set_var("FREEMKV_TEST_EXEC_PID", std::process::id().to_string());
+        std::env::set_var("FREEMKV_TEST_EXEC_PORT", port.to_string());
+    }
+    let exe = std::env::current_exe().unwrap();
+    let relaunch = Relaunch {
+        exe: Ok(exe.clone()),
+        argv: vec![
+            exe.into(),
+            "--exact".into(),
+            NAME.into(),
+            "--nocapture".into(),
+        ],
+    };
+    REBOOT.store(true, Ordering::Release);
+    let code = relaunch_with(&relaunch, exec_in_place);
+    panic!("exec returned (exit code {code})");
 }
 
 fn muxing_staging() -> (tempfile::TempDir, std::path::PathBuf) {

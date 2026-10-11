@@ -134,7 +134,8 @@ impl std::io::Write for SizeCappedFile {
 /// Worker guards for the non-blocking file appenders. Must outlive the
 /// process — flushed on drop. Stored in a static so `init()` can be called
 /// from `main` without the caller having to thread guards through.
-static GUARDS: once_cell::sync::OnceCell<Vec<WorkerGuard>> = once_cell::sync::OnceCell::new();
+static GUARDS: once_cell::sync::OnceCell<std::sync::Mutex<Vec<WorkerGuard>>> =
+    once_cell::sync::OnceCell::new();
 
 // Reload handle for the active EnvFilter, set by `init()` and swapped by
 // `set_debug()`. Absent when init failed or AUTORIP_LOG_LEVEL was set
@@ -229,7 +230,17 @@ pub fn init() {
     if let Some(h) = reload_handle {
         let _ = RELOAD_HANDLE.set(h);
     }
-    let _ = GUARDS.set(guards);
+    let _ = GUARDS.set(std::sync::Mutex::new(guards));
+}
+
+/// Flush the file sinks before the process exits or execs. Each appender's
+/// flush is bounded (about a second), so a hung log disk cannot hold the exit;
+/// events logged afterwards are dropped. A second call does nothing.
+pub fn flush_before_exit() {
+    if let Some(guards) = GUARDS.get() {
+        let taken = std::mem::take(&mut *guards.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(taken);
+    }
 }
 
 // The operator's `AUTORIP_LOG_LEVEL` spec as a filter (`autorip` directives mirrored onto the
