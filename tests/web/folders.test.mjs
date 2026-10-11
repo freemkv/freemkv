@@ -143,3 +143,23 @@ test('a folder still being checked is a notice, not an alert', async () => {
   const held = f.folderBanner([fine], { state: 'checking', role: 'output', path: '/n', message: 'slow', since: 1 }, true);
   assert.match(held, /banner warn/);
 });
+
+test('a queue file that cannot be read is a held queue, not a folder to wait for', async () => {
+  const f = await load();
+  const hold = {
+    role: 'queue file', path: '/config/library-queue.json', since: 3,
+    message: 'The remux queue file could not be read.',
+    hint: 'Nothing in the remux queue runs or changes until this file can be read.',
+  };
+  const html = f.folderBanner([fine], hold, true);
+  assert.match(html, /could not be read/);
+  assert.ok(!html.includes('start on their own'), html);
+  const why = f.queuedNote({ note: null }, hold, 0);
+  assert.ok(!why.includes('folder'), why);
+  const label = f.remuxLinkLabel(hold, null);
+  assert.ok(!label.aria.includes('folder'), label.aria);
+  assert.ok(!label.title.includes('waiting'), label.title);
+  const folder = f.remuxLinkLabel({ role: 'output', message: 'gone' }, null);
+  assert.equal(folder.aria, 'Remuxes are waiting for a folder');
+  assert.equal(folder.title, 'Remuxes are waiting: gone');
+});

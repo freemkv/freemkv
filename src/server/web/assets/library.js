@@ -6,7 +6,7 @@ import { watch, refreshNow } from './libdata.js';
 import { mediaList } from './medialist.js';
 import { chipFilter } from './chips.js';
 import { muxedHtml, auditState, openDetails, outdated, videoLabel, issueText } from './details.js';
-import { folderBanner, unhealthy, stagedNote } from './folders.js';
+import { folderBanner, unhealthy, stagedNote, remuxLinkLabel } from './folders.js';
 
 const FILTERS = [
   ['all', 'All'],
@@ -245,14 +245,15 @@ export default {
       const bad = unhealthy(last && last.folders)[0];
       const held = bad || (last && last.hold);
       a.classList.toggle('remuxing', !!running);
-      a.title = held ? 'Remuxes are waiting: ' + (bad ? bad.message : held.message) : running ? 'Remuxing ' + running.title : '';
+      const label = held ? remuxLinkLabel(last.hold, bad) : null;
+      a.title = label ? label.title : running ? 'Remuxing ' + running.title : '';
       let b = a.querySelector('.nav-badge');
       if ((running || held) && !b) { b = document.createElement('span'); a.appendChild(b); }
       if (b) {
         // Red only for a failed folder; one still being checked is merely slow.
         const failed = bad || (held && held.state !== 'checking');
         b.className = 'nav-badge dot' + (failed ? ' bad' : '');
-        b.setAttribute('aria-label', held ? 'Remuxes are waiting for a folder' : 'A remux is running');
+        b.setAttribute('aria-label', label ? label.aria : 'A remux is running');
       }
       if (!running && !held && b) b.remove();
     };
