@@ -66,7 +66,7 @@ fn opening_a_disc_is_an_open_for_enablement_purposes() {
     // nothing) would leave a live "Open Disc" during a rip.
     assert_eq!(cmd_for(sel!(onOpenFiles:)), Some(Cmd::Open));
     assert_eq!(cmd_for(sel!(onOpenDisc:)), Some(Cmd::Open));
-    assert!(crate::ui::blocked_while_running(Cmd::Open));
+    assert!(crate::ui::blocked_while_running(&Cmd::Open));
 }
 
 #[test]
@@ -315,34 +315,20 @@ fn the_output_field_has_a_delegate_wired_source_inspection_only() {
     );
 }
 
-// ── one settings-save policy, not two ───────────────────────────────────
-// STOPGAP, NOT COVERAGE: needs a live `Controller`, no harness for that
-// exists. Inspects source text for a re-inlined Ok/Err match.
+// ── one settings-save policy, in the core ──────────────────────────────
+// Source inspection only: needs a live `Controller`. The shell commits the
+// form to the core (`Cmd::CommitSettings`), which saves and reports.
 #[test]
 fn language_switch_reports_a_failed_save_source_inspection_only() {
-    let src = include_str!("mac.rs");
-    // `.settings.borrow().save` (…) should appear in exactly ONE place: the
-    // shared helper. A second occurrence means someone re-inlined the
-    // Ok/Err match at a second call site — "one policy implemented twice".
-    let direct_save = format!("{}{}", ".settings.borrow().save", "()");
-    let occurrences = src.matches(&direct_save).count();
-    assert_eq!(
-        occurrences, 1,
-        "the direct settings-save call appears {occurrences} times \
-             outside this test — it must appear exactly once, inside \
-             save_settings_reporting_error, or the language-switch path (or \
-             some future path) has silently grown its own copy again"
-    );
-    let helper = format!("{}{}", "fn save_settings_reporting", "_error");
+    let save = format!("{}{}", "settings.save", "()");
     assert!(
-        src.contains(&helper),
-        "the shared save_settings_reporting_error helper is gone"
+        !prod_src().contains(&save),
+        "mac.rs saves Settings itself again — the core's save-and-report is bypassed"
     );
     let commit = fn_body(prod_src(), "fn commit_prefs(");
     assert!(
-        commit.contains("self.save_settings_reporting_error();"),
-        "commit_prefs no longer saves through save_settings_reporting_error \
-             — a failed save from Settings would go unreported again"
+        commit.contains("Cmd::CommitSettings("),
+        "commit_prefs no longer hands the form to the core"
     );
     let language = fn_body(prod_src(), "fn on_apply_language(");
     assert!(
@@ -382,44 +368,10 @@ fn a_settings_field_commits_on_enter_and_on_leaving_it_source_inspection_only() 
 }
 
 #[test]
-fn a_commit_writes_only_what_changed_and_follows_only_a_new_default_folder() {
-    let before = crate::settings::Settings::default();
-    assert_eq!(
-        prefs_commit(&before, &before.clone()),
-        PrefsCommit::Unchanged
-    );
-
-    let mut other = before.clone();
-    other.filename_template = "{title}".into();
-    assert_eq!(
-        prefs_commit(&before, &other),
-        PrefsCommit::Save { new_dest: None },
-        "an edit elsewhere must not re-point a one-off output folder"
-    );
-
-    let mut moved = before.clone();
-    moved.dest_dir = "/Volumes/Media/Rips".into();
-    assert_eq!(
-        prefs_commit(&before, &moved),
-        PrefsCommit::Save {
-            new_dest: Some("/Volumes/Media/Rips".into())
-        }
-    );
-
-    let mut blank = before.clone();
-    blank.dest_dir = "  ".into();
-    assert_eq!(
-        prefs_commit(&before, &blank),
-        PrefsCommit::Save { new_dest: None },
-        "a cleared default saves but leaves the active folder alone"
-    );
-}
-
-#[test]
 fn a_settings_window_left_by_cancel_is_rebuilt_on_reopen_source_inspection_only() {
     let body = fn_body(prod_src(), "fn perform(&self, effects");
     let at = body
-        .find("E::ShowSettings =>")
+        .find("E::ShowSettings(st) =>")
         .expect("ShowSettings arm moved");
     let arm = &body[at..at + 600.min(body.len() - at)];
     assert!(
@@ -748,21 +700,8 @@ fn a_language_switch_forgets_the_tree_memo_source_inspection_only() {
 }
 
 // ── quitting goes through the same guard as closing ───────────────────
-// The alert itself needs a real `NSAlert` on a run loop, but the two
-// DECISIONS around it are pure functions and are tested for real here.
-
-#[test]
-fn a_quit_asks_exactly_once_and_only_while_a_rip_runs() {
-    // Nothing running: never ask, whatever the latch says.
-    assert!(!needs_rip_confirmation(false, false));
-    assert!(!needs_rip_confirmation(false, true));
-    // Running and nobody has answered yet: ask.
-    assert!(needs_rip_confirmation(true, false));
-    // Already chose "Stop & Quit" on the way out: do NOT ask again.
-    // `Cmd::Cancel` only signals the worker, so `running()` stays true
-    // when the last-window-closed termination reaches the delegate.
-    assert!(!needs_rip_confirmation(true, true));
-}
+// The alert itself needs a real `NSAlert` on a run loop; whether to ask is
+// the core's (`ui::needs_rip_confirmation`), and the answer is mapped here.
 
 #[test]
 fn only_the_first_alert_button_stops_the_rip_and_quits() {
@@ -831,30 +770,18 @@ fn the_language_pickers_own_no_parsing_source_inspection_only() {
     }
 }
 
-// "Stop & Quit" has to STOP before it quits.
+// "Stop & Quit" has to STOP before it quits: the core cancels and waits
+// (`ui::App::confirm_quit`, tested there); this shell must ask it to.
 #[test]
-fn stop_and_quit_waits_for_the_worker_before_letting_the_process_go() {
-    let src = include_str!("mac.rs");
-    // The QUIT path specifically — the Stop button signals the same way and
-    // is not what this is about, so the slice is taken from `confirm_quit`.
-    let helper = format!("{}{}", "fn confirm_", "quit(&self) -> QuitChoice {");
-    let start = src.find(&helper).expect("the shared confirm_quit is gone");
-    let end = start
-        + src[start..]
-            .find("\n    // Save `Settings` to disk")
-            .expect("the next item still ends confirm_quit");
-    let body = &src[start..end];
-    let cancel = format!("{}{}", "self.act(crate::ui::Cmd::", "Cancel);");
+fn stop_and_quit_hands_the_stop_to_the_core_source_inspection_only() {
+    let body = fn_body(prod_src(), "fn confirm_quit(&self) -> QuitChoice {");
     assert!(
-        body.contains(&cancel),
-        "confirm_quit no longer signals the worker at all"
+        body.contains("Cmd::QuitRequested"),
+        "the core no longer decides whether to ask"
     );
-    let wait = format!("{}{}", "await_worker_", "exit(");
     assert!(
-        body.contains(&wait),
-        "the cancel is fire-and-forget: nothing waits for the worker to \
-             put its output down before AppKit tears the process out from \
-             under it"
+        body.contains("a.confirm_quit()"),
+        "Stop & Quit no longer stops the rip before AppKit tears the process down"
     );
 }
 
@@ -929,49 +856,6 @@ fn the_app_has_a_delegate_that_gates_quit_and_ends_the_process_source_inspection
     );
 }
 
-// ── one keydb download at a time ── STOPGAP, NOT COVERAGE: needs a live
-// Controller/Settings window to click. Fails if the guard reverts to
-// just the button's enabled state, which a rebuild resets to enabled.
-#[test]
-fn a_second_keydb_download_is_refused_by_state_not_by_a_button_source_inspection_only() {
-    let src = include_str!("mac.rs");
-    let flag = format!("{}{}", "if self.ivars().keydb_updating", ".get() {");
-    assert!(
-        src.contains(&flag),
-        "onUpdateKeys: no longer checks a controller-held in-flight flag — \
-             reopening Settings mid-download hands back an enabled button and \
-             a second click spawns a second writer of the same keydb file"
-    );
-    let restore = format!(
-        "{}{}",
-        "c.set_keydb_updating(c.ivars().keydb_updating", ".get());"
-    );
-    assert!(
-        src.contains(&restore),
-        "build_prefs no longer restores the in-flight state onto the \
-             freshly built button, so a running download looks idle"
-    );
-}
-
-// ── the drain timer stops once drained ── nothing invalidated it, so it
-// fired forever after the first keydb update; Windows' `drain()` already
-// calls `KillTimer` at the same point. Source inspection only.
-#[test]
-fn the_drain_timer_stops_itself_once_drained_source_inspection_only() {
-    let src = include_str!("mac.rs");
-    let stop = format!(
-        "{}{}",
-        "if let Some(t) = self.ivars().drain.borrow_mut().take",
-        "() {\n                t.invalidate();"
-    );
-    assert!(
-        src.contains(&stop),
-        "onDrain: no longer invalidates and clears the drain timer once \
-             messages are processed — it would go back to polling an always- \
-             empty inbox at 5 Hz forever after the first keydb update"
-    );
-}
-
 // ── codeaudit mac cluster ─────────────────────────────────────────────
 
 fn prod_src() -> &'static str {
@@ -1023,28 +907,6 @@ fn notification_failures_are_logged_source_inspection_only() {
     );
 }
 
-// M4 + M5: a failed update or a panic is a Notice; the payload never shows.
-#[test]
-fn a_failed_keydb_update_is_a_notice_and_never_shows_the_panic_payload() {
-    use crate::ui::LogKind;
-    let ok = keydb_outcome(Ok(Ok("keydb updated — 3 entries".into())));
-    assert_eq!(ok, (LogKind::Result, "keydb updated — 3 entries".into()));
-    let err = keydb_outcome(Ok(Err("keydb download failed: 404".into())));
-    assert_eq!(err.0, LogKind::Notice, "an Err is styled like a success");
-    assert_eq!(err.1, "keydb download failed: 404");
-    let boom = std::panic::catch_unwind(|| -> Result<String, String> {
-        std::panic::panic_any("zip entry out of range")
-    });
-    let (kind, msg) = keydb_outcome(boom);
-    assert_eq!(kind, LogKind::Notice);
-    assert_eq!(msg, "keydb update failed — internal error");
-    let owned: std::thread::Result<Result<String, String>> =
-        Err(Box::new(format!("KEY {}", "0123abcd")));
-    let (kind, msg) = keydb_outcome(owned);
-    assert_eq!(kind, LogKind::Notice);
-    assert!(!msg.contains("0123abcd"), "panic payload leaked: {msg}");
-}
-
 // M6: an ad-hoc signing failure must fail the bundle build.
 #[test]
 fn bundle_sh_fails_when_ad_hoc_signing_fails() {
@@ -1079,7 +941,7 @@ fn every_shared_menu_item_maps_to_a_selector_that_routes_back_to_it() {
                 match &mi.action {
                     MenuAction::Cmd(c) => {
                         assert!(to_ctrl, "{c:?} would go to the responder chain");
-                        assert_eq!(cmd_for(s), Some(*c), "{c:?} runs another command");
+                        assert_eq!(cmd_for(s).as_ref(), Some(c), "{c:?} runs another command");
                     }
                     MenuAction::OpenDisc => {
                         assert!(to_ctrl);

@@ -1232,15 +1232,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // Compute disc_format + duration up front so the abort/early-return
     // paths below can surface them in the UI state (they were previously
     // only available after the mux-build block).
-    let disc_format = match disc.format {
-        libfreemkv::DiscFormat::Uhd => "uhd",
-        libfreemkv::DiscFormat::Fmts => "fmts",
-        libfreemkv::DiscFormat::BluRay => "bluray",
-        libfreemkv::DiscFormat::HdDvd => "hddvd",
-        libfreemkv::DiscFormat::Dvd => "dvd",
-        libfreemkv::DiscFormat::Unknown => "unknown",
-    }
-    .to_string();
+    let disc_format = disc.format.id().to_string();
     let duration = crate::server::util::format_duration_hm(title.duration_secs);
     let map = match freemkv_engine::Mapfile::load(&mapfile_path) {
         Ok(m) => m,

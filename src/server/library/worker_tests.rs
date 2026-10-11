@@ -27,7 +27,7 @@ fn presentation_preference_unplanned_movie_cannot_skip_source_planning() {
 
 #[test]
 fn presentation_preference_single_output_is_frozen_in_queue() {
-    use crate::server::planner::{MediaMetadata, MoviePlanner};
+    use crate::server::planner::MediaMetadata;
     let t = tempfile::tempdir().unwrap();
     let lib = Library::open(t.path(), &t.path().join("logs"));
     lib.queue.add(vec![NewJob {
@@ -41,14 +41,13 @@ fn presentation_preference_single_output_is_frozen_in_queue() {
         presentation_language: "de".into(),
         ..Default::default()
     };
-    let plan = MoviePlanner::from_config(&cfg)
-        .plan(
-            &job.iso,
-            &crate::selection_test_fixtures::variant_titles(),
-            &MediaMetadata::default(),
-            &job.target,
-        )
-        .unwrap();
+    let plan = crate::server::planner::plan(
+        &cfg,
+        &crate::selection_test_fixtures::variant_titles(),
+        &MediaMetadata::default(),
+        &job.target,
+    )
+    .unwrap();
     persist_auto_plan(&lib, &cfg, &mut job, plan).unwrap();
     assert_eq!(
         job.plan
@@ -65,51 +64,14 @@ fn presentation_preference_single_output_is_frozen_in_queue() {
 }
 
 #[test]
-fn replacement_stop_message_does_not_claim_old_files_are_unchanged() {
+fn a_change_match_stop_message_says_how_to_finish_not_that_files_are_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let mut job = job_for(dir.path(), 1);
-    std::fs::write(&job.iso, b"source").unwrap();
-    job.replacement = Some(
-        super::super::replacement::Replacement::capture(
-            &job.iso,
-            &std::collections::HashMap::new(),
-        )
-        .unwrap(),
-    );
+    job.retire = true;
     let text = safe_text(&job);
-    assert!(text.contains("already delivered files are not rolled back"));
-    assert!(!text.contains("unchanged"));
-    assert!(!text.contains("No MKV was written"));
-}
-
-#[test]
-fn corrected_destinations_never_replace_unrelated_files() {
-    let t = tempfile::tempdir().unwrap();
-    let source = t.path().join("source.iso");
-    let target = t.path().join("movie.mkv");
-    let mut links = std::collections::HashMap::new();
-    assert!(validate_corrected_targets(&source, std::slice::from_ref(&target), &links).is_ok());
-    std::fs::write(&target, b"existing").unwrap();
-    assert!(validate_corrected_targets(&source, std::slice::from_ref(&target), &links).is_err());
-    links.insert(target.clone(), t.path().join("other.iso"));
-    assert!(validate_corrected_targets(&source, std::slice::from_ref(&target), &links).is_err());
-    links.insert(target.clone(), source.clone());
-    assert!(validate_corrected_targets(&source, std::slice::from_ref(&target), &links).is_ok());
-    assert_eq!(std::fs::read(target).unwrap(), b"existing");
-}
-
-#[cfg(unix)]
-#[test]
-fn corrected_destinations_reject_even_recorded_symlinks() {
-    let t = tempfile::tempdir().unwrap();
-    let source = t.path().join("source.iso");
-    let original = t.path().join("original.mkv");
-    let target = t.path().join("movie.mkv");
-    std::fs::write(&original, b"untouched").unwrap();
-    std::os::unix::fs::symlink(&original, &target).unwrap();
-    let links = std::collections::HashMap::from([(target.clone(), source.clone())]);
-    assert!(validate_corrected_targets(&source, &[target], &links).is_err());
-    assert_eq!(std::fs::read(original).unwrap(), b"untouched");
+    assert!(text.contains("run Change match again"), "{text}");
+    assert!(!text.contains("Your existing MKV is unchanged"), "{text}");
+    assert!(!text.contains("No MKV was written"), "{text}");
 }
 
 #[test]
@@ -168,56 +130,6 @@ fn unreadable_remux_matches_block_automatic_fallback() {
     }]);
     let mut job = lib.queue.claim_next().unwrap();
     assert!(maybe_attach_tv_plan(&lib, &Config::default(), &mut job).is_err());
-    assert!(!job.target.exists());
-}
-
-#[test]
-fn corrected_frozen_plan_rejects_a_replaced_iso_before_execution() {
-    let t = tempfile::tempdir().unwrap();
-    let lib = Library::open(t.path(), &t.path().join("logs"));
-    let iso = t.path().join("source.iso");
-    std::fs::write(&iso, b"original image").unwrap();
-    let media = crate::server::planner::MediaMetadata {
-        title: "Movie".into(),
-        year: 2000,
-        tmdb_id: 1,
-        kind: Some(crate::server::planner::MediaKind::Movie),
-        ..Default::default()
-    };
-    lib.queue
-        .add_corrected(
-            NewJob {
-                title: "Wrong".into(),
-                iso: iso.clone(),
-                target: t.path().join("Movie.mkv"),
-                replace: false,
-            },
-            super::super::matches::SavedMatch {
-                revision: 1,
-                media: media.clone(),
-            },
-        )
-        .unwrap();
-    let claimed = lib.queue.claim_next().unwrap();
-    assert!(lib.queue.set_plan(
-        claimed.id,
-        crate::server::planner::RemuxPlan {
-            version: crate::server::planner::PLAN_VERSION,
-            source_iso: iso.clone(),
-            media,
-            outputs: vec![crate::server::planner::PlannedOutput {
-                id: "movie".into(),
-                title_index: 0,
-                episode: None,
-                episode_name: String::new(),
-                filename: "Movie.mkv".into(),
-            }],
-        }
-    ));
-    let mut job = lib.queue.snapshot().jobs[0].clone();
-    std::fs::write(&iso, b"new and different image").unwrap();
-    let error = maybe_attach_tv_plan(&lib, &Config::default(), &mut job).unwrap_err();
-    assert!(error.to_string().contains("file changed"));
     assert!(!job.target.exists());
 }
 
@@ -743,9 +655,9 @@ fn job_for(dir: &Path, id: u64) -> Job {
         iso: dir.join("missing.iso"),
         target: dir.join("A/A.mkv"),
         plan: None,
-        selected_match: None,
-        replacement: None,
         outputs: Vec::new(),
+        owned: None,
+        retire: false,
         replace: true,
         state: JobState::Running,
         queued_at: 0,
@@ -1656,3 +1568,91 @@ fn a_share_fault_during_the_planning_scan_stays_a_storage_fault() {
     let error = planning_scan_error(libfreemkv::Error::from(stale));
     assert_eq!(storage_fault(&error), Some(Fault::Stale));
 }
+
+// Two authored 45-minute episodes and a short extra, as a TV disc's scan lists them.
+fn episodes_disc() -> Vec<libfreemkv::DiscTitle> {
+    let mut titles: Vec<_> = [2700.0, 2700.0, 90.0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, secs)| {
+            let mut title = libfreemkv::DiscTitle::empty();
+            title.playlist_id = index as u16;
+            title.duration_secs = secs;
+            title.extents = vec![libfreemkv::disc::Extent {
+                start_lba: 1000 * (index as u32 + 1),
+                sector_count: 1000,
+            }];
+            title
+        })
+        .collect();
+    for (index, title) in titles.iter_mut().enumerate() {
+        title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
+            roster: "test-menu".into(),
+            title_count: 3,
+            member: index < 2,
+            ordinal: (index < 2).then_some(index),
+        };
+    }
+    titles
+}
+
+#[test]
+fn a_wrong_title_iso_corrected_to_tv_honours_tv_auto_and_takes_the_shows_name() {
+    use crate::server::planner::{MediaKind, MediaMetadata};
+    let t = tempfile::tempdir().unwrap();
+    let output = t.path().join("output");
+    let tv_root = output.join("tv");
+    std::fs::create_dir_all(output.join("movies")).unwrap();
+    std::fs::write(output.join("movies/keep.mkv"), b"x").unwrap();
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let cfg = Config {
+        output_dir: output.to_string_lossy().into_owned(),
+        movie_dir: "movies".into(),
+        tv_dir: "tv".into(),
+        tv_auto: false,
+        ..Default::default()
+    };
+    // The ISO was filed as "Wrong_Title.iso"; the correction names the file after the show.
+    let media = MediaMetadata {
+        title: "Right Show".into(),
+        year: 2004,
+        tmdb_id: 7,
+        season: Some(1),
+        kind: Some(MediaKind::Tv),
+        ..Default::default()
+    };
+    let (plan, targets) = corrected_plan(&cfg, &episodes_disc(), &media).unwrap();
+    assert_eq!(plan.outputs.len(), 1, "tv_auto off is one output");
+    assert_eq!(
+        targets,
+        vec![tv_root.join("Right Show (2004)/Season 01/Right_Show.mkv")]
+    );
+    planned_target_ok(&cfg, &plan, &targets[0]).unwrap();
+    // A later disc of the season takes the ripper's variant name, not disc 1's file.
+    let disc2 = MediaMetadata {
+        disc: Some(2),
+        ..media.clone()
+    };
+    let (_, targets) = corrected_plan(&cfg, &episodes_disc(), &disc2).unwrap();
+    assert_eq!(
+        targets,
+        vec![tv_root.join("Right Show (2004)/Season 01/Right_Show_2.mkv")]
+    );
+    let on = Config {
+        tv_auto: true,
+        ..cfg.clone()
+    };
+    let (plan, targets) = corrected_plan(&on, &episodes_disc(), &media).unwrap();
+    assert_eq!(
+        plan.outputs.len(),
+        2,
+        "tv_auto on is one output per episode"
+    );
+    for target in &targets {
+        assert!(target.starts_with(tv_root.join("Right Show (2004)/Season 01")));
+        planned_target_ok(&on, &plan, target).unwrap();
+    }
+}
+
+#[path = "worker_retire_tests.rs"]
+mod retire_runs;

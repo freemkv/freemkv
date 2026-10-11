@@ -42,8 +42,9 @@ fn run(shell: &Rc<Shell>, dir: String) {
     titles(shell, &dir, &mut g.borrow_mut());
 
     // Settings, with a destination long enough to be cut off.
-    shell.settings.borrow_mut().dest_dir = LONG_DEST.into();
-    super::prefs::show(shell, None);
+    let mut st = shell.app.borrow().settings_form().clone();
+    st.dest_dir = LONG_DEST.into();
+    super::prefs::show(shell, &st, None);
     let pages = ["gui.tab.output", "gui.tab.keys", "gui.tab.advanced"];
     settings_page(dir, g, pages.to_vec());
 }

@@ -15,11 +15,10 @@ pub mod index;
 pub mod links;
 pub mod matches;
 pub mod media;
-mod ownership;
-mod ownership_api;
+mod owned;
 pub mod probe;
 pub mod queue;
-pub mod replacement;
+mod retire;
 pub mod transcript;
 pub mod worker;
 
@@ -141,6 +140,8 @@ pub struct Running {
 }
 
 const CONSOLE_LINES: usize = 2000;
+/// How long the Change match dialog waits on the share before listing from the links alone.
+const MATCH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Default)]
 struct Live {
@@ -276,7 +277,6 @@ pub struct Library {
     pub queue: Queue,
     source_matches: Result<matches::MatchStore, String>,
     match_gate: Mutex<()>,
-    ownership_previews: Mutex<ownership::Previews>,
     pub probes: ProbeCache,
     pub audits: audit::Audits,
     // The deep_audit setting as the quick-lane loop last read it.
@@ -435,7 +435,6 @@ impl Library {
             queue: Queue::open(config_dir),
             source_matches: matches::MatchStore::open(config_dir).map_err(|e| e.to_string()),
             match_gate: Mutex::new(()),
-            ownership_previews: Mutex::new(ownership::Previews::default()),
             probes: ProbeCache::default(),
             audits: audit::Audits::open(config_dir),
             deep_on: AtomicBool::new(false),
@@ -462,36 +461,106 @@ impl Library {
             .map_err(Clone::clone)
     }
 
-    /// Save an explicit identity only for an indexed, idle ISO.
-    pub fn change_source_match(
-        &self,
-        d: &Dirs,
-        source: &Path,
-        expected_revision: u64,
-        media: crate::server::planner::MediaMetadata,
-    ) -> std::io::Result<matches::SavedMatch> {
-        let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
-        let listing = self.listing(d);
-        if listing.scanning
-            || !listing
-                .rows
-                .iter()
-                .any(|row| row.iso.as_deref() == Some(source))
+    fn require_indexed_source(&self, d: &Dirs, source: &Path) -> std::io::Result<()> {
+        let snapshot = self.snapshot();
+        if snapshot.dirs.as_ref() != Some(d)
+            || snapshot.incomplete
+            || !snapshot.isos.iter().any(|iso| iso.path == source)
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "source ISO is not in the current library",
+                "source ISO is not in the complete current library scan",
             ));
+        }
+        Ok(())
+    }
+
+    /// The saved match for `source` and the files recorded as made from it: exactly
+    /// the old files a Change match would replace or remove. The flag is false when the
+    /// share did not answer in time and the list is from the links alone.
+    pub(crate) fn match_view(
+        &self,
+        cfg: &Config,
+        source: &Path,
+    ) -> std::io::Result<(Option<matches::SavedMatch>, Vec<PathBuf>, bool)> {
+        self.match_view_with(cfg, source, MATCH_CHECK_TIMEOUT, |links, iso, roots| {
+            owned::capture(&links, &iso, &roots)
+        })
+    }
+
+    pub(crate) fn match_view_with<F>(
+        &self,
+        cfg: &Config,
+        source: &Path,
+        limit: std::time::Duration,
+        capture: F,
+    ) -> std::io::Result<(Option<matches::SavedMatch>, Vec<PathBuf>, bool)>
+    where
+        F: FnOnce(
+                HashMap<PathBuf, PathBuf>,
+                PathBuf,
+                Vec<PathBuf>,
+            ) -> std::io::Result<Vec<owned::Owned>>
+            + Send
+            + 'static,
+    {
+        let saved = self.source_match(source).map_err(std::io::Error::other)?;
+        let links = links::read(&self.config_dir)?;
+        let d = dirs(cfg);
+        let roots = owned::roots(&d);
+        let (by_rules, iso) = (
+            owned::eligible_paths(&links, source, &roots),
+            source.to_path_buf(),
+        );
+        match health::bounded(&d.library, limit, move || capture(links, iso, roots)) {
+            health::Bounded::Done(found) => {
+                Ok((saved, found?.into_iter().map(|o| o.path).collect(), true))
+            }
+            _ => Ok((saved, by_rules, false)),
+        }
+    }
+
+    /// Save `media` as the identity of an indexed, idle `source`, then queue its remux.
+    /// The match stays saved even when no job could be queued (`0`).
+    pub(crate) fn confirm_match_and_queue(
+        &self,
+        cfg: &Config,
+        source: &Path,
+        expected_revision: u64,
+        media: crate::server::planner::MediaMetadata,
+    ) -> std::io::Result<(matches::SavedMatch, usize)> {
+        let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
+        let d = dirs(cfg);
+        self.require_indexed_source(&d, source)?;
+        if let Some(reason) = self.queue_block(&d, true) {
+            return Err(std::io::Error::other(reason));
         }
         let store = self
             .source_matches
             .as_ref()
             .map_err(|e| std::io::Error::other(e.clone()))?;
+        let iso_title = self
+            .snapshot()
+            .isos
+            .iter()
+            .find(|iso| iso.path == source)
+            .map(|iso| iso.title.clone())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "source ISO is not indexed")
+            })?;
         let saved = self
             .queue
             .with_idle_source(source, || store.save(source, expected_revision, media))?;
         self.touch_index();
-        Ok(saved)
+        // Keyed by the source, so same-title discs never share one queue identity.
+        let job = NewJob {
+            title: saved.media.title.clone(),
+            iso: source.to_path_buf(),
+            target: index::new_mkv_target(&d.library, &iso_title),
+            replace: false,
+        };
+        let queued = self.queue.add_fresh(vec![job], true);
+        Ok((saved, queued))
     }
 
     /// The last scan. Cheap: an `Arc` clone under a read lock.
@@ -1111,24 +1180,24 @@ impl Library {
                 })
             })
             .collect();
-        // Runs of plain rows go in one queue write; each corrected row needs its own.
+        // Runs of plain rows go in one queue write. A row whose ISO has a saved match is
+        // planned afresh from it and may overwrite only files linked to that ISO.
         let mut added = 0;
         let mut plain = Vec::new();
-        for job in jobs {
+        for mut job in jobs {
             let selected = self.source_match(&job.iso).map_err(|error| {
                 added += self.queue.add(std::mem::take(&mut plain));
                 format!("{added} jobs queued; saved source matches unavailable: {error}")
             })?;
-            let Some(selected) = selected else {
+            if selected.is_none() {
                 plain.push(job);
                 continue;
-            };
+            }
             if !plain.is_empty() {
                 added += self.queue.add(std::mem::take(&mut plain));
             }
-            added += self.queue.add_corrected(job, selected).map_err(|error| {
-                format!("{added} jobs queued; corrected remux could not be saved: {error}")
-            })?;
+            job.replace = false;
+            added += self.queue.add_fresh(vec![job], false);
         }
         if !plain.is_empty() {
             added += self.queue.add(plain);
@@ -1284,3 +1353,7 @@ pub fn log_line(kind: LineKind, text: &str) -> String {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "match_tests.rs"]
+mod match_tests;

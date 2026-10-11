@@ -246,7 +246,7 @@ fn encryption_label_never_mislabels_a_failed_css_dvd_as_aacs() {
     uhd.encrypted = false;
     assert_eq!(encryption_label(&uhd), None);
 
-    // The case `is_aacs_format` exists for: encrypted, no CSS signal, no `aacs`
+    // The AACS-carrier check exists for: encrypted, no CSS signal, no `aacs`
     // struct, not an AACS carrier. That's generic unresolved encryption, not
     // "AACS 1.0" — labelling it AACS would claim detection of something specific.
     let mut unknown = synthetic_disc();
@@ -272,13 +272,12 @@ fn encryption_label_never_mislabels_a_failed_css_dvd_as_aacs() {
         DiscFormat::Fmts,
         DiscFormat::HdDvd,
     ] {
-        let mut d = synthetic_disc();
-        d.format = f;
-        assert!(super::is_aacs_format(&d), "{f:?} is an AACS carrier");
+        unknown.format = f;
+        assert!(
+            matches!(encryption_label(&unknown), Some(EncLabel::Aacs(_))),
+            "{f:?} is an AACS carrier"
+        );
     }
-    let mut dvd = synthetic_disc();
-    dvd.format = DiscFormat::Dvd;
-    assert!(!super::is_aacs_format(&dvd), "a DVD is not an AACS carrier");
 }
 
 #[test]
@@ -615,14 +614,21 @@ fn codec_name_maps_the_special_cases_and_falls_through_to_name() {
 #[test]
 fn aacs_generation_labels_the_carrier_and_falls_back_to_the_minor() {
     let mut disc = synthetic_disc();
+    disc.encrypted = true;
+    disc.css = None;
+    disc.css_error = None;
+    let generation = |d: &Disc| match encryption_label(d) {
+        Some(EncLabel::Aacs(label)) => label,
+        other => panic!("{other:?}"),
+    };
     disc.format = DiscFormat::Fmts;
-    assert_eq!(aacs_generation(&disc), "AACS 2.1");
+    assert_eq!(generation(&disc), "AACS 2.1");
     disc.format = DiscFormat::Uhd;
-    assert_eq!(aacs_generation(&disc), "AACS 2.0");
-    // Non-carrier with no aacs struct falls back to 1.0.
+    assert_eq!(generation(&disc), "AACS 2.0");
+    // A carrier with no aacs struct falls back to 1.0.
     disc.format = DiscFormat::BluRay;
     disc.aacs = None;
-    assert_eq!(aacs_generation(&disc), "AACS 1.0");
+    assert_eq!(generation(&disc), "AACS 1.0");
 }
 
 #[test]

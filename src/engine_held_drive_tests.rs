@@ -6,6 +6,7 @@
 use super::*;
 use crate::ku_fixtures::*;
 use crate::rip_keys::with_sources;
+use freemkv_engine::keys::covers_scope;
 use libfreemkv::keys::KeyScope;
 use libfreemkv::scsi::{DataDirection, ScsiResult, ScsiTransport};
 use libfreemkv::test_util::{FakeHandle, FakeMode, FakeTransport};
@@ -245,9 +246,9 @@ fn opens_set_is_the_rips_when_it_covers_the_rip() {
     assert_eq!(calls.len(), 2, "Start asks only for the group Open lacked");
 }
 
-/// The server's `keys_cover`: the same disc, the rip's scope, an AACS set for AACS titles.
+/// `covers_scope`, as Open's set is judged: the same disc, the rip's scope, an AACS set for AACS titles.
 #[test]
-fn open_keys_cover_needs_this_disc_and_the_rips_scope() {
+fn covers_scope_needs_this_disc_and_the_rips_scope() {
     let fx = bd_image(&[Some(K1), Some(K2)], 2);
     let main = resolve(
         &fx,
@@ -256,21 +257,21 @@ fn open_keys_cover_needs_this_disc_and_the_rips_scope() {
         &Calls::default(),
     )
     .expect("the main title's set");
-    assert!(open_keys_cover(&fx.disc, &main, &KeyScope::Titles(vec![0])));
-    assert!(!open_keys_cover(
-        &fx.disc,
+    assert!(covers_scope(&main, &fx.disc, &KeyScope::Titles(vec![0])));
+    assert!(!covers_scope(
         &main,
+        &fx.disc,
         &KeyScope::Titles(vec![0, 1])
     ));
-    assert!(!open_keys_cover(&fx.disc, &main, &KeyScope::WholeDisc));
+    assert!(!covers_scope(&main, &fx.disc, &KeyScope::WholeDisc));
     let other = bd_image(&[Some(K2)], 1);
     assert!(
-        !open_keys_cover(&other.disc, &main, &KeyScope::Titles(vec![0])),
+        !covers_scope(&main, &other.disc, &KeyScope::Titles(vec![0])),
         "another disc"
     );
     let none = libfreemkv::keys::KeyRing::none();
     assert!(
-        !open_keys_cover(&fx.disc, &none, &KeyScope::Titles(vec![0])),
+        !covers_scope(&none, &fx.disc, &KeyScope::Titles(vec![0])),
         "no AACS key for AACS titles"
     );
 }

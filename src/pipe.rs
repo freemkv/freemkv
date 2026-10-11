@@ -1545,9 +1545,7 @@ fn dest_is_directory(dest: &str, parsed_dest: &libfreemkv::StreamUrl) -> bool {
 pub(crate) fn drive_credentials(
     keydb_path: &Option<String>,
 ) -> Option<libfreemkv::DriveCredentials> {
-    let path = resolved_keydb_path(keydb_path);
-    let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
-    (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
+    freemkv_engine::keys::drive_credentials(&resolved_keydb_path(keydb_path))
 }
 
 /// `freemkv info -v`'s key status (KU §2.5: "`freemkv info` … `Titles([main])` for status"):
@@ -1933,16 +1931,16 @@ fn title_plan(
     keys: &KeyConfig,
     streams: &freemkv_engine::StreamChoice,
 ) -> freemkv_engine::Plan {
-    crate::plan_core::plan(crate::plan_core::PlanRequest {
+    freemkv_engine::Plan {
         source: source.to_string(),
         dest: dest.to_string(),
         titles: freemkv_engine::Selection::Titles(vec![title_idx]),
         streams: streams.clone(),
         raw,
         multipass: false,
-        keys: key_settings(keys),
+        keys: crate::plan_core::key_params(&key_settings(keys)),
         force: false,
-    })
+    }
 }
 
 // Run a title plan; the mux's outcome, or the error it failed with as the library reports it.
@@ -2143,12 +2141,17 @@ pub(crate) fn cli_plan(
     keys: &KeyConfig,
     flags: (bool, bool, bool),
 ) -> freemkv_engine::Plan {
-    crate::plan_core::plan(crate::plan_core::cli_request(
-        source,
-        dest,
-        flags,
-        key_settings(keys),
-    ))
+    let (raw, multipass, force) = flags;
+    freemkv_engine::Plan {
+        source: source.to_string(),
+        dest: dest.to_string(),
+        titles: freemkv_engine::Selection::default(),
+        streams: freemkv_engine::StreamChoice::default(),
+        raw,
+        multipass,
+        keys: crate::plan_core::key_params(&key_settings(keys)),
+        force,
+    }
 }
 
 // The CLI's rendering of the plan it runs (`--log-level 2`). Exhaustive on purpose (anti-drift

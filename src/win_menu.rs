@@ -107,7 +107,7 @@ pub fn win_menus(layout: &[MenuGroup], exit_label: &str) -> Vec<WinMenu> {
             .filter_map(|e| match e {
                 MenuEntry::Separator => Some(WinEntry::Separator),
                 MenuEntry::Item(mi) if keep(&mi.action) => {
-                    Some(item(mi.action, &mi.label, mi.accel))
+                    Some(item(mi.action.clone(), &mi.label, mi.accel))
                 }
                 MenuEntry::Item(_) => None,
             })
@@ -115,7 +115,7 @@ pub fn win_menus(layout: &[MenuGroup], exit_label: &str) -> Vec<WinMenu> {
     };
     let promoted = |cmd: Cmd| -> Vec<WinEntry> {
         group(MenuGroupId::App)
-            .map(|g| entries(g, &|a| *a == MenuAction::Cmd(cmd)))
+            .map(|g| entries(g, &|a| *a == MenuAction::Cmd(cmd.clone())))
             .unwrap_or_default()
             .into_iter()
             .filter(|e| *e != WinEntry::Separator)
@@ -169,7 +169,7 @@ pub fn accel_table(menus: &[WinMenu]) -> Vec<(MenuAction, WinKey)> {
                 action,
                 accel: Some(a),
                 ..
-            } if !native_edit_action(action) => Some((*action, win_key(a)?)),
+            } if !native_edit_action(action) => Some((action.clone(), win_key(a)?)),
             _ => None,
         })
         .collect()

@@ -314,20 +314,19 @@ fn rip_key_scope(
 }
 
 /// The engine plan for a server rip of the drive at `device_path` writing `dest` (an
-/// output URL): the server's half of the one plan parser every front end shares. The
-/// server rips the main feature, decrypts (it has no raw option), and recovers over passes
+/// output URL), its keys by the one rule every front end shares. The server rips the main feature, decrypts (it has no raw option), and recovers over passes
 /// when `max_retries` asks for them.
 pub fn server_plan(cfg: &Config, device_path: &str, dest: &str) -> freemkv_engine::Plan {
-    crate::plan_core::plan(crate::plan_core::PlanRequest {
+    freemkv_engine::Plan {
         source: format!("disc://{device_path}"),
         dest: dest.to_string(),
         titles: freemkv_engine::Selection::MainMovie,
         streams: freemkv_engine::StreamChoice::default(),
         raw: false,
         multipass: uses_multipass(cfg.max_retries),
-        keys: crate::server::keysource::key_settings(cfg),
+        keys: crate::plan_core::key_params(&crate::server::keysource::key_settings(cfg)),
         force: false,
-    })
+    }
 }
 
 /// The server's log line for the plan a rip runs. Exhaustive on purpose (anti-drift §2): a
@@ -359,18 +358,6 @@ pub fn plan_line(p: &freemkv_engine::Plan) -> String {
         key_auth.is_some(),
         cert_keydb.is_some(),
     )
-}
-
-// Whether the rip's set covers `scope` for `disc`, forensic keys aside (a multipass rip asks
-// for Pending ones once, from its image). `covers` holds for any non-AACS set, so an AACS
-// disc's titles also need an AACS set.
-fn keys_cover(
-    disc: &libfreemkv::Disc,
-    set: &libfreemkv::keys::KeyRing,
-    scope: &libfreemkv::keys::KeyScope,
-) -> bool {
-    let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
-    set.is_for(&disc.media_id()) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
 }
 
 // Whether the rip can decrypt what it produces: no scope needs no key; otherwise the set's
@@ -1884,15 +1871,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         .as_deref()
         .unwrap_or(&disc.volume_id)
         .to_string();
-    let disc_format = match disc.format {
-        libfreemkv::DiscFormat::Uhd => "uhd",
-        libfreemkv::DiscFormat::Fmts => "fmts",
-        libfreemkv::DiscFormat::BluRay => "bluray",
-        libfreemkv::DiscFormat::HdDvd => "hddvd",
-        libfreemkv::DiscFormat::Dvd => "dvd",
-        libfreemkv::DiscFormat::Unknown => "unknown",
-    }
-    .to_string();
+    let disc_format = disc.format.id().to_string();
 
     crate::server::log::device_log(
         device,
@@ -3083,15 +3062,7 @@ fn rip_disc_inner(
         .as_deref()
         .unwrap_or(&disc.volume_id)
         .to_string();
-    let disc_format = match disc.format {
-        libfreemkv::DiscFormat::Uhd => "uhd",
-        libfreemkv::DiscFormat::Fmts => "fmts",
-        libfreemkv::DiscFormat::BluRay => "bluray",
-        libfreemkv::DiscFormat::HdDvd => "hddvd",
-        libfreemkv::DiscFormat::Dvd => "dvd",
-        libfreemkv::DiscFormat::Unknown => "unknown",
-    }
-    .to_string();
+    let disc_format = disc.format.id().to_string();
     // Pass 1 reads the WHOLE DISC, so total must be capacity_bytes — using
     // titles[0].size_bytes was the v0.13.12 bug showing "0.0 GB / 0.0 GB".
     // Mux phase below re-derives its own total from the input stream.
@@ -3247,8 +3218,10 @@ fn rip_disc_inner(
     let key_scope = rip_key_scope(&disc, &cfg_read, &tmdb_media_type, &disc_name);
     // The scan's key reads: every resolve below is served what the scan already read.
     let mut key_reads = std::mem::take(&mut session.key_reads);
+    // The scan's set when it covers the rip, forensic keys aside (a multipass rip asks for
+    // Pending ones once, from its image).
     let mut rip_keys: KeyResult = match (session.keys.take(), session.key_error.take()) {
-        (Some(set), _) if keys_cover(&disc, &set, &key_scope) => Ok(set),
+        (Some(set), _) if freemkv_engine::keys::covers_scope(&set, &disc, &key_scope) => Ok(set),
         (Some(set), _) => resolve_rip_keys(
             device,
             &cfg_read,
@@ -5453,7 +5426,7 @@ fn capture_title_index(
     if let Some(index) = fanout_episode_indices(titles, cfg, media_type, disc_name).first() {
         return Ok(*index);
     }
-    crate::server::planner::MoviePlanner::from_config(cfg).title_index(titles)
+    crate::server::planner::main_title(cfg, titles)
 }
 
 fn selection_review_message(error: &crate::server::planner::PlanError) -> String {
@@ -5560,7 +5533,7 @@ pub(super) fn mux_reserve_for(
 
 // The staged leaf of a movie output (and the stem of its episodes): the title,
 // sanitized, with no `_2` disc suffix. A replan names it the same way.
-pub(super) fn staged_output_name(display_name: &str, ext: &str) -> String {
+pub(crate) fn staged_output_name(display_name: &str, ext: &str) -> String {
     format!(
         "{}.{ext}",
         crate::server::util::sanitize_path_compact(display_name)
@@ -5580,8 +5553,7 @@ fn plan_mux_outputs(
 ) -> Result<Vec<staging::Output>, crate::server::planner::PlanError> {
     let indices = fanout_episode_indices(titles, cfg, media_type, disc_name);
     if indices.is_empty() {
-        let title_index =
-            crate::server::planner::MoviePlanner::from_config(cfg).title_index(titles)?;
+        let title_index = crate::server::planner::main_title(cfg, titles)?;
         return Ok(vec![staging::Output {
             filename: movie_filename.to_string(),
             title_index,

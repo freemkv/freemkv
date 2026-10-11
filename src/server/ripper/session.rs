@@ -572,8 +572,8 @@ pub(super) fn session_disc_hash(device: &str) -> Option<String> {
     sessions
         .get(device)
         .and_then(|sess| sess.disc.as_ref())
-        .and_then(|disc| disc.aacs.as_ref())
-        .and_then(|a| super::jobs::aacs_identity(&a.disc_hash))
+        .and_then(|disc| disc.intrinsic_id())
+        .and_then(super::jobs::aacs_identity)
 }
 
 /// The key set and Volume ID the scan of `device`'s disc resolved (memory only): what an
@@ -585,12 +585,7 @@ pub(super) fn session_rip_keys(
     let Some(sess) = sessions.get(device) else {
         return (None, None);
     };
-    let vid = sess
-        .disc
-        .as_ref()
-        .and_then(|d| d.aacs.as_ref())
-        .map(|a| a.volume_id)
-        .filter(|v| *v != [0u8; 16]);
+    let vid = sess.disc.as_ref().and_then(|d| d.aacs_volume_id());
     (sess.keys.clone(), vid)
 }
 

@@ -1171,17 +1171,6 @@ fn same_disc(drive: &mut libfreemkv::Drive, disc: &libfreemkv::Disc) -> bool {
         Ok(id) if id.volume_id == disc.volume_id && id.capacity_sectors == disc.capacity_sectors)
 }
 
-// Whether Open's set already keys everything this rip reads (the server's `keys_cover`): the
-// same disc, the rip's scope, and AACS keys for an AACS disc's titles.
-fn open_keys_cover(
-    disc: &libfreemkv::Disc,
-    set: &KeySet,
-    scope: &libfreemkv::keys::KeyScope,
-) -> bool {
-    let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
-    set.is_for(&disc.media_id()) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
-}
-
 // `eject_source` over an injected open (`None` = autodetect): one open, then the eject
 // through that handle's `finish`.
 fn eject_source_with(
@@ -1200,8 +1189,7 @@ fn eject_source_with(
 /// same input the CLI's `drive_credentials` builds. Passed to the shared `fe::open_scan`.
 fn session_credentials(keys: &KeyConfig) -> Option<libfreemkv::DriveCredentials> {
     let path = key_settings(keys).keydb_path?;
-    let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
-    (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
+    freemkv_engine::keys::drive_credentials(std::path::Path::new(&path))
 }
 
 // Normalize the GUI's KeyConfig into the engine's KeyParams. Preserves the
@@ -1233,24 +1221,24 @@ pub fn key_settings(keys: &KeyConfig) -> crate::plan_core::KeySettings {
     }
 }
 
-/// The engine plan for `req` writing `dest` (an output URL): the app's half of the one
-/// plan parser every front end shares.
+/// The engine plan for `req` writing `dest` (an output URL), its keys by the one rule every
+/// front end shares.
 pub fn gui_plan(req: &RipRequest, dest: &str) -> freemkv_engine::Plan {
     let titles = if req.titles.is_empty() {
         fe::Selection::MainMovie
     } else {
         fe::Selection::Titles(req.titles.clone())
     };
-    crate::plan_core::plan(crate::plan_core::PlanRequest {
+    freemkv_engine::Plan {
         source: source_url(&req.source),
         dest: dest.to_string(),
         titles,
         streams: fe::StreamChoice::default(),
         raw: req.raw,
         multipass: req.multipass,
-        keys: key_settings(&req.keys),
+        keys: crate::plan_core::key_params(&key_settings(&req.keys)),
         force: req.force,
-    })
+    }
 }
 
 // The output a request writes, as a URL: its folder for a tree or per-title files, the
@@ -2264,8 +2252,7 @@ fn start_rip_with(
     std::thread::spawn(move || {
         let _done = SignalDone(state.clone());
         let sink = UiSink(state.clone());
-        // The plan this run carries out, in the run log (the one plan parser every front
-        // end shares).
+        // The plan this run carries out, in the run log.
         let plan = gui_plan(&req, &plan_dest(&req));
         state
             .lines
@@ -3512,7 +3499,7 @@ fn run_disc_scanning(
     };
     // KU §2.1 invariant 1: every key this rip reads with, from ONE resolve, up front: Open's,
     // over this same held disc, when it covers the rip; else one seeded with Open's set.
-    let set = match open_keys.filter(|k| open_keys_cover(&disc, k, &scope)) {
+    let set = match open_keys.filter(|k| freemkv_engine::keys::covers_scope(k, &disc, &scope)) {
         Some(set) => {
             use freemkv_engine::Sink as _;
             sink.log(

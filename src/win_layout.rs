@@ -641,23 +641,23 @@ pub struct CommitPlan {
     pub close: bool,
 }
 
-/// The form's commit rule. OK saves and closes, as it always has. Enter and
-/// leaving a text field save only what changed and keep the window open, as
-/// the GTK shell's fields do; focus also leaves while the window is being
+/// The form's commit rule. OK commits and closes; Enter and leaving a text
+/// field commit and keep the window open, as the GTK shell's fields do. The
+/// core saves only what changed. Focus also leaves while the window is being
 /// hidden, which is not an edit.
 #[must_use]
-pub fn form_commit(why: FormCommit, window_visible: bool, changed: bool) -> CommitPlan {
+pub fn form_commit(why: FormCommit, window_visible: bool) -> CommitPlan {
     match why {
         FormCommit::Ok => CommitPlan {
             save: true,
             close: true,
         },
         FormCommit::Enter => CommitPlan {
-            save: changed,
+            save: true,
             close: false,
         },
         FormCommit::FocusLost => CommitPlan {
-            save: changed && window_visible,
+            save: window_visible,
             close: false,
         },
     }

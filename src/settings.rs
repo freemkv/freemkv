@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct Settings {
     // Output
@@ -67,6 +67,52 @@ pub struct Settings {
     /// no keys, so an ordinary settings file gains nothing.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+// Redacts only `keyserver_token`; unknown `extra` values may be secret, so only their keys print.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let token = if self.keyserver_token.is_empty() {
+            ""
+        } else {
+            "<redacted>"
+        };
+        f.debug_struct("Settings")
+            .field("dest_dir", &self.dest_dir)
+            .field("container", &self.container)
+            .field("filename_template", &self.filename_template)
+            .field("keep_iso", &self.keep_iso)
+            .field("auto_eject", &self.auto_eject)
+            .field("notify_when_rip_finished", &self.notify_when_rip_finished)
+            .field("selection", &self.selection)
+            .field("min_title_secs", &self.min_title_secs)
+            .field("audio_langs", &self.audio_langs)
+            .field("presentation_language", &self.presentation_language)
+            .field("sub_langs", &self.sub_langs)
+            .field("forced_sub_langs", &self.forced_sub_langs)
+            .field("subtitle_mode", &self.subtitle_mode)
+            .field(
+                "persist_stream_preferences",
+                &self.persist_stream_preferences,
+            )
+            .field("rip_mode", &self.rip_mode)
+            .field("max_passes", &self.max_passes)
+            .field("abort_lost_secs", &self.abort_lost_secs)
+            .field("key_source", &self.key_source)
+            .field("keydb_path", &self.keydb_path)
+            .field("keydb_url", &self.keydb_url)
+            .field("keyserver_url", &self.keyserver_url)
+            .field("raw", &self.raw)
+            .field("force", &self.force)
+            .field("log_level", &self.log_level)
+            .field("language", &self.language)
+            .field("decrypt_threads", &self.decrypt_threads)
+            .field("win_w", &self.win_w)
+            .field("win_h", &self.win_h)
+            .field("keyserver_token", &token)
+            .field("extra_keys", &self.extra.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl Default for Settings {

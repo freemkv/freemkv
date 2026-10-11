@@ -48,8 +48,8 @@ pub mod lossy;
 /// against the literal it had just returned. That assertion could never fail,
 /// no matter what the real `messaging::level_for` did.
 pub mod messaging;
-/// The front ends' one way to an engine `Plan`: the CLI, the app and the server each turn
-/// their inputs into a `PlanRequest`, and one parser builds the plan. Declared here as well
+/// The front ends' one key rule: the CLI, the app and the server each build the engine's
+/// `Plan` with its keys from `plan_core::key_params`. Declared here as well
 /// as in `main.rs` (same reason as `title_identity`).
 pub mod plan_core;
 #[cfg(test)]

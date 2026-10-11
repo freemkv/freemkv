@@ -32,12 +32,12 @@ fn action_names_are_unique() {
 #[test]
 fn open_disc_is_blocked_mid_rip_like_open_and_cancel_is_never_a_menu_row() {
     let od = gating_cmd(&MenuAction::OpenDisc).unwrap();
-    assert!(crate::ui::blocked_while_running(od));
+    assert!(crate::ui::blocked_while_running(&od));
     assert!(action_name_for(&MenuAction::Cmd(Cmd::Cancel)).is_none());
     assert!(gating_cmd(&MenuAction::StandardCopy).is_none());
     // The log stays usable while ripping.
     let tl = gating_cmd(&MenuAction::Cmd(Cmd::ToggleLog)).unwrap();
-    assert!(!crate::ui::blocked_while_running(tl));
+    assert!(!crate::ui::blocked_while_running(&tl));
 }
 
 #[test]
@@ -179,7 +179,7 @@ fn the_menu_gate_matches_the_core_dispatch_rule() {
         );
     }
     let open = Some(Cmd::Open);
-    assert!(!action_enabled(open, true, false));
+    assert!(!action_enabled(open.clone(), true, false));
     // A drop or Open Disc mid-scan would be silently refused by the core.
     assert!(!action_enabled(open, false, true));
     assert!(action_enabled(Some(Cmd::Close), false, true));
@@ -209,14 +209,6 @@ fn open_disc_names_one_drive_autodetects_several_and_stops_on_none() {
     assert_eq!(url.as_deref(), Some("disc://"));
     assert!(line.contains("/dev/sr1"), "{line}");
     assert!(!line.contains('\u{202e}'), "{line}");
-}
-
-#[test]
-fn a_failed_keydb_update_is_logged_as_a_notice() {
-    let (k, m) = keydb_update_line(Err("Download failed: x".into()));
-    assert_eq!((k, m.as_str()), (LogKind::Notice, "Download failed: x"));
-    let (k, _) = keydb_update_line(Ok("keydb updated".into()));
-    assert_eq!(k, LogKind::Result);
 }
 
 #[test]
@@ -258,13 +250,6 @@ fn row_titles_drop_the_label_column_colon() {
     assert_eq!(row_title("Sortie par défaut\u{a0}:"), "Sortie par défaut");
     assert_eq!(row_title("出力："), "出力");
     assert_eq!(row_title("No colon"), "No colon");
-}
-
-#[test]
-fn a_quit_asks_once_and_only_mid_rip() {
-    assert!(!needs_rip_confirmation(false, false));
-    assert!(needs_rip_confirmation(true, false));
-    assert!(!needs_rip_confirmation(true, true));
 }
 
 #[test]

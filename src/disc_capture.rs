@@ -273,7 +273,7 @@ pub(crate) fn selection_json(disc: &Disc) -> String {
         "  \"libfreemkv\": \"{}\",\n",
         esc(libfreemkv::VERSION_LABEL)
     ));
-    s.push_str(&format!("  \"format\": \"{:?}\",\n", disc.format));
+    s.push_str(&format!("  \"format\": \"{}\",\n", disc.format.id()));
     s.push_str(&format!("  \"picked_playlist_id\": {pick},\n"));
     s.push_str(&format!("  \"title_count\": {},\n", disc.titles.len()));
     s.push_str("  \"titles\": [\n");
@@ -410,8 +410,8 @@ pub(crate) fn capture(
 
     let (body, inlined) = issue_body(disc, &summary, &base64_encode(&zip_data));
     let title = format!(
-        "Disc profile: {:?} ({} titles)",
-        disc.format,
+        "Disc profile: {} ({} titles)",
+        disc.format.id(),
         disc.titles.len()
     );
     Ok(Capture {
@@ -469,7 +469,7 @@ pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> (
     let pick = disc.titles.first();
     let mut body = String::new();
     body.push_str("## Disc structure\n\n```\n");
-    body.push_str(&format!("Format:          {:?}\n", disc.format));
+    body.push_str(&format!("Format:          {}\n", disc.format.id()));
     body.push_str(&format!("Titles:          {}\n", disc.titles.len()));
     if let Some(p) = pick {
         body.push_str(&format!(

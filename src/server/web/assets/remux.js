@@ -69,17 +69,13 @@ async function changeMatch(row, button) {
   const current = await act(button, () => api('GET', '/api/library/match?source=' + encodeURIComponent(row.iso)), 'Load match');
   if (!current) return;
   let saved = current.saved;
-  const owned = current.owned_outputs || [];
-  const candidates = current.candidates || [];
+  const linked = current.linked || [];
   const m = modal({ title: 'Change movie or TV match', wide: true,
-    body: '<p class="small muted">Choose the correct TMDB entry and remux this ISO. The complete new output set is verified before the old files are replaced or removed. The ISO is kept.</p>'
+    body: '<p class="small muted">Choose the correct TMDB entry and remux this ISO. The ISO is kept. New files are written first; only after every new file is in place are the old files made from this ISO removed, and only if they have not changed since the remux started.</p>'
       + '<p class="mono small">' + esc(row.iso) + '</p>'
-      + (owned.length ? '<p>Source-linked MKVs to replace:</p><ul>' + owned.map(path => '<li class="mono small">' + esc(path) + '</li>').join('') + '</ul>' : '<p>No existing MKVs have proven source links.</p>')
-      + '<p>Unlinked files are left alone unless you explicitly confirm them below. Names are suggestions, not source proof.</p>'
-      + (current.omitted_candidates ? '<p>Some indexed files are unavailable, unsafe, or aliases and were omitted. They cannot be authorized here and will be left alone.</p>' : '')
-      + (candidates.length ? '<details><summary>Confirm legacy outputs belonging to this ISO</summary><p>Select only files you know came from this ISO. All start unchecked.</p>'
-        + candidates.map(c => '<label class="hook"><input type="checkbox" data-legacy-output="' + c.id + '"><span class="mono small">' + esc(c.path) + '</span><span>' + bytes(c.size_bytes) + '</span></label>').join('')
-        + '<label><input type="checkbox" data-confirm-ownership> I confirm the selected files belong to this ISO and may be removed after all replacement outputs are verified.</label></details>' : '')
+      + (current.unchecked ? '<p class="small muted">Couldn\'t check the share, so this list is from the saved links and may include files that are already gone.</p>' : '')
+      + (linked.length ? '<p>Made from this ISO (replaced or removed):</p><ul>' + linked.map(path => '<li class="mono small">' + esc(path) + '</li>').join('') + '</ul>' : '<p>No existing MKVs are recorded as made from this ISO.</p>')
+      + '<p>Other MKVs are never changed or removed. If one already has a new file\'s name, the remux stops before writing anything and shows it as Failed.</p>'
       + '<div class="hook"><input class="txt" data-query aria-label="Search TMDB" value="' + esc(saved?.media.title || row.title) + '"><button class="btn btn-secondary" data-search>Search TMDB</button></div>'
       + '<label>Show <select data-kind><option value="">Movies and TV</option><option value="movie">Movies</option><option value="tv">TV</option></select></label>'
       + '<div data-results class="stack"></div>'
@@ -126,15 +122,9 @@ async function changeMatch(row, button) {
     if (choice.media_type === 'tv' && (episodeInput.validity?.badInput || (episode_start !== null && (!Number.isInteger(episode_start) || episode_start < 1 || episode_start > 65535)))) {
       toast('First episode must be an integer between 1 and 65535, or blank', 'info'); return;
     }
-    const selected_candidates = [...m.el.querySelectorAll('[data-legacy-output]:checked')].map(node => Number(node.dataset.legacyOutput));
-    const confirm_ownership = !!m.el.querySelector('[data-confirm-ownership]')?.checked;
-    if (selected_candidates.length && !confirm_ownership) {
-      toast('Confirm ownership of the selected legacy files before remuxing.', 'info'); return;
-    }
     const response = await act(pick, () => api('POST', '/api/library/match/remux', {
       source: row.iso, expected_revision: saved?.revision || 0,
       media: { title: choice.title, year: choice.year || 0, tmdb_id: choice.tmdb_id, kind: choice.media_type, season, disc, episode_start },
-      ownership: { preview_token: current.preview_token, selected_candidates, confirm_ownership },
     }), 'Save match');
     if (!response) { m.close(); refreshNow(); return; }
     saved = response.saved;

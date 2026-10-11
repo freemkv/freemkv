@@ -24,7 +24,6 @@ use crate::ui::{App, Cmd, Effect, LogKind, MenuAction, MenuEntry, MenuGroupId};
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const APP_ID: &str = "org.freemkv.FreeMKV";
@@ -56,9 +55,6 @@ pub fn run() -> i32 {
 /// duplicates its state — `memo`/`menu_label` only record what was painted.
 pub(crate) struct Shell {
     app: RefCell<App>,
-    /// The stored settings Settings edits, as on macOS/Windows: separate from
-    /// `app.settings` until a commit pushes them in.
-    settings: RefCell<crate::settings::Settings>,
     gapp: adw::Application,
     window: adw::ApplicationWindow,
     menu_btn: gtk::MenuButton,
@@ -68,14 +64,8 @@ pub(crate) struct Shell {
     menu_label: RefCell<String>,
     actions: RefCell<Vec<(gio::SimpleAction, Option<Cmd>)>>,
     tick: RefCell<Option<glib::SourceId>>,
-    drain: RefCell<Option<glib::SourceId>>,
-    /// Worker threads (keydb update) push lines here; a main-loop timer
-    /// drains them, because GTK objects never cross threads.
-    inbox: Arc<Mutex<Vec<(LogKind, String)>>>,
-    keydb_updating: Cell<bool>,
     /// An Open Disc's drive enumeration is in flight.
     finding_drives: Cell<bool>,
-    quit_confirmed: Cell<bool>,
     /// True while `render` writes to widgets, so the change signals those
     /// writes emit are not mistaken for the user.
     painting: Cell<bool>,
@@ -110,7 +100,6 @@ fn build_ui(gapp: &adw::Application) {
 
     let shell = Rc::new(Shell {
         app: RefCell::new(App::new()),
-        settings: RefCell::new(crate::settings::Settings::load()),
         gapp: gapp.clone(),
         window: window.clone(),
         menu_btn,
@@ -120,11 +109,7 @@ fn build_ui(gapp: &adw::Application) {
         menu_label: RefCell::new(String::new()),
         actions: RefCell::new(Vec::new()),
         tick: RefCell::new(None),
-        drain: RefCell::new(None),
-        inbox: Arc::new(Mutex::new(Vec::new())),
-        keydb_updating: Cell::new(false),
         finding_drives: Cell::new(false),
-        quit_confirmed: Cell::new(false),
         painting: Cell::new(false),
         prefs: RefCell::new(None),
     });
@@ -282,8 +267,11 @@ impl Shell {
                 .set_menu_model(Some(&build_menu_model(v.log_hidden)));
             *self.menu_label.borrow_mut() = v.log_menu_label.clone();
         }
+        if let Some(p) = self.prefs.borrow().as_ref() {
+            p.paint_keydb(v.keydb_note.as_deref(), v.keydb_busy);
+        }
         for (action, gate) in self.actions.borrow().iter() {
-            action.set_enabled(glue::action_enabled(*gate, running, opening));
+            action.set_enabled(glue::action_enabled(gate.clone(), running, opening));
         }
     }
 
@@ -324,7 +312,7 @@ impl Shell {
                         },
                     );
                 }
-                Effect::ShowSettings => prefs::show(self, None),
+                Effect::ShowSettings(st) => prefs::show(self, &st, None),
                 Effect::ShowAbout => self.show_about(),
                 Effect::StartTicking => self.start_tick(),
                 Effect::StopTicking => {
@@ -338,6 +326,7 @@ impl Shell {
                     output_dir,
                 } => self.notify_finished(&title, &body, output_dir.as_deref()),
                 Effect::Quit => self.window.close(),
+                Effect::ConfirmQuit => self.confirm_quit(),
                 Effect::Redraw => {}
             }
         }
@@ -476,7 +465,7 @@ impl Shell {
 
     fn show_about(self: &Rc<Self>) {
         let g = crate::strings::get;
-        let keys = self.settings.borrow().keydb_status();
+        let keys = self.app.borrow().settings.keydb_status();
         let comments = format!(
             "{} libfreemkv {}\n{} MIT\n{} {}",
             g("gui.about.engine"),
@@ -501,66 +490,6 @@ impl Shell {
         about.present();
     }
 
-    /// Save the Settings copy and tell the operator whether it worked — the
-    /// one policy the other shells share.
-    fn save_settings_reporting_error(self: &Rc<Self>) {
-        let saved = self.settings.borrow().save();
-        match saved {
-            Ok(()) => self.say(
-                LogKind::Result,
-                &crate::strings::get("gui.log.settings_saved"),
-            ),
-            Err(e) => self.say(
-                LogKind::Notice,
-                &crate::strings::fmt("gui.log.settings_save_error", &[("e", &e)]),
-            ),
-        }
-    }
-
-    fn set_keydb_note(&self, text: &str) {
-        if let Some(p) = self.prefs.borrow().as_ref() {
-            p.set_keydb_note(text);
-        }
-    }
-
-    /// The FLAG is the guard against a second download; the insensitive row
-    /// is only how it is shown (a Settings window reopened mid-download gets
-    /// a fresh row, which reads the flag).
-    fn set_keydb_updating(&self, updating: bool) {
-        self.keydb_updating.set(updating);
-        if let Some(p) = self.prefs.borrow().as_ref() {
-            p.set_keydb_updating(updating);
-        }
-    }
-
-    fn start_drain(self: &Rc<Self>) {
-        if self.drain.borrow().is_some() {
-            return;
-        }
-        let me = self.clone();
-        let id = glib::timeout_add_local(Duration::from_millis(TICK_MS), move || {
-            let msgs: Vec<(LogKind, String)> = me
-                .inbox
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .drain(..)
-                .collect();
-            if msgs.is_empty() {
-                return glib::ControlFlow::Continue;
-            }
-            for (kind, m) in &msgs {
-                me.say(*kind, m);
-            }
-            if let Some((_, last)) = msgs.last() {
-                me.set_keydb_note(last);
-            }
-            me.set_keydb_updating(false);
-            me.drain.borrow_mut().take();
-            glib::ControlFlow::Break
-        });
-        *self.drain.borrow_mut() = Some(id);
-    }
-
     /// Build (or, after a language switch, rebuild) the window's content and
     /// menu in the active locale, then repaint everything from the model.
     fn relocalize(self: &Rc<Self>) {
@@ -580,14 +509,15 @@ impl Shell {
         for (name, ma) in glue::ACTIONS {
             let action = gio::SimpleAction::new(name, None);
             let me = self.clone();
-            let ma = *ma;
-            action.connect_activate(move |_, _| match ma {
+            let gate = glue::gating_cmd(ma);
+            let ma = ma.clone();
+            action.connect_activate(move |_, _| match &ma {
                 MenuAction::OpenDisc => me.open_disc(true),
-                MenuAction::Cmd(c) => me.act(c),
+                MenuAction::Cmd(c) => me.act(c.clone()),
                 _ => {}
             });
             self.gapp.add_action(&action);
-            installed.push((action, glue::gating_cmd(&ma)));
+            installed.push((action, gate));
         }
         *self.actions.borrow_mut() = installed;
 
@@ -615,9 +545,10 @@ impl Shell {
     fn install_window_handlers(self: &Rc<Self>) {
         let me = self.clone();
         self.window.connect_close_request(move |_| {
-            let running = me.app.borrow().running();
-            if glue::needs_rip_confirmation(running, me.quit_confirmed.get()) {
-                me.confirm_quit();
+            // The core decides whether to ask; the answer comes back as a close.
+            let fx = { me.app.borrow_mut() }.dispatch(Cmd::QuitRequested);
+            if fx.contains(&Effect::ConfirmQuit) {
+                me.perform(fx);
                 return glib::Propagation::Stop;
             }
             if let Some(id) = me.tick.borrow_mut().take() {
@@ -663,9 +594,9 @@ impl Shell {
         self.window.add_controller(drop);
     }
 
-    /// Closing mid-rip must not silently tear the rip down. "Stop & Quit"
-    /// cancels, WAITS (bounded) for the worker to put the file down, then
-    /// closes; anything else keeps ripping.
+    /// Closing mid-rip must not silently tear the rip down. "Stop & Quit" has
+    /// the core cancel and WAIT (bounded) for the worker to put the file down,
+    /// then closes; anything else keeps ripping.
     fn confirm_quit(self: &Rc<Self>) {
         let g = crate::strings::get;
         let dlg = adw::MessageDialog::new(
@@ -685,12 +616,7 @@ impl Shell {
             if r != "stop" {
                 return;
             }
-            me.quit_confirmed.set(true);
-            me.act(Cmd::Cancel);
-            let run = me.app.borrow().run.clone();
-            if let Some(run) = run {
-                crate::engine::await_worker_exit(&run, crate::engine::QUIT_GRACE);
-            }
+            me.app_mut(|a| a.confirm_quit());
             me.window.close();
         });
     }

@@ -5,8 +5,8 @@ use crate::output::{Level::Normal, Output};
 use crate::strings;
 use libfreemkv::disc::{BdRegion, DiscRegion};
 use libfreemkv::{
-    AudioStream, Codec, ColorSpace, Disc, DiscFormat, HdrFormat, LabelPurpose, LabelQualifier,
-    ScanOptions, Stream, SubtitleStream, VideoStream,
+    AudioStream, Codec, ColorSpace, Disc, HdrFormat, LabelPurpose, LabelQualifier, ScanOptions,
+    Stream, SubtitleStream, VideoStream,
 };
 
 // Strip control/escape chars from untrusted on-disc metadata (title, volume
@@ -577,30 +577,6 @@ fn format_subtitle(s: &SubtitleStream, verbose: bool) -> String {
     line
 }
 
-// AACS generation label ("AACS 1.0"/"2.0"/"2.1"): FMTS is 2.1, UHD is 2.0,
-// everything else renders `AACS {aacs.version}.0`, defaulting to 1.0 when no
-// `aacs` struct is present.
-fn aacs_generation(disc: &Disc) -> String {
-    match disc.format {
-        DiscFormat::Fmts => "AACS 2.1".to_string(),
-        DiscFormat::Uhd => "AACS 2.0".to_string(),
-        _ => format!(
-            "AACS {}.0",
-            disc.aacs.as_ref().map(|a| a.version).unwrap_or(1)
-        ),
-    }
-}
-
-/// Whether the disc format is a known AACS carrier (BD / UHD / FMTS / HD DVD). A
-/// DVD or unclassified disc is NOT — so an encrypted-but-unresolved DVD (e.g. a
-/// failed CSS crack) is never mislabeled with an AACS generation.
-fn is_aacs_format(disc: &Disc) -> bool {
-    matches!(
-        disc.format,
-        DiscFormat::BluRay | DiscFormat::Uhd | DiscFormat::Fmts | DiscFormat::HdDvd
-    )
-}
-
 /// The encryption-status line to render for a disc.
 #[derive(Debug, PartialEq, Eq)]
 enum EncLabel {
@@ -622,19 +598,16 @@ fn emit_encryption_line(out: &Output, disc: &Disc) -> bool {
     true
 }
 
-// `None` for an unencrypted disc. CSS wins whenever any CSS signal is present
-// (resolved state OR a recorded css_error from a failed crack) — a
-// failed-CSS DVD must never be mislabeled as AACS.
+// `None` for an unencrypted disc; the library's label rendered (CSS wins over AACS, and
+// encryption on no known AACS carrier stays generic).
 fn encryption_label(disc: &Disc) -> Option<EncLabel> {
-    if !disc.encrypted {
-        return None;
-    }
-    if disc.css.is_some() || disc.css_error.is_some() {
-        Some(EncLabel::Css)
-    } else if disc.aacs.is_some() || is_aacs_format(disc) {
-        Some(EncLabel::Aacs(aacs_generation(disc)))
-    } else {
-        Some(EncLabel::GenericAacs)
+    match disc.protection_label() {
+        libfreemkv::ProtectionLabel::Clear => None,
+        libfreemkv::ProtectionLabel::Css => Some(EncLabel::Css),
+        libfreemkv::ProtectionLabel::Aacs { major, minor } => {
+            Some(EncLabel::Aacs(format!("AACS {major}.{minor}")))
+        }
+        _ => Some(EncLabel::GenericAacs),
     }
 }
 

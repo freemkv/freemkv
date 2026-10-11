@@ -86,7 +86,10 @@ fn commands_that_need_the_shell_return_an_effect() {
     let mut app = App::new();
     assert_eq!(app.dispatch(Cmd::Open), vec![Effect::PickSource]);
     assert_eq!(app.dispatch(Cmd::SetOutput), vec![Effect::PickOutputDir]);
-    assert_eq!(app.dispatch(Cmd::Settings), vec![Effect::ShowSettings]);
+    assert!(matches!(
+        app.dispatch(Cmd::Settings).as_slice(),
+        [Effect::ShowSettings(_)]
+    ));
     assert_eq!(app.dispatch(Cmd::About), vec![Effect::ShowAbout]);
     assert_eq!(app.dispatch(Cmd::Quit), vec![Effect::Quit]);
     assert!(matches!(
@@ -119,10 +122,10 @@ fn destructive_commands_are_blocked_while_running_but_cancel_is_not() {
         Cmd::Invert,
         Cmd::Settings,
     ] {
-        assert!(blocked_while_running(c), "{c:?} must be blocked");
+        assert!(blocked_while_running(&c), "{c:?} must be blocked");
     }
     for c in [Cmd::Cancel, Cmd::About, Cmd::Docs, Cmd::Quit] {
-        assert!(!blocked_while_running(c), "{c:?} must stay available");
+        assert!(!blocked_while_running(&c), "{c:?} must stay available");
     }
 }
 
@@ -243,10 +246,10 @@ fn every_command_is_handled_by_dispatch() {
         // `SetFormat` is checked below; `CheckUpdates` omitted: it does a real HTTPS request to api.github.com.
         Cmd::Quit,
     ];
-    for &c in ALL {
+    for c in ALL {
         let mut a = App::new();
         // Must not panic, and must leave the app in a coherent state.
-        let fx = a.dispatch(c);
+        let fx = a.dispatch(c.clone());
         assert!(
             matches!(
                 a.view().page,
@@ -267,7 +270,7 @@ fn every_command_is_handled_by_dispatch() {
     ));
     assert!(matches!(
         a.dispatch(Cmd::Settings).as_slice(),
-        [Effect::ShowSettings]
+        [Effect::ShowSettings(_)]
     ));
     let hidden = a.view().log_hidden;
     a.dispatch(Cmd::ToggleLog);
@@ -430,11 +433,18 @@ fn only_safe_commands_survive_a_running_job() {
         Cmd::Eject,
         Cmd::Settings,
     ] {
-        assert!(blocked_while_running(c), "{c:?} must be blocked mid-rip");
+        assert!(blocked_while_running(&c), "{c:?} must be blocked mid-rip");
     }
-    for c in [Cmd::Cancel, Cmd::About, Cmd::Docs, Cmd::Quit] {
+    for c in [
+        Cmd::Cancel,
+        Cmd::About,
+        Cmd::Docs,
+        Cmd::Quit,
+        Cmd::QuitRequested,
+        Cmd::TestKeyserver(String::new()),
+    ] {
         assert!(
-            !blocked_while_running(c),
+            !blocked_while_running(&c),
             "{c:?} must stay available mid-rip"
         );
     }

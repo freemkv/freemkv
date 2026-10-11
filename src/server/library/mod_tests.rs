@@ -409,23 +409,6 @@ fn source_match_corruption_is_not_a_missing_match() {
 }
 
 #[test]
-fn source_match_cannot_be_saved_for_an_unindexed_path() {
-    let t = tempfile::tempdir().unwrap();
-    let lib = Library::open(t.path(), &t.path().join("logs"));
-    let d = Dirs {
-        library: t.path().join("movies"),
-        tv: None,
-        isos: Some(t.path().join("iso")),
-        iso_subfolders: false,
-    };
-    assert!(
-        lib.change_source_match(&d, &t.path().join("outside.iso"), 0, Default::default())
-            .is_err()
-    );
-    assert!(!t.path().join("library-matches.json").exists());
-}
-
-#[test]
 fn an_unmatched_iso_row_counts_only_the_isos_it_collides_with() {
     let t = tempfile::tempdir().unwrap();
     let d = dirs_in(t.path());
