@@ -36,6 +36,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, Config, Manifest) {
         Vec::new(),
         vec![output.to_string_lossy().into_owned()],
         &moves,
+        &[],
     )
     .unwrap();
     (temp, dir, cfg, manifest)
@@ -632,6 +633,7 @@ fn links_and_moves_keep_the_configured_destination_form() {
         Vec::new(),
         vec![configured.to_string_lossy().into_owned()],
         &moves,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -885,6 +887,7 @@ fn live_smb_publication_and_journaled_delivery() {
                 source.to_path_buf(),
                 destination.to_string_lossy().into_owned(),
             )],
+            &[],
         )
     };
     let manifest = plan(&job, &source).unwrap();
@@ -958,6 +961,7 @@ fn titled_fixture() -> (tempfile::TempDir, PathBuf, Config, PathBuf, Manifest) {
         Vec::new(),
         vec![output.to_string_lossy().into_owned()],
         &[(source, destination)],
+        &[],
     )
     .unwrap();
     let cfg = Config {

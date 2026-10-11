@@ -188,3 +188,120 @@ fn media_type_empty_movie_tv_or_missing_reads_as_v1_8_3_meant() {
         );
     }
 }
+
+// v1.8.3 copied the MKV into the library and was stopped (or could not unlink the
+// source) before the ISO: both copies of the MKV exist and no journal does. v1.8.3's
+// next tick recognised its own copy; this build must not file the rip again as `_2`.
+#[test]
+fn a_v1_8_3_delivery_cut_off_after_the_mkv_landed_is_not_delivered_twice() {
+    let _g = guard();
+    let (_t, root) = fx::root();
+    fx::install("v1.8.3/staging/Night Harbor", &root, "staging/Night Harbor");
+    fx::media(&root, "staging/Night Harbor/");
+    let cfg = upgraded_config(&root);
+    let landed = root.join("out/movies/Night Harbor (2017)/Night Harbor (2017).mkv");
+    std::fs::create_dir_all(landed.parent().unwrap()).unwrap();
+    std::fs::write(&landed, fx::old_mkv()).unwrap();
+
+    crate::server::ripper::staging::resume_or_quarantine_staging(&cfg.staging_dir);
+    check_and_move(&cfg);
+
+    let job = root.join("staging/Night Harbor");
+    no_error(&job);
+    for dup in [
+        "out/movies/Night Harbor (2017)/Night Harbor (2017)_2.mkv",
+        "out/iso/Night Harbor (2017)_2.iso",
+    ] {
+        assert!(
+            !root.join(dup).exists(),
+            "{dup} is a second copy of the same rip"
+        );
+    }
+    let iso = root.join("out/iso/Night Harbor (2017).iso");
+    assert_eq!(std::fs::metadata(&iso).unwrap().len(), 16384);
+    assert_eq!(std::fs::read(&landed).unwrap(), fx::old_mkv());
+    assert!(!job.exists(), "staging cleaned");
+    assert_eq!(links(&root).get(&landed), Some(&iso));
+}
+
+// The same cut-off when the MKV was moved (its staged copy already gone).
+#[test]
+fn a_v1_8_3_delivery_cut_off_after_the_mkv_moved_files_the_rest() {
+    let _g = guard();
+    let (_t, root) = fx::root();
+    fx::install("v1.8.3/staging/Night Harbor", &root, "staging/Night Harbor");
+    fx::media(&root, "staging/Night Harbor/");
+    let cfg = upgraded_config(&root);
+    let job = root.join("staging/Night Harbor");
+    let landed = root.join("out/movies/Night Harbor (2017)/Night Harbor (2017).mkv");
+    std::fs::create_dir_all(landed.parent().unwrap()).unwrap();
+    std::fs::rename(job.join("Night Harbor.mkv"), &landed).unwrap();
+
+    crate::server::ripper::staging::resume_or_quarantine_staging(&cfg.staging_dir);
+    check_and_move(&cfg);
+
+    no_error(&job);
+    assert_eq!(
+        std::fs::metadata(root.join("out/iso/Night Harbor (2017).iso"))
+            .unwrap()
+            .len(),
+        16384
+    );
+    assert!(!root.join("out/iso/Night Harbor (2017)_2.iso").exists());
+    assert_eq!(std::fs::read(&landed).unwrap(), fx::old_mkv());
+    assert!(!job.exists(), "staging cleaned");
+}
+
+// What v1.8.3 did not file is not taken over: a different file of the same size is
+// another disc's (filed beside it as `_2`), and a moved-away output found nowhere holds.
+#[test]
+fn a_v1_8_3_cut_off_claims_only_its_own_files() {
+    let _g = guard();
+    let (_t, root) = fx::root();
+    fx::install("v1.8.3/staging/Night Harbor", &root, "staging/Night Harbor");
+    fx::media(&root, "staging/Night Harbor/");
+    let cfg = upgraded_config(&root);
+    let job = root.join("staging/Night Harbor");
+    let base = root.join("out/movies/Night Harbor (2017)/Night Harbor (2017).mkv");
+    std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+    let mut other = fx::old_mkv();
+    let n = other.len();
+    other[n / 2] ^= 0xFF;
+    other[n - 1] ^= 0xFF;
+    std::fs::write(&base, &other).unwrap();
+    check_and_move(&cfg);
+    no_error(&job);
+    assert_eq!(
+        std::fs::read(&base).unwrap(),
+        other,
+        "the other file is untouched"
+    );
+    assert_eq!(
+        std::fs::read(root.join("out/movies/Night Harbor (2017)/Night Harbor (2017)_2.mkv"))
+            .unwrap(),
+        fx::old_mkv()
+    );
+    assert!(root.join("out/iso/Night Harbor (2017)_2.iso").exists());
+
+    let (_t, root) = fx::root();
+    fx::install("v1.8.3/staging/Night Harbor", &root, "staging/Night Harbor");
+    fx::media(&root, "staging/Night Harbor/");
+    let cfg = upgraded_config(&root);
+    let job = root.join("staging/Night Harbor");
+    std::fs::remove_file(job.join("Night Harbor.mkv")).unwrap();
+    check_and_move(&cfg);
+    let key = job.to_string_lossy().to_string();
+    let error = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&key);
+    assert!(
+        error.is_some_and(|e| e.reason.contains("a planned output is missing")),
+        "a lost output with nothing filed holds"
+    );
+    assert!(
+        job.join("Night Harbor.iso").exists(),
+        "the rest stays staged"
+    );
+    assert!(!root.join("out/iso/Night Harbor (2017).iso").exists());
+}
