@@ -423,6 +423,9 @@ enum MoveOutcome {
     /// This attempt stalled and drained. Immutable even if the operator
     /// clears its UI error before the enclosing batch processes the result.
     Stalled,
+    /// Shutdown cancelled the copy. Not a failure: no attempt is counted and
+    /// the delivery resumes on the next start.
+    Interrupted,
     /// A required destination operation is unsupported; operator action is
     /// needed, not another automatic full-file copy.
     Unsupported,
@@ -1573,6 +1576,10 @@ fn check_and_move(cfg: &Config) {
         }) {
             Ok(locks) => locks,
             Err(e) => {
+                if shutdown_interrupted(&e) {
+                    log_interrupted_delivery(&dir_str);
+                    continue;
+                }
                 record_error(
                     &dir_str,
                     &format!("delivery ownership lock unavailable: {e}"),
@@ -1669,9 +1676,9 @@ fn check_and_move(cfg: &Config) {
                     entry.eta.clear();
                 }
             }
-            if matches!(outcome, MoveOutcome::Stalled) {
-                // The worker has drained, but this batch remains explicitly
-                // held until Retry; do not publish another artifact this tick.
+            if matches!(outcome, MoveOutcome::Stalled | MoveOutcome::Interrupted) {
+                // The worker has drained; stalled stays held until Retry, an
+                // interruption just stops. Publish no further artifact this tick.
                 break;
             }
             // Peg this artifact's bar to 100% on success. Skipped (idempotent
@@ -1690,7 +1697,7 @@ fn check_and_move(cfg: &Config) {
                 }
             }
             match outcome {
-                MoveOutcome::Collision => {}
+                MoveOutcome::Collision | MoveOutcome::Interrupted => {}
                 MoveOutcome::Skipped => {
                     // Quiet — already moved on a prior tick; no log noise.
                 }
@@ -1764,6 +1771,13 @@ fn check_and_move(cfg: &Config) {
             .iter()
             .any(|o| matches!(o, MoveOutcome::MovedDirty));
 
+        if outcomes
+            .iter()
+            .any(|o| matches!(o, MoveOutcome::Interrupted))
+        {
+            log_interrupted_delivery(&dir_str);
+            continue;
+        }
         if outcomes.iter().any(|o| matches!(o, MoveOutcome::Stalled)) {
             hold_for_operator(&dir_str);
             continue;
@@ -2691,7 +2705,7 @@ fn move_file_inner(
             }
         }
         Err(e) => {
-            if !copy_monitor::was_stalled(&e) {
+            if !copy_monitor::was_stalled(&e) && !shutdown_interrupted(&e) {
                 crate::server::log::syslog(&format!("Copy failed for {dest_str}: {e}"));
             }
             copy_failure_outcome(&e)
@@ -2708,9 +2722,24 @@ fn check_candidate(src: &Path, dest: &Path, candidate: &Path) -> std::io::Result
     check_post_copy(src, candidate).map_err(std::io::Error::other)
 }
 
+// Cancellation (the only source of `Interrupted` here) caused by server shutdown.
+fn shutdown_interrupted(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Interrupted
+        && crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn log_interrupted_delivery(dir: &str) {
+    crate::server::log::syslog(&format!(
+        "Delivery of {dir} interrupted by shutdown; it resumes on the next start"
+    ));
+}
+
 fn copy_failure_outcome(error: &std::io::Error) -> MoveOutcome {
     if copy_monitor::was_stalled(error) {
         return MoveOutcome::Stalled;
+    }
+    if shutdown_interrupted(error) {
+        return MoveOutcome::Interrupted;
     }
     if let Some(invalid) = error.get_ref().and_then(|e| e.downcast_ref::<MoveError>()) {
         return match invalid {
