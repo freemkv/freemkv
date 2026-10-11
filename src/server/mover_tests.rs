@@ -331,14 +331,14 @@ fn delivery_retries_back_off_then_require_operator_retry() {
     super::clear_move_error(path);
     assert!(super::move_retry_ready(path, start));
     assert_eq!(
-        super::retry_deadline(1, start),
-        Some(start + std::time::Duration::from_secs(30))
+        super::retry_delay(1),
+        Some(std::time::Duration::from_secs(30))
     );
     assert_eq!(
-        super::retry_deadline(2, start),
-        Some(start + std::time::Duration::from_secs(120))
+        super::retry_delay(2),
+        Some(std::time::Duration::from_secs(120))
     );
-    assert_eq!(super::retry_deadline(3, start), None);
+    assert_eq!(super::retry_delay(3), None);
 }
 
 #[test]

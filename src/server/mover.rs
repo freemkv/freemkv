@@ -145,10 +145,10 @@ pub struct MoverError {
     retry_after: Option<std::time::Instant>,
 }
 
-fn retry_deadline(attempts: u32, now: std::time::Instant) -> Option<std::time::Instant> {
+fn retry_delay(attempts: u32) -> Option<std::time::Duration> {
     match attempts {
-        1 => Some(now + std::time::Duration::from_secs(30)),
-        2 => Some(now + std::time::Duration::from_secs(120)),
+        1 => Some(std::time::Duration::from_secs(30)),
+        2 => Some(std::time::Duration::from_secs(120)),
         _ => None,
     }
 }
@@ -174,15 +174,14 @@ fn move_retry_ready(path: &str, now: std::time::Instant) -> bool {
 // Only an attempted delivery consumes the retry budget. A health probe waiting
 // for a mount must remain able to recover as soon as that mount responds.
 fn schedule_move_retry(path: &str) {
-    {
-        let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(error) = errors.get_mut(path) {
-            error.attempts = error.attempts.saturating_add(1);
-            error.retry_after = retry_deadline(error.attempts, std::time::Instant::now());
-            error.retry_held = error.retry_after.is_none();
-        }
+    let attempts = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .map(|error| error.attempts.saturating_add(1));
+    if let Some(attempts) = attempts {
+        commit_retry(path, attempts, retry_delay(attempts));
     }
-    persist_retry(path);
 }
 
 fn schedule_failed_delivery(path: &str, outcomes: &[MoveOutcome]) {
@@ -201,14 +200,14 @@ pub static MOVE_ERRORS: once_cell::sync::Lazy<Mutex<BTreeMap<String, MoverError>
 
 // Stop automatic retries until the operator chooses Retry.
 fn hold_for_operator(path: &str) {
-    {
-        let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(error) = errors.get_mut(path) {
-            error.retry_after = None;
-            error.retry_held = true;
-        }
+    let attempts = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .map(|error| error.attempts);
+    if let Some(attempts) = attempts {
+        commit_retry(path, attempts, None);
     }
-    persist_retry(path);
 }
 
 // Operator Retry requests not yet applied to a delivery journal's retry state. The flag
@@ -216,9 +215,20 @@ fn hold_for_operator(path: &str) {
 static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(Default::default);
 
-// Mirror a staging dir's budget or hold into its delivery journal, if it has one,
-// so neither a restart nor an internal reboot buys another full-file copy.
-fn persist_retry(path: &str) {
+// Derive the row's retry fields from a retry state, the journal's record of them.
+fn apply_retry(row: &mut MoverError, state: &manifest::RetryState) {
+    row.attempts = state.attempts;
+    row.retry_after = state.not_before.map(|t| {
+        std::time::Instant::now()
+            + t.duration_since(std::time::SystemTime::now())
+                .unwrap_or_default()
+    });
+    row.retry_held = row.retry_after.is_none();
+}
+
+// A journaled dir's retry state is written first and is authoritative, so neither a
+// restart nor a reboot buys another full-file copy; the row is then derived from it.
+fn commit_retry(path: &str, attempts: u32, delay: Option<std::time::Duration>) {
     let Some(row) = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -227,17 +237,21 @@ fn persist_retry(path: &str) {
     else {
         return;
     };
-    let now = (std::time::Instant::now(), std::time::SystemTime::now());
     let state = manifest::RetryState {
-        attempts: row.attempts,
-        not_before: row
-            .retry_after
-            .map(|deadline| now.1 + deadline.saturating_duration_since(now.0)),
+        attempts,
+        not_before: delay.map(|d| std::time::SystemTime::now() + d),
         reason: row.reason,
         hint: row.hint,
     };
-    if let Err(error) = manifest::Manifest::record_retry(Path::new(path), Some(state)) {
+    if let Err(error) = manifest::Manifest::record_retry(Path::new(path), Some(state.clone())) {
         tracing::warn!(%error, dir = path, "mover: retry state not persisted");
+    }
+    if let Some(row) = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(path)
+    {
+        apply_retry(row, &state);
     }
 }
 
@@ -276,30 +290,24 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
         return Attempt::Due;
     };
     let now = std::time::Instant::now();
-    MOVE_ERRORS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    let row = errors
         .entry(path.to_string())
-        .or_insert_with(|| {
-            let retry_after = state.not_before.map(|t| {
-                now + t
-                    .duration_since(std::time::SystemTime::now())
-                    .unwrap_or_default()
-            });
-            MoverError {
-                path: path.to_string(),
-                reason: state.reason.clone(),
-                hint: state.hint.clone(),
-                attempts: state.attempts,
-                retry_held: retry_after.is_none(),
-                waiting_for_folder: false,
-                waiting_root: None,
-                worker_active: false,
-                retrying: false,
-                copy_stalled: false,
-                retry_after,
-            }
+        .or_insert_with(|| MoverError {
+            path: path.to_string(),
+            reason: state.reason.clone(),
+            hint: state.hint.clone(),
+            attempts: 0,
+            retry_held: false,
+            waiting_for_folder: false,
+            waiting_root: None,
+            worker_active: false,
+            retrying: false,
+            copy_stalled: false,
+            retry_after: None,
         });
+    apply_retry(row, state);
+    drop(errors);
     if move_retry_ready(path, now) {
         Attempt::Due
     } else {
