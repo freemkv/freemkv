@@ -636,7 +636,8 @@ fn sigterm_during_reboot_drain_returns_without_relaunch() {
         rips,
         vec![],
         None,
-        &short_bounds()
+        &short_bounds(),
+        &StopProgress::default()
     ));
     assert!(!relaunch_requested());
     let code = relaunch_with(&Relaunch::capture(), |_, _| {
@@ -688,7 +689,8 @@ fn wedged_worker_still_reaches_relaunch_after_timeout() {
         |_| true,
         workers,
         None,
-        &short_bounds()
+        &short_bounds(),
+        &StopProgress::default()
     ));
     assert!(
         started.elapsed() < Duration::from_secs(2),
@@ -720,7 +722,8 @@ fn idle_reboot_relaunches_with_the_startup_binary_and_argv() {
         |_| true,
         vec![],
         None,
-        &short_bounds()
+        &short_bounds(),
+        &StopProgress::default()
     ));
     assert!(relaunch_requested());
     let mut calls = Vec::new();
@@ -758,37 +761,18 @@ fn exec_failure_or_unknown_binary_exits_75() {
     assert_eq!(relaunch_with(&no_argv, never), RESTART_EXIT_CODE);
 }
 
-// A reboot tail that stalls past its bound (a hung log write) still exits 75; a stop
-// signal disarms it.
+// The stop's exit code: 75 for a reboot nothing vetoed, else the normal 0.
 #[test]
-fn relaunch_deadline_exits_75_unless_a_stop_signal_vetoed_it() {
-    if !in_child("relaunch_deadline_exits_75_unless_a_stop_signal_vetoed_it") {
+fn stop_exit_code_is_75_only_for_an_unvetoed_reboot() {
+    if !in_child("stop_exit_code_is_75_only_for_an_unvetoed_reboot") {
         return;
     }
+    SHUTDOWN.store(true, Ordering::Release);
+    assert_eq!(stop_exit_code(), 0, "a plain stop keeps its normal code");
     REBOOT.store(true, Ordering::Release);
-    let (tx, fired) = std::sync::mpsc::channel();
-    let deadline = spawn_relaunch_deadline(Duration::from_millis(50), move |code| {
-        let _ = tx.send(code);
-    })
-    .unwrap();
-    assert_eq!(
-        fired.recv_timeout(Duration::from_secs(5)),
-        Ok(RESTART_EXIT_CODE)
-    );
-    deadline.join().unwrap();
-
+    assert_eq!(stop_exit_code(), RESTART_EXIT_CODE);
     TERMINATE.store(true, Ordering::Release);
-    let (tx, fired) = std::sync::mpsc::channel();
-    spawn_relaunch_deadline(Duration::from_millis(50), move |code| {
-        let _ = tx.send(code);
-    })
-    .unwrap()
-    .join()
-    .unwrap();
-    assert!(
-        fired.try_recv().is_err(),
-        "a stop signal must disarm the deadline"
-    );
+    assert_eq!(stop_exit_code(), 0, "a stop signal vetoes the relaunch");
 }
 
 // End to end on Linux: exec keeps the pid and closes the CLOEXEC listener, so the
@@ -868,11 +852,201 @@ fn markers_are_cleared_before_the_drain_and_again_after_it() {
             rips,
             vec![],
             None,
-            &short_bounds()
+            &short_bounds(),
+            &StopProgress::default()
         ));
         assert!(
             !marker.exists(),
             "late marker survived the stop (reboot={reboot})"
         );
     }
+}
+
+// Arm a stop deadline over `progress` that reports instead of exiting.
+fn test_deadline(
+    after: Duration,
+    stopping: impl Fn() -> bool + Send + 'static,
+    progress: &Arc<StopProgress>,
+    code: i32,
+    log: impl FnOnce(String) + Send + 'static,
+) -> std::sync::mpsc::Receiver<(i32, Instant)> {
+    let (tx, exited) = std::sync::mpsc::channel();
+    spawn_stop_deadline(
+        after,
+        stopping,
+        progress.clone(),
+        move || code,
+        log,
+        move |c| {
+            let _ = tx.send((c, Instant::now()));
+        },
+    )
+    .unwrap();
+    exited
+}
+
+// Live 2026-10-11: with a thread stuck in the kernel on a hung SMB share, every worker logged
+// "stopping" and the process never exited. Whatever wedges the stop (here the main thread
+// itself, blocked forever in a stop step), the deadline names it and exits with the stop's code.
+#[test]
+fn a_stop_wedged_forever_exits_at_the_deadline_naming_what_did_not_stop() {
+    let progress = Arc::new(StopProgress::default());
+    let (logged_tx, logged) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    let exited = test_deadline(
+        Duration::from_millis(200),
+        || true,
+        &progress,
+        0,
+        move |line| {
+            let _ = logged_tx.send((line, Instant::now()));
+        },
+    );
+    // The "main" thread: its rip join never returns. It is never joined by anyone.
+    let (_hold, wedge) = std::sync::mpsc::channel::<()>();
+    let staging = tempfile::tempdir().unwrap();
+    let stuck = progress.clone();
+    let main = std::thread::spawn(move || {
+        stop_services(
+            staging.path(),
+            |_| {
+                let _ = wedge.recv();
+                true
+            },
+            vec![("mover", None)],
+            None,
+            &short_bounds(),
+            &stuck,
+        )
+    });
+    let (code, at) = exited
+        .recv_timeout(Duration::from_secs(5))
+        .expect("no exit");
+    assert_eq!(code, 0, "a plain stop keeps its normal code");
+    assert!(at - started < Duration::from_secs(2), "{:?}", at - started);
+    let (line, logged_at) = logged.try_recv().expect("the deadline logs before exiting");
+    assert!(logged_at <= at);
+    assert!(line.contains("rip threads"), "{line}");
+    assert!(line.contains("mover"), "{line}");
+    assert!(
+        !main.is_finished(),
+        "the wedged stop is left running, never joined"
+    );
+}
+
+// A restart cut short keeps its 75 for the service manager.
+#[test]
+fn a_reboot_cut_short_exits_75() {
+    let progress = Arc::new(StopProgress::default());
+    progress.start("health");
+    let exited = test_deadline(
+        Duration::from_millis(50),
+        || true,
+        &progress,
+        RESTART_EXIT_CODE,
+        |_| {},
+    );
+    let (code, _) = exited.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(code, RESTART_EXIT_CODE);
+}
+
+// The deadline counts from the stop request, not from startup.
+#[test]
+fn the_deadline_counts_from_the_stop_request() {
+    let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stopping.clone();
+    let progress = Arc::new(StopProgress::default());
+    let exited = test_deadline(
+        Duration::from_millis(100),
+        move || flag.load(Ordering::Acquire),
+        &progress,
+        0,
+        |_| {},
+    );
+    assert!(exited.recv_timeout(Duration::from_millis(400)).is_err());
+    let asked = Instant::now();
+    stopping.store(true, Ordering::Release);
+    let (_, at) = exited.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(at - asked >= Duration::from_millis(100));
+}
+
+// A log write that hangs (logs on a dead /config) does not hold the exit.
+#[test]
+fn a_hung_log_write_does_not_hold_the_exit() {
+    let progress = Arc::new(StopProgress::default());
+    let (_hold, wedge) = std::sync::mpsc::channel::<()>();
+    let started = Instant::now();
+    let exited = test_deadline(
+        Duration::ZERO,
+        || true,
+        &progress,
+        0,
+        move |_| {
+            let _ = wedge.recv();
+        },
+    );
+    let (_, at) = exited
+        .recv_timeout(STOP_LOG_GRACE + Duration::from_secs(3))
+        .unwrap();
+    assert!(at - started <= STOP_LOG_GRACE + Duration::from_secs(1));
+}
+
+// A worker blocked forever is given up on at its bound and named; nothing joins it.
+#[test]
+fn a_worker_blocked_forever_is_named_and_left_behind() {
+    let (_hold, wedge) = std::sync::mpsc::channel::<()>();
+    let prober = std::thread::spawn(move || {
+        let _ = wedge.recv();
+    });
+    let staging = tempfile::tempdir().unwrap();
+    let progress = StopProgress::default();
+    let started = Instant::now();
+    assert!(!stop_services(
+        staging.path(),
+        |_| true,
+        vec![("health", Some(prober)), ("keydb", None)],
+        None,
+        &short_bounds(),
+        &progress,
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(progress.pending(), "health");
+}
+
+// A marker sweep on staging that stopped answering is left behind after its bound.
+#[test]
+fn a_stop_step_blocked_in_the_kernel_is_bounded() {
+    let (_hold, wedge) = std::sync::mpsc::channel::<()>();
+    let progress = StopProgress::default();
+    let started = Instant::now();
+    assert!(!run_bounded(
+        "staging markers",
+        Duration::from_millis(100),
+        &progress,
+        move || {
+            let _ = wedge.recv();
+        }
+    ));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(progress.pending(), "staging markers");
+    assert!(run_bounded(
+        "quick",
+        Duration::from_secs(1),
+        &progress,
+        || {}
+    ));
+    assert_eq!(progress.pending(), "staging markers");
+}
+
+// The whole stop is bounded by the deadline, which covers every stop bound plus slack.
+#[test]
+fn the_stop_deadline_covers_every_stop_bound() {
+    let bounds =
+        RIP_DRAIN_TIMEOUT + SERVICE_DRAIN_TIMEOUT + WEB_JOIN_TIMEOUT + MARKER_CLEAR_TIMEOUT * 2;
+    assert!(STOP_DEADLINE > bounds);
+    assert!(STOP_DEADLINE <= Duration::from_secs(300));
 }
