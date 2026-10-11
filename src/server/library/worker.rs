@@ -163,11 +163,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
         landing: Mutex::new(None),
     };
     let cmd = match &job.staged {
-        Some(kept) => format!(
-            "Finishing the remux kept at {}: copying it to {}",
-            kept.display(),
-            job.target.display()
-        ),
+        Some(kept) => kept_line(&job, kept),
         None => command_line(&job),
     };
     sink.emit(LineKind::Cmd, cmd);
@@ -191,6 +187,40 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
     sink.close_open_line();
     finish(lib, &job, ending, started.elapsed(), &sink);
     lib.set_running(|r| *r = None);
+}
+
+// The console's first line for a job that only copies in the file it kept: its ISO, and the
+// output that file was made for; a Change match's queue key is never named.
+fn kept_line(job: &Job, kept: &Path) -> String {
+    let made_for = job
+        .outputs
+        .iter()
+        .find(|o| o.staged.as_deref() == Some(kept))
+        .map(|o| o.target.clone());
+    let targets = job.output_targets();
+    let dest = made_for.or_else(|| match targets.as_slice() {
+        _ if job.retire && job.plan.is_none() => None,
+        [one] => Some(one.clone()),
+        _ => None,
+    });
+    let iso = job.iso.display().to_string();
+    let kept = kept.display().to_string();
+    match dest {
+        Some(dest) => crate::strings::fmt_or(
+            "server.library.kept_copy_to",
+            "Finishing the remux of {iso} kept at {kept}: copying it to {target}",
+            &[
+                ("iso", &iso),
+                ("kept", &kept),
+                ("target", &dest.display().to_string()),
+            ],
+        ),
+        None => crate::strings::fmt_or(
+            "server.library.kept_copy",
+            "Finishing the remux of {iso} kept at {kept}",
+            &[("iso", &iso), ("kept", &kept)],
+        ),
+    }
 }
 
 // The job as the CLI command it runs: its ISO and the file it writes, or the folder its
@@ -220,11 +250,16 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     if job.plan.is_some() || job.staged.is_some() {
         return Ok(());
     }
-    let episode = linked_episode(&lib.config_dir, job)?;
-    if let Some(saved) = lib.match_store()?.get(&job.iso) {
-        let now = super::links::iso_stamp(&job.iso);
-        if saved.is_for(now) {
-            let row = (episode && !job.retire).then(|| job.target.clone());
+    let saved = lib.match_store()?.get(&job.iso);
+    let now = saved.as_ref().map(|_| super::links::iso_stamp(&job.iso));
+    let current = saved
+        .as_ref()
+        .zip(now)
+        .is_some_and(|(s, now)| s.is_for(now));
+    let episode = linked_episode(&lib.config_dir, job, job.replace || current)?;
+    if let Some((saved, now)) = saved.zip(now) {
+        if current {
+            let row = episode.then(|| job.target.clone());
             return attach_corrected_plan(lib, cfg, job, &saved.media, row.as_deref());
         }
         // Confirmed for an earlier disc filed at this ISO path: not this disc's identity.
@@ -256,13 +291,19 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     attach_from_lookup(lib, cfg, job, looked_up)
 }
 
-// Whether links.json records the job's target as one episode of its ISO's split disc. Links
-// that cannot be read fail a replace: a guess could plan a whole-disc movie over an episode.
-fn linked_episode(config_dir: &Path, job: &Job) -> std::io::Result<bool> {
-    if !job.replace {
+// Whether the job's row is an episode links.json records for its ISO's split disc; a Change
+// match plans the whole disc. Unreadable links fail a job that may overwrite (`strict`): a
+// guess could plan a whole-disc movie over an episode.
+fn linked_episode(config_dir: &Path, job: &Job, strict: bool) -> std::io::Result<bool> {
+    if job.retire {
         return Ok(false);
     }
-    Ok(links_for_job(config_dir)?
+    let links = match links_for_job(config_dir) {
+        Ok(links) => links,
+        Err(e) if strict => return Err(e),
+        Err(_) => return Ok(false),
+    };
+    Ok(links
         .get(&job.target)
         .is_some_and(|l| l.episode && l.iso == job.iso))
 }
@@ -327,7 +368,7 @@ fn attach_from_lookup(
             "TMDB could not be reached to plan this disc; retry once it is back",
         ))
     })?;
-    let episode = linked_episode(&lib.config_dir, job)?;
+    let episode = linked_episode(&lib.config_dir, job, job.replace)?;
     let label = lookup_label(job, episode);
     let tv_match = found.filter(|m| {
         m.media_type.is_tv() && crate::server::tmdb::is_confident_match(&label, &m.title, m.year)

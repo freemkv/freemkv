@@ -307,7 +307,7 @@ pub fn handle(
                 return None;
             }
             let stage = crate::server::health::remux_stage_dir();
-            match discard_kept(&lib, &target, stage.as_deref()) {
+            match discard_kept(&lib, &target, stage.as_deref(), false) {
                 Ok(()) => json_response(request, 200, r#"{"ok":true,"discarded":true}"#),
                 Err((code, msg)) => err(request, code, &msg),
             }
@@ -404,7 +404,7 @@ fn clear_kept_remuxes(lib: &Library, stage: &std::path::Path) -> (usize, usize) 
         .collect();
     let (mut discarded, mut failed) = (0, 0);
     for target in targets {
-        match discard_kept(lib, &target, Some(stage)) {
+        match discard_kept(lib, &target, Some(stage), true) {
             Ok(()) => discarded += 1,
             Err((_, msg)) => {
                 failed += 1;
@@ -417,10 +417,12 @@ fn clear_kept_remuxes(lib: &Library, stage: &std::path::Path) -> (usize, usize) 
 
 // Delete the finished file kept for `target`. Only a kept pair directly in the staging folder
 // is deleted, and never while its job is copying it in; the job forgets it first.
+// `abandoned`: only one whose job has failed or finished, checked as it is taken.
 fn discard_kept(
     lib: &Library,
     target: &std::path::Path,
     stage: Option<&std::path::Path>,
+    abandoned: bool,
 ) -> Result<(), (u16, String)> {
     let kept = lib
         .queue
@@ -439,7 +441,7 @@ fn discard_kept(
             "the kept file is not in the remux staging folder; nothing was deleted".into(),
         ));
     }
-    match lib.queue.take_staged(target) {
+    match lib.queue.take_staged(target, abandoned) {
         Ok(path) if path == kept => {}
         Ok(_) | Err(false) => {
             return Err((409, "the kept file changed; reload and try again".into()));

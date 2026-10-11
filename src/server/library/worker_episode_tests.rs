@@ -241,3 +241,38 @@ fn a_corrected_plan_for_an_episode_row_keeps_only_its_output() {
     let elsewhere = Path::new("/lib/Show/other.mkv");
     assert!(corrected_plan_for(&cfg, &titles, &media, Some(elsewhere)).is_err());
 }
+
+// Remux on an episode row whose ISO has a current saved match goes in through the saved
+// match (no replace); it still plans only that episode, never the whole disc.
+#[test]
+fn an_episode_row_admitted_with_a_saved_match_plans_only_that_episode() {
+    let (t, lib, dirs) = library_with(&[]);
+    let iso = image_iso(&dirs, "Show");
+    let cfg = Config {
+        tv_auto: false,
+        ..no_key_tv_auto(&dirs)
+    };
+    let episodes: Vec<PathBuf> = (1..=2)
+        .map(|e| dirs.library.join(format!("Show/Show S01E0{e}.mkv")))
+        .collect();
+    delivered_episodes(&t, &iso, &episodes);
+    let media = MediaMetadata {
+        title: "Show".into(),
+        year: 2001,
+        tmdb_id: 7,
+        season: Some(1),
+        kind: Some(MediaKind::Tv),
+        ..Default::default()
+    };
+    lib.match_store().unwrap().save(&iso, 0, media).unwrap();
+    lib.index_now(&dirs);
+    let picked = lib.enqueue(&dirs, |r| {
+        r.target.as_deref() == Some(episodes[1].as_path())
+    });
+    assert_eq!(picked, 1);
+    let mut job = lib.queue.claim_next().unwrap();
+    assert!(!job.replace, "admitted through the saved match");
+    let error = maybe_attach_tv_plan(&lib, &cfg, &mut job).unwrap_err();
+    assert!(error.to_string().contains("Change match"), "{error}");
+    assert!(job.plan.is_none());
+}

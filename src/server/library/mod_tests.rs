@@ -631,6 +631,47 @@ fn episode_partials_under_a_tv_layout_in_the_library_are_swept() {
     assert!(!orphan.exists());
 }
 
+// Another writer holding `<target>.lock` owns the partial beside it: the sweep leaves it,
+// and takes it (and the sidecar) once the lock is free.
+#[test]
+fn a_partial_whose_artifact_lock_is_held_is_not_swept() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let d = dirs_in(t.path());
+    let season = d.library.join("Show (2001)/Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    let target = season.join("Show S01E03.mkv");
+    let partial = queue::partial_path(&target);
+    std::fs::write(&partial, b"another writer's remux").unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    let held =
+        libfreemkv::io::ArtifactLock::acquire(&target, &[], &libfreemkv::Halt::new()).unwrap();
+    assert_eq!(lib.sweep_partials(&d), 0);
+    assert!(partial.exists());
+    drop(held);
+    assert_eq!(lib.sweep_partials(&d), 1);
+    assert!(!partial.exists());
+    assert!(!season.join("Show S01E03.mkv.lock").exists());
+}
+
+// A symlinked folder under the library leads outside it: the sweep never follows one.
+#[cfg(unix)]
+#[test]
+fn the_partial_sweep_does_not_follow_a_symlinked_folder() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let d = dirs_in(t.path());
+    std::fs::create_dir_all(&d.library).unwrap();
+    let outside = t.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let foreign = outside.join("Movie.mkv.partial");
+    std::fs::write(&foreign, b"not the library's").unwrap();
+    std::os::unix::fs::symlink(&outside, d.library.join("Movie")).unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    assert_eq!(lib.sweep_partials(&d), 0);
+    assert!(foreign.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn the_unreadable_queue_hold_clears_once_the_file_reads() {
@@ -661,6 +702,89 @@ fn the_unreadable_queue_hold_clears_once_the_file_reads() {
     assert!(!lib.hold_for_unreadable_queue(now + 120));
     assert!(lib.hold().is_none());
     assert!(lib.queue.unreadable().is_none());
+}
+
+// Change match and Remux stat a matched ISO before they take the match gate, once per ISO,
+// on a bounded probe: a share that hangs is refused, never waited on under the gate.
+#[test]
+fn a_matched_iso_is_stat_once_outside_the_match_gate() {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    let (t, cfg, mut lib, sources) = super::match_tests::corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    // Two rows of one ISO: a split disc's episodes, both linked to it.
+    let episodes: Vec<PathBuf> = (1..=2)
+        .map(|e| d.library.join(format!("Castaway/Castaway S01E0{e}.mkv")))
+        .collect();
+    std::fs::create_dir_all(d.library.join("Castaway")).unwrap();
+    for e in &episodes {
+        std::fs::write(e, b"an episode").unwrap();
+    }
+    let delivered: Vec<String> = episodes
+        .iter()
+        .chain([&sources[0]])
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    links::record_delivery(
+        t.path().join("config").to_str().unwrap(),
+        delivered.iter().map(String::as_str),
+    )
+    .unwrap();
+    lib.rescan(&d);
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    lib.iso_stat = Arc::new(move |p: &Path| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        entered_tx.send(()).unwrap();
+        let _ = release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5));
+        links::iso_stamp(p)
+    });
+    let lib = &lib;
+    std::thread::scope(|scope| {
+        let confirm = scope.spawn(|| {
+            lib.confirm_match_and_queue(&cfg, &sources[0], 0, super::match_tests::show())
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            lib.match_gate.try_lock().is_ok(),
+            "Change match stats under the gate"
+        );
+        release.send(()).unwrap();
+        confirm.join().unwrap().unwrap();
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // The Change match job would take the ISO's rows in; Remux is asked for on its own.
+    lib.queue.clear_queued();
+    let remux_all = || lib.enqueue_checked(&d, |r| r.iso.as_deref() == Some(sources[0].as_path()));
+    std::thread::scope(|scope| {
+        let remux = scope.spawn(remux_all);
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            lib.match_gate.try_lock().is_ok(),
+            "Remux stats under the gate"
+        );
+        release.send(()).unwrap();
+        assert_eq!(remux.join().unwrap().unwrap(), 2);
+    });
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "one stat for the ISO of both rows"
+    );
+    std::thread::scope(|scope| {
+        let remux = scope.spawn(remux_all);
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The share never answers: the request is refused at the limit.
+        let refused = remux.join().unwrap().unwrap_err();
+        assert!(refused.contains("not responding"), "{refused}");
+        release.send(()).unwrap();
+    });
 }
 
 #[test]

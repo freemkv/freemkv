@@ -208,11 +208,8 @@ impl FolderView {
 // What one root's Change-match check is given: that root's links, the ISO, and the root.
 type CaptureInput = (HashMap<PathBuf, links::Link>, PathBuf, Vec<PathBuf>);
 
-// The ISO's stamp, read under the ISO folder's probe slot within the Change match check's
-// limit: a request thread never waits on a hung share, and is refused instead.
-fn iso_stamp_bounded(d: &Dirs, iso: &Path) -> std::io::Result<Option<crate::server::util::Stamp>> {
-    iso_stamp_within(d, iso, MATCH_CHECK_TIMEOUT, links::iso_stamp)
-}
+// How a matched ISO is stamped; tests stand in a hung or a watched share.
+type IsoStat = Arc<dyn Fn(&Path) -> Option<crate::server::util::Stamp> + Send + Sync>;
 
 fn iso_stamp_within(
     d: &Dirs,
@@ -234,7 +231,14 @@ fn iso_stamp_within(
             crate::strings::fmt_or(
                 "server.library.nothing_queued",
                 "{reason} Nothing was queued.",
-                &[("reason", &health::Fault::Unresponsive.message("source ISO"))],
+                &[(
+                    "reason",
+                    &crate::strings::fmt_or(
+                        "server.library.iso_unresponsive",
+                        "The source ISO folder {path} is not responding — the network share may be down or hung.",
+                        &[("path", &key.display().to_string())],
+                    ),
+                )],
             ),
         )),
     }
@@ -345,6 +349,7 @@ pub struct Library {
     // The last open failure: when (epoch seconds) and its error; tried again a minute later.
     matches_failed: Mutex<Option<(u64, std::io::ErrorKind, String)>>,
     match_gate: Mutex<()>,
+    iso_stat: IsoStat,
     pub probes: ProbeCache,
     pub audits: audit::Audits,
     // The deep_audit setting as the quick-lane loop last read it.
@@ -506,6 +511,7 @@ impl Library {
             source_matches: Mutex::new(None),
             matches_failed: Mutex::new(None),
             match_gate: Mutex::new(()),
+            iso_stat: Arc::new(links::iso_stamp),
             probes: ProbeCache::default(),
             audits: audit::Audits::open(config_dir),
             deep_on: AtomicBool::new(false),
@@ -525,6 +531,17 @@ impl Library {
         };
         let _ = lib.match_store();
         lib
+    }
+
+    // The ISO's stamp, read under the ISO folder's probe slot within the Change match check's
+    // limit: a request thread never waits on a hung share, and is refused instead.
+    fn iso_stamp_bounded(
+        &self,
+        d: &Dirs,
+        iso: &Path,
+    ) -> std::io::Result<Option<crate::server::util::Stamp>> {
+        let stat = self.iso_stat.clone();
+        iso_stamp_within(d, iso, MATCH_CHECK_TIMEOUT, move |p| stat(p))
     }
 
     /// The saved matches, opened now if they are not yet: an unreadable file is an error
@@ -702,7 +719,7 @@ impl Library {
         media: crate::server::planner::MediaMetadata,
     ) -> std::io::Result<(matches::SavedMatch, usize)> {
         let d = dirs(cfg);
-        let disc = iso_stamp_bounded(&d, source)?;
+        let disc = self.iso_stamp_bounded(&d, source)?;
         let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
         self.require_indexed_source(&d, source)?;
         if let Some(reason) = self.queue_block(&d, true) {
@@ -1415,8 +1432,8 @@ impl Library {
     }
 
     /// Delete unowned movie partials, known output partials, and remux partials in the show
-    /// and season folders of the TV folder (the library when there is none). Returns how many
-    /// went.
+    /// and season folders of the TV folder (the library when there is none), skipping one
+    /// whose `<target>.lock` another writer holds. Returns how many went.
     pub fn sweep_partials(&self, d: &Dirs) -> usize {
         let mut candidates: HashSet<PathBuf> = self
             .queue
@@ -1429,8 +1446,13 @@ impl Library {
             .collect();
         // `<library>/<title>/` holds a movie; `<tv>/<show>/<season>/` an episode, and with no
         // separate TV folder `<library>/<show>/<season>/`.
-        candidates.extend(partials_under(&d.library, 1));
-        candidates.extend(partials_under(d.tv.as_ref().unwrap_or(&d.library), 2));
+        match &d.tv {
+            Some(tv) => {
+                candidates.extend(partials_under(&d.library, &[1]));
+                candidates.extend(partials_under(tv, &[2]));
+            }
+            None => candidates.extend(partials_under(&d.library, &[1, 2])),
+        }
         candidates
             .into_iter()
             .filter(|path| {
@@ -1458,8 +1480,10 @@ impl Library {
         // The ISOs with a saved match are stamped before the gate: a hung share never holds it.
         let mut stamps = HashMap::new();
         for r in self.listing(d).rows.into_iter().filter(|r| pick(r)) {
-            if let Some(iso) = r.iso.filter(|iso| self.loaded_match(iso).is_some()) {
-                let stamp = iso_stamp_bounded(d, &iso).map_err(|e| e.to_string())?;
+            if let Some(iso) = r.iso.filter(|iso| self.loaded_match(iso).is_some())
+                && !stamps.contains_key(&iso)
+            {
+                let stamp = self.iso_stamp_bounded(d, &iso).map_err(|e| e.to_string())?;
                 stamps.insert(iso, stamp);
             }
         }
@@ -1479,13 +1503,15 @@ impl Library {
                 })
             })
             .collect();
-        // Runs of plain rows go in one queue write. A row whose ISO has a saved match is
-        // planned afresh from it and may overwrite only files linked to that ISO.
+        // Plain rows go in one queue write. A row whose ISO has a saved match is planned
+        // afresh from it and may overwrite only files linked to that ISO.
         let mut added = 0;
         let mut plain = Vec::new();
+        let mut matched = Vec::new();
         for mut job in jobs {
             let selected = self.source_match(&job.iso).map_err(|error| {
                 added += self.queue.add(std::mem::take(&mut plain));
+                added += self.add_matched(std::mem::take(&mut matched));
                 format!("{added} jobs queued; saved source matches unavailable: {error}")
             })?;
             // A match confirmed for an earlier disc filed at this path is not this disc's.
@@ -1494,16 +1520,35 @@ impl Library {
                 plain.push(job);
                 continue;
             }
-            if !plain.is_empty() {
-                added += self.queue.add(std::mem::take(&mut plain));
-            }
             job.replace = false;
-            added += self.queue.add_fresh(vec![job], false);
+            matched.push(job);
         }
         if !plain.is_empty() {
             added += self.queue.add(plain);
         }
-        Ok(added)
+        Ok(added + self.add_matched(matched))
+    }
+
+    // Queue rows planned from their ISO's saved match, in one write: a linked episode plans
+    // only itself; any other row plans the whole disc, once for all of its ISO's rows.
+    fn add_matched(&self, mut rows: Vec<NewJob>) -> usize {
+        if rows.is_empty() {
+            return 0;
+        }
+        let links = links::entries(&self.config_dir);
+        let episode = |j: &NewJob| {
+            links
+                .get(&j.target)
+                .is_some_and(|l| l.episode && l.iso == j.iso)
+        };
+        let whole: HashSet<PathBuf> = rows
+            .iter()
+            .filter(|j| !episode(j))
+            .map(|j| j.iso.clone())
+            .collect();
+        let mut planned = HashSet::new();
+        rows.retain(|j| !whole.contains(&j.iso) || (!episode(j) && planned.insert(j.iso.clone())));
+        self.queue.add_fresh(rows, false)
     }
 
     /// Per-title log file. The title is reduced to one safe path segment.
@@ -1604,13 +1649,14 @@ impl Library {
 /// How many folders a partial sweep looks into at most.
 const SWEEP_FOLDERS: usize = 10_000;
 
-// The `.mkv.partial` files in the folders `depth` levels below `root` (not in `root`
-// itself), looking into at most SWEEP_FOLDERS folders.
-fn partials_under(root: &Path, depth: usize) -> Vec<PathBuf> {
+// The `.mkv.partial` files in the folders each of `depths` levels below `root` (not in
+// `root` itself), in one walk that follows no symlink, into at most SWEEP_FOLDERS folders.
+fn partials_under(root: &Path, depths: &[usize]) -> Vec<PathBuf> {
+    let deepest = depths.iter().copied().max().unwrap_or(0);
     let mut found = Vec::new();
     let mut level = vec![root.to_path_buf()];
     let mut visited = 0;
-    for at in 0..=depth {
+    for at in 0..=deepest {
         let mut next = Vec::new();
         for dir in level {
             if visited == SWEEP_FOLDERS {
@@ -1620,14 +1666,15 @@ fn partials_under(root: &Path, depth: usize) -> Vec<PathBuf> {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            for path in entries.flatten().map(|e| e.path()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
                 let partial = path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.to_ascii_lowercase().ends_with(".mkv.partial"));
-                if at == depth && partial {
+                if partial && depths.contains(&at) {
                     found.push(path);
-                } else if at < depth && path.is_dir() {
+                } else if at < deepest && entry.file_type().is_ok_and(|t| t.is_dir()) {
                     next.push(path);
                 }
             }

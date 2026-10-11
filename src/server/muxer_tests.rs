@@ -1512,3 +1512,63 @@ fn a_hand_off_waiting_for_its_job_does_not_take_the_mux_slot() {
         "the mux slot was taken before the job was this mux's"
     );
 }
+
+// The worker loop itself takes no slot for a hand-off: one whose job is still held waits
+// for it without the slot (the ISO's job is leased while the marker's dir is free).
+#[test]
+fn the_mux_worker_takes_no_slot_while_a_hand_off_waits_for_its_job() {
+    use crate::server::ripper::{resume, staging};
+    let _env = crate::server::log::env_guard();
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    // SAFETY: env access in tests, serialized by env_guard.
+    unsafe {
+        std::env::set_var("AUTORIP_DIR", root.path());
+    }
+    let staging_root = root.path().join("staging");
+    let dir = staging_root.join("Heat");
+    let job = root.path().join("job");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&job).unwrap();
+    staging::write_state(
+        &dir,
+        &staging::DiscState::new(staging::StagingState::Ripped),
+    );
+    let mut marker = sample_marker();
+    marker.iso_path = job.join("Heat.iso").to_string_lossy().into_owned();
+    marker.mapfile_path = job.join("Heat.iso.mapfile").to_string_lossy().into_owned();
+    write_marker(&dir, &marker).unwrap();
+    let lease = staging::job_lease(&job);
+    let held = lease.lock().unwrap();
+    resume::LEASE_WAITERS.lock().unwrap().remove("_mux");
+    let halt = libfreemkv::Halt::new();
+    crate::server::ripper::register_halt("_mux", halt.clone());
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: staging_root.to_string_lossy().into_owned(),
+        ..Config::default()
+    }));
+    let worker = std::thread::spawn(move || check_and_mux(&cfg));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !resume::LEASE_WAITERS.lock().unwrap().contains("_mux") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hand-off never waited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let slot_taken = crate::server::library::arbiter::ARBITER.rip_active();
+    halt.cancel();
+    drop(held);
+    worker.join().unwrap();
+    crate::server::ripper::unregister_halt("_mux");
+    resume::LEASE_WAITERS.lock().unwrap().remove("_mux");
+    let path = dir.to_string_lossy().to_string();
+    MUX_ERRORS.lock().unwrap().remove(&path);
+    MUX_DISMISSED.lock().unwrap().remove(&path);
+    assert!(
+        !slot_taken,
+        "the worker loop took the mux slot for a waiting hand-off"
+    );
+}

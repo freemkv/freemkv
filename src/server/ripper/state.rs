@@ -439,6 +439,7 @@ pub(super) fn is_in_cooldown(device: &str) -> bool {
 /// accumulate stale entries. Recovers poisoned locks before cleanup.
 pub(super) fn forget_device_state(device: &str) {
     release_stopped_disc(device);
+    super::forget_staging_hold(device);
     STOP_COOLDOWNS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -613,6 +614,7 @@ pub fn try_claim_active_checked(device: &str, known: bool) -> Option<u64> {
     // Bump claim_gen so a stale detached worker can detect the device was
     // re-claimed and decline to reset it to idle. Saturating so it never wraps.
     entry.claim_gen = entry.claim_gen.saturating_add(1);
+    super::forget_staging_hold(device);
     // The generation IS the claim's identity, and it is returned so the caller
     // can hand it to `rollback_failed_spawn` and undo THIS claim and no other.
     // See that function for the wedge that a device-only rollback produced.

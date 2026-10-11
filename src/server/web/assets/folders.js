@@ -23,13 +23,26 @@ function bannerOne(message, path, since, hint, waits, slow) {
     + '</span></div>';
 }
 
+/** The hold's role while the queue file could not be read: a file, and nothing waits on it. */
+export const QUEUE_FILE_ROLE = 'queue file';
+
 /** One banner per failed folder, then one per folder still being checked, or the queue's hold
     when a preflight found the problem before the next check did; '' when every folder answers. */
 export function folderBanner(folders, hold, waits) {
   const bad = unhealthy(folders).map(f => bannerOne(f.message || 'The ' + f.role + ' folder cannot be used.', f.path, f.health.since, f.hint, waits, false));
   const slow = checking(folders).map(f => bannerOne(f.message || 'The ' + f.role + ' folder has not answered yet — still checking.', f.path, f.health.since, f.hint, waits, true));
   if (bad.length || slow.length) return bad.concat(slow).join('');
-  return hold ? bannerOne(hold.message, hold.path, hold.since, hold.hint, waits, hold.state === 'checking') : '';
+  if (!hold) return '';
+  const held = hold.role === QUEUE_FILE_ROLE;
+  return bannerOne(hold.message, hold.path, hold.since, hold.hint, waits && !held, hold.state === 'checking');
+}
+
+/** The Library's Remux link while remuxes wait: its tooltip and its badge's label. */
+export function remuxLinkLabel(hold, bad) {
+  if (!bad && hold && hold.role === QUEUE_FILE_ROLE) {
+    return { title: 'The remux queue is held: ' + hold.message, aria: 'The remux queue is held until its file can be read' };
+  }
+  return { title: 'Remuxes are waiting: ' + (bad || hold).message, aria: 'Remuxes are waiting for a folder' };
 }
 
 const NOTE = {
@@ -40,7 +53,8 @@ const NOTE = {
 /** Why a queued job has not started: its note, the queue's hold, and when a retry is due. */
 export function queuedNote(job, hold, now) {
   const bits = [];
-  if (job.note === 'waiting_for_folder' && hold) bits.push('waiting for the ' + hold.role + ' folder');
+  if (hold && hold.role === QUEUE_FILE_ROLE) bits.push('queue held: its file cannot be read');
+  else if (job.note === 'waiting_for_folder' && hold) bits.push('waiting for the ' + hold.role + ' folder');
   else if (job.note) bits.push(NOTE[job.note] || job.note);
   else if (hold) bits.push('waiting for the ' + hold.role + ' folder');
   if (job.not_before && job.not_before > now) bits.push('retry ' + (job.attempts + 1) + ' ' + when(job.not_before));

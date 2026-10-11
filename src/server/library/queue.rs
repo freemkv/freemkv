@@ -334,6 +334,37 @@ impl QueueFile {
 }
 
 /// The engine writes its in-progress file beside the target.
+// The final file a `.partial` becomes, or `None` for a name without that suffix.
+fn partial_target(partial: &Path) -> Option<PathBuf> {
+    let name = partial.file_name()?.to_str()?;
+    let cut = name.len().checked_sub(".partial".len())?;
+    let (stem, suffix) = (name.get(..cut)?, name.get(cut..)?);
+    (suffix.eq_ignore_ascii_case(".partial") && !stem.is_empty())
+        .then(|| partial.with_file_name(stem))
+}
+
+/// How long the partial sweep tries for a `<target>.lock` before leaving it to its holder.
+const SWEEP_LOCK_TRY: std::time::Duration = std::time::Duration::from_millis(300);
+
+// `target`'s artifact lock if no other writer holds it, tried for `SWEEP_LOCK_TRY`.
+fn try_artifact_lock(target: &Path) -> Option<libfreemkv::io::ArtifactLock> {
+    let halt = libfreemkv::Halt::new();
+    let timer = halt.clone();
+    let (done, wait) = std::sync::mpsc::channel::<()>();
+    std::thread::Builder::new()
+        .name("partial-lock".into())
+        .spawn(move || {
+            if wait.recv_timeout(SWEEP_LOCK_TRY) == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            {
+                timer.cancel();
+            }
+        })
+        .ok()?;
+    let lock = libfreemkv::io::ArtifactLock::acquire(target, &[], &halt).ok();
+    drop(done);
+    lock
+}
+
 pub fn partial_path(target: &Path) -> PathBuf {
     let mut name = target.file_name().unwrap_or_default().to_os_string();
     name.push(".partial");
@@ -460,6 +491,10 @@ impl Queue {
         {
             return false;
         }
+        // Another writer's `<target>.lock` owns the partial; a free one is held to the end.
+        let Some(lock) = partial_target(path).and_then(|t| try_artifact_lock(&t)) else {
+            return false;
+        };
         let f = self.lock();
         if f.jobs
             .iter()
@@ -471,6 +506,9 @@ impl Queue {
         }
         let removed = unlink(path).is_ok();
         drop(f);
+        if removed && let Err(e) = lock.delete() {
+            tracing::warn!(path = %path.display(), error = %e, "could not remove a swept partial's lock");
+        }
         removed
     }
 
@@ -710,7 +748,6 @@ impl Queue {
                 .entry(job.target.clone())
                 .or_default()
                 .push(existing + added.len());
-            held.insert(job.iso.clone());
             added.push(job);
         }
         // A new job replaces the finished entries that named its target.
@@ -1027,8 +1064,9 @@ impl Queue {
 
     /// Detach the kept file of `target`'s job so it can be deleted: a queued job leaves the
     /// queue, a failed one keeps its failure. `Err(true)` while that job runs, `Err(false)`
-    /// when there is no kept file (or the queue file could not be loaded).
-    pub fn take_staged(&self, target: &Path) -> Result<PathBuf, bool> {
+    /// when there is no kept file (or the queue file could not be loaded), or with
+    /// `abandoned` when its job is neither failed nor finished.
+    pub fn take_staged(&self, target: &Path, abandoned: bool) -> Result<PathBuf, bool> {
         self.mutate_or(Err(false), |f| {
             let pos = f
                 .jobs
@@ -1037,6 +1075,9 @@ impl Queue {
                 .ok_or(false)?;
             if f.jobs[pos].state == JobState::Running {
                 return Err(true);
+            }
+            if abandoned && !matches!(f.jobs[pos].state, JobState::Failed | JobState::Done) {
+                return Err(false);
             }
             let path = f.jobs[pos].staged.clone().ok_or(false)?;
             for output in &mut f.jobs[pos].outputs {

@@ -66,7 +66,8 @@ pub fn retitle_staging_for_device(
             "the staging network share is not mounted; the correction was not saved",
         ));
     }
-    crate::server::config::staging_root_ready(&c).map_err(|p| std::io::Error::other(p.message))?;
+    crate::server::config::staging_root_ready(&c)
+        .map_err(|p| std::io::Error::other(staging_problem_text(&p)))?;
     create_job_dir(&dir)
         .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create staging: {e}")))?;
     staging::save_user_metadata_for_device(
@@ -1037,6 +1038,14 @@ fn auto_resume_action(resumable: Option<Resumable>) -> AutoResumeAction {
     }
 }
 
+// Whether `mode` is a disc insertion's (the on-insert setting), not the operator's.
+fn insert_mode(mode: crate::server::web::ResumeMode) -> bool {
+    matches!(
+        mode,
+        crate::server::web::ResumeMode::Fresh | crate::server::web::ResumeMode::Prefer
+    )
+}
+
 fn auto_insert_rip_mode(on_insert: &str) -> Option<crate::server::web::ResumeMode> {
     match on_insert {
         "rip" => Some(crate::server::web::ResumeMode::Fresh),
@@ -1096,6 +1105,26 @@ impl PollAction {
             PollAction::Absent { .. } | PollAction::Hold { latch: false }
         )
     }
+}
+
+// One drive's tick: whether the disc counts as a new insert, and the action. An insert
+// held for its staging folder is replayed as an insert once the folder is there.
+fn presence_tick(
+    device: &str,
+    presence: libfreemkv::DiscPresence,
+    had_disc: bool,
+    cfg: &Arc<RwLock<Config>>,
+    now: u64,
+    in_cooldown: bool,
+) -> (bool, PollAction) {
+    let mut latched = had_disc;
+    if presence == libfreemkv::DiscPresence::Present && staging_held(device) {
+        let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if staging_hold_lifted(device, &c, now) {
+            latched = false;
+        }
+    }
+    (!latched, poll_action(presence, latched, in_cooldown))
 }
 
 fn poll_action(
@@ -1366,17 +1395,16 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                     }
                 };
 
-                // A rip held for its staging folder starts again, as an insert, once it is there.
-                if presence == libfreemkv::DiscPresence::Present && staging_held(&device) {
-                    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-                    if staging_hold_lifted(&device, &c, crate::server::util::epoch_secs()) {
-                        had_disc.remove(&device);
-                    }
-                }
-                let is_new_insert = !had_disc.contains(&device);
                 // One is_in_cooldown read for both halves: asking twice could
                 // straddle the expiry and dispatch without latching.
-                let action = poll_action(presence, !is_new_insert, is_in_cooldown(&device));
+                let (is_new_insert, action) = presence_tick(
+                    &device,
+                    presence,
+                    had_disc.contains(&device),
+                    cfg,
+                    crate::server::util::epoch_secs(),
+                    is_in_cooldown(&device),
+                );
                 if action.latch() {
                     current_with_disc.insert(device.clone());
                 }
@@ -1401,10 +1429,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                             tracing::info!(device = %device, "disc removed");
                             drop_session(&device);
                         }
-                        STAGING_HELD
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&device);
+                        forget_staging_hold(&device);
                         continue;
                     }
                 };
@@ -1471,7 +1496,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                     let dev_path_for_thread = dev_path.clone();
                     if let Err(e) = spawn_rip_thread(&device, "rip", move || {
                         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            scan_disc(&cfg, &device_for_thread, &dev_path);
+                            scan_disc_for(&cfg, &device_for_thread, &dev_path, true);
                             if let Some(mode) = auto_mode {
                                 let cancelled = device_halt(&device_for_thread)
                                     .map(|h| h.is_cancelled())
@@ -1560,6 +1585,11 @@ fn mark_config_lock_poisoned(device: &str, op: &str) {
 
 /// Scan a disc — open, init, identify, TMDB, full scan. Stores session for rip.
 pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
+    scan_disc_for(cfg, device, device_path, false);
+}
+
+// `scan_disc`; `insert` when the disc's insertion started it, not the operator.
+fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, insert: bool) {
     // Snapshot Config and drop the read guard immediately (see rip_disc):
     // scans can take 10-30s on damaged discs, long enough to block a
     // racing settings POST.
@@ -1741,7 +1771,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         }
         Err(e) => {
             if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
-                hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+                hold_for_staging(device, &problem, crate::server::util::epoch_secs(), insert);
                 return;
             }
             let job = match jobs::fresh_unverified_job(&cfg_read) {
@@ -1969,7 +1999,7 @@ pub fn handle_rip_request(
     // clears the UI poster/title and re-runs TMDB for no benefit. Eject +
     // re-insert calls drop_session, so a stale session can't survive it.
     if !session_is_scanned(device) {
-        scan_disc(cfg, device, device_path);
+        scan_disc_for(cfg, device, device_path, insert_mode(mode));
     } else {
         crate::server::log::device_log(
             device,
@@ -1999,6 +2029,12 @@ fn dispatch_rip_request(
     mode: crate::server::web::ResumeMode,
 ) {
     let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Err(problem) = crate::server::config::staging_root_ready(&c) {
+        let now = crate::server::util::epoch_secs();
+        hold_for_staging(device, &problem, now, insert_mode(mode));
+        drop_session(device);
+        return;
+    }
     let needs_capture = staging_job_for_device(device)
         .and_then(|job| staging::read_state(&std::path::Path::new(&c.staging_dir).join(job)))
         .is_some_and(|s| s.replan_required && s.needs_disc && !s.muxing);
@@ -2376,17 +2412,49 @@ const STAGING_HOLD_RECHECK_SECS: u64 = 10;
 static STAGING_HELD: std::sync::Mutex<std::collections::BTreeMap<String, u64>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-// Hold `device`'s rip until the staging folder `problem` names is there; the drive shows why.
-fn hold_for_staging(device: &str, problem: &crate::server::health::Problem, now: u64) {
+// The staging folder `problem` names stops `device`'s rip, and the drive shows why. An
+// insert's rip waits for the folder; an operator's is refused, to be retried.
+fn hold_for_staging(
+    device: &str,
+    problem: &crate::server::health::Problem,
+    now: u64,
+    insert: bool,
+) {
+    if insert {
+        STAGING_HELD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(device.to_string(), now);
+    }
+    let text = staging_problem_text(problem);
+    crate::server::log::device_log(device, &text);
+    update_state_with(device, |s| {
+        s.status = "error".into();
+        s.last_error = text.clone();
+    });
+}
+
+// The drive's text for a staging folder that cannot be used: its path and the cause.
+pub(super) fn staging_problem_text(problem: &crate::server::health::Problem) -> String {
+    if problem.fault == crate::server::health::Fault::Missing {
+        return problem.message.clone();
+    }
+    crate::strings::fmt_or(
+        "error.staging.root_unusable",
+        "staging folder {path} cannot be used: {detail}",
+        &[
+            ("path", &problem.path.display().to_string()),
+            ("detail", &problem.detail),
+        ],
+    )
+}
+
+// Drop `device`'s waiting insert: a rip or scan started on it, or its disc changed.
+pub(super) fn forget_staging_hold(device: &str) {
     STAGING_HELD
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(device.to_string(), now);
-    crate::server::log::device_log(device, &problem.message);
-    update_state_with(device, |s| {
-        s.status = "error".into();
-        s.last_error = problem.message.clone();
-    });
+        .remove(device);
 }
 
 fn staging_held(device: &str) -> bool {
@@ -3011,7 +3079,12 @@ fn rip_disc_inner(
     // scan's verified identity lands in the same first write, so an early return
     // never leaves an identity-less job that location refuses for good.
     if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
-        hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+        hold_for_staging(
+            device,
+            &problem,
+            crate::server::util::epoch_secs(),
+            !operator,
+        );
         return;
     }
     let started = if crate::server::health::share_unmounted(&job_path) {
@@ -3336,7 +3409,12 @@ fn rip_disc_inner(
     let staging = cfg_read.staging_device_dir(&job_id);
     // Under an unmounted share the dir would be made on the container's own disk.
     if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
-        hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+        hold_for_staging(
+            device,
+            &problem,
+            crate::server::util::epoch_secs(),
+            !operator,
+        );
         unregister_halt(device);
         return;
     }
@@ -5277,16 +5355,10 @@ fn hold_capture_for_review(
         "The saved ISO and plan are retained.",
     );
     let paths = (staging_path, iso, std::path::Path::new(mapfile));
-    match resume::hold_in_review(device, paths, reason, &hint) {
-        Ok(()) => {
-            if let Some(set) = keys {
-                crate::server::keysource::hold_rip_keys(iso, set.clone());
-            }
-        }
-        Err(e) => crate::server::log::syslog(&format!(
-            "Review hold for {} did not persist: {e}",
-            staging_path.display()
-        )),
+    if resume::hold_in_review(device, paths, reason, &hint).is_ok()
+        && let Some(set) = keys
+    {
+        crate::server::keysource::hold_rip_keys(iso, set.clone());
     }
 }
 

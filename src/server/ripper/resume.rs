@@ -772,7 +772,7 @@ pub(super) fn changed_while_waiting(before: &JobFingerprint, after: &JobFingerpr
 
 /// Hold a job in Review for `reason`, its capture and plan kept, and surface it the same way
 /// from every path: the device log and a System-tab card with `hint`. A hold that could not
-/// be saved says so on the card instead. `Ok` once the hold is saved.
+/// be saved says so on the card and in the device log, and is logged. `Ok` once it is saved.
 pub(super) fn hold_in_review(
     device: &str,
     (staging_dir, iso, mapfile): (&Path, &Path, &Path),
@@ -783,14 +783,37 @@ pub(super) fn hold_in_review(
     let held = staging::hold_title_identity_review(staging_dir, iso, mapfile, reason);
     let hint = match &held {
         Ok(()) => hint.to_string(),
-        Err(error) => crate::strings::fmt_or(
-            "error.plan.review_unsaved",
-            "The review hold could not be saved ({error}); the capture is kept. Fix the staging share, then Resume the disc.",
-            &[("error", &error.to_string())],
-        ),
+        Err(error) => {
+            crate::server::log::device_log(device, &review_unsaved(error));
+            crate::server::log::syslog(&format!(
+                "Review hold for {} did not persist: {error}",
+                staging_dir.display()
+            ));
+            crate::strings::fmt_or(
+                "error.plan.review_unsaved",
+                "The review hold could not be saved ({error}); the capture is kept. Fix the staging share, then Resume the disc.",
+                &[("error", &error.to_string())],
+            )
+        }
     };
     crate::server::muxer::record_error(&staging_dir.to_string_lossy(), reason, &hint);
     held
+}
+
+fn review_unsaved(error: &std::io::Error) -> String {
+    crate::strings::fmt_or(
+        "error.plan.review_hold_failed",
+        "Could not save the review hold: {error}",
+        &[("error", &error.to_string())],
+    )
+}
+
+// The drive's text for a Review hold: `reason`, and whether the hold could not be saved.
+fn review_status(reason: &str, held: &std::io::Result<()>) -> String {
+    match held {
+        Ok(()) => reason.to_string(),
+        Err(error) => format!("{reason} {}", review_unsaved(error)),
+    }
 }
 
 // A plan only the operator can settle (E9086, numbering): hold it in Review with the
@@ -805,8 +828,9 @@ fn hold_plan_for_review(
         "error.plan.review_retained",
         "The saved ISO and plan are retained.",
     );
-    let _ = hold_in_review(device, paths, &reason, &hint);
-    reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
+    let held = hold_in_review(device, paths, &reason, &hint);
+    let status = review_status(&reason, &held);
+    reset_status_after_ripping(device, "error", display_name, "", "", Some(status));
 }
 
 // The superseded plan is never delivered; drop its outputs (plain leaves in this job
@@ -1317,13 +1341,14 @@ fn resume_remux_within<S>(
                 let reason = format!(
                     "{reason}. Use the Review queue to confirm or change the match and rebuild the plan from the saved ISO. No disc reread is needed."
                 );
-                let _ = hold_in_review(
+                let held = hold_in_review(
                     device,
                     (&staging_dir, &iso_path, &mapfile_path),
                     &reason,
                     "The saved ISO and outputs are unchanged. Confirm the match in the Review queue to replan without rereading the disc.",
                 );
-                reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
+                let status = review_status(&reason, &held);
+                reset_status_after_ripping(device, "error", &display_name, "", "", Some(status));
                 return;
             }
         };

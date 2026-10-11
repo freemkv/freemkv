@@ -143,3 +143,28 @@ fn resume_holds_a_selection_it_cannot_make_in_review() {
         crate::server::muxer::MuxVerdict::Dispatch
     );
 }
+
+// A hold that could not be saved says so where the operator looks: the drive status.
+#[test]
+fn a_review_hold_that_could_not_be_saved_says_so_on_the_drive() {
+    crate::strings::set_locale("en");
+    let dir = scratch("unsaved").join("gone");
+    let (iso, map) = (dir.join("Show.iso"), dir.join("Show.iso.mapfile"));
+    let device = "_review_hold_unsaved_test";
+    hold_plan_for_review(device, (&dir, &iso, &map), "Show", "needs review".into());
+    let row = super::super::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(device)
+        .unwrap();
+    assert!(
+        row.last_error.starts_with("needs review"),
+        "{}",
+        row.last_error
+    );
+    assert!(
+        row.last_error.contains("Could not save the review hold:"),
+        "{}",
+        row.last_error
+    );
+}

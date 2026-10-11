@@ -90,10 +90,11 @@ fn saved_matches_unreadable_at_start_are_read_again_once_repaired() {
     let file = t.path().join("library-matches.json");
     std::fs::write(&file, b"broken").unwrap();
     let lib = Library::open(t.path(), &t.path().join("logs"));
-    let now = crate::server::util::epoch_secs();
     let iso = t.path().join("source.iso");
     let error = lib.source_match(&iso).unwrap_err();
     assert!(error.contains("library-matches.json"), "{error}");
+    // Timed from the failure as recorded, not a clock read of the test's own.
+    let now = lib.matches_failed.lock().unwrap().as_ref().unwrap().0;
     std::fs::write(&file, b"{}").unwrap();
     // A failed read is not repeated on every call, only once a minute.
     let error = lib.match_store_at(now + 1).err().unwrap().to_string();
@@ -145,4 +146,39 @@ fn a_change_match_console_names_its_iso_and_planned_files_not_its_queue_key() {
         planned.ends_with(&format!("mkv://{}", season.display())),
         "{planned}"
     );
+}
+
+// A kept file is copied to the output it was made for; a Change match's queue key is never
+// named, and the ISO always is.
+#[test]
+fn a_kept_file_console_names_its_iso_and_output_not_the_queue_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut job = super::job_for(dir.path(), 1);
+    job.retire = true;
+    job.target = dir
+        .path()
+        .join("lib/Heat [3fa2b1c0d9e8]/Heat [3fa2b1c0d9e8].mkv");
+    let kept = dir.path().join("stage/Show_S01E02.0123456789ab.staged.mkv");
+    let unplanned = kept_line(&job, &kept);
+    assert!(!unplanned.contains("3fa2b1c0d9e8"), "{unplanned}");
+    assert!(
+        unplanned.contains(&*job.iso.to_string_lossy()),
+        "{unplanned}"
+    );
+    assert!(unplanned.contains(&*kept.to_string_lossy()), "{unplanned}");
+    let season = dir.path().join("tv/Show/Season 01");
+    job.plan = Some(one_output());
+    job.outputs = (1..=2)
+        .map(|e| super::super::super::queue::OutputProgress {
+            id: format!("e{e}"),
+            target: season.join(format!("Show S01E0{e}.mkv")),
+            state: OutputState::Pending,
+            staged: (e == 2).then(|| kept.clone()),
+            landing: None,
+        })
+        .collect();
+    let planned = kept_line(&job, &kept);
+    assert!(!planned.contains("3fa2b1c0d9e8"), "{planned}");
+    let output = season.join("Show S01E02.mkv");
+    assert!(planned.ends_with(&*output.to_string_lossy()), "{planned}");
 }
