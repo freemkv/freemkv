@@ -3850,7 +3850,7 @@ fn fresh_wipe_cannot_delete_artifacts_while_job_lease_is_held() {
         "leased staging was wiped"
     );
     assert_eq!(
-        st.status, "error",
+        st.status, "idle",
         "fresh dispatch should stand down: {st:?}"
     );
 }
@@ -4016,13 +4016,6 @@ fn insert_dispatch_stands_down_on_unreadable_staging() {
 fn fresh_insert_spares_a_live_sweep_but_wipes_a_dead_one() {
     let mode = super::auto_insert_rip_mode("rip").expect("an auto-rip mode");
     let tmp = tempfile::TempDir::new().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let other = "sg_insert_live_sweep_other_test";
-    seed_scanned_disc(other, "Twin Disc", tmp.path());
-    let handle = std::thread::spawn(move || {
-        let _ = rx.recv();
-    });
-    super::register_rip_thread(other, handle).expect("register the other drive's rip");
     let device = "sg_insert_live_sweep_test";
     let cfg = seed_scanned_disc(device, "Twin Disc", tmp.path());
     super::update_state_with(device, |s| s.status = "scanning".to_string());
@@ -4032,14 +4025,16 @@ fn fresh_insert_spares_a_live_sweep_but_wipes_a_dead_one() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("Sentinel.iso"), b"precious").unwrap();
     staging::write_sweeping_marker(&dir);
+    // Another drive's live rip holds the job lease.
+    let lease = staging::job_lease(&dir);
+    let other_rip = lease.lock().unwrap();
     super::dispatch_rip_request(&cfg, device, "/nonexistent/autorip-test-drive", mode);
     let status = super::STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(device)
         .map(|s| s.status.clone());
-    drop(tx);
-    forget_device(other);
+    drop(other_rip);
     forget_device(device);
     assert!(
         dir.join("Sentinel.iso").exists(),
@@ -4058,6 +4053,36 @@ fn fresh_insert_spares_a_live_sweep_but_wipes_a_dead_one() {
         });
     assert!(!dead.exists(), "a dead sweep's leftover must start fresh");
     assert_eq!(st.status, "error", "and the fresh rip must be attempted");
+}
+
+// Lease contention is a typed busy: whoever holds the job (another drive's rip
+// before its sweep lands, the mux worker, a delivery), every rip mode stands down idle.
+#[test]
+fn a_held_job_lease_stands_every_rip_mode_down_idle() {
+    for (label, mode) in [
+        ("fresh", super::auto_insert_rip_mode("rip").expect("mode")),
+        ("default", crate::server::web::ResumeMode::Default),
+        ("wipe", crate::server::web::ResumeMode::Wipe),
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let device = format!("sg_lease_busy_{label}_test");
+        let cfg = seed_scanned_disc(&device, "Leased Disc", tmp.path());
+        super::update_state_with(&device, |s| s.status = "scanning".to_string());
+        let dir = tmp.path().join("Leased_Disc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Sentinel.iso"), b"precious").unwrap();
+        let lease = staging::job_lease(&dir);
+        let owner = lease.lock().unwrap();
+        super::dispatch_rip_request(&cfg, &device, "/nonexistent/autorip-test-drive", mode);
+        drop(owner);
+        let st = super::STATE.lock().unwrap().get(&device).cloned().unwrap();
+        forget_device(&device);
+        assert!(
+            dir.join("Sentinel.iso").exists(),
+            "{label}: leased job touched"
+        );
+        assert_eq!(st.status, "idle", "{label} must stand down: {st:?}");
+    }
 }
 
 // Run `mode` over an existing but EMPTY staging dir; returns (dir, status).
@@ -4148,13 +4173,6 @@ fn insert_dispatch_stands_down_on_an_unusable_state_file() {
 #[test]
 fn operator_resume_refuses_a_live_sweep_and_unreadable_staging() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let other = "sg_require_live_sweep_other_test";
-    seed_scanned_disc(other, "Busy Disc", tmp.path());
-    let handle = std::thread::spawn(move || {
-        let _ = rx.recv();
-    });
-    super::register_rip_thread(other, handle).expect("register the other drive's rip");
     let device = "sg_require_live_sweep_test";
     let cfg = seed_scanned_disc(device, "Busy Disc", tmp.path());
     let dir = tmp
@@ -4164,6 +4182,9 @@ fn operator_resume_refuses_a_live_sweep_and_unreadable_staging() {
     std::fs::write(dir.join("Sentinel.iso"), b"precious").unwrap();
     stage_partial_sweep(&dir);
     staging::write_sweeping_marker(&dir);
+    // Another drive's live rip holds the job lease.
+    let lease = staging::job_lease(&dir);
+    let other_rip = lease.lock().unwrap();
     let mode = crate::server::web::ResumeMode::Require;
     super::dispatch_rip_request(&cfg, device, "/nonexistent/autorip-test-drive", mode);
     let st = super::STATE
@@ -4172,8 +4193,7 @@ fn operator_resume_refuses_a_live_sweep_and_unreadable_staging() {
         .get(device)
         .cloned()
         .unwrap_or_default();
-    drop(tx);
-    forget_device(other);
+    drop(other_rip);
     forget_device(device);
     assert_eq!(st.status, "error", "{st:?}");
     assert!(

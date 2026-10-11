@@ -1024,61 +1024,13 @@ fn auto_insert_rip_mode(on_insert: &str) -> Option<crate::server::web::ResumeMod
 }
 
 // Fresh unattended rip (1.7.7): discard this disc's staging, whatever it holds, then sweep.
-// Only staging the mux worker owns, another drive sweeps, or that can't be read stands down.
+// Only staging the mux worker owns, another drive uses, or that can't be read stands down;
+// rip_disc's job lease (taken before its wipe) excludes the same disc in a second drive.
 fn auto_rip_fresh(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
-    // Held from before the wipe until rip_disc returns: the same disc in a second drive
-    // stands down instead of wiping this rip's dir before its `.sweeping` lands.
-    let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let staging_dir =
-        staging_job_for_device(device).map(|b| std::path::Path::new(&cfg_read.staging_dir).join(b));
-    let _claim = match staging_dir {
-        Some(dir) => match claim_fresh_rip(&dir.to_string_lossy(), device) {
-            Some(claim) => Some(claim),
-            None => {
-                crate::server::log::device_log(
-                    device,
-                    "Another drive is ripping this disc right now — NOT re-ripping.",
-                );
-                stand_down_idle(device, false);
-                return;
-            }
-        },
-        None => None,
-    };
     if staging_hold_stands_down(cfg, device, GuardFor::Insert) {
         return;
     }
     rip_disc_inner(cfg, device, device_path, false, true);
-}
-
-// Staging dirs a fresh rip owns (dir → device), from its wipe until it returns.
-static FRESH_RIP_CLAIMS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, String>>,
-> = std::sync::LazyLock::new(Default::default);
-
-struct FreshRipClaim {
-    dir: String,
-}
-
-impl Drop for FreshRipClaim {
-    fn drop(&mut self) {
-        FRESH_RIP_CLAIMS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.dir);
-    }
-}
-
-// Claim staging `dir` for a fresh rip on `device`; `None` while another device holds it.
-fn claim_fresh_rip(dir: &str, device: &str) -> Option<FreshRipClaim> {
-    let mut claims = FRESH_RIP_CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
-    if claims.get(dir).is_some_and(|owner| owner != device) {
-        return None;
-    }
-    claims.insert(dir.to_string(), device.to_string());
-    Some(FreshRipClaim {
-        dir: dir.to_string(),
-    })
 }
 
 // Decide both halves of a tick's response to an observed disc; the two answers must agree.
@@ -2137,8 +2089,8 @@ enum StagingHold {
     HeldForReview,
     /// `.aborted-loss`: swept ISO awaiting the operator's Accept / another pass.
     LossAborted,
-    /// `.sweeping` by another drive's live rip of the same disc.
-    LiveSweep,
+    /// Another drive's rip, the mux worker or a delivery holds this job's lease.
+    JobBusy,
     /// A staged image held for this disc (E7034): inserting it finishes the mux.
     NeedsDisc,
 }
@@ -2148,7 +2100,7 @@ enum StagingHold {
 enum GuardFor {
     /// Sweep in place (Default).
     InPlace,
-    /// On-insert Rip / Resume: only staging owned by the mux worker, swept by another
+    /// On-insert Rip / Resume: only staging owned by the mux worker, leased by another
     /// drive, or unreadable holds; an empty-looking listing is not trusted.
     Insert,
 }
@@ -2215,9 +2167,7 @@ fn staging_hold_stands_down(cfg: &Arc<RwLock<Config>>, device: &str, purpose: Gu
         StagingHold::HeldForReview => {
             "Disc has a finished rip held for title review — NOT re-ripping. Confirm or cancel it under Review first."
         }
-        StagingHold::LiveSweep => {
-            "Another drive is sweeping this disc's staging dir right now — NOT re-ripping."
-        }
+        StagingHold::JobBusy => JOB_BUSY,
         StagingHold::NeedsDisc => {
             "This disc's staged image is waiting for it (E7034) but could not be resumed — NOT re-ripping. Use Resume to finish it."
         }
@@ -2241,9 +2191,7 @@ fn resume_refused_by_staging(cfg: &Arc<RwLock<Config>>, device: &str) -> bool {
         Some(StagingHold::Unreadable) => {
             "Cannot read this disc's staging dir cleanly (staging share degraded?) — not resuming. Retry once staging is readable."
         }
-        Some(StagingHold::LiveSweep) => {
-            "Another drive is sweeping this disc's staging dir right now — not resuming."
-        }
+        Some(StagingHold::JobBusy) => JOB_BUSY,
         _ => return false,
     };
     crate::server::log::device_log(device, why);
@@ -2295,10 +2243,16 @@ fn disc_staging_hold(
             Err(_) => Some(StagingHold::UnconfirmedEmpty),
         };
     }
-    snapshot_hold(&snap).or_else(|| {
-        (snap.has_sweeping && another_drive_sweeping(device, &job))
-            .then_some(StagingHold::LiveSweep)
-    })
+    snapshot_hold(&snap).or_else(|| job_busy(&dir).then_some(StagingHold::JobBusy))
+}
+
+// Why a rip stands down over a job someone else holds (see [`job_busy`]).
+const JOB_BUSY: &str =
+    "Another drive or the mux worker is using this disc's staging job right now — NOT re-ripping.";
+
+// Lease contention: a live rip (from before its wipe), mux or delivery owns the job.
+fn job_busy(dir: &std::path::Path) -> bool {
+    staging::job_lease(dir).try_lock().is_err()
 }
 
 // Pure: the hold a cleanly-read snapshot imposes. `.done` counts on its own for old-format
@@ -2317,21 +2271,6 @@ fn snapshot_hold(snap: &staging::StagingSnapshot) -> Option<StagingHold> {
     } else {
         None
     }
-}
-
-// Is another drive's live rip thread working in the same staging dir (same disc in two drives)?
-// A `.sweeping` dir no thread owns is a crash leftover.
-fn another_drive_sweeping(device: &str, job: &str) -> bool {
-    let others: Vec<String> = STATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .keys()
-        .filter(|d| d.as_str() != device)
-        .cloned()
-        .collect();
-    others
-        .iter()
-        .any(|d| rip_thread_running(d) && staging_job_for_device(d).as_deref() == Some(job))
 }
 
 // Leave a skipped disc idle (not stuck "scanning") and release its drive session.
@@ -2681,17 +2620,10 @@ fn rip_disc_inner(
         }
     };
     let job_lease = staging::job_lease(&job_path);
-    let _job_owner = match job_lease.try_lock() {
-        Ok(owner) => owner,
-        Err(_) => {
-            update_state_with(device, |s| {
-                s.status = "error".into();
-                s.last_error =
-                    "This staging job is active on another drive or worker; nothing was reset"
-                        .into();
-            });
-            return;
-        }
+    let Ok(_job_owner) = job_lease.try_lock() else {
+        crate::server::log::device_log(device, JOB_BUSY);
+        stand_down_idle(device, false);
+        return;
     };
     if wipe {
         let reset = if disc_owned_by_worker(cfg, device) {
