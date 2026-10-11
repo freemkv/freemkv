@@ -2922,3 +2922,9 @@ pub(super) fn begin_capture(
 #[cfg(test)]
 #[path = "staging_tests.rs"]
 mod tests;
+
+// The job's state lock, so a test can hold it across another thread's unlocked read.
+#[cfg(test)]
+pub(crate) fn state_lock_of(dir: &Path) -> JobMutex {
+    state_lock(dir)
+}

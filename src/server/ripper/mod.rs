@@ -4205,32 +4205,21 @@ fn rip_disc_inner(
         };
         let staging_path = std::path::Path::new(&staging);
         let inline_fallback = inline_mux_delivers(&plan);
-        if let Err(e) = hand_off_to_mux_worker(staging_path, &marker, rip_keys.as_ref().ok(), |s| {
-            s.tmdb_id = tmdb_id;
-            s.episode_start = episode_start;
-            s.disc_name = disc_name.clone();
-            s.season = crate::server::tmdb::season_from_label(&disc_name);
-            s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
-            s.outputs = plan;
-        }) {
-            // Couldn't hand off: fall back to the inline mux below, which muxes one
-            // title, so never for an episode fan-out (the capture stays resumable).
-            if !inline_fallback {
-                abort_post_mux_preserving_staging(
-                    device,
-                    &format!(
-                        ".ripped marker write failed ({e}); the episode set is kept staged for Resume"
-                    ),
-                    &format!("hand-off to the mux worker failed: {e}"),
-                );
-                unregister_halt(device);
-                return;
-            }
-            crate::server::log::device_log(
-                device,
-                &format!(".ripped marker write failed ({e}); falling back to inline mux"),
-            );
-        } else {
+        let handed = hand_off_or_keep(device, inline_fallback, || {
+            hand_off_to_mux_worker(staging_path, &marker, rip_keys.as_ref().ok(), |s| {
+                s.tmdb_id = tmdb_id;
+                s.episode_start = episode_start;
+                s.disc_name = disc_name.clone();
+                s.season = crate::server::tmdb::season_from_label(&disc_name);
+                s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
+                s.outputs = plan;
+            })
+        });
+        if handed == HandOff::Kept {
+            unregister_halt(device);
+            return;
+        }
+        if handed == HandOff::Handed {
             crate::server::log::device_log(
                 device,
                 "Sweep + patch complete; handed off to mux worker via .ripped marker.",
@@ -5521,6 +5510,45 @@ pub(crate) fn staged_output_name(display_name: &str, ext: &str) -> String {
         "{}.{ext}",
         crate::server::util::sanitize_path_compact(display_name)
     )
+}
+
+// What a capture's hand-off to the mux worker came to.
+#[derive(Debug, PartialEq, Eq)]
+enum HandOff {
+    Handed,
+    /// It failed; the one-title plan is muxed inline instead.
+    Inline,
+    /// It failed for an episode fan-out: nothing is muxed, the capture stays staged.
+    Kept,
+}
+
+// Hand the capture off. If that fails, only a plan the inline mux delivers (`inline`) falls
+// back to it; an episode fan-out is never muxed as one title and stays staged for Resume.
+fn hand_off_or_keep(
+    device: &str,
+    inline: bool,
+    hand_off: impl FnOnce() -> std::io::Result<()>,
+) -> HandOff {
+    match hand_off() {
+        Ok(()) => HandOff::Handed,
+        Err(e) if !inline => {
+            abort_post_mux_preserving_staging(
+                device,
+                &format!(
+                    ".ripped marker write failed ({e}); the episode set is kept staged for Resume"
+                ),
+                &format!("hand-off to the mux worker failed: {e}"),
+            );
+            HandOff::Kept
+        }
+        Err(e) => {
+            crate::server::log::device_log(
+                device,
+                &format!(".ripped marker write failed ({e}); falling back to inline mux"),
+            );
+            HandOff::Inline
+        }
+    }
 }
 
 // Whether the inline mux (one title) can deliver `plan`: never an episode fan-out.

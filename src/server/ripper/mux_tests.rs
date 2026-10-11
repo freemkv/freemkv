@@ -1026,7 +1026,15 @@ fn mux_iso_honours_a_stop_pressed_before_it_starts() {
 #[test]
 fn a_failed_watchdog_spawn_is_reported() {
     let device = "watchdog_spawn_fail_device";
-    report_watchdog_spawn_failure(device, &std::io::Error::other("no threads"));
+    let dest = tempfile::tempdir().unwrap();
+    let a = atomics();
+    spawn_mux_watchdog_with(
+        &inputs_for(device, dest.path()),
+        Arc::new(AtomicBool::new(true)),
+        a.wd_last_frame,
+        a.wd_bytes,
+        |_| Err(std::io::Error::other("no threads")),
+    );
     let log = crate::server::log::get_device_log(device, 10);
     assert!(
         log.iter()

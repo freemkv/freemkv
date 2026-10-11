@@ -569,10 +569,29 @@ fn an_episode_fan_out_never_falls_back_to_the_one_title_inline_mux() {
         ..Default::default()
     };
     assert!(inline_mux_delivers(&[out("Movie.mkv")]));
-    assert!(!inline_mux_delivers(&[
-        out("Show_S01E01.mkv"),
-        out("Show_S01E02.mkv")
-    ]));
+    let episodes = [out("Show_S01E01.mkv"), out("Show_S01E02.mkv")];
+    assert!(!inline_mux_delivers(&episodes));
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let failed = || Err(std::io::Error::other("staging share is read-only"));
+    let device = "dev-hand-off-kept";
+    let kept = hand_off_or_keep(device, inline_mux_delivers(&episodes), failed);
+    assert_eq!(
+        kept,
+        HandOff::Kept,
+        "an episode set is never muxed as one title"
+    );
+    let row = STATE.lock().unwrap().remove(device).unwrap();
+    assert_eq!(row.status, "error");
+    assert!(
+        row.last_error.contains("hand-off to the mux worker failed"),
+        "{}",
+        row.last_error
+    );
+    let movie = hand_off_or_keep(device, inline_mux_delivers(&[out("Movie.mkv")]), failed);
+    assert_eq!(movie, HandOff::Inline);
+    STATE.lock().unwrap().remove(device);
 }
 
 // The single-pass log names the title the rip muxes, not the engine's MainMovie pick.

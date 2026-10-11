@@ -526,11 +526,22 @@ fn planned_and_legacy_targets_both_obey_current_library_root() {
     assert!(!job.target.parent().unwrap().exists());
     // Without a plan only a kept file is copied in, and only under the current library.
     job.plan = None;
+    job.staged = Some(write_kept(
+        &t.path().join("stage"),
+        "A.1",
+        &job.target,
+        &movie(),
+        1,
+    ));
     for replace in [false, true] {
         job.replace = replace;
-        let Ending::Failed(_) = remux(&job, &cfg, &sink) else {
+        let Ending::Failed(e) = remux(&job, &cfg, &sink) else {
             panic!("foreign target accepted")
         };
+        assert!(
+            e.to_string().contains("is not under the library folder"),
+            "{e}"
+        );
         assert!(!job.target.parent().unwrap().exists());
     }
 }
