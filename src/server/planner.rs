@@ -55,6 +55,32 @@ pub enum PlanError {
     EpisodeRange,
 }
 
+impl PlanError {
+    /// What the operator can do about a held selection in the server UI, if anything.
+    pub(crate) fn action(&self) -> Option<String> {
+        use crate::strings::get_or;
+        match self {
+            PlanError::Selection(_) => Some(get_or(
+                "error.plan.action.roster",
+                "If it is a film, correct its match to the movie; to rip it as one title, turn off \"Rip TV seasons automatically\" in Settings.",
+            )),
+            PlanError::LaterDiscStart | PlanError::EpisodeRange => Some(get_or(
+                "error.plan.action.first_episode",
+                "Set the First episode when you correct its match.",
+            )),
+            PlanError::NoTitles | PlanError::NoOutputs | PlanError::DuplicateOutput(_) => None,
+        }
+    }
+
+    /// `held` (a sentence naming this error) followed by [`PlanError::action`], if any.
+    pub(crate) fn with_action(&self, held: String) -> String {
+        match self.action() {
+            Some(action) => format!("{held} {action}"),
+            None => held,
+        }
+    }
+}
+
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use crate::strings::{fmt_or, get_or};

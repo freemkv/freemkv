@@ -348,8 +348,9 @@ fn corrected_plan(
         &crate::server::ripper::staged_output_name(&name, "mkv"),
         media.season,
     ));
-    let plan = crate::server::planner::plan(cfg, titles, media, &target)
-        .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
+    let plan = crate::server::planner::plan(cfg, titles, media, &target).map_err(|e| {
+        std::io::Error::other(e.with_action(format!("Corrected match needs review: {e}")))
+    })?;
     let targets = tv_destinations(cfg, &plan)
         .map(|(_, paths)| paths)
         .unwrap_or_else(|| vec![target]);
@@ -362,7 +363,7 @@ fn tv_plan_result(
     result.map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Title plan needs review before remux: {error}"),
+            error.with_action(format!("Title plan needs review before remux: {error}")),
         )
     })
 }

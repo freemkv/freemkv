@@ -1028,7 +1028,10 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         crate::server::muxer::record_error(
             &staging_dir.to_string_lossy(),
             &reason,
-            "Select episode titles explicitly before retrying; the saved ISO and plan are retained.",
+            &crate::strings::get_or(
+                "error.plan.review_retained",
+                "The saved ISO and plan are retained.",
+            ),
         );
         reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
         return;

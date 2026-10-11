@@ -5429,10 +5429,15 @@ fn capture_title_index(
     crate::server::planner::main_title(cfg, titles)
 }
 
+// A held plan for the operator: why (E9086 and its reason, or the numbering), that nothing
+// was guessed, and what the server UI can do about it.
 fn selection_review_message(error: &crate::server::planner::PlanError) -> String {
     let reason = error.to_string();
-    let reason = reason.trim_end_matches('.');
-    format!("Title selection needs review before muxing: {reason}. No fallback title was selected.")
+    error.with_action(crate::strings::fmt_or(
+        "error.plan.review_held",
+        "Title selection needs review before muxing: {reason}. No fallback title was selected.",
+        &[("reason", reason.trim_end_matches('.'))],
+    ))
 }
 
 // Episode titles a TV disc fans out to under `tv_auto`; empty = one movie-style output.

@@ -402,10 +402,13 @@ fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
     }));
     assert_eq!(
         roster,
-        "Title selection needs review before muxing: E9086 the disc has no authored episode list. No fallback title was selected."
+        "Title selection needs review before muxing: E9086 the disc has no authored episode list. No fallback title was selected. If it is a film, correct its match to the movie; to rip it as one title, turn off \"Rip TV seasons automatically\" in Settings."
     );
+    // Never the impossible action: the server has no title picker.
+    assert!(!roster.contains("Select episode titles"), "{roster}");
     let numbering = selection_review_message(&PlanError::EpisodeRange);
     assert!(!numbering.contains(".."), "{numbering}");
+    assert!(numbering.ends_with("Set the First episode when you correct its match."));
     for error in [
         PlanError::NoTitles,
         PlanError::NoOutputs,
