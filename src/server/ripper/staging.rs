@@ -286,6 +286,10 @@ pub struct DiscState {
     pub episode_start: Option<u16>,
     #[serde(default)]
     pub title_confident: bool,
+    /// The saved title came from a confident TMDB match, so a later scan may reuse
+    /// it without a lookup (a raw-label fallback or a guess is looked up again).
+    #[serde(default)]
+    pub tmdb_confident: bool,
 
     // --- capture handles + mux-reconstruction knobs (was RippedMarker) -----
     #[serde(default)]
@@ -344,6 +348,7 @@ impl DiscState {
             disc_number: None,
             episode_start: None,
             title_confident: false,
+            tmdb_confident: false,
             iso_path: String::new(),
             mapfile_path: String::new(),
             max_retries: 0,
@@ -2519,6 +2524,7 @@ fn reset_capture_with(
     let mut fresh = DiscState::new(StagingState::Stopped);
     UserMetadata::shown_by(&old).apply(&mut fresh);
     fresh.title_confident = old.title_confident;
+    fresh.tmdb_confident = old.tmdb_confident;
     fresh.user_metadata = old.user_metadata;
     fresh.metadata_revision = old.metadata_revision;
     // Legacy adoption may know identity only through the soon-to-be-deleted map.

@@ -522,3 +522,42 @@ fn a_scan_that_read_disk_before_a_correction_published_keeps_the_correction() {
     row.restore_job_metadata("other", "hash2", None, 0);
     assert!(row.user_metadata.is_none());
 }
+
+// A title saved from a raw-label fallback (TMDB down, no key) or a guess is not an
+// operator choice: a later scan or rip looks the disc up again.
+#[test]
+fn only_a_correction_or_a_confident_lookup_skips_the_next_lookup() {
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.title = "THE_OFFICE".into();
+    assert!(
+        metadata_from_state(st.clone()).is_none(),
+        "raw label reused as metadata"
+    );
+
+    let mut confident = st.clone();
+    confident.title = "The Office".into();
+    confident.year = 2005;
+    confident.tmdb_confident = true;
+    assert_eq!(metadata_from_state(confident).unwrap().title, "The Office");
+
+    let mut corrected = st;
+    corrected.user_metadata = Some(selection("The Office"));
+    assert_eq!(metadata_from_state(corrected).unwrap().title, "The Office");
+}
+
+#[test]
+fn a_lookup_is_confident_only_when_it_matches_the_label_with_a_year() {
+    let found = |title: &str, year| crate::server::tmdb::TmdbResult {
+        title: title.into(),
+        year,
+        poster_url: String::new(),
+        overview: String::new(),
+        media_type: crate::server::planner::MediaKind::Movie,
+        tmdb_id: 949,
+    };
+    let hit = found("Heat", 1995);
+    assert!(lookup_confident("HEAT", Some(&hit)));
+    assert!(!lookup_confident("HEAT", None));
+    let guess = found("Heat Wave", 1990);
+    assert!(!lookup_confident("HEAT", Some(&guess)));
+}

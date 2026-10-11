@@ -12,13 +12,14 @@ pub(super) fn metadata(root: &Path, job: &str) -> Option<crate::server::tmdb::Tm
     metadata_from_state(st)
 }
 
+/// The saved metadata a scan or rip uses instead of a lookup: an operator correction,
+/// or a confident TMDB match. A raw-label fallback or a guess is looked up again.
 pub(super) fn metadata_from_state(
     st: staging::DiscState,
 ) -> Option<crate::server::tmdb::TmdbResult> {
-    let m = st
-        .user_metadata
-        .clone()
-        .or_else(|| (!st.title.is_empty()).then(|| staging::UserMetadata::shown_by(&st)))?;
+    let m = st.user_metadata.clone().or_else(|| {
+        (st.tmdb_confident && !st.title.is_empty()).then(|| staging::UserMetadata::shown_by(&st))
+    })?;
     Some(crate::server::tmdb::TmdbResult {
         title: m.title,
         year: m.year,
@@ -27,6 +28,14 @@ pub(super) fn metadata_from_state(
         poster_url: m.poster_url,
         overview: m.overview,
     })
+}
+
+/// Whether `lookup` is a confident TMDB answer for the disc `label`.
+pub(super) fn lookup_confident(
+    label: &str,
+    lookup: Option<&crate::server::tmdb::TmdbResult>,
+) -> bool {
+    lookup.is_some_and(|t| crate::server::tmdb::is_confident_match(label, &t.title, t.year))
 }
 
 /// AACS supplies the disc hash. Other media use a versioned, content-sampled

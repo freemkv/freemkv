@@ -2908,12 +2908,14 @@ fn rip_disc_inner(
     let _sweeping_guard = SweepingGuard {
         staging: job_path.clone(),
     };
-    let saved_confident = saved_state
-        .as_ref()
-        .is_some_and(|s| s.user_metadata.is_some() || s.title_confident);
     let episode_start = saved_state.as_ref().and_then(|s| s.episode_start);
+    let overridden = saved_state
+        .as_ref()
+        .is_some_and(|s| s.user_metadata.is_some());
     let saved_metadata = saved_state.and_then(jobs::metadata_from_state);
-    let overridden = saved_confident;
+    // Saved metadata is a correction or an earlier confident match; else this scan's lookup.
+    let tmdb_confident =
+        saved_metadata.is_some() || jobs::lookup_confident(&disc_name, session.tmdb.as_ref());
     let tmdb_owned = saved_metadata.or_else(|| session.tmdb.clone());
     let tmdb = &tmdb_owned;
     let tmdb_title = tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default();
@@ -3252,6 +3254,7 @@ fn rip_disc_inner(
         staging::stamp_capture_label(s, &disc_name);
         s.origin_device = device.to_string();
         s.title = display_name.clone();
+        s.tmdb_confident = tmdb_confident;
         s.year = tmdb_year;
         s.media_type = tmdb_media_type;
         s.tmdb_id = tmdb_id;
