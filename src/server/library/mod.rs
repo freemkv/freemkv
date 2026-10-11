@@ -1415,8 +1415,8 @@ impl Library {
     }
 
     /// Delete unowned movie partials, known output partials, and remux partials in the show
-    /// and season folders of the TV folder (the library when there is none). Returns how many
-    /// went.
+    /// and season folders of the TV folder (the library when there is none), skipping one
+    /// whose `<target>.lock` another writer holds. Returns how many went.
     pub fn sweep_partials(&self, d: &Dirs) -> usize {
         let mut candidates: HashSet<PathBuf> = self
             .queue
@@ -1429,8 +1429,13 @@ impl Library {
             .collect();
         // `<library>/<title>/` holds a movie; `<tv>/<show>/<season>/` an episode, and with no
         // separate TV folder `<library>/<show>/<season>/`.
-        candidates.extend(partials_under(&d.library, 1));
-        candidates.extend(partials_under(d.tv.as_ref().unwrap_or(&d.library), 2));
+        match &d.tv {
+            Some(tv) => {
+                candidates.extend(partials_under(&d.library, &[1]));
+                candidates.extend(partials_under(tv, &[2]));
+            }
+            None => candidates.extend(partials_under(&d.library, &[1, 2])),
+        }
         candidates
             .into_iter()
             .filter(|path| {
@@ -1604,13 +1609,14 @@ impl Library {
 /// How many folders a partial sweep looks into at most.
 const SWEEP_FOLDERS: usize = 10_000;
 
-// The `.mkv.partial` files in the folders `depth` levels below `root` (not in `root`
-// itself), looking into at most SWEEP_FOLDERS folders.
-fn partials_under(root: &Path, depth: usize) -> Vec<PathBuf> {
+// The `.mkv.partial` files in the folders each of `depths` levels below `root` (not in
+// `root` itself), in one walk that follows no symlink, into at most SWEEP_FOLDERS folders.
+fn partials_under(root: &Path, depths: &[usize]) -> Vec<PathBuf> {
+    let deepest = depths.iter().copied().max().unwrap_or(0);
     let mut found = Vec::new();
     let mut level = vec![root.to_path_buf()];
     let mut visited = 0;
-    for at in 0..=depth {
+    for at in 0..=deepest {
         let mut next = Vec::new();
         for dir in level {
             if visited == SWEEP_FOLDERS {
@@ -1620,14 +1626,15 @@ fn partials_under(root: &Path, depth: usize) -> Vec<PathBuf> {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            for path in entries.flatten().map(|e| e.path()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
                 let partial = path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.to_ascii_lowercase().ends_with(".mkv.partial"));
-                if at == depth && partial {
+                if partial && depths.contains(&at) {
                     found.push(path);
-                } else if at < depth && path.is_dir() {
+                } else if at < deepest && entry.file_type().is_ok_and(|t| t.is_dir()) {
                     next.push(path);
                 }
             }

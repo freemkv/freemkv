@@ -631,6 +631,47 @@ fn episode_partials_under_a_tv_layout_in_the_library_are_swept() {
     assert!(!orphan.exists());
 }
 
+// Another writer holding `<target>.lock` owns the partial beside it: the sweep leaves it,
+// and takes it (and the sidecar) once the lock is free.
+#[test]
+fn a_partial_whose_artifact_lock_is_held_is_not_swept() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let d = dirs_in(t.path());
+    let season = d.library.join("Show (2001)/Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    let target = season.join("Show S01E03.mkv");
+    let partial = queue::partial_path(&target);
+    std::fs::write(&partial, b"another writer's remux").unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    let held =
+        libfreemkv::io::ArtifactLock::acquire(&target, &[], &libfreemkv::Halt::new()).unwrap();
+    assert_eq!(lib.sweep_partials(&d), 0);
+    assert!(partial.exists());
+    drop(held);
+    assert_eq!(lib.sweep_partials(&d), 1);
+    assert!(!partial.exists());
+    assert!(!season.join("Show S01E03.mkv.lock").exists());
+}
+
+// A symlinked folder under the library leads outside it: the sweep never follows one.
+#[cfg(unix)]
+#[test]
+fn the_partial_sweep_does_not_follow_a_symlinked_folder() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let d = dirs_in(t.path());
+    std::fs::create_dir_all(&d.library).unwrap();
+    let outside = t.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let foreign = outside.join("Movie.mkv.partial");
+    std::fs::write(&foreign, b"not the library's").unwrap();
+    std::os::unix::fs::symlink(&outside, d.library.join("Movie")).unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    assert_eq!(lib.sweep_partials(&d), 0);
+    assert!(foreign.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn the_unreadable_queue_hold_clears_once_the_file_reads() {
