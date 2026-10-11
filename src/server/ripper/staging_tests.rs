@@ -292,38 +292,15 @@ fn rmw_writers_refuse_to_overwrite_an_unreadable_state_json() {
     untouched(&d, "muxer::write_marker");
 }
 
-// A live-disc rip rebuilds the plan from the disc, so it may deliberately
-// replace an unreadable state.json (kept aside); the hand-off must then land.
+// An unreadable state.json blocks a capture start outright: nothing is set
+// aside or replaced, so the operator's held card stays the one way forward.
 #[test]
-fn live_disc_seed_replaces_unreadable_state_and_handoff_proceeds() {
+fn begin_capture_refuses_an_unreadable_state_and_keeps_it() {
     let d = tmpdir();
     fs::write(state_path(&d), b"{ torn").unwrap();
-    let replaced = seed_sweeping_for_live_rip(&d);
-    assert!(replaced.is_some(), "the replacement must be reported");
-    assert_eq!(
-        read_state(&d).map(|s| s.state),
-        Some(StagingState::Sweeping)
-    );
-    assert_eq!(fs::read(d.join(UNREADABLE_STATE_ASIDE)).unwrap(), b"{ torn");
-    let m = DiscState::new(StagingState::Ripped).to_ripped_marker();
-    assert!(
-        crate::server::muxer::write_marker(&d, &m).is_ok(),
-        "hand-off refused"
-    );
-    assert!(
-        mark_handoff(&d, true, |_| {}).is_ok(),
-        "mark_handoff refused"
-    );
-
-    // A readable state is seeded in place, nothing reported or set aside.
-    let ok = tmpdir();
-    write_state(&ok, &DiscState::new(StagingState::Ripped));
-    assert!(seed_sweeping_for_live_rip(&ok).is_none());
-    assert_eq!(
-        read_state(&ok).map(|s| s.state),
-        Some(StagingState::Sweeping)
-    );
-    assert!(!ok.join(UNREADABLE_STATE_ASIDE).exists());
+    assert!(begin_capture(&d, 1, "").is_err());
+    assert_eq!(fs::read(state_path(&d)).unwrap(), b"{ torn");
+    assert!(!d.join(UNREADABLE_STATE_ASIDE).exists());
 }
 
 // G5/G6: startup must hold (not wipe, not quarantine over) a dir whose
@@ -1945,7 +1922,7 @@ fn live_rip_seed_drops_the_prior_attempts_one_shots() {
     }];
     write_state(&disc, &st);
 
-    assert!(seed_sweeping_for_live_rip(&disc).is_none());
+    start_sweep(&disc, |_| {}).unwrap();
     let st = read_state(&disc).unwrap();
     assert_eq!(st.state, StagingState::Sweeping);
     assert!(

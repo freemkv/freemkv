@@ -2935,7 +2935,9 @@ fn rip_disc_inner(
             return;
         }
     };
-    let _metadata_sweeping_guard = SweepingGuard {
+    // RAII cleanup for Sweeping: terminal writers clear it first, so this only
+    // fires on an early return or panic, never stranding the dir InProgress.
+    let _sweeping_guard = SweepingGuard {
         staging: job_path.clone(),
     };
     let saved_confident = saved_state
@@ -3253,45 +3255,6 @@ fn rip_disc_inner(
         unregister_halt(device);
         return;
     }
-    let identity = STATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(device)
-        .map(|s| s.disc_identity.clone())
-        .unwrap_or_default();
-    if let Err(e) = staging::mutate_state(
-        std::path::Path::new(&staging),
-        staging::StagingState::Sweeping,
-        |s| {
-            s.disc_identity = identity;
-            s.origin_device = device.to_string();
-        },
-    ) {
-        update_state_with(device, |s| {
-            s.status = "error".into();
-            s.last_error = e.to_string();
-        });
-        return;
-    }
-    // Write `.sweeping` before Pass 1 to govern the whole sweep+patch window;
-    // without it a crash mid-sweep leaves the dir ungoverned (restart-count
-    // toward `.failed`, mover WARN-floods). Replaced by `.ripped`/`.failed`.
-    if let Some(why) = staging::seed_sweeping_for_live_rip(std::path::Path::new(&staging)) {
-        crate::server::log::device_log(
-            device,
-            &format!(
-                "Replaced an unreadable state.json ({why}); the plan is rebuilt from the disc. The old file is kept as {}.",
-                staging::UNREADABLE_STATE_ASIDE
-            ),
-        );
-        crate::server::muxer::clear_error_with_prefix(&staging, staging::STATE_HELD_PREFIX);
-    }
-    // RAII cleanup for `.sweeping`: terminal-marker writers clear it first,
-    // so this only fires on error/panic, preventing a stale `.sweeping` from
-    // stranding the dir InProgress across restarts.
-    let _sweeping_guard = SweepingGuard {
-        staging: std::path::PathBuf::from(&staging),
-    };
     // FILE names, NOT the dir basename — plain sanitize(display_name), no
     // `_2` disc suffix (the dir already separates discs). delete_partial_output
     // and the mover's TV/fallback delivery both key off this exact form.
@@ -3321,23 +3284,22 @@ fn rip_disc_inner(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    if let Err(e) = staging::mutate_state(
-        std::path::Path::new(&staging),
-        staging::StagingState::Sweeping,
-        |s| {
-            s.title = display_name.clone();
-            s.year = tmdb_year;
-            s.media_type = tmdb_media_type.clone();
-            s.tmdb_id = tmdb_id;
-            s.tmdb_poster = tmdb_poster.clone();
-            s.tmdb_overview = tmdb_overview.clone();
-            s.max_retries = cfg_read.max_retries;
-            if uses_multipass(cfg_read.max_retries) {
-                s.iso_path = iso_path_str.clone();
-                s.mapfile_path = mapfile_path_str.clone();
-            }
-        },
-    ) {
+    // One Sweeping write governs the sweep+patch window (begin_capture already
+    // stamped the identity); without it a crash mid-sweep leaves the dir ungoverned.
+    if let Err(e) = staging::start_sweep(std::path::Path::new(&staging), |s| {
+        s.origin_device = device.to_string();
+        s.title = display_name.clone();
+        s.year = tmdb_year;
+        s.media_type = tmdb_media_type.clone();
+        s.tmdb_id = tmdb_id;
+        s.tmdb_poster = tmdb_poster.clone();
+        s.tmdb_overview = tmdb_overview.clone();
+        s.max_retries = cfg_read.max_retries;
+        if uses_multipass(cfg_read.max_retries) {
+            s.iso_path = iso_path_str.clone();
+            s.mapfile_path = mapfile_path_str.clone();
+        }
+    }) {
         update_state_with(device, |s| {
             s.status = "error".into();
             s.last_error = e.to_string();

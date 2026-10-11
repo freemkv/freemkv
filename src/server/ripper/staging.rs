@@ -1268,44 +1268,28 @@ pub fn mark_aborted_on_loss_reporting_landed(staging_disc_dir: &Path, reason: &s
     write_aborted_loss_marker(staging_disc_dir, reason, attempt)
 }
 
-/// Record `state: Sweeping` in `state.json` durably. Called at staging-dir
-/// creation in `rip_disc`, before Pass 1. Best-effort — logs on failure; a
-/// missing `Sweeping` just leaves the sweep window ungoverned, it never
-/// corrupts state.
-pub fn write_sweeping_marker(staging_disc_dir: &Path) {
-    // Owned-in-progress transition → `state: Sweeping`, keeping data from a prior
-    // attempt. A new sweep re-reads the disc, so the prior attempt's one-shot
-    // accept-loss and E7034 needs-disc hold no longer apply.
-    if let Err(e) = mutate_state(staging_disc_dir, StagingState::Sweeping, |s| {
+/// The capture-start Sweeping write, plus the caller's fields in the same write.
+/// A new sweep re-reads the disc, so the prior attempt's one-shot accept-loss
+/// and E7034 needs-disc hold no longer apply. `.ripped`/`.failed` replace it.
+pub(super) fn start_sweep(dir: &Path, f: impl FnOnce(&mut DiscState)) -> io::Result<()> {
+    mutate_state(dir, StagingState::Sweeping, |s| {
         s.state = StagingState::Sweeping;
         s.accept_loss = false;
         s.needs_disc = false;
-    }) {
+        f(s);
+    })
+}
+
+/// Test fixture: [`start_sweep`] with no extra fields, logging a failure.
+#[cfg(test)]
+pub fn write_sweeping_marker(staging_disc_dir: &Path) {
+    if let Err(e) = start_sweep(staging_disc_dir, |_| {}) {
         tracing::error!(path = %staging_disc_dir.display(), error = %e, "failed to record .sweeping in state.json");
     }
 }
 
-/// Where [`seed_sweeping_for_live_rip`] keeps an unreadable state.json it replaced.
+/// Where 1.8.x set an unreadable state.json aside; now only listed as bookkeeping.
 pub const UNREADABLE_STATE_ASIDE: &str = "state.json.unreadable";
-
-/// Seed `Sweeping` for a LIVE-DISC rip. Unlike [`write_sweeping_marker`] this
-/// may replace an unreadable state.json (moved aside to [`UNREADABLE_STATE_ASIDE`]):
-/// the rip rebuilds the plan from the disc. Returns why, if it replaced one.
-pub fn seed_sweeping_for_live_rip(staging_disc_dir: &Path) -> Option<String> {
-    let StateRead::Unreadable(u) = read_state_checked(staging_disc_dir) else {
-        write_sweeping_marker(staging_disc_dir);
-        return None;
-    };
-    let p = state_path(staging_disc_dir);
-    if let Err(e) = std::fs::rename(&p, staging_disc_dir.join(UNREADABLE_STATE_ASIDE)) {
-        tracing::warn!(path = %p.display(), error = %e, "could not set the unreadable state.json aside; replacing it");
-    }
-    tracing::warn!(path = %p.display(), reason = %u.log_text(), "live-disc rip replacing an unreadable state.json");
-    if let Err(e) = try_write_state(staging_disc_dir, &DiscState::new(StagingState::Sweeping)) {
-        tracing::error!(path = %p.display(), error = %e, "failed to seed state.json for the live-disc rip");
-    }
-    Some(u.log_text())
-}
 
 /// Set the `muxing` exclusion lock in `state.json`. Called by the mux worker
 /// when it begins muxing a `Ripped` dir; cleared on completion (RAII guard).
