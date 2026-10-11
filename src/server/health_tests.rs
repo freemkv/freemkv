@@ -1219,6 +1219,42 @@ fn a_failed_write_test_is_not_overridden_by_access() {
     );
 }
 
+// A failed write test outlives verdicts that are not write tests (a slow round's "checking",
+// a hang, a read error): only a write test that passes clears it.
+#[test]
+fn a_failed_write_test_outlives_other_verdicts_until_one_passes() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t = tempfile::tempdir().unwrap();
+    let path = t.path().to_path_buf();
+    WATCHED.lock().unwrap().push(("Movies", path.clone()));
+    fn quota(_: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::EDQUOT))
+    }
+    fn fine(_: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+    let failed = preflight_with("Movies", &path, Duration::from_secs(5), quota);
+    publish(vec![Mount::checking("Movies", &path)], true);
+    let after_checking = check_with("Movies", &path, true, quota);
+    publish(vec![after_checking.clone()], false);
+    publish(vec![not_responding("Movies", &path, HANG_AFTER)], false);
+    let after_hang = check_with("Movies", &path, true, quota);
+    publish(vec![after_hang.clone()], false);
+    let passed = check_with("Movies", &path, true, fine);
+    publish(vec![passed.clone()], false);
+    let cleared = check_with("Movies", &path, true, quota);
+    WATCHED.lock().unwrap().retain(|(_, p)| *p != path);
+    LAST.lock().unwrap().retain(|m| m.path != path);
+    assert!(failed.is_err());
+    assert!(
+        !after_checking.ok,
+        "a checking row cleared it: {after_checking:?}"
+    );
+    assert!(!after_hang.ok, "a hang row cleared it: {after_hang:?}");
+    assert!(passed.ok, "{passed:?}");
+    assert!(cleared.ok, "a passing write test clears it: {cleared:?}");
+}
+
 // The sweep lists the whole folder, which on a slow share takes time: the write test answers
 // first, and the sweep runs after it, off the timed probe.
 #[test]

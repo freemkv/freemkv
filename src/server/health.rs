@@ -222,10 +222,12 @@ pub struct Mount {
     // replaces a newer one, whichever is published last.
     #[serde(skip)]
     observed: u64,
-    // This verdict is a failed real write test: access() cannot clear it, only another
-    // write test that passes.
+    // A real write test failed here: access() cannot clear it, only another write test that
+    // passes (`write_passed`); kept across every other verdict until then.
     #[serde(skip)]
     write_failed: bool,
+    #[serde(skip)]
+    write_passed: bool,
 }
 
 // Orders the evidence behind published results.
@@ -241,6 +243,7 @@ impl Mount {
         Mount {
             observed: observed_now(),
             write_failed: false,
+            write_passed: false,
             role,
             path: path.to_path_buf(),
             ok: false,
@@ -525,6 +528,7 @@ fn check_with(
             m.write_failed = write_tested;
             return m;
         }
+        m.write_passed = write_tested;
     }
     tracing::debug!(role, path = %path.display(), stage = "statvfs", "folder probe");
     match statvfs(path) {
@@ -1081,6 +1085,9 @@ fn no_answer_for(after: Duration) -> String {
 // still running).
 fn merge(prev: Option<&Mount>, mut next: Mount) -> Mount {
     let Some(prev) = prev else { return next };
+    if !next.write_passed {
+        next.write_failed |= prev.write_failed;
+    }
     if !next.state.failed() && next.total_bytes.is_none() {
         next.free_bytes = prev.free_bytes;
         next.total_bytes = prev.total_bytes;
@@ -1562,6 +1569,7 @@ where
             Ok(()) => {
                 let mut m = Mount::blank(role, &owned).passed();
                 m.latency_ms = Some(started.elapsed().as_millis() as u64);
+                m.write_passed = true;
                 m
             }
             Err(e) => {
