@@ -134,9 +134,13 @@ impl Stamp {
     pub fn read(path: &std::path::Path) -> std::io::Result<Self> {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
-        // No-follow open closes the check-then-open window for a swapped-in symlink.
+        // No-follow open closes the check-then-open window for a swapped-in symlink, and a
+        // non-blocking one lets a swapped-in FIFO be refused below instead of hanging.
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+        std::os::unix::fs::OpenOptionsExt::custom_flags(
+            &mut options,
+            libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        );
         // Read through an open handle: SMB clients refresh cached attributes on open.
         let metadata = options.open(path)?.metadata()?;
         if !metadata.is_file() {

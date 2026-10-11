@@ -311,3 +311,25 @@ fn an_older_journal_identity_reads_as_a_stamp() {
     let saved = serde_json::to_value(stamp).unwrap();
     assert_eq!(saved.as_object().unwrap().len(), 2, "{saved}");
 }
+
+// A FIFO swapped in at a checked path (NFS carries special files) is refused as not a
+// regular file at once; opening it must not wait for a writer and hang the mover.
+#[cfg(unix)]
+#[test]
+fn a_stamp_of_a_fifo_is_refused_without_blocking() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("Title (2024).mkv");
+    let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+    // SAFETY: `c` is a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::server::util::Stamp::read(&path).map(|_| ()));
+    });
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("Stamp::read blocked on a FIFO");
+    let error = result.expect_err("a FIFO is not a delivered file");
+    assert!(error.to_string().contains("not a regular file"), "{error}");
+}
