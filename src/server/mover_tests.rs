@@ -1241,14 +1241,19 @@ fn move_file_cross_device_copy_unlink_success_when_two_filesystems_exist() {
     // them returns EXDEV, forcing the copy+unlink fallback.
     let work = secondary_root.join(format!("autorip-xdev-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&work);
+    // Removed after the asserts (which check the source is still there), even on a panic.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _scratch = Scratch(work.clone());
     let src = work.join("a.mkv");
     let dest = primary.path().join("a.mkv");
     write_minimal_mkv(&src, b"cross device payload bytes");
 
     let outcome = deliver(&src, &dest);
-
-    // Best-effort cleanup of the secondary-fs scratch dir.
-    let _ = std::fs::remove_dir_all(&work);
 
     // If for some reason rename still succeeded (same fs after all), we'd
     // get Moved too — both acceptable; the key assertions are that the
