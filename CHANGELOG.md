@@ -15,6 +15,7 @@
 
 ### Changed
 
+- **Opening an image checks the titles that will be ripped** (app only: the readiness line after Open): it checks the titles the list ticks for your title mode and languages, such as the German cut or every episode, instead of always the first title.
 - **A TV disc held for review says what you can do about it** (server only: the drive card, Review and Needs action rows, Library remux): the message carries E9086 and the reason, and suggests correcting the match to the movie or turning off "Rip TV seasons automatically" (or setting the First episode for numbering), instead of asking you to select episode titles, which the server cannot do.
 - **A title is labelled "Episode" only when the disc's authored episode list names it** (app only: the title list's Notes): the list no longer guesses "Play all" and "Episode" from which titles' sectors contain others, a guess the Episodes choice never used.
 - **A saved "Episodes" title mode no longer applies to the next disc you open** (app only: the selection bar): every disc starts on the default selection, and Episodes is offered when the disc has an episode roster. Audio and subtitle choices are kept as before.
