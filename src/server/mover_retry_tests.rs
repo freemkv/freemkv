@@ -482,3 +482,92 @@ fn a_retry_on_an_unjournaled_dir_is_spent_on_its_next_pass() {
     );
     assert!(!left, "the request outlived the pass");
 }
+
+// A pass that leaves without attempting anything (here: the marker became unreadable) must
+// not leave the row saying "Retrying now." with its Retry button disabled.
+#[test]
+fn a_pass_that_attempts_nothing_clears_retrying() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let job = staging.join("Torn");
+    std::fs::create_dir_all(&job).unwrap();
+    std::fs::write(job.join(".done"), b"").unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: tmp.path().join("output").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let key = job.to_string_lossy().into_owned();
+    record_error_with(
+        &key,
+        "a planned output is missing before delivery",
+        "",
+        |_| {},
+    );
+    check_and_move(&cfg);
+    let left = row(&key);
+    clear_error(&key);
+    let left = left.expect("the row stays");
+    assert!(!left.retrying, "{left:?}");
+}
+
+// A disc-variant name that cannot be examined holds the plan with a reason naming it,
+// instead of falling back to the base name it knows is taken.
+#[cfg(unix)]
+#[test]
+fn an_unexaminable_destination_is_named_not_assumed() {
+    use std::os::unix::fs::PermissionsExt;
+    if is_root() {
+        return;
+    }
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let job = staging.join("Sealed");
+    let movies = tmp.path().join("output/Movies");
+    let folder = movies.join("Sealed (2024)");
+    std::fs::create_dir_all(&job).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    let marker = serde_json::json!({"title": "Sealed", "year": 2024, "media_type": "movie"});
+    std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+    std::fs::write(job.join("Sealed.mkv"), [0x1A, 0x45, 0xDF, 0xA3, 0, 0]).unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: tmp.path().join("output").to_string_lossy().into_owned(),
+        movie_dir: movies.to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let key = job.to_string_lossy().into_owned();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+    check_and_move(&cfg);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let left = row(&key);
+    clear_error(&key);
+    let left = left.expect("held with a reason");
+    assert!(
+        left.reason.contains("uncertain destination") && left.reason.contains("Sealed (2024).mkv"),
+        "{left:?}"
+    );
+    assert!(!job.join(super::manifest::FILE).exists(), "no plan frozen");
+}
+
+// The `<destination>.lock` sidecars a pass takes never stay in the library when the pass
+// ends without delivering (here: a foreign file holds the frozen name).
+#[test]
+fn a_pass_that_does_not_deliver_leaves_no_lock_sidecars() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dest) = journaled(tmp.path(), "Locked");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    std::fs::write(&dest, b"someone else's file").unwrap();
+    check_and_move(&cfg);
+    clear_error(&key);
+    let locks: Vec<_> = std::fs::read_dir(dest.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".lock"))
+        .collect();
+    assert!(locks.is_empty(), "{locks:?}");
+}

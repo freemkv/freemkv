@@ -171,6 +171,36 @@ fn mark_retrying(path: &str) {
     }
 }
 
+// Clears the row's "Retrying now." when the pass that set it ends, by whatever exit; a pass
+// that recorded a new failure has already rewritten it.
+struct RetryingGuard(String);
+
+impl Drop for RetryingGuard {
+    fn drop(&mut self) {
+        if let Some(error) = MOVE_ERRORS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&self.0)
+        {
+            error.retrying = false;
+        }
+    }
+}
+
+// The destination lock sidecars of one pass. Every exit deletes them (a cooperating writer
+// re-creates its own), so no `<destination>.lock` is ever left in the library.
+struct TargetLocks(Vec<libfreemkv::io::ArtifactLock>);
+
+impl Drop for TargetLocks {
+    fn drop(&mut self) {
+        for lock in self.0.drain(..) {
+            if let Err(e) = lock.delete() {
+                tracing::warn!(error = %e, "delivery lock sidecar retained");
+            }
+        }
+    }
+}
+
 fn move_retry_ready(path: &str, now: std::time::Instant) -> bool {
     MOVE_ERRORS
         .lock()
@@ -1284,6 +1314,7 @@ fn check_and_move(cfg: &Config) {
             continue;
         };
         mark_retrying(&dir.to_string_lossy());
+        let _retrying = RetryingGuard(dir.to_string_lossy().into_owned());
 
         let delivery = match manifest::Manifest::load(&dir) {
             Ok(delivery) => delivery,
@@ -1652,22 +1683,19 @@ fn check_and_move(cfg: &Config) {
                         *dest = dest_with_variant(dest, n);
                     }
                 }
-                None if legacy && uncertain.is_some() => {
-                    // A legacy rip never falls back to the base names it could not examine.
+                None if uncertain.is_some() => {
+                    // Never the base names it could not rule out: nothing is frozen until
+                    // the name can be examined.
                     let path = uncertain.unwrap_or_default();
                     record_error(
                         &dir_str,
                         &format!(
-                            "cannot examine the destination {}; nothing was moved",
+                            "uncertain destination: cannot examine the destination {}; nothing was moved",
                             absolute_for_log(&path)
                         ),
                         "Check the output folder's permissions and mount. The rip stays in staging and is tried again on the next pass.",
                     );
                     continue;
-                }
-                None if uncertain.is_some() => {
-                    // Left to the collision guard's stat-error branch, which logs
-                    // the deferral and retries next tick.
                 }
                 None => {
                     // Every variant name is held by a different file: hold, never overwrite.
@@ -1806,7 +1834,7 @@ fn check_and_move(cfg: &Config) {
             m.ok_or_else(|| std::io::Error::other("delivery manifest disappeared"))?
                 .lock_targets()
         }) {
-            Ok(locks) => locks,
+            Ok(locks) => TargetLocks(locks),
             Err(e) => {
                 if shutdown_interrupted(&e) {
                     log_interrupted_delivery(&dir_str);
@@ -2119,11 +2147,7 @@ fn check_and_move(cfg: &Config) {
         let cleanup_err = delivered.cleanup().err();
 
         if cleanup_err.is_none() {
-            for lock in target_locks {
-                if let Err(e) = lock.delete() {
-                    tracing::warn!(error = %e, "delivered file lock sidecar retained");
-                }
-            }
+            drop(target_locks);
             clear_error(&dir_str);
             crate::server::log::syslog(&format!("Move complete: {}", display_name));
         } else if let Some(e) = cleanup_err {
@@ -2265,6 +2289,8 @@ fn is_reserved(candidate: &str, reserved: &[std::path::PathBuf]) -> bool {
 fn unowned_dest_claim(dest: &str) -> DestClaim {
     match std::fs::symlink_metadata(dest) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DestClaim::Claimable,
+        // A file where the folder goes: no file can be there; creating the folder reports it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => DestClaim::Claimable,
         Err(_) => DestClaim::Unknown,
         Ok(m) if m.is_file() => match fresh_metadata(Path::new(dest)) {
             Err(_) => DestClaim::Unknown,
