@@ -496,7 +496,7 @@ fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
     }));
     assert_eq!(
         roster,
-        "Title selection needs review before muxing: E9086 the disc has no authored episode list. No fallback title was selected. If it is a film, correct its match to the movie; to rip it as one title, turn off \"Rip TV seasons automatically\" in Settings."
+        "Title selection needs review before muxing: E9086 the disc has no authored episode list. No fallback title was selected. If it is a film, use Change match to pick the movie; to rip it as one title, turn off automatic TV season ripping in Settings."
     );
     // Never the impossible action: the server has no title picker.
     assert!(!roster.contains("Select episode titles"), "{roster}");

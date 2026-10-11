@@ -387,6 +387,28 @@ fn the_selection_bar_picks_episodes_and_the_film_in_the_chosen_languages() {
     assert_eq!(ticked("Episodes", &langs(&["jpn"])), vec![2, 4]);
 }
 
+// The Open preflight checks the titles the opened tree ticks: the settings' pick, with Episodes
+// a per-disc choice that is never inherited.
+#[test]
+fn the_open_preflight_covers_the_titles_the_settings_tick() {
+    let sc = episode_disc();
+    let mut settings = crate::settings::Settings::default();
+    for (selection, audio, want) in [
+        ("Main film only", "", vec![0]),
+        ("Episodes", "", vec![0]),
+        ("Main film only", "deu", vec![1]),
+        ("No titles", "", vec![]),
+    ] {
+        settings.selection = selection.into();
+        settings.audio_langs = audio.into();
+        assert_eq!(
+            open_preflight_titles(&sc, &settings),
+            want,
+            "{selection} {audio}"
+        );
+    }
+}
+
 // `episode_disc` with, on every title, a regular French subtitle (0x40+) and a forced
 // English one (0x60+), so the subtitle choices have both kinds to keep or drop.
 fn pick_disc() -> Scanned {

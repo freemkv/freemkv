@@ -195,7 +195,6 @@ fn split_langs(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// An empty list means "no preference", which the engine spells `All`.
 /// The titles `selection` ticks by itself under `prefs`' audio and presentation languages: the
 /// engine's executable pick. A selection that needs review ticks nothing.
 pub fn automatic_titles(
@@ -221,6 +220,14 @@ fn open_picks(settings: &crate::settings::Settings) -> (String, LangPrefs, f64) 
     };
     let min_secs = settings.min_title_secs.trim().parse::<f64>().unwrap_or(0.0);
     (mode, LangPrefs::from_settings(settings), min_secs)
+}
+
+/// An empty list means "no preference", which the engine spells `All`.
+// The titles an opened source's tree ticks under the settings' picks: what the preflight
+// checks (none ticked: the main title).
+fn open_preflight_titles(sc: &Scanned, settings: &crate::settings::Settings) -> Vec<usize> {
+    let (mode, prefs, min_secs) = open_picks(settings);
+    Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles()
 }
 
 fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
@@ -2842,7 +2849,7 @@ impl App {
         let path = path.to_owned();
         let keys = KeyConfig::from_settings(&self.settings);
         let scan = self.scan;
-        let (mode, prefs, min_secs) = open_picks(&self.settings);
+        let settings = self.settings.clone();
         let tok = OpenToken::default();
         if let Some(old) = self.open_token.replace(tok.clone()) {
             old.halt.cancel();
@@ -2853,11 +2860,11 @@ impl App {
             .spawn(move || {
                 let scanned = scan(&path, &keys, &tok);
                 // The preflight reuses Open's key set: no second key request (KU §2.5). It
-                // checks the titles the tree will tick (none ticked: the main title).
+                // checks the titles the tree will tick.
                 let seed = scanned.as_ref().ok().and_then(|sc| sc.keys.as_ref());
                 let ticked = scanned
                     .as_ref()
-                    .map(|sc| Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles())
+                    .map(|sc| open_preflight_titles(sc, &settings))
                     .unwrap_or_default();
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
