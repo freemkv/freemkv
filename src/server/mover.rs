@@ -511,10 +511,30 @@ fn clear_stale_dest_error(dest: &Path) {
     clear_error(&dest.to_string_lossy());
 }
 
-// A row keyed by a delivery's destination, owned by its staging dir `job`.
-fn record_dest_error(dest: &Path, job: &Path, reason: &str, hint: &str) {
+thread_local! {
+    // The cause of this thread's latest failed delivery step, for the delivery's own row.
+    static LAST_FAILURE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn note_failure(detail: String) {
+    LAST_FAILURE.with(|f| *f.borrow_mut() = Some(detail));
+}
+
+fn take_failure() -> Option<String> {
+    LAST_FAILURE.with(|f| f.borrow_mut().take())
+}
+
+// A row keyed by a delivery's destination, owned by its staging dir `job`: the step and
+// its OS error as the reason, an instruction as the hint. The delivery's row gets the cause.
+fn record_dest_error(dest: &Path, job: &Path, step: &str, error: &dyn std::fmt::Display) {
     let key = dest.to_string_lossy();
-    record_error(&key, reason, hint);
+    let reason = format!("{step}: {error}");
+    note_failure(reason.clone());
+    let hint = crate::strings::get_or(
+        "server.mover.destination_step_failed",
+        "Check the destination folder's permissions, free space and mount. The delivery's own row shows when it is tried again.",
+    );
+    record_error(&key, &reason, &hint);
     if let Some(row) = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -580,7 +600,7 @@ enum MoveOutcome {
     Skipped,
     /// Atomic rename succeeded — src is gone, dest has the bytes.
     Moved,
-    /// Copy itself failed. Caller can retry on the next tick.
+    /// Copy itself failed. Retried on the delivery's backoff.
     Failed,
     /// This attempt stalled and drained. Immutable even if the operator
     /// clears its UI error before the enclosing batch processes the result.
@@ -603,7 +623,7 @@ enum MoveOutcome {
     /// the operator gets an accurate hint — an ENOSPC/short-write hint is
     /// wrong for a structurally-invalid-but-correctly-sized copy. Like
     /// `SizeMismatch`, the caller leaves the staging dir alone (src is the
-    /// source of truth) and retries next tick.
+    /// source of truth) and retries on the delivery's backoff.
     PostCopyInvalid,
     /// Destination already exists as a DIFFERENT file (present, non-empty, and a
     /// different size than src, or the same size with different content). The
@@ -1948,6 +1968,7 @@ fn check_and_move(cfg: &Config) {
         }
         let mut outcomes: Vec<MoveOutcome> = Vec::new();
         let mut held: Option<String> = None;
+        take_failure();
         let mut announced_moving = false;
         for (i, (src, dest)) in planned_moves.iter().enumerate() {
             let on_progress = move |pct: u8, gb: f64, total_gb: f64, speed: f64| {
@@ -2106,7 +2127,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination size does not match source",
-                "check the destination filesystem for ENOSPC / short writes; the mover removes only its temp file and retries next tick (if a dst file remains, remove it)",
+                SIZE_MISMATCH_HINT,
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2116,7 +2137,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination is structurally invalid or unreadable",
-                "the copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); the mover removes only its temp file and retries next tick (if a dst file remains, remove it) — see device_system.log for the specific check",
+                POST_COPY_INVALID_HINT,
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2133,12 +2154,16 @@ fn check_and_move(cfg: &Config) {
         }
 
         if any_failed {
-            // Leave the dir alone; mover will retry next tick.
+            // Leave the dir alone; it is retried on its backoff, then held for Retry.
             // Surface a summary error so the UI shows what's failing.
+            let reason = match take_failure() {
+                Some(cause) => format!("copy to destination failed: {cause}"),
+                None => "copy to destination failed".to_string(),
+            };
             record_error(
                 &dir_str,
-                "copy to destination failed",
-                "see device_system.log for the underlying error",
+                &reason,
+                "See device_system.log for the underlying error. The delivery is tried again after 30 s, then 2 min; after that it waits for Retry.",
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2187,7 +2212,7 @@ fn check_and_move(cfg: &Config) {
 
         // Every file this pass could SEE is accounted for, not every file that IS there: a
         // listing error drops an entry the destructive remove_dir_all teardown would then
-        // silently delete. Treat like a failed copy: leave the dir and retry next tick.
+        // silently delete. Treat like a failed copy: leave the dir; it retries on its backoff.
         if !listing_complete {
             teardown_blocked(
                 &dir_str,
@@ -2227,6 +2252,10 @@ fn check_and_move(cfg: &Config) {
     // Same unbounded-growth prune for the stranded-dir one-time-warn dedup set.
     prune_stranded_warned(&seen_dirs);
 }
+
+// What a failed copy's row tells the operator to do.
+const SIZE_MISMATCH_HINT: &str = "Check the destination filesystem for ENOSPC / short writes. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
+const POST_COPY_INVALID_HINT: &str = "The copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); see device_system.log for the specific check. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
 
 // A delivered dir whose staging teardown cannot run: shown, and retried on the delivery's
 // backoff (then held), never re-run every tick.
@@ -2952,7 +2981,7 @@ fn move_file(
     let src_meta = fresh_metadata(src);
 
     if let Err(e) = before_publish(src) {
-        record_dest_error(dest, job, "publication checkpoint failed", &e.to_string());
+        record_dest_error(dest, job, "publication checkpoint failed", &e);
         return MoveOutcome::Failed;
     }
     match publish_rename(src, dest, job) {
@@ -2960,12 +2989,7 @@ fn move_file(
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
-                record_dest_error(
-                    dest,
-                    job,
-                    "publication directory sync failed",
-                    &e.to_string(),
-                );
+                record_dest_error(dest, job, "publication directory sync failed", &e);
                 return MoveOutcome::Failed;
             }
             clear_stale_dest_error(dest);
@@ -2974,7 +2998,7 @@ fn move_file(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return MoveOutcome::Collision,
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {}
         Err(e) => {
-            record_dest_error(dest, job, "publication failed", &e.to_string());
+            record_dest_error(dest, job, "publication failed", &e);
             return if e.kind() == std::io::ErrorKind::Unsupported {
                 MoveOutcome::Unsupported
             } else {
@@ -3046,12 +3070,7 @@ fn move_file(
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
-                record_dest_error(
-                    dest,
-                    job,
-                    "publication directory sync failed",
-                    &e.to_string(),
-                );
+                record_dest_error(dest, job, "publication directory sync failed", &e);
                 return MoveOutcome::Failed;
             }
             clear_stale_dest_error(dest);
@@ -3061,6 +3080,7 @@ fn move_file(
         Err(e) => {
             if !copy_monitor::was_stalled(&e) && !shutdown_interrupted(&e) {
                 crate::server::log::syslog(&format!("Copy failed for {dest_str}: {e}"));
+                note_failure(e.to_string());
             }
             copy_failure_outcome(&e)
         }

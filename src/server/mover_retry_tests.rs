@@ -710,3 +710,54 @@ fn a_stall_is_counted_in_the_journal_when_it_is_declared() {
     assert_eq!(left.attempts, 1, "{left:?}");
     assert!(left.retry_after.is_some() && !left.retry_held, "{left:?}");
 }
+
+// A failed copy is retried after 30 s, then 2 min, then held for Retry: its hint says so
+// instead of promising a retry on the next tick.
+#[test]
+fn failed_copy_hints_describe_the_real_retry_schedule() {
+    for hint in [SIZE_MISMATCH_HINT, POST_COPY_INVALID_HINT] {
+        assert!(!hint.contains("next tick"), "{hint}");
+        assert!(hint.contains("Retry"), "{hint}");
+    }
+}
+
+// A refused publication step: the delivery's own row carries the OS error (the
+// log line said only "copy to destination failed"), and the destination's row gives an
+// instruction in its hint slot, not the raw error.
+#[cfg(unix)]
+#[test]
+fn a_refused_publication_names_its_error_on_the_delivery_row() {
+    use std::os::unix::fs::PermissionsExt;
+    if is_root() {
+        return;
+    }
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, _folder) = journaled_in_folder(tmp.path(), "Refused");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    // The publication checkpoint opens the staged file read-write: read-only refuses it.
+    let source = job.join("Refused.mkv");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o444)).unwrap();
+    check_and_move(&cfg);
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let staging_row = row(&key);
+    let dest_rows: Vec<MoverError> = MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|e| e.owner.as_deref() == Some(key.as_str()))
+        .cloned()
+        .collect();
+    clear_error(&key);
+    let staging_row = staging_row.expect("a row");
+    assert!(
+        staging_row.reason.contains("ermission denied"),
+        "{staging_row:?}"
+    );
+    assert!(!dest_rows.is_empty(), "fixture: a destination row");
+    for r in dest_rows {
+        assert!(!r.hint.contains("os error"), "{r:?}");
+        assert!(r.reason.contains("ermission denied"), "{r:?}");
+    }
+}
