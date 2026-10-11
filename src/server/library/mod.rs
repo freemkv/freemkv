@@ -505,9 +505,13 @@ impl Library {
                 }
                 Err(std::io::Error::new(
                     e.kind(),
-                    format!(
-                        "the saved matches (library-matches.json in {}) cannot be read: {e}",
-                        self.config_dir.display()
+                    crate::strings::fmt_or(
+                        "server.library.matches_unreadable",
+                        "the saved matches (library-matches.json in {dir}) cannot be read: {error}",
+                        &[
+                            ("dir", &self.config_dir.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
                     ),
                 ))
             }

@@ -601,9 +601,10 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     // Planning freezes a plan for every job before it gets here; only a kept file found at
     // startup arrives without one, and only its copy into the library is left to do.
     let Some(kept) = &job.staged else {
-        return Ending::Failed(std::io::Error::other(
+        return Ending::Failed(std::io::Error::other(crate::strings::get_or(
+            "server.library.no_title_plan",
             "this remux has no title plan; nothing was written",
-        ));
+        )));
     };
     if let Err(why) = safe_to_create(&super::dirs(cfg), &job.target) {
         return Ending::Failed(std::io::Error::other(why));
