@@ -2261,7 +2261,10 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination size does not match source",
-                &crate::strings::get_or("server.mover.size_mismatch_hint", SIZE_MISMATCH_HINT),
+                &crate::strings::get_or(
+                    "server.mover.size_mismatch_hint",
+                    "Check the destination filesystem for ENOSPC / short writes. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).",
+                ),
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2273,7 +2276,7 @@ fn check_and_move(cfg: &Config) {
                 "post-cp validation failed: destination is structurally invalid or unreadable",
                 &crate::strings::get_or(
                     "server.mover.post_copy_invalid_hint",
-                    POST_COPY_INVALID_HINT,
+                    "The copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); see device_system.log for the specific check. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).",
                 ),
             );
             schedule_failed_delivery(&dir_str, &outcomes);
@@ -2398,10 +2401,6 @@ fn check_and_move(cfg: &Config) {
     // Same unbounded-growth prune for the stranded-dir one-time-warn dedup set.
     prune_stranded_warned(&seen_dirs);
 }
-
-// What a failed copy's row tells the operator to do (English; the catalog may translate it).
-const SIZE_MISMATCH_HINT: &str = "Check the destination filesystem for ENOSPC / short writes. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
-const POST_COPY_INVALID_HINT: &str = "The copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); see device_system.log for the specific check. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
 
 // A delivered dir whose staging teardown cannot run: shown, retried after 30 s and 2 min, then
 // held for Retry, on a count of its own (no copy is involved). In memory: a restart re-checks.

@@ -781,7 +781,11 @@ fn a_stall_backoff_runs_from_the_workers_return() {
 // instead of promising a retry on the next tick.
 #[test]
 fn failed_copy_hints_describe_the_real_retry_schedule() {
-    for hint in [SIZE_MISMATCH_HINT, POST_COPY_INVALID_HINT] {
+    for key in [
+        "server.mover.size_mismatch_hint",
+        "server.mover.post_copy_invalid_hint",
+    ] {
+        let hint = crate::strings::get_or(key, "");
         assert!(!hint.contains("next tick"), "{hint}");
         assert!(hint.contains("Retry"), "{hint}");
     }
