@@ -13,7 +13,7 @@ function storageSummary(d) {
 
 function storageFolderRow(m) {
   const used = m.total_bytes ? 100 - (m.free_bytes / m.total_bytes) * 100 : null;
-  const state = m.state || (m.ok ? 'ok' : 'unhealthy');
+  const state = m.state;
   const tone = state === 'ok' ? 'ok' : state === 'unresponsive' ? 'warn' : 'bad';
   const health = state === 'ok' ? 'Accessible' : (m.message || state);
   return '<tr><td class="title"><b>' + esc(m.role) + '</b><span class="path mono" title="' + esc(m.path) + '">' + esc(m.path) + '</span></td>'

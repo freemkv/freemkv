@@ -20,7 +20,7 @@ const RESTART_EXIT_CODE: i32 = 75;
 // Slack past the drain bounds before a stalled reboot tail (a hung log disk) is cut short.
 const RELAUNCH_SLACK: Duration = Duration::from_secs(30);
 // Cadence of the KEYDB refresh and log prune threads, in one-second SHUTDOWN polls.
-const DAILY_SECS: u64 = 24 * 3600;
+const DAILY: Duration = Duration::from_secs(24 * 3600);
 
 /// Run the server shell. `argv` is everything after `freemkv server`.
 ///
@@ -197,13 +197,9 @@ pub fn run(argv: Vec<String>) {
         let cfg2 = cfg.clone();
         move || {
             tracing::info!("keydb update thread starting (24h interval)");
-            'outer: loop {
-                // 24h sleep in 1s chunks so SHUTDOWN is observed within ~1s.
-                for _ in 0..DAILY_SECS {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if SHUTDOWN.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
+            loop {
+                if crate::server::sleep_unless_shutdown(DAILY) {
+                    break;
                 }
                 // Online key source resolves out-of-band; no local keydb to keep
                 // fresh (and refreshing one would only shadow the service).
@@ -231,15 +227,12 @@ pub fn run(argv: Vec<String>) {
         let cfg = cfg.clone();
         move || {
             tracing::info!("log prune thread starting (24h interval)");
-            'outer: loop {
+            loop {
                 // Prune first, then wait: a daemon restarted more often than daily
                 // would otherwise never reach a tick.
                 log_prune_tick(&cfg);
-                for _ in 0..DAILY_SECS {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if SHUTDOWN.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
+                if crate::server::sleep_unless_shutdown(DAILY) {
+                    break;
                 }
             }
             tracing::info!("log prune thread stopping");

@@ -990,12 +990,7 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
                 refresh(&c);
                 #[cfg(unix)]
                 heal(&c);
-                let until = Instant::now() + Duration::from_secs(INTERVAL_SECS);
-                while Instant::now() < until
-                    && !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
+                crate::server::sleep_unless_shutdown(Duration::from_secs(INTERVAL_SECS));
             }
         })
         .ok()
