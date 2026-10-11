@@ -616,6 +616,21 @@ fn tv_folder_partials_no_job_owns_are_swept() {
     assert!(season.join("Show S01E03.mkv").exists());
 }
 
+#[test]
+fn episode_partials_under_a_tv_layout_in_the_library_are_swept() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    // The default layout: TV files under the library itself, so there is no separate TV folder.
+    let d = dirs_in(t.path());
+    let season = d.library.join("Show (2001)/Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    let orphan = season.join("Show S01E04.mkv.partial");
+    std::fs::write(&orphan, b"half an episode").unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    assert_eq!(lib.sweep_partials(&d), 1);
+    assert!(!orphan.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn the_unreadable_queue_hold_clears_once_the_file_reads() {

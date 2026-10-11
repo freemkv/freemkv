@@ -1421,8 +1421,9 @@ impl Library {
         id != 0 && self.cancel_job.load(Ordering::SeqCst) == id
     }
 
-    /// Delete unowned movie partials, known output partials, and remux partials in the TV
-    /// folder's show and season folders. Returns how many went.
+    /// Delete unowned movie partials, known output partials, and remux partials in the show
+    /// and season folders of the TV folder (the library when there is none). Returns how many
+    /// went.
     pub fn sweep_partials(&self, d: &Dirs) -> usize {
         let mut candidates: HashSet<PathBuf> = self
             .queue
@@ -1433,11 +1434,10 @@ impl Library {
             .chain(links::load(&self.config_dir).into_keys())
             .map(|p| queue::partial_path(&p))
             .collect();
-        // `<library>/<title>/` holds a movie; `<tv>/<show>/<season>/` an episode.
+        // `<library>/<title>/` holds a movie; `<tv>/<show>/<season>/` an episode, and with no
+        // separate TV folder `<library>/<show>/<season>/`.
         candidates.extend(partials_under(&d.library, 1));
-        if let Some(tv) = &d.tv {
-            candidates.extend(partials_under(tv, 2));
-        }
+        candidates.extend(partials_under(d.tv.as_ref().unwrap_or(&d.library), 2));
         candidates
             .into_iter()
             .filter(|path| {
