@@ -1,10 +1,11 @@
 use super::*;
 use crate::server::config::Config;
 
+type Hook = Option<Box<dyn Fn(&Path)>>;
+
 thread_local! {
     // Run between an adoption's checks and its journal update, on this thread.
-    static ADOPTING: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> =
-        std::cell::RefCell::new(None);
+    static ADOPTING: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
 }
 
 pub(super) fn adopting(dir: &Path) {
