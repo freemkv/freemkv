@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "target": "@ROOT@/out/movies/Golf (2007)/Golf (2007).mkv",
+  "replace": false,
+  "target_before": {
+    "state": "absent"
+  },
+  "iso": "@ROOT@/out/iso/Golf (2007).iso",
+  "iso_len": 3,
+  "iso_mtime_secs": 1791699429,
+  "title": 0,
+  "size": 244,
+  "runtime_secs": 58.0,
+  "expected_secs": 60.0,
+  "writing_app": "freemkv 1.8.3 (g956a0d3)",
+  "engine_version": "1.8.3 (g956a0d3)",
+  "created_at": 1791699430,
+  "attempts": 1,
+  "last_attempt_at": 1791699430,
+  "failed_phase": "copy",
+  "error": "No such file or directory (os error 2)",
+  "error_code": null
+}

@@ -1,0 +1,6 @@
+# Rescue Logfile. Created by 1.8.3
+# freemkv-disc: a1b2c3d4e5f60718293a4b5c6d7e8f9012345678
+# Current pos / status / pass / pass_time
+0x000000000  ?  1  0
+#      pos        size  status
+0x000000000  0x000008000    +

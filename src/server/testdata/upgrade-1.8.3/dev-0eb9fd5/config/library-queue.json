@@ -1,0 +1,157 @@
+{
+ "schema": 2,
+ "next_id": 8,
+ "paused": false,
+ "debug_log": false,
+ "jobs": [
+  {
+   "id": 6,
+   "title": "Coastline II (2016) - Disc 2",
+   "iso": "@ROOT@/out/iso/Coastline II (2016) - Disc 2.iso",
+   "target": "@ROOT@/out/movies/Coastline II (2016) - Disc 2/Coastline II (2016) - Disc 2.mkv",
+   "plan": {
+    "version": 1,
+    "source_iso": "@ROOT@/out/iso/Coastline II (2016) - Disc 2.iso",
+    "media": {
+     "title": "Coastline II",
+     "year": 2016,
+     "tmdb_id": 68595,
+     "season": null,
+     "disc": 2,
+     "episode_start": null,
+     "kind": "tv"
+    },
+    "outputs": [
+     {
+      "id": "title-11-episode-4",
+      "title_index": 11,
+      "episode": 4,
+      "episode_name": "Deserts",
+      "filename": "Coastline II (2016) - Disc 2_S01E04.mkv"
+     },
+     {
+      "id": "title-13-episode-5",
+      "title_index": 13,
+      "episode": 5,
+      "episode_name": "Grasslands",
+      "filename": "Coastline II (2016) - Disc 2_S01E05.mkv"
+     },
+     {
+      "id": "title-15-episode-6",
+      "title_index": 15,
+      "episode": 6,
+      "episode_name": "Cities",
+      "filename": "Coastline II (2016) - Disc 2_S01E06.mkv"
+     }
+    ]
+   },
+   "outputs": [
+    {
+     "id": "title-11-episode-4",
+     "target": "@ROOT@/out/movies/Coastline II (2016) - Disc 2/Coastline II (2016) - Disc 2_S01E04.mkv",
+     "state": "failed"
+    },
+    {
+     "id": "title-13-episode-5",
+     "target": "@ROOT@/out/movies/Coastline II (2016) - Disc 2/Coastline II (2016) - Disc 2_S01E05.mkv",
+     "state": "pending"
+    },
+    {
+     "id": "title-15-episode-6",
+     "target": "@ROOT@/out/movies/Coastline II (2016) - Disc 2/Coastline II (2016) - Disc 2_S01E06.mkv",
+     "state": "pending"
+    }
+   ],
+   "replace": false,
+   "state": "failed",
+   "queued_at": 1791593528,
+   "started_at": 1791593548,
+   "finished_at": 1791593606,
+   "note": "interrupted",
+   "failure": {
+    "code": 6020,
+    "message": "E6020 the disc image file ends before a sector this rip needs, so the image is truncated or incomplete. Reading stopped rather than fill the missing part with zeros \u2014 make a new image from the disc. It stopped while muxing. No MKV was written to the library."
+   }
+  },
+  {
+   "id": 8,
+   "title": "Coastline II (2016)",
+   "iso": "@ROOT@/out/iso/Coastline II (2016).iso",
+   "target": "@ROOT@/out/movies/Coastline II (2016)/Coastline II (2016).mkv",
+   "plan": {
+    "version": 1,
+    "source_iso": "@ROOT@/out/iso/Coastline II (2016).iso",
+    "media": {
+     "title": "Coastline II",
+     "year": 2016,
+     "tmdb_id": 68595,
+     "season": null,
+     "disc": null,
+     "episode_start": null,
+     "kind": "tv"
+    },
+    "outputs": [
+     {
+      "id": "title-1-episode-1",
+      "title_index": 1,
+      "episode": 1,
+      "episode_name": "Islands",
+      "filename": "Coastline II (2016)_S01E01.mkv"
+     },
+     {
+      "id": "title-3-episode-2",
+      "title_index": 3,
+      "episode": 2,
+      "episode_name": "Mountains",
+      "filename": "Coastline II (2016)_S01E02.mkv"
+     },
+     {
+      "id": "title-5-episode-3",
+      "title_index": 5,
+      "episode": 3,
+      "episode_name": "Jungles",
+      "filename": "Coastline II (2016)_S01E03.mkv"
+     }
+    ]
+   },
+   "outputs": [
+    {
+     "id": "title-1-episode-1",
+     "target": "@ROOT@/out/movies/Coastline II (2016)/Coastline II (2016)_S01E01.mkv",
+     "state": "done"
+    },
+    {
+     "id": "title-3-episode-2",
+     "target": "@ROOT@/out/movies/Coastline II (2016)/Coastline II (2016)_S01E02.mkv",
+     "state": "done"
+    },
+    {
+     "id": "title-5-episode-3",
+     "target": "@ROOT@/out/movies/Coastline II (2016)/Coastline II (2016)_S01E03.mkv",
+     "state": "done"
+    }
+   ],
+   "replace": false,
+   "state": "done",
+   "queued_at": 1791593754,
+   "started_at": 1791616566,
+   "finished_at": 1791625463,
+   "note": "preempted"
+  }
+ ],
+ "results": {
+  "@ROOT@/out/movies/Coastline II (2016) - Disc 2/Coastline II (2016) - Disc 2.mkv": {
+   "outcome": "failed",
+   "code": 6020,
+   "message": "E6020 the disc image file ends before a sector this rip needs, so the image is truncated or incomplete. Reading stopped rather than fill the missing part with zeros \u2014 make a new image from the disc. It stopped while muxing. No MKV was written to the library.",
+   "finished_at": 1791593606
+  },
+  "@ROOT@/out/movies/Coastline II (2016)/Coastline II (2016).mkv": {
+   "outcome": "done",
+   "size_bytes": 0,
+   "secs": 8895,
+   "finished_at": 1791625462,
+   "writing_app": null
+  }
+ }
+}

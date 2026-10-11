@@ -986,6 +986,110 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
 static STRANDED_WARNED: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
+// Staged outputs of 1.8.3 hand-offs already reported as filed by it, logged once each.
+static MOVED_AWAY_LOGGED: once_cell::sync::Lazy<
+    Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
+
+// A hand-off v1.8.3 wrote: its state.json predates `disc_identity`, which this build
+// always writes and which arrived with the delivery journal.
+fn pre_journal_handoff(dir: &Path) -> bool {
+    std::fs::read(dir.join(crate::server::ripper::staging::STATE_FILE)).is_ok_and(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .is_ok_and(|v| v.is_object() && v.get("disc_identity").is_none())
+    })
+}
+
+// The outputs still to deliver, and those 1.8.3 already moved away: a planned leaf whose
+// staged path is positively absent. Anything else stays planned (and is held if missing).
+fn split_moved_away(
+    dir: &Path,
+    outputs: Vec<crate::server::ripper::staging::Output>,
+) -> (
+    Vec<crate::server::ripper::staging::Output>,
+    Vec<crate::server::ripper::staging::Output>,
+) {
+    let (gone, kept): (Vec<_>, Vec<_>) = outputs.into_iter().partition(|output| {
+        Path::new(&output.filename).file_name() == Some(output.filename.as_ref())
+            && std::fs::symlink_metadata(dir.join(&output.filename))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    });
+    for output in &gone {
+        let staged = dir.join(&output.filename);
+        if MOVED_AWAY_LOGGED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(staged.clone())
+        {
+            crate::server::log::syslog(&format!(
+                "{}: already filed by the earlier version (no longer staged); not delivered again",
+                staged.display()
+            ));
+        }
+    }
+    (kept, gone)
+}
+
+// With an output moved away, every other file must be planned or ripper bookkeeping: a
+// staged file under another name is never left to the journal's cleanup to delete.
+fn legacy_unlisted_file(
+    dir: &Path,
+    planned: &[std::path::PathBuf],
+) -> std::io::Result<Option<String>> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default();
+        let map_of_planned = path.extension().is_some_and(|e| e == "mapfile")
+            && planned.contains(&path.with_extension(""));
+        if planned.contains(&path)
+            || crate::server::ripper::staging::is_ripper_bookkeeping(name)
+            || map_of_planned
+            || orphan_mapfile(&path)
+        {
+            continue;
+        }
+        return Ok(Some(name.to_string_lossy().into_owned()));
+    }
+    Ok(None)
+}
+
+// A recovery map whose image is gone: it holds no media.
+fn orphan_mapfile(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "mapfile")
+        && std::fs::symlink_metadata(path.with_extension(""))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+// Every output of a 1.8.3 hand-off was already filed by it: only bookkeeping is left, so
+// the rip is complete. Removes that bookkeeping and the folder; nothing else.
+fn finish_filed_elsewhere(dir: &Path, display_name: &str) {
+    let key = dir.to_string_lossy().to_string();
+    let removed = (|| -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            let name = path.file_name().unwrap_or_default();
+            if crate::server::ripper::staging::is_ripper_bookkeeping(name) || orphan_mapfile(&path)
+            {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        std::fs::remove_dir(dir)
+    })();
+    match removed {
+        Ok(()) => {
+            clear_error(&key);
+            crate::server::log::syslog(&format!(
+                "Move complete: {display_name} (filed by the earlier version)"
+            ));
+        }
+        Err(e) => record_error(
+            &key,
+            &format!("staging cleanup failed: {e}"),
+            "The rip was already filed; remove its staging folder by hand.",
+        ),
+    }
+}
+
 // Forget in-memory mover state, as a process restart would.
 #[cfg(test)]
 pub(super) fn forget_process_state() {
@@ -1287,6 +1391,41 @@ fn check_and_move(cfg: &Config) {
             });
         }
 
+        // 1.8.3 delivered without a journal and may have been cut off mid-delivery. An output
+        // it already moved out of staging is left where it was filed: never claimed, linked
+        // or delivered again. Existing destinations are never adopted (the strict rule).
+        let legacy = delivery.is_none() && pre_journal_handoff(&dir);
+        let (state_outputs, moved_away) = if legacy {
+            split_moved_away(&dir, state_outputs)
+        } else {
+            (state_outputs, Vec::new())
+        };
+        if !moved_away.is_empty() {
+            match legacy_unlisted_file(&dir, &ripped_files) {
+                Ok(None) => {}
+                Ok(Some(name)) => {
+                    record_error(
+                        &dir.to_string_lossy(),
+                        &format!("staging holds a file this hand-off does not list: {name}"),
+                        "Nothing was moved or deleted. Rename it to the output it is, or remove it if it is not wanted, then choose Retry.",
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    record_error(
+                        &dir.to_string_lossy(),
+                        &format!("cannot list staging directory {}: {e}", dir.display()),
+                        "check that the staging mount is healthy and readable",
+                    );
+                    continue;
+                }
+            }
+            if ripped_files.is_empty() {
+                finish_filed_elsewhere(&dir, &display_name);
+                continue;
+            }
+        }
+
         if ripped_files.is_empty() && delivery.is_none() {
             // Nothing the mover should promote. Skip; the dir's lifetime
             // is governed by the ripper (which owns the state.json transition
@@ -1377,10 +1516,10 @@ fn check_and_move(cfg: &Config) {
         // gives disc 2 `Title (Year)_2.mkv` instead of a collision. ONE variant
         // covers the whole file set (MKV+ISO matched); a STAT failure aborts as `uncertain`.
         if delivery.is_none() {
-            let mut uncertain = false;
+            let mut uncertain = None;
             let mut residue = None;
             let variant = crate::server::util::disc_variant(|n| {
-                if uncertain || residue.is_some() {
+                if uncertain.is_some() || residue.is_some() {
                     return false;
                 }
                 for (_, dest) in planned_moves.iter() {
@@ -1393,7 +1532,7 @@ fn check_and_move(cfg: &Config) {
                             return false;
                         }
                         DestClaim::Unknown => {
-                            uncertain = true;
+                            uncertain = Some(candidate);
                             return false;
                         }
                     }
@@ -1418,7 +1557,20 @@ fn check_and_move(cfg: &Config) {
                         *dest = dest_with_variant(dest, n);
                     }
                 }
-                None if uncertain => {
+                None if legacy && uncertain.is_some() => {
+                    // A legacy rip never falls back to the base names it could not examine.
+                    let path = uncertain.unwrap_or_default();
+                    record_error(
+                        &dir_str,
+                        &format!(
+                            "cannot examine the destination {}; nothing was moved",
+                            absolute_for_log(&path)
+                        ),
+                        "Check the output folder's permissions and mount. The rip stays in staging and is tried again on the next pass.",
+                    );
+                    continue;
+                }
+                None if uncertain.is_some() => {
                     // Left to the collision guard's stat-error branch, which logs
                     // the deferral and retries next tick.
                 }
@@ -2776,3 +2928,7 @@ fn copy_failure_outcome(error: &std::io::Error) -> MoveOutcome {
 #[cfg(test)]
 #[path = "mover_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mover_upgrade_tests.rs"]
+mod upgrade_tests;

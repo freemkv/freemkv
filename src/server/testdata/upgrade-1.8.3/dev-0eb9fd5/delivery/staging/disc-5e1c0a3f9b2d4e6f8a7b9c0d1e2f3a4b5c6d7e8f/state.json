@@ -1,0 +1,69 @@
+{
+  "schema": 2,
+  "state": "done",
+  "user_metadata": null,
+  "disc_identity": "5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f",
+  "metadata_revision": 0,
+  "replan_required": false,
+  "title_identity_review": false,
+  "reset_in_progress": false,
+  "restart_count": 0,
+  "muxing": false,
+  "accept_loss": false,
+  "failure_reason": null,
+  "aborted_loss_attempt": 0,
+  "needs_disc": false,
+  "disc_label": "",
+  "disc_name": "Long Shore",
+  "disc_format": "uhd",
+  "title": "Long Shore",
+  "year": 2017,
+  "media_type": "movie",
+  "tmdb_id": 100001,
+  "tmdb_poster": "https://image.tmdb.org/t/p/w300/fixture.jpg",
+  "tmdb_overview": "An anonymised overview.",
+  "season": null,
+  "disc_number": null,
+  "title_confident": true,
+  "iso_path": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/Long Shore.iso",
+  "mapfile_path": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/Long Shore.iso.mapfile",
+  "max_retries": 3,
+  "abort_on_lost_secs": 0,
+  "origin_device": "ioreg:4295201274",
+  "rip": {
+    "elapsed_secs": 0.0,
+    "errors": 0,
+    "lost_video_secs": 0.0,
+    "last_sector": 0,
+    "sweep_errors": 0,
+    "sweep_total_lost_ms": -0.0,
+    "sweep_main_lost_ms": 0.0,
+    "sweep_num_bad_ranges": 0,
+    "sweep_largest_gap_ms": 0.0
+  },
+  "outputs": [
+    {
+      "filename": "Long Shore.mkv",
+      "title_index": 0,
+      "title_identity": {
+        "playlist": "00100.mpls",
+        "playlist_id": 100,
+        "extents": [
+          [
+            695424,
+            524256
+          ],
+          [
+            1219680,
+            524256
+          ]
+        ]
+      },
+      "episode": null,
+      "episode_name": "",
+      "moved": false
+    }
+  ],
+  "date": "2026-10-11",
+  "resumed": true
+}

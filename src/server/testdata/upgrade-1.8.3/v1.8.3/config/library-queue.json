@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "next_id": 5,
+  "paused": false,
+  "debug_log": false,
+  "jobs": [
+    {
+      "id": 1,
+      "title": "Echo (2005)",
+      "iso": "@ROOT@/out/iso/Echo (2005).iso",
+      "target": "@ROOT@/out/movies/Echo (2005)/Echo (2005).mkv",
+      "replace": true,
+      "state": "done",
+      "queued_at": 1791699429,
+      "started_at": 1791699429,
+      "finished_at": 1791699429,
+      "note": null
+    },
+    {
+      "id": 2,
+      "title": "Foxtrot (2006)",
+      "iso": "@ROOT@/out/iso/Foxtrot (2006).iso",
+      "target": "@ROOT@/out/movies/Foxtrot (2006)/Foxtrot (2006).mkv",
+      "replace": false,
+      "state": "failed",
+      "queued_at": 1791699429,
+      "started_at": 1791699429,
+      "finished_at": 1791699429,
+      "note": null,
+      "failure": {
+        "code": 6020,
+        "message": "E6020 the disc image file ends before a sector this rip needs."
+      }
+    },
+    {
+      "id": 3,
+      "title": "Hotel (2008)",
+      "iso": "@ROOT@/out/iso/Hotel (2008).iso",
+      "target": "@ROOT@/out/movies/Hotel (2008)/Hotel (2008).mkv",
+      "replace": false,
+      "state": "queued",
+      "queued_at": 1791699429,
+      "started_at": null,
+      "finished_at": null,
+      "note": "interrupted"
+    },
+    {
+      "id": 4,
+      "title": "Delta (2004)",
+      "iso": "@ROOT@/out/iso/Delta (2004).iso",
+      "target": "@ROOT@/out/movies/Delta (2004)/Delta (2004).mkv",
+      "replace": false,
+      "state": "queued",
+      "queued_at": 1791699429,
+      "started_at": null,
+      "finished_at": null,
+      "note": null
+    },
+    {
+      "id": 5,
+      "title": "Golf (2007)",
+      "iso": "@ROOT@/out/iso/Golf (2007).iso",
+      "target": "@ROOT@/out/movies/Golf (2007)/Golf (2007).mkv",
+      "replace": false,
+      "state": "queued",
+      "queued_at": 1791699430,
+      "started_at": null,
+      "finished_at": null,
+      "note": "staged_waiting",
+      "failure": {
+        "code": null,
+        "message": "No such file or directory (os error 2). Finished locally; waiting for the output folder to copy it in."
+      },
+      "staged": "@ROOT@/remux-stage/Golf (2007).1f2335b9f41c.staged.mkv",
+      "staged_bytes": 244,
+      "staged_attempts": 1
+    }
+  ],
+  "results": {
+    "@ROOT@/out/movies/Echo (2005)/Echo (2005).mkv": {
+      "outcome": "done",
+      "size_bytes": 1234,
+      "secs": 95,
+      "finished_at": 1791699429,
+      "writing_app": "freemkv 1.8.3 (g956a0d3)"
+    },
+    "@ROOT@/out/movies/Foxtrot (2006)/Foxtrot (2006).mkv": {
+      "outcome": "failed",
+      "code": 6020,
+      "message": "E6020 the disc image file ends before a sector this rip needs.",
+      "finished_at": 1791699429
+    }
+  }
+}

@@ -1961,3 +1961,7 @@ fn deep_one(
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "worker_upgrade_tests.rs"]
+mod upgrade_tests;
