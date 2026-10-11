@@ -647,3 +647,31 @@ fn the_unreadable_queue_hold_clears_once_the_file_reads() {
     assert!(lib.hold().is_none());
     assert!(lib.queue.unreadable().is_none());
 }
+
+#[test]
+fn an_iso_whose_share_hangs_is_refused_without_waiting_on_it() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    let iso = d.isos.as_ref().unwrap().join("Hung.iso");
+    let started = std::time::Instant::now();
+    let hung = |_: &Path| {
+        std::thread::sleep(Duration::from_secs(5));
+        None
+    };
+    let e = iso_stamp_within(&d, &iso, Duration::from_millis(100), hung).unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the caller did not wait"
+    );
+    assert!(e.to_string().contains("not responding"), "{e}");
+    assert!(e.to_string().ends_with("Nothing was queued."), "{e}");
+    let stamp = crate::server::util::Stamp {
+        size: 1,
+        modified: std::time::UNIX_EPOCH,
+    };
+    // Another share answers; the hung probe holds only its own folder's slot.
+    let other = dirs_in(&t.path().join("other"));
+    let iso = other.isos.as_ref().unwrap().join("Fine.iso");
+    let answered = iso_stamp_within(&other, &iso, Duration::from_secs(3), move |_| Some(stamp));
+    assert_eq!(answered.unwrap(), Some(stamp));
+}

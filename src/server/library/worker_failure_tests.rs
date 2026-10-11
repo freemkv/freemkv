@@ -90,9 +90,14 @@ fn saved_matches_unreadable_at_start_are_read_again_once_repaired() {
     let file = t.path().join("library-matches.json");
     std::fs::write(&file, b"broken").unwrap();
     let lib = Library::open(t.path(), &t.path().join("logs"));
+    let now = crate::server::util::epoch_secs();
     let iso = t.path().join("source.iso");
     let error = lib.source_match(&iso).unwrap_err();
     assert!(error.contains("library-matches.json"), "{error}");
     std::fs::write(&file, b"{}").unwrap();
+    // A failed read is not repeated on every call, only once a minute.
+    let error = lib.match_store_at(now + 1).err().unwrap().to_string();
+    assert!(error.contains("library-matches.json"), "{error}");
+    assert_eq!(lib.match_store_at(now + 60).unwrap().get(&iso), None);
     assert_eq!(lib.source_match(&iso).unwrap(), None);
 }

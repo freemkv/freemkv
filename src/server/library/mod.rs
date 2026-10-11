@@ -208,6 +208,41 @@ impl FolderView {
 // What one root's Change-match check is given: that root's links, the ISO, and the root.
 type CaptureInput = (HashMap<PathBuf, links::Link>, PathBuf, Vec<PathBuf>);
 
+// The ISO's stamp, read under the ISO folder's probe slot within the Change match check's
+// limit: a request thread never waits on a hung share, and is refused instead.
+fn iso_stamp_bounded(d: &Dirs, iso: &Path) -> std::io::Result<Option<crate::server::util::Stamp>> {
+    iso_stamp_within(d, iso, MATCH_CHECK_TIMEOUT, links::iso_stamp)
+}
+
+fn iso_stamp_within(
+    d: &Dirs,
+    iso: &Path,
+    limit: std::time::Duration,
+    stat: impl FnOnce(&Path) -> Option<crate::server::util::Stamp> + Send + 'static,
+) -> std::io::Result<Option<crate::server::util::Stamp>> {
+    let key = d
+        .isos
+        .clone()
+        .filter(|root| iso.starts_with(root))
+        .or_else(|| iso.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| iso.to_path_buf());
+    let owned = iso.to_path_buf();
+    match health::bounded(&key, limit, move || stat(&owned)) {
+        health::Bounded::Done(stamp) => Ok(stamp),
+        health::Bounded::TimedOut | health::Bounded::Busy => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            crate::strings::fmt_or(
+                "server.library.nothing_queued",
+                "{reason} Nothing was queued.",
+                &[("reason", &health::Fault::Unresponsive.message("source ISO"))],
+            ),
+        )),
+    }
+}
+
+// How long a saved-matches file that could not be read waits before it is read again.
+const MATCHES_RETRY_SECS: u64 = 60;
+
 /// The role of a separate TV folder among [`folder_views`].
 pub(crate) const TV_ROLE: &str = "TV output";
 /// The hold's role while the queue file could not be loaded; it is a file, not a folder.
@@ -299,10 +334,10 @@ impl Snapshot {
 /// The Library's state: the queue, the probe cache, the index and the console.
 pub struct Library {
     pub queue: Queue,
-    // Opened on first good read; an unreadable file is tried again on the next use.
+    // Opened on first good read, never under this lock: listing readers never wait on it.
     source_matches: Mutex<Option<Arc<matches::MatchStore>>>,
-    // The last open failure was logged; cleared once the file reads again.
-    matches_unreadable: AtomicBool,
+    // The last open failure: when (epoch seconds) and its error; tried again a minute later.
+    matches_failed: Mutex<Option<(u64, std::io::ErrorKind, String)>>,
     match_gate: Mutex<()>,
     pub probes: ProbeCache,
     pub audits: audit::Audits,
@@ -463,7 +498,7 @@ impl Library {
         let lib = Self {
             queue: Queue::open(config_dir),
             source_matches: Mutex::new(None),
-            matches_unreadable: AtomicBool::new(false),
+            matches_failed: Mutex::new(None),
             match_gate: Mutex::new(()),
             probes: ProbeCache::default(),
             audits: audit::Audits::open(config_dir),
@@ -487,39 +522,73 @@ impl Library {
     }
 
     /// The saved matches, opened now if they are not yet: an unreadable file is an error
-    /// that names it, logged once, and read again on the next call.
+    /// that names it, logged once, and read again at most once a minute.
     pub(crate) fn match_store(&self) -> std::io::Result<Arc<matches::MatchStore>> {
-        let mut slot = self
-            .source_matches
+        self.match_store_at(crate::server::util::epoch_secs())
+    }
+
+    pub(crate) fn match_store_at(&self, now: u64) -> std::io::Result<Arc<matches::MatchStore>> {
+        if let Some(store) = self.loaded_store() {
+            return Ok(store);
+        }
+        let failed = |at: u64, kind, why: &str| {
+            let message = crate::strings::fmt_or(
+                "server.library.matches_unreadable",
+                "the saved matches (library-matches.json in {dir}) cannot be read: {error}",
+                &[
+                    ("dir", &self.config_dir.display().to_string()),
+                    ("error", why),
+                ],
+            );
+            (now < at.saturating_add(MATCHES_RETRY_SECS))
+                .then(|| std::io::Error::new(kind, message))
+        };
+        let last = self
+            .matches_failed
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(store) = slot.as_ref() {
-            return Ok(store.clone());
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some((at, kind, why)) = &last
+            && let Some(e) = failed(*at, *kind, why)
+        {
+            return Err(e);
         }
         match matches::MatchStore::open(&self.config_dir) {
             Ok(store) => {
-                if self.matches_unreadable.swap(false, Ordering::SeqCst) {
+                if self
+                    .matches_failed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                    .is_some()
+                {
                     tracing::info!("saved source matches are readable again");
                 }
-                Ok(slot.insert(Arc::new(store)).clone())
+                let mut slot = self
+                    .source_matches
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                Ok(slot.get_or_insert_with(|| Arc::new(store)).clone())
             }
             Err(e) => {
-                if !self.matches_unreadable.swap(true, Ordering::SeqCst) {
+                if last.is_none() {
                     tracing::error!(error = %e, dir = %self.config_dir.display(), "library-matches.json cannot be read; remuxes wait until it is repaired");
                 }
-                Err(std::io::Error::new(
-                    e.kind(),
-                    crate::strings::fmt_or(
-                        "server.library.matches_unreadable",
-                        "the saved matches (library-matches.json in {dir}) cannot be read: {error}",
-                        &[
-                            ("dir", &self.config_dir.display().to_string()),
-                            ("error", &e.to_string()),
-                        ],
-                    ),
-                ))
+                let why = e.to_string();
+                *self
+                    .matches_failed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some((now, e.kind(), why.clone()));
+                Err(failed(now, e.kind(), &why).unwrap_or(e))
             }
         }
+    }
+
+    fn loaded_store(&self) -> Option<Arc<matches::MatchStore>> {
+        self.source_matches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Unreadable saved corrections are an error, never an automatic lookup.
@@ -531,11 +600,7 @@ impl Library {
 
     // The saved match as already loaded: no disk access, for the listing.
     fn loaded_match(&self, source: &Path) -> Option<matches::SavedMatch> {
-        let slot = self
-            .source_matches
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        slot.as_ref().and_then(|store| store.get(source))
+        self.loaded_store().and_then(|store| store.get(source))
     }
 
     fn require_indexed_source(&self, d: &Dirs, source: &Path) -> std::io::Result<()> {
@@ -631,8 +696,9 @@ impl Library {
         expected_revision: u64,
         media: crate::server::planner::MediaMetadata,
     ) -> std::io::Result<(matches::SavedMatch, usize)> {
-        let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
         let d = dirs(cfg);
+        let disc = iso_stamp_bounded(&d, source)?;
+        let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
         self.require_indexed_source(&d, source)?;
         if let Some(reason) = self.queue_block(&d, true) {
             return Err(std::io::Error::other(reason));
@@ -647,7 +713,6 @@ impl Library {
             .ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "source ISO is not indexed")
             })?;
-        let disc = links::iso_stamp(source);
         let saved = self.queue.with_idle_source(source, || {
             store.save_for(source, expected_revision, media, disc)
         })?;
@@ -1380,6 +1445,14 @@ impl Library {
         d: &Dirs,
         pick: impl Fn(&RowView) -> bool,
     ) -> Result<usize, String> {
+        // The ISOs with a saved match are stamped before the gate: a hung share never holds it.
+        let mut stamps = HashMap::new();
+        for r in self.listing(d).rows.into_iter().filter(|r| pick(r)) {
+            if let Some(iso) = r.iso.filter(|iso| self.loaded_match(iso).is_some()) {
+                let stamp = iso_stamp_bounded(d, &iso).map_err(|e| e.to_string())?;
+                stamps.insert(iso, stamp);
+            }
+        }
         let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
         let jobs: Vec<NewJob> = self
             .listing(d)
@@ -1406,7 +1479,8 @@ impl Library {
                 format!("{added} jobs queued; saved source matches unavailable: {error}")
             })?;
             // A match confirmed for an earlier disc filed at this path is not this disc's.
-            if selected.is_none_or(|m| !m.is_for(links::iso_stamp(&job.iso))) {
+            // One saved after the stamps were read goes in plain; the worker applies it at claim.
+            if !selected.is_some_and(|m| stamps.get(&job.iso).is_some_and(|now| m.is_for(*now))) {
                 plain.push(job);
                 continue;
             }
