@@ -5,21 +5,35 @@ use libfreemkv::disc::{EpisodeEvidence, MovieSelectionBasis, NavigationSource};
 use libfreemkv::{AudioChannels, AudioStream, Codec, DiscTitle, LabelPurpose, SampleRate, Stream};
 
 #[test]
-fn presentation_language_selects_authored_launch_with_audio_all_in_gui() {
+fn the_gui_ticks_the_cut_in_the_wanted_language() {
     let mut disc = disc(false);
-    disc.titles = crate::selection_test_fixtures::launch_titles();
+    disc.titles = crate::selection_test_fixtures::variant_titles();
     let scan = scanned_from_disc(&disc, "none".into());
-    for (language, expected) in [("de", vec![1]), ("en", vec![0]), ("fr", vec![])] {
+    let cases = [
+        (Some("de"), vec![], vec![1]),
+        (Some("en"), vec![], vec![0]),
+        (Some("fr"), vec![], vec![0]),
+        (None, vec!["deu".to_string()], vec![1]),
+        (None, vec![], vec![0]),
+    ];
+    for (language, audio, expected) in cases {
         let prefs = LangPrefs {
-            presentation_language: Some(language.into()),
+            presentation_language: language.map(Into::into),
+            audio,
             ..Default::default()
         };
-        assert!(prefs.audio.is_empty());
-        assert_eq!(
-            Tree::from_scan(&scan, "Main film only", 0.0, &prefs).ticked_titles(),
-            expected
-        );
+        let ticked = Tree::from_scan(&scan, "Main film only", 0.0, &prefs).ticked_titles();
+        assert_eq!(ticked, expected, "{language:?} {:?}", prefs.audio);
     }
+    // A separate German programme is never the main film.
+    disc.titles = crate::selection_test_fixtures::separate_titles();
+    let scan = scanned_from_disc(&disc, "none".into());
+    let prefs = LangPrefs {
+        audio: vec!["deu".into()],
+        ..Default::default()
+    };
+    let ticked = Tree::from_scan(&scan, "Main film only", 0.0, &prefs).ticked_titles();
+    assert_eq!(ticked, vec![0]);
 }
 
 fn title(id: u16, program: &str, secs: f64, language: &str) -> DiscTitle {
@@ -35,6 +49,7 @@ fn title(id: u16, program: &str, secs: f64, language: &str) -> DiscTitle {
         source_packets: 0,
         feed_span: None,
     });
+    title.selection_evidence.segments = libfreemkv::disc::ContentSegment::from_clips(&title.clips);
     title.streams.push(Stream::Audio(AudioStream {
         pid: 0x1100,
         codec: Codec::Ac3,
@@ -268,27 +283,30 @@ fn visible_episode_subset_keeps_canonical_indices_and_longest_ties_match_engine(
     );
 }
 
-// Open on a disc whose main title needs review resolves keys for the review candidates and
-// does not fail: ticking titles is the way past the hold.
+// Open resolves keys for the main title alone, even when another cut exists.
 #[test]
-fn open_scopes_keys_to_the_review_candidates() {
+fn open_scopes_keys_to_the_main_title() {
     let mut disc = disc(false);
-    disc.titles = crate::selection_test_fixtures::launch_titles();
-    assert_eq!(super::open_titles(&disc), vec![0, 1]);
+    disc.titles = crate::selection_test_fixtures::variant_titles();
+    assert_eq!(super::open_titles(&disc), vec![0]);
 }
 
-// A title rip of a selection that needs review refuses with E9086 and the reason, never as
-// "nothing selected"; a whole-disc copy proceeds and measures over the candidates.
+// A title rip of a selection that needs review (Episodes with no roster) refuses with E9086
+// and the reason, never as "nothing selected"; a whole-disc copy measures the candidates.
 #[test]
 fn a_rip_needing_review_is_e9086_unless_it_copies_the_whole_disc() {
     let mut disc = disc(false);
-    disc.titles = crate::selection_test_fixtures::launch_titles();
-    let err = super::rip_titles(&disc, &Selection::MainMovie, false).unwrap_err();
+    disc.titles = crate::selection_test_fixtures::separate_titles();
+    let err = super::rip_titles(&disc, &Selection::Episodes, false).unwrap_err();
     assert!(err.starts_with("E9086 "), "{err}");
-    assert!(err.contains("missing-presentation-language"), "{err}");
+    assert!(err.contains("missing-episode-roster"), "{err}");
     assert_eq!(
-        super::rip_titles(&disc, &Selection::MainMovie, true),
+        super::rip_titles(&disc, &Selection::Episodes, true),
         Ok(vec![0, 1])
+    );
+    assert_eq!(
+        super::rip_titles(&disc, &Selection::MainMovie, false),
+        Ok(vec![0])
     );
     assert_eq!(
         super::rip_titles(&disc, &Selection::Titles(vec![1]), false),
@@ -301,11 +319,11 @@ fn a_rip_needing_review_is_e9086_unless_it_copies_the_whole_disc() {
 fn preflight_reasons_keep_their_detail() {
     let review = freemkv_engine::Reason {
         key: "selection-review-required".into(),
-        detail: Some("missing-presentation-language".into()),
+        detail: Some("missing-episode-roster".into()),
     };
     assert_eq!(
         super::reason_text(&review),
-        "selection-review-required=missing-presentation-language"
+        "selection-review-required=missing-episode-roster"
     );
     let bare = freemkv_engine::Reason {
         key: "encrypted-no-key".into(),

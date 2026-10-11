@@ -90,6 +90,8 @@ pub type Opt = (&'static str, &'static str, &'static str);
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     Text,
+    /// Blank, or a language tag title selection understands; anything else is refused.
+    Language,
     Path(PathRule),
     /// Shown as the sentinel once set; the sentinel posted back is ignored.
     Secret,
@@ -121,7 +123,7 @@ pub enum Kind {
 impl Kind {
     fn type_name(self) -> &'static str {
         match self {
-            Kind::Text | Kind::Target => "text",
+            Kind::Text | Kind::Language | Kind::Target => "text",
             Kind::Path(_) => "path",
             Kind::Secret => "secret",
             Kind::Url(_) => "url",
@@ -298,14 +300,14 @@ pub static FIELDS: &[Field] = &[
     field("auto_eject", "Eject when done", G::Disc, Kind::Bool, B(true),
         "Eject the disc when its rip is done."),
     field("output_format", "What to make", G::Ripping, Kind::Choice(OUTPUT_FORMAT), S("mkv"),
-        "The output container or image format. Title outputs follow the shared selection plan; supported TV sources may produce multiple outputs. Uncertain selection or episode numbering requires review."),
+        "The output container or image format. Title outputs follow the shared selection plan; supported TV sources may produce multiple outputs. TV episodes that cannot be told apart, or whose numbering is unconfirmed, are held for review."),
     field("network_target", "Network address", G::Ripping, Kind::Target, S(""),
         "The other machine's address and port, for example nas.example.com:9000.")
         .placeholder("nas.example.com:9000").show_if("output_format", "network"),
     field("main_feature", "Main movie only", G::Hidden, Kind::Bool, B(true),
         "Rip only the movie itself, not the extras.").hide_if("output_format", "iso"),
-    field("presentation_language", "Presentation language", G::Ripping, Kind::Text, S(""),
-        "Choose an authored language presentation (for example de or en), without removing audio tracks. Empty leaves the preference unspecified; ambiguous authored choices require review."),
+    field("presentation_language", "Presentation language", G::Ripping, Kind::Language, S(""),
+        "Prefer the version of the main movie in this language (for example de or en) when the disc has the movie in more than one language, without removing audio tracks. Empty keeps the disc's first title."),
     field("min_length_secs", "Shortest title to rip (seconds)", G::Hidden, Kind::Number { max: MAX_DURATION_SECS }, N(600),
         "Skip titles shorter than this (600 = 10 minutes).").hide_if("output_format", "iso"),
     field("tv_auto", "Rip TV seasons automatically", G::Ripping, Kind::Bool, B(true),
@@ -426,6 +428,14 @@ impl Field {
         let text = || v.as_str().ok_or_else(|| format!("{key}: expected text"));
         match self.kind {
             Kind::Text => Ok(Some(json!(text()?))),
+            Kind::Language => {
+                let s = text()?;
+                if s.trim().is_empty() || freemkv_engine::is_language_tag(s) {
+                    Ok(Some(json!(s)))
+                } else {
+                    Err(format!("{key}: '{s}' is not a language"))
+                }
+            }
             Kind::Path(rule) => {
                 let s = text()?;
                 if mode == Mode::Save && !s.is_empty() {

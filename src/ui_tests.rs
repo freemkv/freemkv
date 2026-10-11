@@ -328,6 +328,8 @@ fn episode_disc() -> Scanned {
             source_packets: 0,
             feed_span: None,
         });
+        title.selection_evidence.segments =
+            libfreemkv::disc::ContentSegment::from_clips(&title.clips);
         title
             .streams
             .push(libfreemkv::Stream::Audio(libfreemkv::AudioStream {
@@ -2819,6 +2821,33 @@ fn settings_commit_takes_picks_the_form_did_change() {
     edited.audio_langs = "fra".into();
     let merged = app.commit_settings(&before, edited);
     assert_eq!(merged.audio_langs, "fra");
+}
+
+// The Settings form's presentation language is checked on commit: a tag that is not a
+// language keeps the previous value and says why, in every shell.
+#[test]
+fn settings_commit_refuses_a_presentation_language_that_is_not_a_language() {
+    let mut app = picking(pick_disc());
+    app.settings.presentation_language = "de".into();
+    let before = app.settings.clone();
+    let mut edited = before.clone();
+    edited.presentation_language = "xx".into();
+    edited.dest_dir = "/elsewhere".into();
+    let merged = app.commit_settings(&before, edited);
+    assert_eq!(merged.presentation_language, "de");
+    assert_eq!(merged.dest_dir, "/elsewhere");
+    let last = app
+        .log
+        .last()
+        .map(|line| line.text.clone())
+        .unwrap_or_default();
+    assert!(last.contains("E9083") && last.contains("xx"), "{last}");
+    let mut edited = merged.clone();
+    edited.presentation_language = "fr".into();
+    assert_eq!(
+        app.commit_settings(&merged, edited).presentation_language,
+        "fr"
+    );
 }
 
 #[test]

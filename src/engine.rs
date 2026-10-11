@@ -601,9 +601,8 @@ fn stopped_open<T>(
     }
 }
 
-// The titles Open resolves keys for: the main title, or its review candidates when automatic
-// selection needs review. Open never fails on review: ticking titles is the way past it, and
-// the preflight reports `selection-review-required`.
+// The titles Open resolves keys for: the main title. MainMovie never needs review today; were
+// it to, Open would scope to the candidates rather than fail.
 pub(crate) fn open_titles(disc: &libfreemkv::Disc) -> Vec<usize> {
     fe::resolve_selection(disc, &fe::Selection::MainMovie)
         .unwrap_or_else(|review| review.candidates)

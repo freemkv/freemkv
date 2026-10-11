@@ -44,7 +44,7 @@ fn presentation_preference_single_output_is_frozen_in_queue() {
     let plan = MoviePlanner::from_config(&cfg)
         .plan(
             &job.iso,
-            &crate::selection_test_fixtures::launch_titles(),
+            &crate::selection_test_fixtures::variant_titles(),
             &MediaMetadata::default(),
             &job.target,
         )

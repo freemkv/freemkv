@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The main movie follows your language again on discs that carry it in more than one language** (CLI, app, server): with a presentation language, or audio languages such as `-a de`, the version in that language is chosen when it is another cut of the first title (most of its content shared, in the same order). Trailers, single episodes, decoy playlists and separate copies are never chosen this way. The same rule applies to DVD, Blu-ray, UHD and HD DVD.
+- **A language preference no longer stops a rip for review** (CLI, app, server): on most DVDs the CLI exited, the app ticked no title and the server held the disc whenever an audio or presentation language was set. A language the disc doesn't match now keeps the first title.
+- **A presentation language that isn't a language is refused where you enter it** (CLI, app, server): `--presentation-language xx` is an error (E9083), the app's Settings keep the previous value and say why, and the server's Settings page refuses the save. It used to be ignored silently.
+- **`--presentation-language` no longer fails on a source the CLI can't pre-scan** (CLI only: the app and server always scan first); such a source has one title, so the flag changes nothing.
+
 ## [1.8.3] — 2026-10-08
 
 ### Changed

@@ -527,6 +527,13 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             "--presentation-language" => match args.get(i + 1) {
                 Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
                     i += 1;
+                    // Selection keeps title 0 for a tag it cannot match, so refuse it here.
+                    if !freemkv_engine::is_language_tag(v) {
+                        let tag = v.clone();
+                        return Err(render_error(&libfreemkv::Error::StreamLanguageUnknown {
+                            tag,
+                        }));
+                    }
                     f.presentation_language = Some(v.clone());
                 }
                 _ => {
@@ -774,24 +781,11 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
             .as_ref()
             .map(|(disc, _, _)| disc)
             .or_else(|| iso_disc.as_ref().map(|(disc, _)| disc));
-        if let Some(disc) = scanned {
-            match automatic_presentation_title(&disc.titles, &streams.audio, presentation_language)
-            {
-                Ok(index) => title_nums = vec![index + 1],
-                Err(reason) => {
-                    out.raw(Always, &title_review_message(&reason));
-                    return 1;
-                }
-            }
-        } else if presentation_language.is_some() {
-            out.raw(
-                Always,
-                &strings::get_or(
-                    "error.presentation_needs_scan",
-                    "Presentation-language selection requires a scanned disc; choose --title explicitly.",
-                ),
-            );
-            return 1;
+        // An unscanned source has one title, so the presentation language changes nothing.
+        if let Some(index) =
+            scanned.and_then(|disc| main_title(&disc.titles, &streams.audio, presentation_language))
+        {
+            title_nums = vec![index + 1];
         }
     }
     let titles = iso_disc.as_ref().map(|(d, _)| d.titles.clone());
@@ -2859,19 +2853,12 @@ fn resolve_scanned_title<'a>(
     Ok(title)
 }
 
-fn title_review_message(reason: &str) -> String {
-    strings::fmt_or(
-        "error.selection_review",
-        "Title selection needs review: {reason}; choose --title explicitly.",
-        &[("reason", &strings::review_reason_text(reason))],
-    )
-}
-
-fn automatic_presentation_title(
+// The main title (0-based): title 0, or a cut of it in the wanted language. Never a review.
+fn main_title(
     titles: &[libfreemkv::DiscTitle],
     audio: &freemkv_engine::StreamFilter,
     presentation_language: Option<String>,
-) -> Result<usize, String> {
+) -> Option<usize> {
     let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
         &freemkv_engine::Selection::MainMovie,
         audio,
@@ -2879,14 +2866,7 @@ fn automatic_presentation_title(
             presentation_language,
         },
     );
-    if let Some(reason) = report.review_reason {
-        return Err(reason.key().into());
-    }
-    report
-        .indices
-        .first()
-        .copied()
-        .ok_or_else(|| "no-titles".into())
+    report.indices.first().copied()
 }
 
 fn normalize_title_nums(title_nums: &mut Vec<usize>, all_titles: bool) {

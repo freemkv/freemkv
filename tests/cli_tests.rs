@@ -608,3 +608,35 @@ fn info_share_on_a_folder_honours_help() {
     );
     assert!(!s.0.join("disc-profile-backup").exists(), "captured anyway");
 }
+
+// `--presentation-language` is checked as the flag is read, and on a source the keyless
+// scan cannot read it is a no-op (one title), not a demand for a scanned disc.
+#[test]
+fn presentation_language_is_validated_and_needs_no_scan() {
+    let s = Scratch::new("presentation");
+    let iso = s.file("junk.iso", b"not a disc image");
+    let mkv = s.0.join("out.mkv");
+    let run = |language: &str| {
+        freemkv()
+            .args([
+                format!("iso://{}", iso.display()),
+                format!("mkv://{}", mkv.display()),
+                "--presentation-language".into(),
+                language.into(),
+            ])
+            .output()
+            .expect("failed to run")
+    };
+    let bad = run("xx");
+    let combined = combined_output(&bad);
+    assert_ne!(bad.status.code(), Some(0), "{combined}");
+    assert!(
+        combined.contains("E9083") && combined.contains("'xx'"),
+        "{combined}"
+    );
+    let combined = combined_output(&run("de"));
+    assert!(
+        !combined.contains("requires a scanned disc"),
+        "an unscanned source must not demand a scan: {combined}"
+    );
+}

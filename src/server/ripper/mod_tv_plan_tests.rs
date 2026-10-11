@@ -2,9 +2,9 @@ use super::*;
 use libfreemkv::disc::{ContentFormat, Extent};
 
 #[test]
-fn presentation_preference_capture_holds_and_freezes_single_output() {
-    let titles = crate::selection_test_fixtures::launch_titles();
-    for (language, expected) in [("de", 1), ("en", 0)] {
+fn presentation_preference_capture_freezes_the_chosen_cut_and_never_holds() {
+    let titles = crate::selection_test_fixtures::variant_titles();
+    for (language, expected) in [("de", 1), ("en", 0), ("", 0), ("fr", 0)] {
         let cfg = Config {
             presentation_language: language.into(),
             ..Default::default()
@@ -19,19 +19,7 @@ fn presentation_preference_capture_holds_and_freezes_single_output() {
             capture_title_index(&titles, &cfg, "movie", "").unwrap(),
             expected
         );
-    }
-    for language in ["", "fr"] {
-        let cfg = Config {
-            presentation_language: language.into(),
-            ..Default::default()
-        };
-        assert!(check_capture_selection(&titles, &cfg, "movie", "").is_err());
-        assert!(plan_mux_outputs(&titles, &cfg, "movie", "Movie", 0, "movie.mkv", None).is_err());
-        let iso = Config {
-            output_format: "iso".into(),
-            ..cfg
-        };
-        assert!(check_capture_selection(&titles, &iso, "movie", "").is_ok());
+        assert!(check_capture_selection(&titles, &cfg, "movie", "").is_ok());
     }
 }
 
@@ -417,12 +405,12 @@ fn tv_auto_off_does_not_fan_out() {
 #[test]
 fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
     use crate::server::planner::PlanError;
-    let ambiguous = selection_review_message(&PlanError::SelectionNeedsReview(
-        "ambiguous-presentation-language".into(),
+    let roster = selection_review_message(&PlanError::SelectionNeedsReview(
+        "missing-episode-roster".into(),
     ));
     assert_eq!(
-        ambiguous,
-        "Title selection needs review before muxing: more than one presentation matches the presentation language. No fallback title was selected."
+        roster,
+        "Title selection needs review before muxing: the disc has no authored episode list. No fallback title was selected."
     );
     let numbering = selection_review_message(&PlanError::SelectionNeedsReview(
         "Episode numbering is outside the supported range.".into(),

@@ -31,23 +31,15 @@ pub fn fmt_or(key: &str, english: &str, args: &[(&str, &str)]) -> String {
 }
 
 /// Localized sentence for an engine selection-review reason key
-/// (`SelectionReviewReason::key()`), or `no-titles`. An unknown key is shown
-/// as-is rather than hidden.
+/// (`SelectionReviewReason::key()`). An unknown key is shown as-is rather than hidden.
+// Only the server (in the lib) renders review reasons; the CLI binary compiles this module too.
+#[allow(dead_code)]
 pub fn review_reason_text(key: &str) -> String {
     let english = match key {
         "missing-episode-roster" => "the disc has no authored episode list",
         "incomplete-episode-roster" => "the disc's authored episode list is incomplete",
         "conflicting-episode-roster" => "the disc's authored episode lists conflict",
         "invalid-episode-roster" => "the disc's authored episode list is invalid",
-        "incomplete-launch-proof" => "the disc's launch sequence is incomplete",
-        "invalid-launch-proof" => "the disc's launch sequence is invalid",
-        "missing-presentation-language" => "the disc has no presentation in the requested language",
-        "invalid-presentation-language" => "the presentation language is not valid",
-        "unmatched-presentation-language" => "no presentation matches the presentation language",
-        "ambiguous-presentation-language" => {
-            "more than one presentation matches the presentation language"
-        }
-        "no-titles" => "the disc has no usable titles",
         other => return other.to_string(),
     };
     get_or(
