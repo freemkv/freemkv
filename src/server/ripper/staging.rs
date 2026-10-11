@@ -1265,14 +1265,21 @@ pub fn mark_aborted_on_loss_reporting_landed(staging_disc_dir: &Path, reason: &s
     write_aborted_loss_marker(staging_disc_dir, reason, attempt)
 }
 
+/// Record the raw volume label a capture plans from (its replan reads it back).
+pub(super) fn stamp_capture_label(st: &mut DiscState, label: &str) {
+    st.disc_label = label.to_string();
+    st.disc_name = label.to_string();
+}
+
 /// The capture-start Sweeping write, plus the caller's fields in the same write.
-/// A new sweep re-reads the disc, so the prior attempt's one-shot accept-loss
-/// and E7034 needs-disc hold no longer apply. `.ripped`/`.failed` replace it.
+/// A new sweep re-reads the disc, so the prior attempt's one-shot accept-loss,
+/// E7034 needs-disc hold and hold reason no longer apply.
 pub(super) fn start_sweep(dir: &Path, f: impl FnOnce(&mut DiscState)) -> io::Result<()> {
     mutate_state(dir, StagingState::Sweeping, |s| {
         s.state = StagingState::Sweeping;
         s.accept_loss = false;
         s.needs_disc = false;
+        s.failure_reason = None;
         f(s);
     })
 }
@@ -1413,6 +1420,8 @@ pub fn mark_handoff(
     let mut st = state_for_write(staging_disc_dir, state)?;
     st.state = state;
     st.title_confident = title_confident;
+    // A finished mux supersedes an earlier attempt's failure or hold reason.
+    st.failure_reason = None;
     if st.date.is_empty() {
         st.date = crate::server::util::format_date();
     }

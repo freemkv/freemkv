@@ -868,6 +868,15 @@ fn forget_space_refusal(staging_dir: &Path) {
         .remove(staging_dir);
 }
 
+/// The raw volume label a job's plan is made from (season, disc number, label-only TV).
+pub(super) fn planning_label(st: &staging::DiscState) -> &str {
+    if st.disc_label.is_empty() {
+        &st.disc_name
+    } else {
+        &st.disc_label
+    }
+}
+
 pub(super) fn check_resume_state(saved: &staging::DiscState) -> Result<(), String> {
     if saved.reset_in_progress {
         return Err("Capture reset is incomplete; finish Start over before resuming. Staging is held unchanged.".into());
@@ -1052,7 +1061,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // The raw label the replan plans from (plan_mux_outputs), else the scan's.
     let disc_label = saved_state
         .as_ref()
-        .map(|s| s.disc_label.clone())
+        .map(|s| planning_label(s).to_string())
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| {
             super::STATE
@@ -1094,7 +1103,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             &disc.titles,
             &cfg_read,
             saved.media_type,
-            &saved.disc_label,
+            &disc_label,
             saved.tmdb_id,
             &filename,
             saved.episode_start,
@@ -2472,3 +2481,7 @@ mod superseded_outputs_tests;
 #[cfg(test)]
 #[path = "resume_plan_review_hold_tests.rs"]
 mod plan_review_hold_tests;
+
+#[cfg(test)]
+#[path = "resume_planning_label_tests.rs"]
+mod planning_label_tests;

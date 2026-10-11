@@ -3249,6 +3249,7 @@ fn rip_disc_inner(
     // One Sweeping write governs the sweep+patch window (begin_capture already
     // stamped the identity); without it a crash mid-sweep leaves the dir ungoverned.
     if let Err(e) = staging::start_sweep(std::path::Path::new(&staging), |s| {
+        staging::stamp_capture_label(s, &disc_name);
         s.origin_device = device.to_string();
         s.title = display_name.clone();
         s.year = tmdb_year;
