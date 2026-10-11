@@ -538,14 +538,7 @@ impl Library {
             return Ok(store);
         }
         let failed = |at: u64, kind, why: &str| {
-            let message = crate::strings::fmt_or(
-                "server.library.matches_unreadable",
-                "the saved matches (library-matches.json in {dir}) cannot be read: {error}",
-                &[
-                    ("dir", &self.config_dir.display().to_string()),
-                    ("error", why),
-                ],
-            );
+            let message = matches_unreadable(&self.config_dir, why);
             (now < at.saturating_add(MATCHES_RETRY_SECS))
                 .then(|| std::io::Error::new(kind, message))
         };
@@ -1829,3 +1822,11 @@ mod tests;
 #[cfg(test)]
 #[path = "match_tests.rs"]
 mod match_tests;
+
+fn matches_unreadable(config_dir: &Path, why: &str) -> String {
+    crate::strings::fmt_or(
+        "server.library.matches_unreadable",
+        "the saved matches (library-matches.json in {dir}) cannot be read: {error}",
+        &[("dir", &config_dir.display().to_string()), ("error", why)],
+    )
+}
