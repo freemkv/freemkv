@@ -681,6 +681,40 @@ fn hold_unreadable_plan(
     reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
 }
 
+// The superseded plan is never delivered; drop its outputs (plain leaves in this job
+// only) so they do not hold staging space. `sources` (the capture image and its map,
+// an ISO output's only file) are never deleted.
+pub(super) fn remove_superseded_outputs(
+    device: &str,
+    staging_dir: &Path,
+    old: &[staging::Output],
+    new: &[staging::Output],
+    sources: &[&Path],
+) {
+    let is_source = |leaf: &str| {
+        sources.iter().any(|p| {
+            p.file_name()
+                .is_some_and(|n| n == std::ffi::OsStr::new(leaf))
+        })
+    };
+    for old in old {
+        if is_plain_leaf(&old.filename)
+            && !is_source(&old.filename)
+            && !new.iter().any(|o| o.filename == old.filename)
+        {
+            match std::fs::remove_file(staging_dir.join(&old.filename)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    crate::server::log::device_log(
+                        device,
+                        &format!("superseded output {} was not removed: {e}", old.filename),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 // Whether `name` is a bare file name: no directory part, not `.`/`..`, not empty.
 fn is_plain_leaf(name: &str) -> bool {
     Path::new(name).file_name().is_some_and(|n| n == name)
@@ -1077,21 +1111,13 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e.to_string()));
             return;
         }
-        // The superseded plan is never delivered; drop its outputs (plain leaves in
-        // this job only) so they do not hold staging space beside the new plan.
-        for old in &plan_outputs {
-            if is_plain_leaf(&old.filename) && !outputs.iter().any(|o| o.filename == old.filename) {
-                match std::fs::remove_file(staging_dir.join(&old.filename)) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        crate::server::log::device_log(
-                            device,
-                            &format!("superseded output {} was not removed: {e}", old.filename),
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
+        remove_superseded_outputs(
+            device,
+            &staging_dir,
+            &plan_outputs,
+            &outputs,
+            &[&iso_path, &mapfile_path],
+        );
         plan_outputs = outputs;
     }
     // Numeric indices belong to the original drive scan. Rebind the entire plan
@@ -2414,3 +2440,7 @@ mod vid_needs_disc_tests;
 #[cfg(test)]
 #[path = "resume_upgrade_tests.rs"]
 mod upgrade_tests;
+
+#[cfg(test)]
+#[path = "resume_superseded_outputs_tests.rs"]
+mod superseded_outputs_tests;
