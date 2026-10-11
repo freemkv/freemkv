@@ -154,17 +154,14 @@ fn journal_checkpoint_failure_preserves_source_and_never_publishes() {
     let source = dir.path().join("source.iso");
     let destination = dir.path().join("destination.iso");
     std::fs::write(&source, b"source bytes").unwrap();
-    let published = super::Published::default();
     let outcome = super::move_file(
         &source,
         &destination,
         &|_, _, _, _| {},
         std::sync::Arc::new(|_| Err(std::io::Error::other("journal failed"))),
         dir.path(),
-        published.clone(),
     );
     assert!(matches!(outcome, super::MoveOutcome::Failed));
-    assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(std::fs::read(source).unwrap(), b"source bytes");
     assert!(!destination.exists());
 }
@@ -176,38 +173,16 @@ fn journal_callback_concurrent_winner_is_not_overwritten() {
     let destination = dir.path().join("destination.iso");
     std::fs::write(&source, b"source bytes").unwrap();
     let winner = destination.clone();
-    let published = super::Published::default();
     let outcome = super::move_file(
         &source,
         &destination,
         &|_, _, _, _| {},
         std::sync::Arc::new(move |_| std::fs::write(&winner, b"winner")),
         dir.path(),
-        published.clone(),
     );
     assert!(matches!(outcome, super::MoveOutcome::Collision));
-    assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(std::fs::read(source).unwrap(), b"source bytes");
     assert_eq!(std::fs::read(destination).unwrap(), b"winner");
-}
-
-#[test]
-fn a_journaled_publication_reports_that_it_published() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("source.iso");
-    let destination = dir.path().join("destination.iso");
-    std::fs::write(&source, b"source bytes").unwrap();
-    let published = super::Published::default();
-    let outcome = super::move_file(
-        &source,
-        &destination,
-        &|_, _, _, _| {},
-        std::sync::Arc::new(|_| Ok(())),
-        dir.path(),
-        published.clone(),
-    );
-    assert!(matches!(outcome, super::MoveOutcome::Moved));
-    assert!(published.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]
@@ -1116,7 +1091,6 @@ fn deliver(src: &Path, dest: &Path) -> MoveOutcome {
         &noop_progress,
         std::sync::Arc::new(|_| Ok(())),
         src.parent().unwrap(),
-        Default::default(),
     )
 }
 

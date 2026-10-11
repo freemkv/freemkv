@@ -437,7 +437,7 @@ fn target_lock_set_excludes_a_cooperating_writer_until_released() {
 }
 
 #[test]
-fn a_publication_whose_size_changed_is_not_rebound() {
+fn a_destination_changed_after_publication_is_held() {
     let (_temp, dir, _cfg, manifest) = fixture();
     let entry = &manifest.entries[0];
     let candidate = entry.destination.with_extension("part");
@@ -445,9 +445,11 @@ fn a_publication_whose_size_changed_is_not_rebound() {
     Manifest::prepare(&dir, 0, &candidate).unwrap();
     libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
     std::fs::write(&entry.destination, b"shadowed").unwrap();
-    assert!(Manifest::settle(&dir, 0, true, true).is_err());
-    let saved = Manifest::load(&dir).unwrap().unwrap();
-    assert!(saved.entries[0].published.is_none() && !saved.entries[0].completed);
+    assert!(Manifest::settle(&dir, 0).is_err());
+    assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
+    assert!(!Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
+    assert_eq!(std::fs::read(&entry.destination).unwrap(), b"shadowed");
+    assert!(entry.source.exists());
 }
 
 #[test]
@@ -845,11 +847,8 @@ fn live_smb_publication_and_journaled_delivery() {
     );
     let delivered = Manifest::load(&job).unwrap().unwrap();
     let entry = &delivered.entries[0];
-    let (prepared, published) = (
-        entry.prepared.unwrap(),
-        entry.published.unwrap(),
-    );
-    eprintln!("live: delivered {outcome:?}; prepared {prepared:?}; published {published:?}");
+    let prepared = entry.prepared.unwrap();
+    eprintln!("live: delivered {outcome:?}; prepared {prepared:?}");
     assert!(entry.completed);
     assert_eq!(std::fs::read(&destination).unwrap(), rip);
     delivered.verify_delivered().unwrap();
@@ -875,7 +874,6 @@ fn live_smb_publication_and_journaled_delivery() {
         &|_, _, _, _| {},
         Arc::new(move |_| std::fs::write(&racing, b"winner")),
         &job2,
-        Default::default(),
     );
     assert!(
         matches!(outcome, super::super::MoveOutcome::Collision),

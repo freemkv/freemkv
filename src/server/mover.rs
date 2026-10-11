@@ -607,8 +607,8 @@ fn copy_counting_with_halt(
             total += n as u64;
             written.store(total, Ordering::Relaxed);
         }
-        // Journal rebinds compare size and this explicit time; a deferred SMB
-        // close would otherwise stamp publication time. Best effort: see rebind.
+        // The journal's Stamp is size plus this explicit time; a deferred SMB close
+        // would otherwise restamp it. Best effort: a mismatch only holds the delivery.
         stage("pinning destination modification time");
         if let Err(error) = reader
             .metadata()
@@ -1724,7 +1724,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 &format!("delivery held: {reason}"),
-                "The library file does not match what this delivery prepared or published, and it is never removed automatically. Inspect it, remove it if it is broken or not this rip, then choose Retry. Staged sources are retained.",
+                "The library file does not match what this delivery prepared, and it is never removed automatically. Inspect it, remove it if it is broken or not this rip, then choose Retry. Staged sources are retained.",
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2368,8 +2368,6 @@ fn absolute_for_log(dest: &str) -> String {
 }
 
 type BeforePublish = std::sync::Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
-// Set once our own no_replace returned Ok, whatever outcome is reported later.
-type Published = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 fn move_file(
     src: &Path,
@@ -2377,7 +2375,6 @@ fn move_file(
     on_progress: &dyn Fn(u8, f64, f64, f64),
     before_publish: BeforePublish,
     job: &Path,
-    published: Published,
 ) -> MoveOutcome {
     // Journal recovery alone may adopt an existing destination. Never infer
     // transaction ownership from its size, structure, or the source's absence.
@@ -2398,7 +2395,6 @@ fn move_file(
     }
     match libfreemkv::io::publish::no_replace(src, dest) {
         Ok(()) => {
-            published.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
@@ -2458,10 +2454,6 @@ fn move_file(
             },
             Some(&worker_activity),
         );
-        // Copy returns Ok only after publication, even if the monitor stalled.
-        if result.is_ok() {
-            published.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
         let _ = tx.send(result);
     }) {
         Ok(handle) => handle,

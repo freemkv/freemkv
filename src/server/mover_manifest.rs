@@ -4,7 +4,6 @@
 //! (`util::Stamp`). No file is known by device/inode: SMB renumbers devices on remount
 //! and derives inodes from names. Adopting a destination found after a crash also
 //! needs its first and last 64 KiB to match the staged source, while that exists.
-//! The publishing call records `published` after checking the destination's stamp.
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,8 +22,6 @@ struct Entry {
     destination_parent_id: (u64, u64),
     source_identity: Stamp,
     prepared: Option<Stamp>,
-    #[serde(default)]
-    published: Option<Stamp>,
     completed: bool,
     // The destination as planned from settings; links and logs use this form.
     #[serde(default)]
@@ -32,11 +29,8 @@ struct Entry {
 }
 
 impl Entry {
-    // The publication this journal proved last: rebound, else as prepared.
-    fn owned(&self) -> io::Result<&Stamp> {
-        self.published
-            .as_ref()
-            .or(self.prepared.as_ref())
+    fn prepared(&self) -> io::Result<Stamp> {
+        self.prepared
             .ok_or_else(|| io::Error::other("delivery identity missing"))
     }
 }
@@ -169,7 +163,6 @@ impl Manifest {
                 destination_parent_id,
                 source_identity,
                 prepared: None,
-                published: None,
                 completed: false,
                 planned: Some(destination_planned.clone()),
             });
@@ -289,7 +282,8 @@ impl Manifest {
         // head and tail; never a pathname, a valid-looking media file, or size alone.
         match std::fs::symlink_metadata(&entry.destination) {
             Ok(found) => {
-                if entry.published.is_none() && found.is_file() && found.len() == 0 {
+                if found.is_file() && found.len() == 0 && entry.prepared.is_none_or(|p| p.size != 0)
+                {
                     return Err(io::Error::other(format!(
                         "zero-length file at destination, likely an interrupted publication; \
                          inspect and remove it, then Retry: {}",
@@ -300,7 +294,7 @@ impl Manifest {
                 if entry.prepared.is_none() {
                     return Ok(super::MoveOutcome::Collision);
                 }
-                entry.owned()?.verify(&entry.destination)?;
+                entry.prepared()?.verify(&entry.destination)?;
                 if !entry.completed {
                     adoptable(&entry)?;
                 }
@@ -315,52 +309,32 @@ impl Manifest {
         }
         entry.source_identity.verify(&entry.source)?;
         let owned_dir = dir.to_path_buf();
-        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let outcome = super::move_file(
             &entry.source,
             &entry.destination,
             progress,
             Arc::new(move |candidate| Self::prepare(&owned_dir, index, candidate)),
             dir,
-            published.clone(),
         );
-        let finished = matches!(
+        // A publication reported as stalled is adopted by a later call instead.
+        if matches!(
             outcome,
             super::MoveOutcome::Moved | super::MoveOutcome::Skipped
-        );
-        let published = published.load(std::sync::atomic::Ordering::SeqCst);
-        if published || finished {
-            Self::settle(dir, index, published, finished)?;
+        ) {
+            Self::settle(dir, index)?;
         }
         Ok(outcome)
     }
 
-    // `published`: our no_replace returned Ok in this call, under the target
-    // lock, even if a later step failed. Only then may a changed id rebind.
-    fn settle(dir: &Path, index: usize, published: bool, finished: bool) -> io::Result<()> {
+    fn settle(dir: &Path, index: usize) -> io::Result<()> {
         let mut manifest =
             Self::load(dir)?.ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
         let entry = manifest
             .entries
             .get_mut(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?;
-        let prepared = entry
-            .prepared
-            .as_ref()
-            .ok_or_else(|| io::Error::other("publication did not journal its identity"))?;
-        if published {
-            let current = Stamp::read(&entry.destination)?;
-            if current != *prepared {
-                return Err(io::Error::other(format!(
-                    "published file differs from its prepared size or time: {}",
-                    entry.destination.display()
-                )));
-            }
-            entry.published = Some(current);
-        } else {
-            prepared.verify(&entry.destination)?;
-        }
-        entry.completed |= finished;
+        entry.prepared()?.verify(&entry.destination)?;
+        entry.completed = true;
         manifest.save()
     }
 
@@ -370,7 +344,7 @@ impl Manifest {
             if !entry.completed {
                 return Err(io::Error::other("delivery plan is incomplete"));
             }
-            entry.owned()?.verify(&entry.destination)?;
+            entry.prepared()?.verify(&entry.destination)?;
             sync_parent(&entry.destination)?;
         }
         Ok(())
@@ -471,7 +445,7 @@ impl Manifest {
         for entry in &self.cleanup {
             if let Some(delivered) = self.entries.iter().find(|e| e.source == entry.path) {
                 verify_parent(&delivered.destination, delivered.destination_parent_id)?;
-                delivered.owned()?.verify(&delivered.destination)?;
+                delivered.prepared()?.verify(&delivered.destination)?;
             }
             match entry.identity.verify(&entry.path) {
                 Ok(()) => std::fs::remove_file(&entry.path)?,
