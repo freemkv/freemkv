@@ -1562,9 +1562,13 @@ fn check_and_move(cfg: &Config) {
             cfg.keep_iso || crate::server::ripper::output_is_iso_image(&cfg.output_format);
         let (mut ripped_files, listing_complete): (Vec<std::path::PathBuf>, bool) =
             match std::fs::read_dir(&dir) {
-                Ok(entries) => {
-                    collect_ripped_files(entries.map(|r| r.map(|e| e.path())), move_iso, &dir)
-                }
+                Ok(entries) => collect_ripped_files(
+                    entries
+                        .map(|r| r.map(|e| e.path()))
+                        .chain(listing_faults(&dir)),
+                    move_iso,
+                    &dir,
+                ),
                 Err(e) => {
                     // Enumerating the staging dir failed (e.g. transient NFS
                     // read_dir error). Without this arm the dir is skipped
@@ -2309,6 +2313,17 @@ fn teardown_blocked(dir: &str, reason: &str, hint: &str) {
         row.retry_after = retry_delay(row.teardown_attempts)
             .and_then(|d| std::time::Instant::now().checked_add(d));
         row.retry_held = row.retry_after.is_none();
+    }
+}
+
+// Listing errors the tests inject into a staging dir's listing; none otherwise.
+fn listing_faults(dir: &Path) -> Vec<std::io::Result<std::path::PathBuf>> {
+    #[cfg(test)]
+    return test_hooks::listing_faults(dir);
+    #[cfg(not(test))]
+    {
+        let _ = dir;
+        Vec::new()
     }
 }
 
@@ -3302,6 +3317,20 @@ pub(crate) mod test_hooks {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push((path.to_string(), active, blocked));
+    }
+    /// Staging dirs whose listing reports one entry error.
+    pub static LISTING_FAULTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    pub fn listing_faults(dir: &Path) -> Vec<std::io::Result<PathBuf>> {
+        let faulty = LISTING_FAULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|p| p == dir);
+        if faulty {
+            vec![Err(std::io::Error::other("injected listing fault"))]
+        } else {
+            Vec::new()
+        }
     }
     pub fn preflighted(root: &Path) {
         for (_, scope, n) in PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).iter() {

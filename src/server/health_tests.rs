@@ -739,7 +739,7 @@ fn a_late_answer_is_the_verdict() {
 // probe included: it never waits two bounds. Its own probe, out less than the bound when the
 // wait runs out, is "still checking", not hung; its answer, when it comes, is the verdict.
 #[test]
-fn a_preflight_waiting_to_the_hang_bound_publishes_the_hang() {
+fn a_preflight_run_out_after_waiting_on_another_reads_still_checking() {
     let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = tempfile::tempdir().unwrap();
     let dir = t.path().to_path_buf();
@@ -756,10 +756,15 @@ fn a_preflight_waiting_to_the_hang_bound_publishes_the_hang() {
     eventually("the caller waits on the earlier probe", || {
         someone_waited_on(&dir)
     });
-    std::thread::sleep(hang / 4);
+    // Late in the wait: counted from its own start, its probe would run to 3.5 s.
+    std::thread::sleep(hang * 3 / 4);
     drop(earlier);
     let p = caller.join().unwrap().unwrap_err();
-    assert!(called.elapsed() < hang + hang / 4, "{:?}", called.elapsed());
+    assert!(
+        called.elapsed() < hang + hang * 3 / 8,
+        "{:?}",
+        called.elapsed()
+    );
     assert_eq!(p.fault, Fault::Unresponsive);
     assert!(p.detail.contains(STILL_CHECKING), "{}", p.detail);
     open.send(()).unwrap();
@@ -1026,16 +1031,19 @@ fn a_round_that_sees_a_stop_does_not_heal() {
 fn a_busy_folder_does_not_hold_up_the_rest_of_the_batch() {
     let busy = PathBuf::from("/test/batch-queue-busy");
     let free = PathBuf::from("/test/batch-queue-free");
-    let running = begin(&busy, Duration::from_secs(5), || {
-        std::thread::sleep(Duration::from_millis(1500));
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let running = begin(&busy, Duration::from_secs(30), move || {
+        let _ = gate.recv();
     });
     let t = Instant::now();
+    // Queued behind the busy folder, the batch would wait out its whole 5 s limit.
     let out = bounded_each(
         vec![(busy.clone(), 1), (free.clone(), 2)],
-        Duration::from_millis(600),
+        Duration::from_secs(5),
         |n| n,
     );
     let took = t.elapsed();
+    release.send(()).unwrap();
     let _ = running.wait();
     assert_ne!(
         out[0],
@@ -1043,7 +1051,7 @@ fn a_busy_folder_does_not_hold_up_the_rest_of_the_batch() {
         "the busy folder is not probed twice"
     );
     assert_eq!(out[1], Bounded::Done(2), "the free folder is checked");
-    assert!(took < Duration::from_millis(500), "took {took:?}");
+    assert!(took < Duration::from_millis(2500), "took {took:?}");
 }
 
 // A preflight waits at most one hang bound in all, from the call: waiting for another
@@ -1052,20 +1060,31 @@ fn a_busy_folder_does_not_hold_up_the_rest_of_the_batch() {
 fn a_preflight_waits_one_hang_bound_in_all() {
     let t = tempfile::tempdir().unwrap();
     let dir = t.path().to_path_buf();
-    let hang = Duration::from_millis(1000);
-    let earlier = begin(&dir, Duration::from_secs(5), || {
-        std::thread::sleep(Duration::from_millis(800));
+    let hang = Duration::from_secs(3);
+    let (release_earlier, earlier_gate) = std::sync::mpsc::channel::<()>();
+    let earlier = begin(&dir, Duration::from_secs(30), move || {
+        let _ = earlier_gate.recv();
     });
+    let (probe, release_own) = gated();
     let started = Instant::now();
-    let result = preflight_hanging_after("Output", &dir, hang, hang, |_| {
-        std::thread::sleep(Duration::from_millis(900));
-        Ok(())
-    });
+    let caller = {
+        let dir = dir.clone();
+        std::thread::spawn(move || preflight_hanging_after("Output", &dir, hang, hang, probe))
+    };
+    // The earlier probe answers 2 s in; two bounds would then run to 5 s.
+    std::thread::sleep(Duration::from_secs(2));
+    release_earlier.send(()).unwrap();
+    let result = caller.join().unwrap();
     let took = started.elapsed();
+    let _ = release_own.send(());
     let _ = earlier.wait();
     assert!(
-        took < Duration::from_millis(1400),
+        took < Duration::from_millis(4200),
         "took {took:?}: {result:?}"
+    );
+    assert!(
+        result.is_err_and(|p| p.detail.contains(STILL_CHECKING)),
+        "its own probe is still out"
     );
 }
 

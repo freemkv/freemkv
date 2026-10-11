@@ -367,14 +367,33 @@ fn a_failed_teardown_backs_off_and_its_re_pass_writes_nothing() {
     assert_eq!(links_before, links_after, "links rewritten");
 }
 
-// The incomplete-listing teardown skip goes through the same backoff as a failed teardown.
+// A delivered rip whose staging listing came back incomplete keeps its staging folder (its
+// teardown would delete what it could not see), shows why, and backs off.
 #[test]
 fn the_incomplete_listing_skip_backs_off_too() {
-    let src = crate::server::util::source_lf(include_str!("mover.rs"));
-    let skip = src.find("if !listing_complete {\n            teardown_blocked(");
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dest) = journaled(tmp.path(), "Unlisted");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    test_hooks::LISTING_FAULTS.lock().unwrap().push(job.clone());
+    check_and_move(&cfg);
+    test_hooks::LISTING_FAULTS
+        .lock()
+        .unwrap()
+        .retain(|p| *p != job);
+    let left = row(&key);
+    clear_error(&key);
+    assert!(dest.exists() && job.exists(), "delivered, staging kept");
+    let left = left.expect("the skip is shown");
     assert!(
-        skip.is_some(),
-        "the listing skip must record a backed-off row"
+        left.reason.contains("could not be fully listed"),
+        "{left:?}"
+    );
+    assert!(
+        left.retry_after
+            .is_some_and(|t| t > std::time::Instant::now()),
+        "backs off: {left:?}"
     );
 }
 
@@ -682,13 +701,19 @@ fn a_stall_is_counted_in_the_journal_when_it_is_declared() {
         tmp.path(),
         Duration::from_millis(40),
         std::sync::Arc::new(move || {
-            std::thread::sleep(Duration::from_millis(200));
-            let attempts = super::manifest::Manifest::load(&hook_job)
-                .ok()
-                .flatten()
-                .and_then(|m| m.retry().map(|r| r.attempts));
+            // Blocked "in the kernel" until the stall's attempt is in the journal (or 10 s).
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let attempts = loop {
+                let attempts = super::manifest::Manifest::load(&hook_job)
+                    .ok()
+                    .flatten()
+                    .and_then(|m| m.retry().map(|r| r.attempts));
+                if attempts.is_some() || std::time::Instant::now() > deadline {
+                    break attempts;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
             *hook_seen.lock().unwrap() = Some(attempts);
-            std::thread::sleep(Duration::from_millis(100));
         }),
     );
     check_and_move(&cfg);
@@ -922,10 +947,23 @@ fn a_stall_is_shown_before_its_attempt_is_written() {
     let (cfg, job, _dest) = journaled(tmp.path(), "ShownFirst");
     let key = job.to_string_lossy().into_owned();
     clear_error(&key);
+    let hook_key = key.clone();
     let _hooks = test_hooks::set(
         tmp.path(),
         Duration::from_millis(40),
-        std::sync::Arc::new(|| std::thread::sleep(Duration::from_millis(300))),
+        // Blocked until the stall has been declared and committed (or 10 s).
+        std::sync::Arc::new(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline
+                && !test_hooks::STALL_COMMITS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(k, ..)| *k == hook_key)
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }),
     );
     check_and_move(&cfg);
     drop(_hooks);
