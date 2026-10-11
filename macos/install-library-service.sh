@@ -50,6 +50,11 @@ fi
 # same resource policy as an app for this user-requested rip/mux/move service.
 /usr/bin/plutil -remove ProcessType "$tmp" 2>/dev/null || true
 /usr/bin/plutil -insert ProcessType -string Interactive "$tmp"
+# launchd SIGKILLs a stopping job after ExitTimeOut (default 20 s). Give the
+# server longer than its own stop deadline (116 s), which cuts a stop short
+# itself and logs what did not stop.
+/usr/bin/plutil -remove ExitTimeOut "$tmp" 2>/dev/null || true
+/usr/bin/plutil -insert ExitTimeOut -integer 130 "$tmp"
 /usr/bin/plutil -lint "$tmp" >/dev/null
 chmod 600 "$tmp"
 if [[ -f $plist ]]; then cp -p "$plist" "$plist.previous"; fi

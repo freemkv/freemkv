@@ -8,13 +8,15 @@ import { stagedLine } from './folders.js';
 function storageSummary(d) {
   if ((d.move_errors || []).length) return '<span style="color:var(--bad)">file delivery needs attention — see <a href="/drives">Drives</a></span>';
   if (!(d.mounts || []).length) return 'checking folders';
-  return d.mounts.every(m => m.ok) ? 'every folder answering' : '<span style="color:var(--bad)">a folder needs attention</span>';
+  if (d.mounts.every(m => m.ok)) return 'every folder answering';
+  if (d.mounts.every(m => m.ok || m.state === 'checking')) return 'a folder is slow to answer — still checking';
+  return '<span style="color:var(--bad)">a folder needs attention</span>';
 }
 
 function storageFolderRow(m) {
   const used = m.total_bytes ? 100 - (m.free_bytes / m.total_bytes) * 100 : null;
   const state = m.state;
-  const tone = state === 'ok' ? 'ok' : state === 'unresponsive' ? 'warn' : 'bad';
+  const tone = state === 'ok' ? 'ok' : (state === 'unresponsive' || state === 'checking') ? 'warn' : 'bad';
   const health = state === 'ok' ? 'Accessible' : (m.message || state);
   return '<tr><td class="title"><b>' + esc(m.role) + '</b><span class="path mono" title="' + esc(m.path) + '">' + esc(m.path) + '</span></td>'
     + '<td><span class="health"><span class="dot dot-' + tone + '"></span><span>' + esc(health) + '</span></span></td>'
