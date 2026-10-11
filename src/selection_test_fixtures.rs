@@ -27,6 +27,7 @@ fn titles(clips: fn(&str) -> Vec<String>) -> Vec<DiscTitle> {
             title.clips = clips(language)
                 .into_iter()
                 .map(|clip_id| Clip {
+                    marks_on_pes_clock: true,
                     clip_id,
                     in_time: 0,
                     out_time: 45_000_000,
