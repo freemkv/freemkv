@@ -876,7 +876,8 @@ impl Library {
     }
 
     // Drop the links whose MKV a stat found missing, so they are not looked for on every
-    // scan. Only under a root that lists entries: an empty one may be an unmounted share.
+    // scan. Only under a root that lists entries (an empty one may be an unmounted share)
+    // and from a folder that still exists (a nested mount or pool disk may be offline).
     fn forget_gone_links(
         &self,
         d: &Dirs,
@@ -891,6 +892,7 @@ impl Library {
             .iter()
             .filter(|(mkv, _)| checked.get(*mkv) == Some(&Target::Gone))
             .filter(|(mkv, _)| populated.iter().any(|root| mkv.starts_with(root)))
+            .filter(|(mkv, _)| mkv.parent().is_some_and(|p| p.is_dir()))
             .map(|(mkv, l)| (mkv.clone(), l.clone()))
             .collect();
         match links::forget_gone(&self.config_dir, &gone) {

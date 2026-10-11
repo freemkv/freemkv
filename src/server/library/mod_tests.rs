@@ -532,9 +532,46 @@ fn a_scan_forgets_links_to_files_gone_from_a_populated_library_only() {
     // An empty library may be an unmounted share: nothing is forgotten.
     lib.index_now(&d);
     assert!(links::load(&cfg).contains_key(&gone));
+    // Its folder is gone too: a nested mount or pool disk may be offline.
     std::fs::create_dir_all(d.library.join("Other")).unwrap();
     lib.index_now(&d);
+    assert!(links::load(&cfg).contains_key(&gone));
+    // The folder is back without the file: it was deleted.
+    std::fs::create_dir_all(gone.parent().unwrap()).unwrap();
+    lib.index_now(&d);
     assert!(!links::load(&cfg).contains_key(&gone));
+}
+
+#[test]
+fn a_scan_keeps_links_under_a_subfolder_that_disappears() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    let mount = d.library.join("Nested");
+    let kept = mount.join("Kept (2001)/Kept (2001).mkv");
+    let deleted = d.library.join("Here (2002)/Here (2002).mkv");
+    for f in [&kept, &deleted] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, b"x").unwrap();
+    }
+    let isos = d.isos.clone().unwrap();
+    std::fs::create_dir_all(&isos).unwrap();
+    let cfg = t.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    links::record(&cfg, &kept, &isos.join("Kept (2001).iso")).unwrap();
+    links::record(&cfg, &deleted, &isos.join("Here (2002).iso")).unwrap();
+    std::fs::remove_dir_all(&mount).unwrap();
+    std::fs::remove_file(&deleted).unwrap();
+    let lib = Library::open(&cfg, &t.path().join("logs"));
+    lib.index_now(&d);
+    let now = links::load(&cfg);
+    assert!(
+        now.contains_key(&kept),
+        "a vanished subfolder keeps its links"
+    );
+    assert!(
+        !now.contains_key(&deleted),
+        "a file deleted from its folder is forgotten"
+    );
 }
 
 static IN_STAT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
