@@ -550,51 +550,6 @@ impl Queue {
         })
     }
 
-    /// Admit a confirmed correction and save its match as one step: `save` runs only
-    /// once the job is admitted, and `revert` runs if the admission is not published.
-    pub(crate) fn add_corrected_saving(
-        &self,
-        item: NewJob,
-        frozen: super::replacement::Replacement,
-        save: impl FnOnce() -> std::io::Result<super::matches::SavedMatch>,
-        revert: impl FnOnce(&super::matches::SavedMatch),
-    ) -> std::io::Result<super::matches::SavedMatch> {
-        frozen.verify_admission(&item.iso)?;
-        let source = item.iso.clone();
-        let mut attempted = None;
-        let result = self.try_mutate_durable(|f| {
-            if f.jobs.iter().any(|j| j.iso == item.iso && j.holds_source()) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "source has active or retained output; stop or resolve that job first",
-                ));
-            }
-            if Self::append(f, vec![item], false, None, Some(frozen)) == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "another job already uses this destination; nothing was saved",
-                ));
-            }
-            let saved = save()?;
-            attempted = Some(saved.clone());
-            if let Some(job) = f.jobs.last_mut() {
-                job.selected_match = Some(saved.clone());
-            }
-            Ok(saved)
-        });
-        if result.is_err()
-            && let Some(saved) = &attempted
-            && !self
-                .lock()
-                .jobs
-                .iter()
-                .any(|j| j.iso == source && j.selected_match.as_ref() == Some(saved))
-        {
-            revert(saved);
-        }
-        result
-    }
-
     /// Exclude claims while saving a correction for an otherwise idle source.
     pub(crate) fn with_idle_source<T>(
         &self,

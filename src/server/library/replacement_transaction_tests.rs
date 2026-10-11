@@ -1,43 +1,5 @@
 use super::*;
 
-#[test]
-fn confirmed_legacy_three_to_one_and_one_to_three_keep_unselected_files() {
-    for (old_count, new_count) in [(3, 1), (1, 3)] {
-        let (dir, source, old, _, mut io) = fixture();
-        let mut replacement = Replacement::capture(&source, &Default::default()).unwrap();
-        replacement.bind_roots(&[dir.path().to_owned()]).unwrap();
-        for path in old.iter().take(old_count) {
-            replacement
-                .confirm(Replacement::candidate(path).unwrap())
-                .unwrap();
-        }
-        let untouched = dir.path().join("unrelated.mkv");
-        std::fs::write(&untouched, b"unrelated").unwrap();
-        let targets: Vec<_> = (0..new_count)
-            .map(|i| dir.path().join(format!("new-{i}.mkv")))
-            .collect();
-        io.saved = replacement.clone();
-        io.fail_prepare = Some(new_count - 1);
-        assert!(replacement.run(&source, &targets, 9, &mut io).is_err());
-        assert!(old.iter().all(|path| path.exists()));
-        io.fail_prepare = None;
-        let mut recovered: Replacement =
-            serde_json::from_slice(&serde_json::to_vec(&io.saved).unwrap()).unwrap();
-        assert!(
-            recovered
-                .old_outputs
-                .iter()
-                .all(|old| old.ownership == Ownership::UserConfirmed)
-        );
-        recovered.run(&source, &targets, 9, &mut io).unwrap();
-        assert!(old.iter().take(old_count).all(|path| !path.exists()));
-        assert!(old.iter().skip(old_count).all(|path| path.exists()));
-        assert!(targets.iter().all(|path| path.exists()));
-        assert_eq!(std::fs::read(&untouched).unwrap(), b"unrelated");
-        assert!(source.exists());
-    }
-}
-
 struct TestIo {
     saved: Replacement,
     fail_prepare: Option<usize>,

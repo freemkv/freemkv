@@ -48,15 +48,7 @@ impl FileIdentity {
         })
     }
 
-    pub(super) fn canonical(&self) -> &Path {
-        &self.canonical
-    }
-
-    pub(super) fn filesystem_id(&self) -> Option<(u64, u64)> {
-        self.filesystem_id
-    }
-
-    pub(super) fn same_file(&self, other: &Self) -> bool {
+    fn same_file(&self, other: &Self) -> bool {
         self.canonical == other.canonical
             || self
                 .filesystem_id
@@ -239,64 +231,10 @@ impl Replacement {
         self.source.verify(source)
     }
 
-    pub(super) fn bind_roots(&mut self, roots: &[PathBuf]) -> io::Result<()> {
-        self.roots = roots
-            .iter()
-            .map(|path| {
-                if !path.is_absolute() || !std::fs::symlink_metadata(path)?.is_dir() {
-                    return Err(io::Error::other(
-                        "replacement root must be an absolute directory",
-                    ));
-                }
-                Ok(OutputRoot {
-                    path: path.clone(),
-                    canonical: path.canonicalize()?,
-                    identity: libfreemkv::io::artifact_lock::file_identity(path)?,
-                })
-            })
-            .collect::<io::Result<_>>()?;
-        Ok(())
-    }
-
-    pub(super) fn confirm(&mut self, output: OwnedOutput) -> io::Result<()> {
-        if output.ownership != Ownership::UserConfirmed
-            || output.identity.same_file(&self.source)
-            || self
-                .old_outputs
-                .iter()
-                .any(|old| old.identity.same_file(&output.identity))
-        {
-            return Err(io::Error::other("ambiguous confirmed output alias"));
-        }
-        output.identity.verify(&output.path)?;
-        self.old_outputs.push(output);
-        Ok(())
-    }
-
-    pub(super) fn verify_admission(&self, source: &Path) -> io::Result<()> {
-        self.verify_source(source)?;
-        for output in &self.old_outputs {
-            output.identity.verify(&output.path)?;
-        }
-        Ok(())
-    }
-
     pub(super) fn authorizes_existing(&self, path: &Path) -> bool {
         self.old_outputs
             .iter()
             .any(|output| output.path == path && output.identity.verify(path).is_ok())
-    }
-
-    pub(super) fn candidate(path: &Path) -> io::Result<OwnedOutput> {
-        Ok(OwnedOutput {
-            path: path.to_path_buf(),
-            identity: FileIdentity::read(path)?,
-            ownership: Ownership::UserConfirmed,
-        })
-    }
-
-    pub(super) fn output_size(output: &OwnedOutput) -> u64 {
-        output.identity.size
     }
 
     pub(crate) fn candidates(&self) -> impl Iterator<Item = &Path> {

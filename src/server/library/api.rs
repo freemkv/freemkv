@@ -1,7 +1,7 @@
 //! `/api/library*` and the Library's frames on the `/events` stream.
 //!
 //! Listings answer from index/queue snapshots. Mutations persist their state;
-//! corrected-remux admission also verifies source and ownership identities.
+//! a Change match saves the identity, then queues its remux.
 //! Media scanning and muxing belong to the indexer and worker threads.
 
 use super::queue::JobState;
@@ -58,15 +58,6 @@ struct MatchRequest {
     media: crate::server::planner::MediaMetadata,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfirmedMatchRequest {
-    source: PathBuf,
-    expected_revision: u64,
-    media: crate::server::planner::MediaMetadata,
-    ownership: super::ownership::Confirmation,
-}
-
 /// Serve a `/api/library*` request; one that is not ours is handed back.
 pub fn handle(
     request: tiny_http::Request,
@@ -104,16 +95,11 @@ pub fn handle(
             {
                 err(request, 404, "source ISO is not in the current library");
             } else {
-                let preview = lib.preview_ownership(&c, &source);
-                match preview {
-                    Ok((saved, preview)) => json_response(
+                match lib.match_view(&c, &source) {
+                    Ok((saved, linked)) => json_response(
                         request,
                         200,
-                        &json!({"source": source, "saved": saved,
-                            "owned_outputs": preview.owned_outputs, "candidates": preview.candidates,
-                            "preview_token": preview.preview_token,
-                            "omitted_candidates": preview.omitted_candidates})
-                            .to_string(),
+                        &json!({"source": source, "saved": saved, "linked": linked}).to_string(),
                     ),
                     Err(error) => err(request, 409, &error.to_string()),
                 }
@@ -123,7 +109,7 @@ pub fn handle(
             let Ok((request, body)) = read_json_body(request) else {
                 return None;
             };
-            let Ok(change) = serde_json::from_str::<ConfirmedMatchRequest>(&body) else {
+            let Ok(change) = serde_json::from_str::<MatchRequest>(&body) else {
                 err(request, 400, "invalid confirmed source match request");
                 return None;
             };
@@ -132,7 +118,6 @@ pub fn handle(
                 &change.source,
                 change.expected_revision,
                 change.media,
-                change.ownership,
             ) {
                 Ok((saved, queued)) => json_response(
                     request,
@@ -143,36 +128,6 @@ pub fn handle(
                     err(request, 400, &error.to_string())
                 }
                 Err(error) => err(request, 409, &error.to_string()),
-            }
-        }
-        (_, true, "/api/library/match") => {
-            let Ok((request, body)) = read_json_body(request) else {
-                return None;
-            };
-            let Ok(change) = serde_json::from_str::<MatchRequest>(&body) else {
-                err(request, 400, "invalid source match request");
-                return None;
-            };
-            match lib.change_source_match(
-                &d,
-                &change.source,
-                change.expected_revision,
-                change.media,
-            ) {
-                Ok(saved) => json_response(
-                    request,
-                    200,
-                    &json!({"ok": true, "saved": saved}).to_string(),
-                ),
-                Err(error) => {
-                    let status = match error.kind() {
-                        std::io::ErrorKind::InvalidInput => 400,
-                        std::io::ErrorKind::NotFound => 404,
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::AlreadyExists => 409,
-                        _ => 500,
-                    };
-                    err(request, status, &error.to_string());
-                }
             }
         }
         (true, _, "/api/library/raw") => {

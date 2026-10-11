@@ -15,8 +15,7 @@ pub mod index;
 pub mod links;
 pub mod matches;
 pub mod media;
-mod ownership;
-mod ownership_api;
+mod owned;
 pub mod probe;
 pub mod queue;
 pub mod replacement;
@@ -276,7 +275,6 @@ pub struct Library {
     pub queue: Queue,
     source_matches: Result<matches::MatchStore, String>,
     match_gate: Mutex<()>,
-    ownership_previews: Mutex<ownership::Previews>,
     pub probes: ProbeCache,
     pub audits: audit::Audits,
     // The deep_audit setting as the quick-lane loop last read it.
@@ -435,7 +433,6 @@ impl Library {
             queue: Queue::open(config_dir),
             source_matches: matches::MatchStore::open(config_dir).map_err(|e| e.to_string()),
             match_gate: Mutex::new(()),
-            ownership_previews: Mutex::new(ownership::Previews::default()),
             probes: ProbeCache::default(),
             audits: audit::Audits::open(config_dir),
             deep_on: AtomicBool::new(false),
@@ -462,36 +459,74 @@ impl Library {
             .map_err(Clone::clone)
     }
 
-    /// Save an explicit identity only for an indexed, idle ISO.
-    pub fn change_source_match(
-        &self,
-        d: &Dirs,
-        source: &Path,
-        expected_revision: u64,
-        media: crate::server::planner::MediaMetadata,
-    ) -> std::io::Result<matches::SavedMatch> {
-        let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
-        let listing = self.listing(d);
-        if listing.scanning
-            || !listing
-                .rows
-                .iter()
-                .any(|row| row.iso.as_deref() == Some(source))
+    fn require_indexed_source(&self, d: &Dirs, source: &Path) -> std::io::Result<()> {
+        let snapshot = self.snapshot();
+        if snapshot.dirs.as_ref() != Some(d)
+            || snapshot.incomplete
+            || !snapshot.isos.iter().any(|iso| iso.path == source)
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "source ISO is not in the current library",
+                "source ISO is not in the complete current library scan",
             ));
+        }
+        Ok(())
+    }
+
+    /// The saved match for `source` and the files recorded as made from it: exactly
+    /// the old files a Change match would replace or remove.
+    pub(crate) fn match_view(
+        &self,
+        cfg: &Config,
+        source: &Path,
+    ) -> std::io::Result<(Option<matches::SavedMatch>, Vec<PathBuf>)> {
+        let saved = self.source_match(source).map_err(std::io::Error::other)?;
+        let links = links::read(&self.config_dir)?;
+        let linked = owned::capture(&links, source, &owned::roots(&dirs(cfg)))?;
+        Ok((saved, linked.into_iter().map(|o| o.path).collect()))
+    }
+
+    /// Save `media` as the identity of an indexed, idle `source`, then queue its remux.
+    /// The match stays saved even when no job could be queued (`0`).
+    pub(crate) fn confirm_match_and_queue(
+        &self,
+        cfg: &Config,
+        source: &Path,
+        expected_revision: u64,
+        media: crate::server::planner::MediaMetadata,
+    ) -> std::io::Result<(matches::SavedMatch, usize)> {
+        let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
+        let d = dirs(cfg);
+        self.require_indexed_source(&d, source)?;
+        if let Some(reason) = self.queue_block(&d, true) {
+            return Err(std::io::Error::other(reason));
         }
         let store = self
             .source_matches
             .as_ref()
             .map_err(|e| std::io::Error::other(e.clone()))?;
+        let iso_title = self
+            .snapshot()
+            .isos
+            .iter()
+            .find(|iso| iso.path == source)
+            .map(|iso| iso.title.clone())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "source ISO is not indexed")
+            })?;
         let saved = self
             .queue
             .with_idle_source(source, || store.save(source, expected_revision, media))?;
         self.touch_index();
-        Ok(saved)
+        // Keyed by the source, so same-title discs never share one queue identity.
+        let job = NewJob {
+            title: saved.media.title.clone(),
+            iso: source.to_path_buf(),
+            target: index::new_mkv_target(&d.library, &iso_title),
+            replace: true,
+        };
+        let queued = self.queue.add_corrected(job, saved.clone())?;
+        Ok((saved, queued))
     }
 
     /// The last scan. Cheap: an `Arc` clone under a read lock.
@@ -1284,3 +1319,7 @@ pub fn log_line(kind: LineKind, text: &str) -> String {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "match_tests.rs"]
+mod match_tests;

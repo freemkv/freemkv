@@ -3,12 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { title: 'Old', season: 1 }, candidates = []) {
+async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { title: 'Old', season: 1 }, linked = ['/tv/<old>.mkv']) {
   const source = await readFile(new URL('../../src/server/web/assets/remux.js', import.meta.url), 'utf8');
   const context = vm.createContext({});
   const calls = [], nodes = {};
-  const legacyNodes = candidates.map(c => ({ checked: false, dataset: { legacyOutput: String(c.id) } }));
-  nodes['confirm-ownership'] = { checked: false };
   for (const key of ['results', 'kind', 'search', 'query', 'season', 'disc', 'episode-start']) nodes[key] = { value: '' };
   nodes.query.value = 'Cast Away'; nodes.season.value = '1';
   let closed = false, refreshed = 0, body = '', closeHook;
@@ -22,14 +20,14 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
         ? { ok: true, queued }
         : { ok: true, queued, saved: { revision: payload.expected_revision + 1, media: payload.media } };
       if (url.startsWith('/api/tmdb/search')) return searchApi ? searchApi(url) : [choice];
-      return { saved: savedMedia === null ? null : { revision: 7, media: savedMedia }, owned_outputs: ['/tv/<old>.mkv'], preview_token: 'server-snapshot', candidates };
+      return { saved: savedMedia === null ? null : { revision: 7, media: savedMedia }, linked };
     },
     modal: options => {
       body = options.body;
       for (const key of ['season', 'disc', 'episode-start']) {
         nodes[key].value = body.match(new RegExp('data-' + key + ' value="([^"]*)"'))?.[1] || '';
       }
-      return { el: { querySelector: selector => nodes[selector.slice(6, -1)], querySelectorAll: () => legacyNodes.filter(n => n.checked) },
+      return { el: { querySelector: selector => nodes[selector.slice(6, -1)] },
         onClose: hook => { closeHook = hook; }, close: () => { closed = true; closeHook?.(); } };
     },
     refreshNow: () => { refreshed++; }, toast: () => {}, stagedActions: () => 'retained',
@@ -44,7 +42,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
     }, { context });
   });
   await module.evaluate();
-  return { ui: module.namespace, nodes, legacyNodes, calls, get body() { return body; }, get closed() { return closed; }, get refreshed() { return refreshed; } };
+  return { ui: module.namespace, nodes, calls, get body() { return body; }, get closed() { return closed; }, get refreshed() { return refreshed; } };
 }
 
 for (const kind of ['movie', 'tv']) test(`change match submits explicit ${kind} identity and revision`, async () => {
@@ -64,8 +62,7 @@ for (const kind of ['movie', 'tv']) test(`change match submits explicit ${kind} 
   assert.equal(post.payload.media.season, kind === 'tv' ? 2 : null);
   assert.equal(post.payload.media.disc, kind === 'tv' ? 3 : null);
   assert.equal(post.payload.media.episode_start, kind === 'tv' ? 4 : null);
-  assert.equal(post.payload.ownership.preview_token, 'server-snapshot');
-  assert.equal(post.payload.ownership.selected_candidates.length, 0);
+  assert.deepEqual(Object.keys(post.payload).sort(), ['expected_revision', 'media', 'source']);
   assert.equal(h.calls.some(c => c.url === '/api/library/queue/add'), false);
   assert.equal(h.closed, true);
   assert.equal(h.refreshed, 1);
@@ -148,23 +145,16 @@ test('a saved match is not reported as queued when admission fails', async () =>
   assert.deepEqual(saves.map(c => c.payload.expected_revision), [7]);
 });
 
-test('legacy candidates start unchecked and require separate ownership affirmation', async () => {
-  const h = await harness('movie', undefined, 1, undefined, [{ id: 2, path: '/tv/<episode>.mkv', size_bytes: 10 }]);
-  await h.ui.changeMatch({ iso: '/iso/source.iso', title: 'Old' }, {});
-  assert.ok(h.body.includes('/tv/&lt;episode&gt;.mkv'));
-  assert.ok(!/data-legacy-output="2"[^>]*checked/.test(h.body));
-  assert.equal(h.legacyNodes[0].checked, false);
-  await h.nodes.search.onclick();
-  const pick = { target: { closest: () => ({ dataset: { pick: '0' } }) } };
-  h.legacyNodes[0].checked = true;
-  await h.nodes.results.onclick(pick);
-  assert.equal(h.calls.filter(c => c.method === 'POST').length, 0);
-  h.nodes['confirm-ownership'].checked = true;
-  await h.nodes.results.onclick(pick);
-  const ownership = h.calls.find(c => c.method === 'POST').payload.ownership;
-  assert.deepEqual(JSON.parse(JSON.stringify(ownership)), {
-    preview_token: 'server-snapshot', selected_candidates: [2], confirm_ownership: true,
-  });
+test('the dialog lists the files made from this ISO, or says there are none', async () => {
+  const listed = await harness('movie', undefined, 1, undefined, ['/tv/<a>.mkv', '/tv/b.mkv']);
+  await listed.ui.changeMatch({ iso: '/iso/source.iso', title: 'Old' }, {});
+  assert.ok(listed.body.includes('Made from this ISO (replaced or removed):'));
+  assert.ok(listed.body.includes('/tv/&lt;a&gt;.mkv') && listed.body.includes('/tv/b.mkv'));
+  assert.ok(!listed.body.includes('checkbox'));
+  assert.ok(listed.body.includes('Other MKVs are never changed or removed'));
+  const none = await harness('movie', undefined, 1, undefined, []);
+  await none.ui.changeMatch({ iso: '/iso/source.iso', title: 'Old' }, {});
+  assert.ok(none.body.includes('No existing MKVs are recorded as made from this ISO.'));
 });
 
 test('an older search cannot overwrite the newest match results', async () => {

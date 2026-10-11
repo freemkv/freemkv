@@ -80,28 +80,6 @@ impl MatchStore {
         *entries = next;
         Ok(saved)
     }
-
-    /// Undo `saved` when what it was saved for did not happen; a newer save is kept.
-    pub(crate) fn revert(
-        &self,
-        source: &Path,
-        saved: &SavedMatch,
-        previous: Option<SavedMatch>,
-    ) -> io::Result<()> {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        if entries.get(source) != Some(saved) {
-            return Ok(());
-        }
-        let mut next = entries.clone();
-        match previous {
-            Some(previous) => next.insert(source.to_path_buf(), previous),
-            None => next.remove(source),
-        };
-        let bytes = serde_json::to_vec_pretty(&next).map_err(io::Error::other)?;
-        crate::server::ripper::staging::write_marker_durable(&self.path, &bytes)?;
-        *entries = next;
-        Ok(())
-    }
 }
 
 fn validate(source: &Path, media: &MediaMetadata) -> io::Result<()> {

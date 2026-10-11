@@ -2918,6 +2918,47 @@ mod http {
         assert_eq!(code, 400);
         let (code, _) = roundtrip(&cfg, "GET", "/api/library/nope", None, &[]);
         assert_eq!(code, 404);
+        // Change match lists only the files made from the ISO; there is no preview token.
+        let iso = isos
+            .join("New (2020).iso")
+            .to_string_lossy()
+            .replace(' ', "%20");
+        let (code, body) = roundtrip(
+            &cfg,
+            "GET",
+            &format!("/api/library/match?source={iso}"),
+            None,
+            &[],
+        );
+        assert_eq!(code, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["linked"], serde_json::json!([]), "{body}");
+        for gone in ["candidates", "preview_token", "owned_outputs"] {
+            assert!(v.get(gone).is_none(), "{gone}: {body}");
+        }
+        let change = serde_json::json!({"source": isos.join("New (2020).iso"), "expected_revision": 0,
+            "media": {"title": "New", "year": 2020, "tmdb_id": 1, "season": null, "disc": null, "kind": "movie"}});
+        let (code, _) = roundtrip(
+            &cfg,
+            "POST",
+            "/api/library/match",
+            Some(&change.to_string()),
+            &[],
+        );
+        assert_eq!(code, 404, "saving without queueing is gone");
+        let mut stale = change.clone();
+        stale["ownership"] = serde_json::json!({"preview_token": "t", "selected_candidates": [], "confirm_ownership": false});
+        let (code, _) = roundtrip(
+            &cfg,
+            "POST",
+            "/api/library/match/remux",
+            Some(&stale.to_string()),
+            &[],
+        );
+        assert_eq!(
+            code, 400,
+            "a stale client's ownership confirmation is refused"
+        );
         let (code, _) = roundtrip(&cfg, "GET", "/api/library/queue/all", None, &[]);
         assert_eq!(code, 404, "queue actions are POST only");
         let bad = r#"{"library_dir": "relative/path"}"#;
