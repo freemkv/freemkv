@@ -151,6 +151,9 @@ pub struct MoverError {
     // recreating it. A root wait (unresponsive, stale, unmounted...) never does.
     #[serde(skip)]
     missing_folder: bool,
+    // A declared stall's committed backoff, applied once its blocked worker returns.
+    #[serde(skip)]
+    stall_resume: Option<Option<std::time::Instant>>,
 }
 
 fn retry_delay(attempts: u32) -> Option<std::time::Duration> {
@@ -219,6 +222,39 @@ fn schedule_move_retry(path: &str) {
         .map(|error| error.attempts.saturating_add(1));
     if let Some(attempts) = attempts {
         commit_retry(path, attempts, retry_delay(attempts));
+    }
+}
+
+// A stall is an attempt, committed (journal first) as it is declared: a restart while the
+// worker is still blocked cannot buy a fresh copy. The row holds until the worker returns.
+fn commit_stall(path: &str) {
+    schedule_move_retry(path);
+    if let Some(row) = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(path)
+    {
+        row.stall_resume = Some(row.retry_after);
+        row.retry_after = None;
+        row.retry_held = true;
+    }
+}
+
+// The stalled worker returned: the backoff committed at the stall applies from now on.
+fn finish_stall(path: &str) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    match errors
+        .get_mut(path)
+        .and_then(|row| Some((row.stall_resume.take()?, row)))
+    {
+        Some((resume, row)) => {
+            row.retry_after = resume;
+            row.retry_held = resume.is_none();
+        }
+        None => {
+            drop(errors);
+            schedule_move_retry(path);
+        }
     }
 }
 
@@ -383,6 +419,7 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             retry_after: None,
             owner: None,
             missing_folder: false,
+            stall_resume: None,
         });
     apply_retry_at(row, state, now);
     drop(errors);
@@ -433,6 +470,7 @@ fn record_error_at_stage(
                 retry_after,
                 owner: None,
                 missing_folder: false,
+                stall_resume: None,
             },
         );
         same_reason
@@ -2038,7 +2076,7 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
         if outcomes.iter().any(|o| matches!(o, MoveOutcome::Stalled)) {
-            schedule_move_retry(&dir_str);
+            finish_stall(&dir_str);
             continue;
         }
         if any_unsupported {

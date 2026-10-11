@@ -259,6 +259,7 @@ fn a_restored_backoff_is_clamped_to_the_longest_real_one() {
             retry_after: None,
             owner: None,
             missing_folder: false,
+            stall_resume: None,
         };
         let state = super::manifest::RetryState {
             attempts: 2,
@@ -662,4 +663,50 @@ fn folders_are_created_only_below_the_checked_root() {
         assert!(job.join("Dropped.mkv").exists());
         assert!(left.is_some(), "recreate={recreate}: the refusal is shown");
     }
+}
+
+// A stalled copy's attempt is in the journal as soon as the stall is declared, while the
+// worker is still blocked: a restart then cannot buy a fresh full copy. The worker's
+// return does not count it twice.
+#[test]
+fn a_stall_is_counted_in_the_journal_when_it_is_declared() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, _dest) = journaled(tmp.path(), "Stalled");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (hook_job, hook_seen) = (job.clone(), seen.clone());
+    let _hooks = test_hooks::set(
+        tmp.path(),
+        Duration::from_millis(40),
+        std::sync::Arc::new(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let attempts = super::manifest::Manifest::load(&hook_job)
+                .ok()
+                .flatten()
+                .and_then(|m| m.retry().map(|r| r.attempts));
+            *hook_seen.lock().unwrap() = Some(attempts);
+            std::thread::sleep(Duration::from_millis(100));
+        }),
+    );
+    check_and_move(&cfg);
+    drop(_hooks);
+    let left = row(&key);
+    let journal = super::manifest::Manifest::load(&job)
+        .unwrap()
+        .unwrap()
+        .retry()
+        .map(|r| r.attempts);
+    clear_error(&key);
+    let while_blocked = *seen.lock().unwrap();
+    assert_eq!(
+        while_blocked,
+        Some(Some(1)),
+        "counted while the worker is blocked"
+    );
+    assert_eq!(journal, Some(1), "counted once");
+    let left = left.expect("the stall is shown");
+    assert_eq!(left.attempts, 1, "{left:?}");
+    assert!(left.retry_after.is_some() && !left.retry_held, "{left:?}");
 }
