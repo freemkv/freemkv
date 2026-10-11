@@ -881,20 +881,22 @@ fn heal(cfg: &Config) {
 /// Start the health thread.
 pub fn start(cfg: &Arc<RwLock<Config>>) {
     let cfg = cfg.clone();
-    let _ = crate::server::daemon::spawn_background("health", move || {
-        while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-            let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-            refresh(&c);
-            #[cfg(unix)]
-            heal(&c);
-            let until = Instant::now() + Duration::from_secs(INTERVAL_SECS);
-            while Instant::now() < until
-                && !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
-            {
-                std::thread::sleep(Duration::from_millis(500));
+    let _ = std::thread::Builder::new()
+        .name("health".into())
+        .spawn(move || {
+            while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+                refresh(&c);
+                #[cfg(unix)]
+                heal(&c);
+                let until = Instant::now() + Duration::from_secs(INTERVAL_SECS);
+                while Instant::now() < until
+                    && !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
-        }
-    });
+        });
 }
 
 /// Called only after the daemon has drained all services. Abandoned folder probes may

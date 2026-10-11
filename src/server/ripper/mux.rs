@@ -120,10 +120,12 @@ fn reboot_during_watchdog_counter_wait_suppresses_exit() {
 /// Returns `true` if it finished in time; `false` on timeout or spawn failure.
 pub fn bounded_call(name: &str, deadline: Duration, op: impl FnOnce() + Send + 'static) -> bool {
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(0);
-    let _ = crate::server::daemon::spawn_background(name, move || {
-        op();
-        let _ = tx.send(());
-    });
+    let _ = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            op();
+            let _ = tx.send(());
+        });
     rx.recv_timeout(deadline).is_ok()
 }
 
@@ -500,8 +502,7 @@ fn spawn_mux_watchdog(
     let wd_tmdb_year = inputs.tmdb_year;
     let wd_filename = inputs.filename.clone();
     let wd_staging_disc_dir = inputs.staging_disc_dir.clone();
-    // Internal reboot must wait for WatchdogGuard's cancellation to be observed.
-    let _ = crate::server::daemon::spawn_background("mux-watchdog", move || {
+    let _ = std::thread::Builder::new().name("mux-watchdog".into()).spawn(move || {
         let mut was_stalled = false;
         let mut last_log_secs: u64 = 0;
         let mut clock = StallClock::new(

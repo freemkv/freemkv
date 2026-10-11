@@ -2445,25 +2445,27 @@ fn move_file(
     let activity = Arc::new(copy_monitor::Activity::default());
     let worker_activity = activity.clone();
     let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<u64>>();
-    let copy_handle = match crate::server::daemon::spawn_background("mover-copy", move || {
-        let result = copy_counting_with_halt(
-            &src_owned,
-            &dest_owned,
-            &written_w,
-            &|| crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
-            Some(&worker_halt),
-            &|candidate| {
-                check_candidate(&src_owned, &dest_owned, candidate)?;
-                before_publish(candidate)
-            },
-            Some(&worker_activity),
-        );
-        // Copy returns Ok only after publication, even if the monitor stalled.
-        if result.is_ok() {
-            published.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        let _ = tx.send(result);
-    }) {
+    let copy_handle = match std::thread::Builder::new()
+        .name("mover-copy".into())
+        .spawn(move || {
+            let result = copy_counting_with_halt(
+                &src_owned,
+                &dest_owned,
+                &written_w,
+                &|| crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
+                Some(&worker_halt),
+                &|candidate| {
+                    check_candidate(&src_owned, &dest_owned, candidate)?;
+                    before_publish(candidate)
+                },
+                Some(&worker_activity),
+            );
+            // Copy returns Ok only after publication, even if the monitor stalled.
+            if result.is_ok() {
+                published.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let _ = tx.send(result);
+        }) {
         Ok(handle) => handle,
         Err(e) => {
             tracing::warn!(error = %e, "could not start mover copy");

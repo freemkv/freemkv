@@ -32,15 +32,17 @@ fn open_sse_handler_drains_promptly_on_shutdown() {
     let server = Server::http("127.0.0.1:0").unwrap();
     let addr = server.server_addr().to_ip().unwrap();
     let (done, finished) = std::sync::mpsc::channel();
-    let worker = crate::server::daemon::spawn_background("test-sse-handler", move || {
-        let request = server
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
-        handle_sse(request, &cfg);
-        done.send(()).unwrap();
-    })
-    .unwrap();
+    let worker = std::thread::Builder::new()
+        .name("test-sse-handler".into())
+        .spawn(move || {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            handle_sse(request, &cfg);
+            done.send(()).unwrap();
+        })
+        .unwrap();
     let mut socket = std::net::TcpStream::connect(addr).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))

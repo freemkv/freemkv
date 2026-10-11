@@ -700,12 +700,12 @@ pub fn save_coalesced(
     }
     if !slot.writer_active {
         let writer_path = path.clone();
-        crate::server::daemon::spawn_background("autorip-settings-save", move || {
-            run_save_writer(&writer_path)
-        })
-        .inspect_err(|_| {
-            slot.pending = None;
-        })?;
+        std::thread::Builder::new()
+            .name("autorip-settings-save".into())
+            .spawn(move || run_save_writer(&writer_path))
+            .inspect_err(|_| {
+                slot.pending = None;
+            })?;
         slot.writer_active = true;
     }
     Ok(rx)

@@ -244,12 +244,15 @@ fn serve(
             }
         };
         let cfg = Arc::clone(cfg);
-        if let Err(e) = crate::server::daemon::spawn_background("autorip-http", move || {
-            // Hold the admission token for the handler's lifetime;
-            // dropped here on return/unwind, freeing the slot.
-            let _guard = guard;
-            handle_request(request, &cfg);
-        }) {
+        if let Err(e) = std::thread::Builder::new()
+            .name("autorip-http".into())
+            .spawn(move || {
+                // Hold the admission token for the handler's lifetime;
+                // dropped here on return/unwind, freeing the slot.
+                let _guard = guard;
+                handle_request(request, &cfg);
+            })
+        {
             tracing::error!(error = %e, "failed to spawn request handler thread");
             // guard drops here, freeing the reserved slot.
         }

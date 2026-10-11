@@ -7,26 +7,12 @@ use super::{
 
 use std::sync::atomic::Ordering;
 
-#[path = "daemon_lifecycle.rs"]
-mod lifecycle;
-static BACKGROUND: std::sync::LazyLock<std::sync::Arc<lifecycle::Background>> =
-    std::sync::LazyLock::new(Default::default);
-
-// Generation drain bounds: all services, the rip threads within it, then the web thread.
+// Drain bounds: the rip threads, then every other service together, then the web thread.
 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const RIP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const WEB_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 // Cadence of the KEYDB refresh and log prune threads, in one-second SHUTDOWN polls.
 const DAILY_SECS: u64 = 24 * 3600;
-
-/// Spawn a service helper which must finish before an internal restart, even
-/// when its caller times out and drops the returned handle.
-pub(crate) fn spawn_background<T: Send + 'static>(
-    name: &str,
-    f: impl FnOnce() -> T + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<T>> {
-    BACKGROUND.spawn(name, f)
-}
 
 /// Run the server shell. `argv` is everything after `freemkv server`.
 ///
@@ -280,15 +266,16 @@ pub fn run(argv: Vec<String>) {
             .staging_dir
             .clone();
         let drained = stop_generation(std::path::Path::new(&staging), || {
-            // HTTP admission is closed by SHUTDOWN. Existing requests may still
-            // spawn rips, so drain their tracked helpers BEFORE the final rip
-            // registry check. No short-circuit: every worker gets a drain attempt.
-            let mut drained = drain_services(
-                &mut workers,
-                &BACKGROUND,
-                ripper::join_all_rip_threads,
-                DRAIN_TIMEOUT,
-            );
+            // No short-circuit: every worker gets a drain attempt.
+            let mut drained = ripper::join_all_rip_threads(RIP_DRAIN_TIMEOUT);
+            let deadline = std::time::Instant::now() + DRAIN_TIMEOUT;
+            for (name, handle) in &mut workers {
+                drained &= join_bounded(
+                    handle,
+                    name,
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                );
+            }
             if drained {
                 web::stop_after_drain();
                 drained &= join_bounded(&mut web_handle, "web", WEB_JOIN_TIMEOUT);
@@ -297,7 +284,6 @@ pub fn run(argv: Vec<String>) {
         });
         if drained && take_restart() {
             reset_after_drain();
-            BACKGROUND.reopen();
             reopen_admission();
             restarting = true;
             log::syslog("autorip soft reboot: starting fresh instance");
@@ -412,7 +398,7 @@ fn spawn_destination_check<F>(
 where
     F: FnOnce(&config::Config) -> Vec<(String, String)> + Send + 'static,
 {
-    spawn_background("destination-check", move || {
+    std::thread::Builder::new().name("destination-check".into()).spawn(move || {
         for (root, reason) in check(&cfg) {
             log::syslog(&format!(
                 "WARNING: configured destination '{root}' is not usable at startup: {reason}. \
@@ -459,31 +445,6 @@ fn reset_after_drain() {
     mover::reset_after_drain();
     muxer::reset_after_drain();
     web::reset_after_drain();
-}
-
-fn drain_services(
-    workers: &mut [(&str, Option<std::thread::JoinHandle<()>>)],
-    background: &lifecycle::Background,
-    mut drain_rips: impl FnMut(std::time::Duration) -> bool,
-    timeout: std::time::Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    let mut drained = drain_rips(timeout.min(RIP_DRAIN_TIMEOUT));
-    for (name, handle) in workers {
-        drained &= join_bounded(
-            handle,
-            name,
-            deadline.saturating_duration_since(std::time::Instant::now()),
-        );
-    }
-    // Keep helper admission available to cancellation cleanup until the primary
-    // workers have finished. Tracked HTTP handlers and their newly spawned rips
-    // then drain together before admission is sealed atomically at zero.
-    if !drained || !background.drain(deadline.saturating_duration_since(std::time::Instant::now()))
-    {
-        return false;
-    }
-    drain_rips(std::time::Duration::ZERO)
 }
 
 #[cfg(unix)]

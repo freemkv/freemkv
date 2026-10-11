@@ -451,16 +451,18 @@ impl Manifest {
         let halt = libfreemkv::Halt::new();
         let waiting_halt = halt.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        let waiter = crate::server::daemon::spawn_background("mover-delivery-locks", move || {
-            let result = targets
-                .into_iter()
-                .map(|target| {
-                    libfreemkv::io::ArtifactLock::acquire(&target, &[], &waiting_halt)
-                        .map_err(io::Error::other)
-                })
-                .collect::<io::Result<Vec<_>>>();
-            let _ = tx.send(result);
-        })?;
+        let waiter = std::thread::Builder::new()
+            .name("mover-delivery-locks".into())
+            .spawn(move || {
+                let result = targets
+                    .into_iter()
+                    .map(|target| {
+                        libfreemkv::io::ArtifactLock::acquire(&target, &[], &waiting_halt)
+                            .map_err(io::Error::other)
+                    })
+                    .collect::<io::Result<Vec<_>>>();
+                let _ = tx.send(result);
+            })?;
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(result) => {
@@ -480,8 +482,7 @@ impl Manifest {
                     }
                     if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                         halt.cancel();
-                        // The tracked worker releases any partial lock set on
-                        // cancellation; lifecycle drain accounts for its exit.
+                        // The waiter releases any partial lock set on cancellation.
                         return Err(io::Error::new(
                             io::ErrorKind::Interrupted,
                             "delivery lock wait cancelled",

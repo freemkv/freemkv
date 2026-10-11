@@ -122,9 +122,7 @@ where
                 .entered();
         f();
     };
-    // Also cover a rip spawned by an already-admitted HTTP handler during
-    // shutdown: the daemon's helper drain must see it before sealing admission.
-    let handle = crate::server::daemon::spawn_background(&name, wrapped)?;
+    let handle = std::thread::Builder::new().name(name).spawn(wrapped)?;
     match register_rip_thread(device, handle) {
         Ok(()) => {
             // Release the worker. A send error is impossible in practice (the

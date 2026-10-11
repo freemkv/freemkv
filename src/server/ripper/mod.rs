@@ -118,49 +118,51 @@ impl ScanWatchdog {
         let active_w = active.clone();
         let phase_w = phase.clone();
         let device = device.to_string();
-        let _ = crate::server::daemon::spawn_background("scan-watchdog", move || {
-            let start = std::time::Instant::now();
-            let mut warned = false;
-            // A due deadline, not `elapsed % 15`: sleep overshoot can skip an exact multiple.
-            let mut next_warn = 15;
-            while active_w.load(Ordering::Relaxed) {
-                // Poll in short slices so the guard drop is observed
-                // promptly, but only WARN on 15s boundaries.
-                std::thread::sleep(Duration::from_secs(1));
-                if !active_w.load(Ordering::Relaxed) {
-                    break;
+        let _ = std::thread::Builder::new()
+            .name("scan-watchdog".into())
+            .spawn(move || {
+                let start = std::time::Instant::now();
+                let mut warned = false;
+                // A due deadline, not `elapsed % 15`: sleep overshoot can skip an exact multiple.
+                let mut next_warn = 15;
+                while active_w.load(Ordering::Relaxed) {
+                    // Poll in short slices so the guard drop is observed
+                    // promptly, but only WARN on 15s boundaries.
+                    std::thread::sleep(Duration::from_secs(1));
+                    if !active_w.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let elapsed = start.elapsed().as_secs();
+                    if elapsed >= next_warn {
+                        next_warn = (elapsed / 15 + 1) * 15;
+                        let last_phase = match phase_w.load(Ordering::Relaxed) {
+                            0 => "scan",
+                            _ => "resolve_keys",
+                        };
+                        tracing::warn!(
+                            device = %device,
+                            elapsed_secs = elapsed,
+                            last_phase,
+                            "scan still running"
+                        );
+                        crate::server::log::device_log(
+                            &device,
+                            &format!(
+                                "Still scanning ({}s elapsed, phase={})...",
+                                elapsed, last_phase
+                            ),
+                        );
+                        warned = true;
+                    }
                 }
-                let elapsed = start.elapsed().as_secs();
-                if elapsed >= next_warn {
-                    next_warn = (elapsed / 15 + 1) * 15;
-                    let last_phase = match phase_w.load(Ordering::Relaxed) {
-                        0 => "scan",
-                        _ => "resolve_keys",
-                    };
-                    tracing::warn!(
+                if warned {
+                    tracing::info!(
                         device = %device,
-                        elapsed_secs = elapsed,
-                        last_phase,
-                        "scan still running"
+                        elapsed_secs = start.elapsed().as_secs(),
+                        "scan watchdog stood down (scan/resolve returned)"
                     );
-                    crate::server::log::device_log(
-                        &device,
-                        &format!(
-                            "Still scanning ({}s elapsed, phase={})...",
-                            elapsed, last_phase
-                        ),
-                    );
-                    warned = true;
                 }
-            }
-            if warned {
-                tracing::info!(
-                    device = %device,
-                    elapsed_secs = start.elapsed().as_secs(),
-                    "scan watchdog stood down (scan/resolve returned)"
-                );
-            }
-        });
+            });
         Self { active, phase }
     }
 
