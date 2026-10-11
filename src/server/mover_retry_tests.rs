@@ -571,3 +571,95 @@ fn a_pass_that_does_not_deliver_leaves_no_lock_sidecars() {
         .collect();
     assert!(locks.is_empty(), "{locks:?}");
 }
+
+// A TV rip refused before delivery (a listed episode is missing) leaves no empty
+// `Show (Year)/Season NN/` folders in the library.
+#[test]
+fn a_refused_delivery_creates_no_library_folders() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let tv = tmp.path().join("output/TV");
+    std::fs::create_dir_all(&tv).unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: tmp.path().join("output").to_string_lossy().into_owned(),
+        tv_dir: "TV".into(),
+        ..Config::default()
+    };
+    let job = staging.join("Show_S01");
+    std::fs::create_dir_all(&job).unwrap();
+    let mut st = crate::server::ripper::staging::DiscState::new(
+        crate::server::ripper::staging::StagingState::Done,
+    );
+    st.title = "Show".into();
+    st.disc_name = "Show".into();
+    st.year = 2012;
+    st.media_type = "tv".into();
+    st.season = Some(1);
+    let output = |name: &str, episode| crate::server::ripper::staging::Output {
+        filename: name.into(),
+        episode: Some(episode),
+        episode_name: String::new(),
+        ..Default::default()
+    };
+    st.outputs = vec![output("Show_E01.mkv", 1), output("Show_E02.mkv", 2)];
+    crate::server::ripper::staging::write_state(&job, &st);
+    std::fs::write(job.join("Show_E01.mkv"), vec![0x11u8; 64]).unwrap();
+    let key = job.to_string_lossy().into_owned();
+    check_and_move(&cfg);
+    let left = row(&key);
+    clear_error(&key);
+    let left = left.expect("refused");
+    assert!(left.reason.contains("missing before delivery"), "{left:?}");
+    let made: Vec<_> = std::fs::read_dir(&tv).unwrap().collect();
+    assert!(
+        made.is_empty(),
+        "folders created for a refused delivery: {made:?}"
+    );
+}
+
+// The share drops (its root is gone, or replaced by a bare local folder) between the root's
+// check and the folder creation: nothing is created above or in place of the checked root.
+#[test]
+fn folders_are_created_only_below_the_checked_root() {
+    let _g = guard();
+    for recreate in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let movies = tmp.path().join("share/Movies");
+        let job = staging.join("Dropped");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::create_dir_all(&movies).unwrap();
+        let marker = serde_json::json!({"title": "Dropped", "year": 2024, "media_type": "movie"});
+        std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+        std::fs::write(job.join("Dropped.mkv"), [0x1A, 0x45, 0xDF, 0xA3, 0, 0]).unwrap();
+        let cfg = Config {
+            staging_dir: staging.to_string_lossy().into_owned(),
+            output_dir: tmp.path().join("share").to_string_lossy().into_owned(),
+            movie_dir: movies.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let dropped = movies.clone();
+        let _hook = test_hooks::on_preflight(
+            &movies,
+            std::sync::Arc::new(move || {
+                let _ = std::fs::remove_dir(&dropped);
+                if recreate {
+                    let _ = std::fs::create_dir(&dropped);
+                }
+            }),
+        );
+        let key = job.to_string_lossy().into_owned();
+        check_and_move(&cfg);
+        drop(_hook);
+        let left = row(&key);
+        clear_error(&key);
+        assert!(
+            !movies.join("Dropped (2024)").exists(),
+            "recreate={recreate}: created on the dropped root: {left:?}"
+        );
+        assert!(job.join("Dropped.mkv").exists());
+        assert!(left.is_some(), "recreate={recreate}: the refusal is shown");
+    }
+}

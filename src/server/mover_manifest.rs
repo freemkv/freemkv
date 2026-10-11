@@ -241,6 +241,17 @@ impl Manifest {
         reserved
     }
 
+    /// Each entry's destination root and folder, as frozen (canonical).
+    pub fn folders(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let root = self.roots.iter().find(|r| e.destination.starts_with(r))?;
+                Some((PathBuf::from(root), e.destination.parent()?.to_path_buf()))
+            })
+            .collect()
+    }
+
     pub fn moves(&self) -> Vec<(PathBuf, String)> {
         self.entries
             .iter()

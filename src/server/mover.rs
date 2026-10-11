@@ -1765,29 +1765,7 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
 
-        // Create destination directories under the root confirmed above. A journaled
-        // delivery's folders existed at freeze: only an operator Retry recreates them.
-        let mut dest_ok = true;
-        let create_folders = delivery.is_none() || attempt == Attempt::Recreate;
-        for (_, dest) in planned_moves.iter().filter(|_| create_folders) {
-            if let Some(parent) = Path::new(dest).parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                record_error(
-                    &dir_str,
-                    &format!(
-                        "cannot create destination directory {}: {e}",
-                        absolute_for_log(&parent.to_string_lossy())
-                    ),
-                    "check write permissions on the output / movie / tv directory",
-                );
-                dest_ok = false;
-            }
-        }
-        if !dest_ok {
-            continue;
-        }
-
+        // Refused before any folder is made: a refusal leaves nothing in the library.
         if delivery.is_none() {
             if !listing_complete {
                 record_error(
@@ -1809,6 +1787,48 @@ fn check_and_move(cfg: &Config) {
                 );
                 continue;
             }
+        }
+
+        // Create destination directories below the root confirmed above, one level at a
+        // time. A journaled delivery's folders existed at freeze: only Retry on its
+        // missing-folder row recreates them.
+        let folders: Vec<(std::path::PathBuf, std::path::PathBuf)> = match &delivery {
+            None => planned_moves
+                .iter()
+                .filter_map(|(src, dest)| {
+                    let fname = src.file_name().unwrap_or_default().to_string_lossy();
+                    let root = destination_root_for(cfg, &tmdb_result, &fname);
+                    Some((root.into(), Path::new(dest).parent()?.to_path_buf()))
+                })
+                .collect(),
+            Some(saved) if attempt == Attempt::Recreate => saved.folders(),
+            Some(_) => Vec::new(),
+        };
+        let mut created = Vec::new();
+        let mut dest_ok = true;
+        for (root, folder) in &folders {
+            match create_below_root(root, folder, root_checks.identity(root)) {
+                Ok(made) => created.extend(made),
+                Err(e) => {
+                    record_error(
+                        &dir_str,
+                        &format!(
+                            "cannot create destination directory {}: {e}",
+                            absolute_for_log(&folder.to_string_lossy())
+                        ),
+                        "check write permissions on the output / movie / tv directory",
+                    );
+                    dest_ok = false;
+                    break;
+                }
+            }
+        }
+        if !dest_ok {
+            remove_created(&created);
+            continue;
+        }
+
+        if delivery.is_none() {
             match manifest::Manifest::create(
                 &dir,
                 marker.clone(),
@@ -1820,6 +1840,7 @@ fn check_and_move(cfg: &Config) {
                     planned_moves = saved.moves();
                 }
                 Err(e) => {
+                    remove_created(&created);
                     record_error(
                         &dir_str,
                         &format!("cannot persist delivery plan: {e}"),
@@ -2523,10 +2544,79 @@ fn validate_root_checked(root: &str, checks: &mut RootChecks) -> Result<(), Stri
         .map_err(|p| root_reason(root, &p))
 }
 
+// Create `folder` one level at a time below `root`, which must still be the folder its check
+// passed (`identity`): a share dropped since is never recreated on the local disk. On
+// failure nothing it made is left; on success it returns what it made.
+fn create_below_root(
+    root: &Path,
+    folder: &Path,
+    identity: Option<(u64, u64)>,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let below = folder.strip_prefix(root).map_err(|_| {
+        std::io::Error::other(format!("not under its destination root {}", root.display()))
+    })?;
+    let gone = || {
+        std::io::Error::other(format!(
+            "the destination root {} changed since its check (a share that dropped or was remounted?)",
+            root.display()
+        ))
+    };
+    let meta = std::fs::metadata(root).map_err(|_| gone())?;
+    if !meta.is_dir()
+        || identity.is_some_and(|id| file_identity(&meta) != Some(id))
+        || crate::server::health::share_unmounted(root)
+    {
+        return Err(gone());
+    }
+    let mut created = Vec::new();
+    let mut at = root.to_path_buf();
+    for part in below.components() {
+        let std::path::Component::Normal(name) = part else {
+            remove_created(&created);
+            return Err(std::io::Error::other(
+                "unexpected destination path component",
+            ));
+        };
+        at.push(name);
+        match std::fs::create_dir(&at) {
+            Ok(()) => created.push(at.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && at.is_dir() => {}
+            Err(e) => {
+                remove_created(&created);
+                return Err(e);
+            }
+        }
+    }
+    Ok(created)
+}
+
+// Remove folders this pass made, deepest first, where still empty.
+fn remove_created(created: &[std::path::PathBuf]) {
+    for folder in created.iter().rev() {
+        let _ = std::fs::remove_dir(folder);
+    }
+}
+
+// A folder's (device, inode), where the platform has them.
+fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
 // The bounded write test of each destination root, run at most once per move attempt.
 struct RootChecks {
     // A check was cut short by the server stopping.
     stopped: bool,
+    // Each passed root's identity, taken as its check answered.
+    identities: Vec<(std::path::PathBuf, (u64, u64))>,
     limit: std::time::Duration,
     probe: fn(&Path) -> std::io::Result<()>,
     done: Vec<(
@@ -2549,6 +2639,7 @@ impl RootChecks {
     fn with(limit: std::time::Duration, probe: fn(&Path) -> std::io::Result<()>) -> Self {
         RootChecks {
             stopped: false,
+            identities: Vec::new(),
             limit,
             probe,
             done: Vec::new(),
@@ -2562,9 +2653,29 @@ impl RootChecks {
         #[cfg(test)]
         test_hooks::preflighted(root);
         let result = crate::server::health::preflight_with("output", root, self.limit, self.probe);
+        if result.is_ok()
+            && let Some(id) = std::fs::metadata(root)
+                .ok()
+                .as_ref()
+                .and_then(file_identity)
+        {
+            self.identities.push((root.to_path_buf(), id));
+        }
+        #[cfg(test)]
+        test_hooks::after_preflight(root);
         self.stopped |= result.as_ref().is_err_and(|p| p.stopped());
         self.done.push((root.to_path_buf(), result.clone()));
         result
+    }
+}
+
+impl RootChecks {
+    // The identity `root` had when its check passed.
+    fn identity(&self, root: &Path) -> Option<(u64, u64)> {
+        self.identities
+            .iter()
+            .find(|(p, _)| p == root)
+            .map(|(_, id)| *id)
     }
 }
 
@@ -3033,6 +3144,38 @@ pub(crate) mod test_hooks {
             n.clone(),
         ));
         Preflights(id, n)
+    }
+    type Watch = (u64, PathBuf, Hook);
+    static AFTER_PREFLIGHT: Mutex<Vec<Watch>> = Mutex::new(Vec::new());
+    /// Runs `hook` after each write test of a root under `scope` has answered, until dropped.
+    pub struct Watching(u64);
+    impl Drop for Watching {
+        fn drop(&mut self) {
+            AFTER_PREFLIGHT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(id, ..)| *id != self.0);
+        }
+    }
+    pub fn on_preflight(scope: &Path, hook: Hook) -> Watching {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        AFTER_PREFLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((id, scope.to_path_buf(), hook));
+        Watching(id)
+    }
+    pub fn after_preflight(root: &Path) {
+        let hooks: Vec<Hook> = AFTER_PREFLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, scope, _)| root.starts_with(scope))
+            .map(|(_, _, hook)| hook.clone())
+            .collect();
+        for hook in hooks {
+            hook();
+        }
     }
     pub fn preflighted(root: &Path) {
         for (_, scope, n) in PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
