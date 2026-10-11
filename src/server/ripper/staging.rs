@@ -1276,6 +1276,69 @@ pub(super) fn stamp_capture_label(st: &mut DiscState, label: &str) {
     st.disc_name = label.to_string();
 }
 
+/// Record a capture's planned outputs at its start (`None`: none planned yet, as for a
+/// single-pass rip). Returns the previous plan's unmoved files, which it supersedes.
+pub(super) fn stamp_capture_plan(
+    st: &mut DiscState,
+    plan: Option<&Result<Vec<Output>, crate::server::planner::PlanError>>,
+) -> Vec<String> {
+    let previous = st
+        .outputs
+        .iter()
+        .filter(|o| !o.moved)
+        .map(|o| o.filename.clone())
+        .collect();
+    match plan {
+        Some(Ok(outputs)) => st.outputs = outputs.clone(),
+        Some(Err(_)) => st.outputs.clear(),
+        None => {}
+    }
+    previous
+}
+
+/// Muxed files a re-capture supersedes in its job dir: `previous` plan files and any other
+/// muxed leftover (a stopped rip's partial under an older title). Never `keep` or the
+/// capture image and map in `sources`; nothing at all while a delivery journal exists.
+pub(super) fn superseded_partials(
+    dir: &Path,
+    previous: &[String],
+    keep: &[String],
+    sources: &[&str],
+) -> Vec<PathBuf> {
+    if !delivery_journal_absent(dir) {
+        return Vec::new();
+    }
+    let muxed = |leaf: &str| {
+        Path::new(leaf)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| ["mkv", "mk3d", "m2ts"].contains(&e.to_ascii_lowercase().as_str()))
+    };
+    let mut leaves: Vec<String> = previous.to_vec();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        leaves.extend(
+            entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+                .filter(|leaf| muxed(leaf)),
+        );
+    }
+    leaves.sort();
+    leaves.dedup();
+    leaves
+        .into_iter()
+        .filter(|leaf| {
+            Path::new(leaf)
+                .file_name()
+                .is_some_and(|n| n == leaf.as_str())
+        })
+        .filter(|leaf| !keep.contains(leaf) && !sources.contains(&leaf.as_str()))
+        .map(|leaf| dir.join(leaf))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
 /// The capture-start Sweeping write, plus the caller's fields in the same write.
 /// A new sweep re-reads the disc, so the prior attempt's one-shot accept-loss,
 /// E7034 needs-disc hold and hold reason no longer apply.

@@ -2485,3 +2485,7 @@ mod plan_review_hold_tests;
 #[cfg(test)]
 #[path = "resume_planning_label_tests.rs"]
 mod planning_label_tests;
+
+#[cfg(test)]
+#[path = "resume_capture_plan_tests.rs"]
+mod capture_plan_tests;

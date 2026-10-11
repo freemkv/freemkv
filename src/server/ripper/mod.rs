@@ -3248,10 +3248,19 @@ fn rip_disc_inner(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
+    let mut capture_plan = capture_plan(
+        &cfg_read,
+        &disc.titles,
+        (tmdb_media_type, &disc_name, tmdb_id),
+        &filename,
+        episode_start,
+    );
+    let mut superseded = Vec::new();
     // One Sweeping write governs the sweep+patch window (begin_capture already
     // stamped the identity); without it a crash mid-sweep leaves the dir ungoverned.
     if let Err(e) = staging::start_sweep(std::path::Path::new(&staging), |s| {
         staging::stamp_capture_label(s, &disc_name);
+        superseded = staging::stamp_capture_plan(s, capture_plan.as_ref());
         s.origin_device = device.to_string();
         s.title = display_name.clone();
         s.tmdb_confident = tmdb_confident;
@@ -3271,6 +3280,25 @@ fn rip_disc_inner(
             s.last_error = e.to_string();
         });
         return;
+    }
+    let keep: Vec<String> = match &capture_plan {
+        Some(Ok(plan)) => plan.iter().map(|o| o.filename.clone()).collect(),
+        _ => vec![filename.clone()],
+    };
+    let map_leaf = std::path::Path::new(&mapfile_path_str)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let sources = [iso_filename.as_str(), map_leaf.as_str()];
+    for stale in
+        staging::superseded_partials(std::path::Path::new(&staging), &superseded, &keep, &sources)
+    {
+        if let Err(e) = std::fs::remove_file(&stale) {
+            crate::server::log::device_log(
+                device,
+                &format!("superseded output {} was not removed: {e}", stale.display()),
+            );
+        }
     }
     let dest_url = if staging::is_network_output(&output_format, &cfg_read.network_target) {
         format!("network://{}", cfg_read.network_target)
@@ -3994,15 +4022,18 @@ fn rip_disc_inner(
         };
         // TV-routing metadata `RippedMarker` doesn't carry, plus the deliverable PLAN
         // (`outputs[]`), so it propagates through mux/resume into the mover.
-        let plan = match plan_mux_outputs(
-            &disc.titles,
-            &cfg_read,
-            tmdb_media_type,
-            &disc_name,
-            tmdb_id,
-            &filename,
-            episode_start,
-        ) {
+        let planned = capture_plan.take().unwrap_or_else(|| {
+            plan_mux_outputs(
+                &disc.titles,
+                &cfg_read,
+                tmdb_media_type,
+                &disc_name,
+                tmdb_id,
+                &filename,
+                episode_start,
+            )
+        });
+        let plan = match planned {
             Ok(plan) => plan,
             Err(error) => {
                 let reason = selection_review_message(&error);
@@ -5321,6 +5352,28 @@ pub(crate) fn staged_output_name(display_name: &str, ext: &str) -> String {
         "{}.{ext}",
         crate::server::util::sanitize_path_compact(display_name)
     )
+}
+
+// A multipass MKV capture's deliverable plan, decided at capture start: recorded then so a
+// remux after a loss-abort or Stop can bind it, and committed as is at the hand-off.
+fn capture_plan(
+    cfg: &Config,
+    titles: &[libfreemkv::DiscTitle],
+    (media_type, label, tmdb_id): (MediaKind, &str, u64),
+    movie_filename: &str,
+    episode_start: Option<u16>,
+) -> Option<Result<Vec<staging::Output>, crate::server::planner::PlanError>> {
+    (uses_multipass(cfg.max_retries) && !output_is_iso_image(&cfg.output_format)).then(|| {
+        plan_mux_outputs(
+            titles,
+            cfg,
+            media_type,
+            label,
+            tmdb_id,
+            movie_filename,
+            episode_start,
+        )
+    })
 }
 
 // Decide the deliverables a captured disc produces: titles to mux out of the ISO + staging
