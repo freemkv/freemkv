@@ -2805,7 +2805,7 @@ fn settings_commit_takes_picks_the_form_did_change() {
 // language keeps the previous value and says why, in every shell.
 #[test]
 fn presentation_language_all_and_none_are_not_languages() {
-    for bad in ["all", "none", "None", " ALL "] {
+    for bad in ["all", "none", "None", " ALL ", "und", "MUL", "zxx", "mis"] {
         assert!(!valid_presentation_language(bad), "{bad}");
     }
     for ok in ["", "  ", "de", "fra", "German"] {

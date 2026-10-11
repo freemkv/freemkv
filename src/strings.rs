@@ -99,6 +99,10 @@ pub fn is_presentation_language(tag: &str) -> bool {
     t.is_empty()
         || (!t.eq_ignore_ascii_case("all")
             && !t.eq_ignore_ascii_case("none")
+            // ISO 639-2 special codes: not languages a title can be in.
+            && !["und", "mul", "zxx", "mis"]
+                .iter()
+                .any(|c| t.eq_ignore_ascii_case(c))
             && freemkv_engine::is_language_tag(t))
 }
 
