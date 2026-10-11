@@ -2390,7 +2390,7 @@ const RIPPER_BOOKKEEPING: &[&str] = &[
     DISC_LABEL_FILE,
 ];
 
-fn is_ripper_bookkeeping(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_ripper_bookkeeping(name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
     RIPPER_BOOKKEEPING.contains(&name.strip_suffix(".tmp").unwrap_or(&name))
 }
