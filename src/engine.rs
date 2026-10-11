@@ -174,19 +174,12 @@ fn clips_note(n: usize) -> String {
     format!("{n} {}", crate::strings::get(word))
 }
 
-/// The Notes cell of a title row: its proven role, real playlist name, clip count and chapters.
-fn title_notes(
-    t: &libfreemkv::DiscTitle,
-    show_playlist: bool,
-    role: Option<freemkv_engine::TitleRole>,
-) -> String {
-    let play_all = crate::strings::get_or("gui.item.play_all", "Play all");
-    let episode = crate::strings::get_or("gui.item.episode", "Episode");
+/// The Notes cell of a title row: "Episode" when an authored roster names it, its real
+/// playlist name, clip count and chapters.
+fn title_notes(t: &libfreemkv::DiscTitle, show_playlist: bool, episode: bool) -> String {
     let mut parts = Vec::new();
-    match role {
-        Some(freemkv_engine::TitleRole::PlayAll) => parts.push(play_all),
-        Some(freemkv_engine::TitleRole::Episode) => parts.push(episode),
-        None => {}
+    if episode {
+        parts.push(crate::strings::get_or("gui.item.episode", "Episode"));
     }
     if show_playlist && !t.playlist.is_empty() {
         parts.push(sanitize_display(&t.playlist));
@@ -738,11 +731,23 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         size_bytes: None,
     });
 
-    let roles = freemkv_engine::title_roles(&disc.titles);
+    // "Episode" marks a member of the authored roster the Episodes pick uses, only when it holds.
+    let selection_model = fe::SelectionModel::from_titles(&disc.titles);
+    let roster = selection_model
+        .select(&fe::Selection::Episodes, &fe::StreamFilter::All, None)
+        .is_ok();
     for (ti, t) in disc.titles.iter().enumerate() {
+        let episode = roster
+            && matches!(
+                t.selection_evidence.episodes,
+                libfreemkv::disc::EpisodeEvidence::Authored {
+                    ordinal: Some(_),
+                    ..
+                }
+            );
         // A DVD title's "playlist" is a name the scan makes up (VTS_xx_y.VOB), naming no file
         // on the disc, so only a real playlist name (untrusted disc bytes, sanitized) is shown.
-        let notes = title_notes(t, disc.format != libfreemkv::DiscFormat::Dvd, roles[ti]);
+        let notes = title_notes(t, disc.format != libfreemkv::DiscFormat::Dvd, episode);
         rows.push(Row {
             type_s: "Title".into(),
             item: title_item(ti),
@@ -773,7 +778,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
 
     let details = disc_details(disc, &summary);
     Scanned {
-        selection_model: fe::SelectionModel::from_titles(&disc.titles),
+        selection_model,
         label,
         volume_id: disc.volume_id.clone(),
         title_count: disc.titles.len(),
