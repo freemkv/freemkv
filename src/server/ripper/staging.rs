@@ -574,7 +574,8 @@ pub fn save_review_metadata(dir: &Path, metadata: UserMetadata) -> io::Result<u6
     save_user_metadata_inner(dir, metadata, None, true)
 }
 
-/// Hold an unproved legacy plan without discarding its captured image or outputs.
+/// Hold a job for operator confirmation (an unproved legacy plan, or a plan only the
+/// operator can settle) without discarding its captured image or outputs.
 pub(super) fn hold_title_identity_review(
     dir: &Path,
     iso: &Path,

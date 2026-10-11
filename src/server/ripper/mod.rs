@@ -4002,11 +4002,13 @@ fn rip_disc_inner(
             Ok(plan) => plan,
             Err(error) => {
                 let reason = selection_review_message(&error);
-                staging::mutate_state_if_present(std::path::Path::new(&staging), |s| {
-                    s.state = staging::StagingState::Review;
-                    s.failure_reason = Some(reason.clone());
-                });
-                crate::server::log::device_log(device, &reason);
+                hold_capture_for_review(
+                    device,
+                    std::path::Path::new(&staging),
+                    (&iso_path_str, &mapfile_path_str),
+                    rip_keys.as_ref().ok(),
+                    &reason,
+                );
                 update_state_with(device, |s| {
                     s.status = "error".into();
                     s.last_error = reason;
@@ -5071,6 +5073,45 @@ fn hand_off_to_mux_worker(
         crate::server::keysource::forget_rip_keys(iso);
     }
     written
+}
+
+// Hold a finished capture whose plan only the operator can settle in Review, keeping
+// the rip's keys for the remux its correction triggers. A hold that did not land is
+// surfaced; the capture stays resumable (Stopped) either way.
+fn hold_capture_for_review(
+    device: &str,
+    staging_path: &std::path::Path,
+    (iso, mapfile): (&str, &str),
+    keys: Option<&libfreemkv::keys::KeyRing>,
+    reason: &str,
+) {
+    crate::server::log::device_log(device, reason);
+    let iso = std::path::Path::new(iso);
+    match staging::hold_title_identity_review(
+        staging_path,
+        iso,
+        std::path::Path::new(mapfile),
+        reason,
+    ) {
+        Ok(()) => {
+            if let Some(set) = keys {
+                crate::server::keysource::hold_rip_keys(iso, set.clone());
+            }
+        }
+        Err(e) => {
+            crate::server::log::syslog(&format!(
+                "Review hold for {} did not persist: {e}",
+                staging_path.display()
+            ));
+            crate::server::muxer::record_error(
+                &staging_path.to_string_lossy(),
+                reason,
+                &format!(
+                    "the review hold could not be saved ({e}); the capture is kept — fix the staging share, then Resume the disc"
+                ),
+            );
+        }
+    }
 }
 
 // The sweep damage figures the passes pushed into `device`'s STATE row.
@@ -6258,6 +6299,10 @@ mod probe_failure_tests;
 #[cfg(test)]
 #[path = "mod_quarantine_persist_tests.rs"]
 mod quarantine_persist_tests;
+
+#[cfg(test)]
+#[path = "mod_capture_review_hold_tests.rs"]
+mod capture_review_hold_tests;
 
 #[cfg(test)]
 #[path = "mod_stop_and_claim_tests.rs"]

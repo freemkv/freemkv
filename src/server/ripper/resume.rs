@@ -681,6 +681,29 @@ fn hold_unreadable_plan(
     reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
 }
 
+// A plan only the operator can settle (E9086, numbering): hold it in Review with the
+// ISO and outputs kept, so the mux worker stops re-dispatching it until a correction.
+fn hold_plan_for_review(
+    device: &str,
+    (staging_dir, iso, mapfile): (&Path, &Path, &Path),
+    display_name: &str,
+    mut reason: String,
+) {
+    if let Err(error) = staging::hold_title_identity_review(staging_dir, iso, mapfile, &reason) {
+        reason.push_str(&format!(" Could not save the review hold: {error}"));
+    }
+    crate::server::log::device_log(device, &reason);
+    crate::server::muxer::record_error(
+        &staging_dir.to_string_lossy(),
+        &reason,
+        &crate::strings::get_or(
+            "error.plan.review_retained",
+            "The saved ISO and plan are retained.",
+        ),
+    );
+    reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
+}
+
 // The superseded plan is never delivered; drop its outputs (plain leaves in this job
 // only) so they do not hold staging space. `sources` (the capture image and its map,
 // an ISO output's only file) are never deleted.
@@ -1048,16 +1071,12 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         replan_required,
     ) {
         let reason = super::selection_review_message(&error);
-        crate::server::log::device_log(device, &reason);
-        crate::server::muxer::record_error(
-            &staging_dir.to_string_lossy(),
-            &reason,
-            &crate::strings::get_or(
-                "error.plan.review_retained",
-                "The saved ISO and plan are retained.",
-            ),
+        hold_plan_for_review(
+            device,
+            (&staging_dir, &iso_path, &mapfile_path),
+            &display_name,
+            reason,
         );
-        reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
         return;
     }
 
@@ -1083,7 +1102,12 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             Ok(outputs) => outputs,
             Err(error) => {
                 let reason = super::selection_review_message(&error);
-                reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
+                hold_plan_for_review(
+                    device,
+                    (&staging_dir, &iso_path, &mapfile_path),
+                    &display_name,
+                    reason,
+                );
                 return;
             }
         };
@@ -2444,3 +2468,7 @@ mod upgrade_tests;
 #[cfg(test)]
 #[path = "resume_superseded_outputs_tests.rs"]
 mod superseded_outputs_tests;
+
+#[cfg(test)]
+#[path = "resume_plan_review_hold_tests.rs"]
+mod plan_review_hold_tests;
