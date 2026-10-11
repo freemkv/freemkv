@@ -123,8 +123,24 @@ fn sample_fingerprint(
 /// never permission to pick arbitrarily or delete another partial capture.
 pub(super) fn locate(root: &Path, identity: &str) -> Result<String, String> {
     // The retrying listing: a cold NFS cache can list an existing job as absent.
-    let names = match super::list_staging_basenames(root) {
-        Some(names) => names,
+    locate_listed(root, identity, super::read_staging_listing(root))
+}
+
+// `locate` over `listing`. A partial listing or an entry that cannot be inspected may
+// hide this disc's job, so either is a hold, never a fresh job beside it.
+fn locate_listed(
+    root: &Path,
+    identity: &str,
+    listing: Option<super::StagingListing>,
+) -> Result<String, String> {
+    let names = match listing {
+        Some(listing) if listing.complete => listing.names,
+        Some(_) => {
+            return Err(crate::strings::get_or(
+                "error.staging.listing_incomplete",
+                "cannot inspect staging: some entries in the staging folder could not be read",
+            ));
+        }
         None if std::fs::symlink_metadata(root)
             .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
         {
@@ -137,7 +153,14 @@ pub(super) fn locate(root: &Path, identity: &str) -> Result<String, String> {
     let mut found = None;
     for name in names {
         let dir = root.join(&name);
-        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        let meta = std::fs::symlink_metadata(&dir).map_err(|e| {
+            crate::strings::fmt_or(
+                "error.staging.entry_unreadable",
+                "cannot inspect staging entry {name}: {error}",
+                &[("name", &name), ("error", &e.to_string())],
+            )
+        })?;
+        if !meta.is_dir() {
             continue;
         }
         if dir_matches_identity(&dir, identity) {

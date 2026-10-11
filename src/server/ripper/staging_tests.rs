@@ -2418,6 +2418,10 @@ fn clear_staging_lists_unmatchable_1_8_3_folders_without_deleting_them() {
     st.disc_identity = "0123".into();
     try_write_state(&job, &st).unwrap();
     fs::write(job.join("Heat.mkv"), b"partial").unwrap();
+    for system in [".snapshot", "@eaDir", "#recycle"] {
+        fs::create_dir(root.path().join(system)).unwrap();
+        fs::write(root.path().join(system).join("Thumbs.db"), b"nas").unwrap();
+    }
     assert_eq!(unmatchable_legacy_jobs(root.path()), ["Heat"]);
     clear_abandoned_staging(root.path());
     assert!(legacy.join("Heat.mkv").exists());
@@ -2481,4 +2485,37 @@ fn an_unreadable_state_keeps_its_error_kind() {
             .kind(),
         io::ErrorKind::InvalidData
     );
+}
+
+// A crash between a prune's rename and its unlink leaves `<iso>.pruning`: startup removes
+// it from a job nobody holds, and nothing but the prune's own leftovers.
+#[test]
+fn startup_removes_an_interrupted_prunes_leftovers_from_unheld_jobs() {
+    let root = tmpdir();
+    let mut leftovers = Vec::new();
+    for name in ["Heat", "Held"] {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        try_write_state(&dir, &DiscState::new(StagingState::Stopped)).unwrap();
+        let iso = dir.join(format!("{name}.iso"));
+        let map = dir.join(format!("{name}.iso.mapfile"));
+        fs::write(&iso, b"image").unwrap();
+        fs::write(&map, b"map").unwrap();
+        fs::write(dir.join("notes.pruning"), b"operator file").unwrap();
+        fs::write(dir.join(format!("{name}.mkv")), b"muxed").unwrap();
+        let crashed = prune_with(&dir, &[&iso, &map], |_| Err(io::Error::other("crash")));
+        assert!(crashed.unwrap().iter().all(|(_, r)| r.is_err()));
+        leftovers.push(dir.join(format!("{name}.iso.pruning")));
+        leftovers.push(dir.join(format!("{name}.iso.mapfile.pruning")));
+    }
+    let held = job_lease(&root.join("Held"));
+    let _owner = held.try_lock().unwrap();
+    resume_or_quarantine_staging(&root.to_string_lossy());
+    assert!(!leftovers[0].exists() && !leftovers[1].exists());
+    assert!(
+        leftovers[2].exists() && leftovers[3].exists(),
+        "a held job is left alone"
+    );
+    assert!(root.join("Heat/notes.pruning").exists());
+    assert!(root.join("Heat/Heat.mkv").exists());
 }

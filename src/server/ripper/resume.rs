@@ -729,6 +729,18 @@ pub(super) fn wait_for_job_lease<'a>(
     }
 }
 
+// Why a resume gave up waiting for its job: the mux worker's own wording on `_mux`.
+fn lease_busy_message(device: &str) -> String {
+    if device == "_mux" {
+        crate::strings::get_or(
+            "error.staging.mux_job_busy",
+            "A drive is using this rip's staging job right now; it was not muxed and stays staged.",
+        )
+    } else {
+        super::JOB_BUSY_REFUSED.to_string()
+    }
+}
+
 // Whether a job a resume waited for changed lifecycle meanwhile (e.g. the other
 // drive's mux finished it), so the resume's classification no longer holds.
 pub(super) fn changed_while_waiting(
@@ -959,7 +971,24 @@ pub(super) fn check_resume_selection(
 }
 
 pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: ResumeClass) {
-    let _mux_slot = crate::server::library::arbiter::claim_for_rip();
+    resume_remux_within(
+        cfg,
+        device,
+        classification,
+        LEASE_WAIT,
+        crate::server::library::arbiter::claim_for_rip,
+    );
+}
+
+// `resume_remux` waiting at most `lease_wait` for the job; the mux slot (`claim_slot`,
+// which stops a Library remux) is taken only once the job is this resume's to mux.
+fn resume_remux_within<S>(
+    cfg: &Arc<RwLock<Config>>,
+    device: &str,
+    classification: ResumeClass,
+    lease_wait: std::time::Duration,
+    claim_slot: impl FnOnce() -> S,
+) {
     let ResumeClass::Remux {
         iso_path,
         mapfile_path,
@@ -1004,7 +1033,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     let job_lease = staging::job_lease(&staging_dir);
     let lifecycle = || staging::read_state(&staging_dir).map(|s| s.state);
     let before = lifecycle();
-    let _job_owner = match wait_for_job_lease(device, &job_lease, LEASE_WAIT) {
+    let _job_owner = match wait_for_job_lease(device, &job_lease, lease_wait) {
         LeaseWait::Acquired { guard, waited } => {
             if waited && changed_while_waiting(before, lifecycle()) {
                 let msg = "this rip changed while another drive or the mux worker finished with it; nothing was re-muxed".to_string();
@@ -1023,18 +1052,13 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             return;
         }
         LeaseWait::Busy => {
-            crate::server::log::device_log(device, super::JOB_BUSY_REFUSED);
-            reset_status_after_ripping(
-                device,
-                "error",
-                &display_name,
-                "",
-                "",
-                Some(super::JOB_BUSY_REFUSED.to_string()),
-            );
+            let msg = lease_busy_message(device);
+            crate::server::log::device_log(device, &msg);
+            reset_status_after_ripping(device, "error", &display_name, "", "", Some(msg));
             return;
         }
     };
+    let _mux_slot = claim_slot();
 
     // The deliverable plan the rip recorded in `state.json` (movie = 1 output;
     // TV = one per episode). Absent = legacy/movie; present-but-unreadable is

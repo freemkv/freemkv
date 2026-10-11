@@ -589,3 +589,24 @@ fn locate_still_refuses_a_job_dir_holding_another_identity_or_unproved_data() {
     std::fs::write(dir.join("Movie.iso"), b"capture").unwrap();
     assert!(locate(root.path(), id).is_err());
 }
+
+// A partial listing or an entry that cannot be inspected may hide this disc's job:
+// locate holds instead of starting a fresh job beside it.
+#[test]
+fn locate_refuses_a_partial_listing_or_an_uninspectable_entry() {
+    let root = tempfile::tempdir().unwrap();
+    job(root.path(), "Other", "other-hash");
+    let listing = |names: &[&str], complete| {
+        Some(super::super::StagingListing {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            complete,
+        })
+    };
+    assert_eq!(
+        locate_listed(root.path(), "hash", listing(&["Other"], true)).unwrap(),
+        "disc-hash"
+    );
+    assert!(locate_listed(root.path(), "hash", listing(&["Other"], false)).is_err());
+    let gone = locate_listed(root.path(), "hash", listing(&["Other", "Vanished"], true));
+    assert!(gone.unwrap_err().contains("Vanished"));
+}

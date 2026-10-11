@@ -585,3 +585,57 @@ fn the_single_pass_plan_line_names_the_muxed_title() {
     let line = plan_line(&single_pass_plan(&cfg, "/dev/sr0", "mkv:///s/Show.mkv", 2));
     assert!(line.contains("Titles([2])"), "{line}");
 }
+
+// TMDB down at capture start: the hand-off plans again once it answers, as 1.8.3 fetched
+// the season there; while it is still down, or the replan fails, the start plan stands.
+#[test]
+fn the_hand_off_replans_a_start_plan_made_without_tmdb() {
+    let ep = |number: u16, runtime_min: u16| crate::server::tmdb::Episode {
+        number,
+        name: format!("Ep {number}"),
+        runtime_min,
+    };
+    let season = vec![ep(1, 30), ep(2, 30), ep(3, 30), ep(4, 60), ep(5, 90)];
+    let mut titles = vec![title(60.0 * 60.0, 1000), title(90.0 * 60.0, 2000)];
+    authored_roster(&mut titles, 0..2);
+    let cfg = Config::default();
+    let plan_for = |episodes: Vec<crate::server::tmdb::Episode>, first: Option<u16>| {
+        plan_with_season(
+            &titles,
+            &cfg,
+            (
+                crate::server::planner::MediaKind::Tv,
+                "Show Season 1 Disc 2",
+                7,
+            ),
+            "Show.mkv",
+            first,
+            move |_, _, _| episodes,
+        )
+    };
+    let numbers = |plan: PlanResult| {
+        plan.unwrap()
+            .iter()
+            .map(|o| (o.episode, o.episode_name.clone()))
+            .collect::<Vec<_>>()
+    };
+    let disc_order = vec![(Some(3), String::new()), (Some(4), String::new())];
+    let start = plan_for(Vec::new(), None);
+    assert!(start.without_tmdb);
+    assert_eq!(
+        numbers(handoff_plan(start, || plan_for(season.clone(), None))),
+        [(Some(4), "Ep 4".into()), (Some(5), "Ep 5".into())]
+    );
+    let still_down = handoff_plan(plan_for(Vec::new(), None), || plan_for(Vec::new(), None));
+    assert_eq!(numbers(still_down), disc_order);
+    let failed = handoff_plan(plan_for(Vec::new(), None), || {
+        plan_for(season.clone(), Some(u16::MAX))
+    });
+    assert_eq!(numbers(failed), disc_order);
+    let named = plan_for(season.clone(), None);
+    assert!(!named.without_tmdb);
+    let kept = handoff_plan(named, || {
+        unreachable!("a TMDB-numbered plan is not refetched")
+    });
+    assert_eq!(numbers(kept)[1].1, "Ep 5");
+}

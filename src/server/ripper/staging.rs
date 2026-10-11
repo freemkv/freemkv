@@ -2154,6 +2154,9 @@ pub fn resume_or_quarantine_staging(staging_dir: &str) -> Vec<StagingResumeHint>
         };
         let path = entry.path();
         surface_interrupted_reset(&path, finish_interrupted_reset(&path));
+        if path.is_dir() {
+            remove_prune_leftovers(&path);
+        }
         let Some(snap) = snapshot_staging_disc(&path) else {
             continue;
         };
@@ -2447,6 +2450,7 @@ pub(crate) fn clear_abandoned_staging(root: &Path) -> (usize, usize) {
             removed += 1;
             continue;
         }
+        surface_prune_leftovers(&dir, remove_prune_leftovers_owned(&dir));
         match clear_if_abandoned(&dir) {
             Ok(true) => removed += 1,
             Ok(false) => {}
@@ -2469,7 +2473,11 @@ pub(crate) fn unmatchable_legacy_jobs(root: &Path) -> Vec<String> {
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| Some((e.file_name().to_str()?.to_owned(), e.path())))
-        .filter(|(name, _)| !name.starts_with("disc-") && !name.starts_with(UNVERIFIED_JOB_PREFIX))
+        .filter(|(name, _)| {
+            !name.starts_with("disc-")
+                && !name.starts_with(UNVERIFIED_JOB_PREFIX)
+                && !is_system_folder(name)
+        })
         .filter(|(_, dir)| {
             read_state(dir).is_none_or(|s| s.disc_identity.is_empty())
                 && super::resume::find_iso_and_mapfile(dir)
@@ -2482,6 +2490,11 @@ pub(crate) fn unmatchable_legacy_jobs(root: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+// Hidden and NAS system folders (`.snapshot`, `@eaDir`, `#recycle`): never a rip.
+fn is_system_folder(name: &str) -> bool {
+    name.starts_with(['.', '@', '#'])
 }
 
 /// Prefix of a job allocated for a disc whose identity could not be verified.
@@ -2794,6 +2807,47 @@ fn prune_with(
             .map(|(file, aside)| (file, aside.and_then(|aside| unlink(&aside))))
             .collect(),
     )
+}
+
+// The suffix `prune_with` renames a capture's ISO and map to before unlinking them.
+const PRUNING_SUFFIXES: [&str; 2] = [".iso.pruning", ".mapfile.pruning"];
+
+// Unlink the ISO and map a prune renamed aside but never deleted (a crash between the
+// rename and the unlink). The caller owns the job lease. Returns how many were removed.
+fn remove_prune_leftovers_owned(dir: &Path) -> io::Result<usize> {
+    let mut removed = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if PRUNING_SUFFIXES.iter().any(|s| name.ends_with(s)) && entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+// [`remove_prune_leftovers_owned`] for a job no rip, mux or delivery holds; a failure
+// is logged and the files are retried at the next walk.
+fn remove_prune_leftovers(dir: &Path) {
+    let lease = job_lease(dir);
+    let Ok(_owner) = lease.try_lock() else {
+        return;
+    };
+    surface_prune_leftovers(dir, remove_prune_leftovers_owned(dir));
+}
+
+fn surface_prune_leftovers(dir: &Path, removed: io::Result<usize>) {
+    match removed {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(path = %dir.display(), files = n, "removed an interrupted ISO prune's leftovers")
+        }
+        Err(e) => {
+            tracing::warn!(path = %dir.display(), error = %e, "an interrupted ISO prune's leftovers could not be removed")
+        }
+    }
 }
 
 /// Freeze execution mode, stamp the scan's verified identity and read planning

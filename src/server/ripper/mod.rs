@@ -2267,12 +2267,20 @@ fn disc_staging_hold(
         }
         Err(_) => return Some(StagingHold::Unreadable),
     }
-    // A Start over interrupted by a restart is finished here, not reported as unreadable.
-    if let Err(e) = staging::finish_interrupted_reset(&dir) {
-        crate::server::log::device_log(
+    // A Start over interrupted by a restart is finished here, not reported as unreadable;
+    // one that removed the job (nothing to keep) leaves no staging to hold on.
+    match staging::finish_interrupted_reset(&dir) {
+        Ok(true)
+            if std::fs::symlink_metadata(&dir)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return None;
+        }
+        Ok(_) => {}
+        Err(e) => crate::server::log::device_log(
             device,
             &format!("An interrupted Start over could not finish deleting the old capture: {e}"),
-        );
+        ),
     }
     let snap = match staging::snapshot_staging_disc(&dir) {
         Some(s) if !s.had_entry_error && s.state_unreadable.is_none() => s,
@@ -2343,6 +2351,17 @@ fn stand_down_idle(device: &str, loss_aborted: bool) {
 // List the immediate-child basenames of the staging root with the same NFS cold-cache
 // discipline as staging::snapshot_staging_disc; retries read_dir on error and unions results.
 fn list_staging_basenames(staging_dir: &std::path::Path) -> Option<Vec<String>> {
+    read_staging_listing(staging_dir).map(|listing| listing.names)
+}
+
+// A staging root's listing; `complete` is false when every pass hit an entry error.
+pub(super) struct StagingListing {
+    pub(super) names: Vec<String>,
+    pub(super) complete: bool,
+}
+
+// `list_staging_basenames` with whether the union is complete (None: never opened).
+pub(super) fn read_staging_listing(staging_dir: &std::path::Path) -> Option<StagingListing> {
     let mut saw_read_ok = false;
     // Insertion-ordered union of every basename observed across passes; the
     // set guards against duplicating a name seen in more than one pass.
@@ -2372,23 +2391,22 @@ fn list_staging_basenames(staging_dir: &std::path::Path) -> Option<Vec<String>> 
                 // Clean, complete listing — trust it immediately. We still
                 // return the accumulated union: any name from a prior degraded
                 // pass that this clean pass happened not to surface stays in.
-                return Some(union);
+                return Some(StagingListing {
+                    names: union,
+                    complete: true,
+                });
             }
         }
         if attempt < 2 {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
-    if saw_read_ok {
-        // Every pass that opened had at least one entry error; return the union
-        // of every basename we observed rather than None, so a disc whose dir
-        // appeared in any pass is still matchable.
-        Some(union)
-    } else {
-        // Never opened the directory across all retries — UNKNOWN. Behave
-        // like the old `read_dir(...).ok()?` (no listing → no match).
-        None
-    }
+    // Every pass that opened had an entry error: the union of every basename observed,
+    // marked incomplete. Never opened: UNKNOWN (no listing → no match).
+    saw_read_ok.then_some(StagingListing {
+        names: union,
+        complete: false,
+    })
 }
 
 /// The staging job the scan resolved for the disc in `device` (`jobs::locate`,
@@ -3299,7 +3317,7 @@ fn rip_disc_inner(
     // stamped the identity); without it a crash mid-sweep leaves the dir ungoverned.
     if let Err(e) = staging::start_sweep(std::path::Path::new(&staging), |s| {
         staging::stamp_capture_label(s, &disc_name);
-        superseded = staging::stamp_capture_plan(s, capture_plan.as_ref());
+        superseded = staging::stamp_capture_plan(s, capture_plan.as_ref().map(|p| &p.outputs));
         s.origin_device = device.to_string();
         s.title = display_name.clone();
         s.tmdb_confident = tmdb_confident;
@@ -3320,7 +3338,7 @@ fn rip_disc_inner(
         });
         return;
     }
-    let keep: Vec<String> = match &capture_plan {
+    let keep: Vec<String> = match capture_plan.as_ref().map(|p| &p.outputs) {
         Some(Ok(plan)) => plan.iter().map(|o| o.filename.clone()).collect(),
         _ => vec![filename.clone()],
     };
@@ -4066,17 +4084,20 @@ fn rip_disc_inner(
         };
         // TV-routing metadata `RippedMarker` doesn't carry, plus the deliverable PLAN
         // (`outputs[]`), so it propagates through mux/resume into the mover.
-        let planned = capture_plan.take().unwrap_or_else(|| {
-            plan_mux_outputs(
+        let replan = || {
+            plan_with_season(
                 &disc.titles,
                 &cfg_read,
-                tmdb_media_type,
-                &plan_label,
-                tmdb_id,
+                (tmdb_media_type, &plan_label, tmdb_id),
                 &filename,
                 episode_start,
+                crate::server::tmdb::season_episodes,
             )
-        });
+        };
+        let planned = match capture_plan.take() {
+            Some(start) => handoff_plan(start, replan),
+            None => replan().outputs,
+        };
         let plan = match planned {
             Ok(plan) => plan,
             Err(error) => {
@@ -5431,26 +5452,49 @@ fn inline_mux_delivers(plan: &[staging::Output]) -> bool {
     plan.len() <= 1
 }
 
+type PlanResult = Result<Vec<staging::Output>, crate::server::planner::PlanError>;
+
+// A deliverable plan, and whether its episodes were numbered without TMDB's season.
+struct CapturePlan {
+    outputs: PlanResult,
+    without_tmdb: bool,
+}
+
 // A multipass MKV capture's deliverable plan, decided at capture start: recorded then so a
-// remux after a loss-abort or Stop can bind it, and committed as is at the hand-off.
+// remux after a loss-abort or Stop can bind it; the hand-off commits it (`handoff_plan`).
 fn capture_plan(
     cfg: &Config,
     titles: &[libfreemkv::DiscTitle],
     (media_type, label, tmdb_id): (MediaKind, &str, u64),
     movie_filename: &str,
     episode_start: Option<u16>,
-) -> Option<Result<Vec<staging::Output>, crate::server::planner::PlanError>> {
+) -> Option<CapturePlan> {
     (uses_multipass(cfg.max_retries) && !output_is_iso_image(&cfg.output_format)).then(|| {
-        plan_mux_outputs(
+        plan_with_season(
             titles,
             cfg,
-            media_type,
-            label,
-            tmdb_id,
+            (media_type, label, tmdb_id),
             movie_filename,
             episode_start,
+            crate::server::tmdb::season_episodes,
         )
     })
+}
+
+// The plan the hand-off commits: a start plan numbered without TMDB (down at capture start)
+// is planned again, as 1.8.3 fetched the season here; the start plan stands when TMDB still
+// has no season for it or the replan fails.
+fn handoff_plan(start: CapturePlan, replan: impl FnOnce() -> CapturePlan) -> PlanResult {
+    if !start.without_tmdb {
+        return start.outputs;
+    }
+    match replan() {
+        CapturePlan {
+            outputs: Ok(outputs),
+            without_tmdb: false,
+        } => Ok(outputs),
+        _ => start.outputs,
+    }
 }
 
 // Decide the deliverables a captured disc produces: titles to mux out of the ISO + staging
@@ -5463,32 +5507,64 @@ fn plan_mux_outputs(
     tmdb_id: u64,
     movie_filename: &str,
     episode_start: Option<u16>,
-) -> Result<Vec<staging::Output>, crate::server::planner::PlanError> {
+) -> PlanResult {
+    plan_with_season(
+        titles,
+        cfg,
+        (media_type, disc_name, tmdb_id),
+        movie_filename,
+        episode_start,
+        crate::server::tmdb::season_episodes,
+    )
+    .outputs
+}
+
+// `plan_mux_outputs` with the TMDB season fetch (`season_episodes`) injected.
+fn plan_with_season(
+    titles: &[libfreemkv::DiscTitle],
+    cfg: &Config,
+    (media_type, disc_name, tmdb_id): (MediaKind, &str, u64),
+    movie_filename: &str,
+    episode_start: Option<u16>,
+    season_episodes: impl FnOnce(u64, u16, &str) -> Vec<crate::server::tmdb::Episode>,
+) -> CapturePlan {
+    let plan = |outputs| CapturePlan {
+        outputs,
+        without_tmdb: false,
+    };
     let indices = fanout_episode_indices(titles, cfg, media_type, disc_name);
     if indices.is_empty() {
-        let title_index = crate::server::planner::main_title(cfg, titles)?;
-        return Ok(vec![staging::Output {
+        let title_index = match crate::server::planner::main_title(cfg, titles) {
+            Ok(index) => index,
+            Err(e) => return plan(Err(e)),
+        };
+        return plan(Ok(vec![staging::Output {
             filename: movie_filename.to_string(),
             title_index,
             title_identity: Some(crate::title_identity::TitleIdentity::of(
                 &titles[title_index],
             )),
             ..Default::default()
-        }]);
+        }]));
     }
     let season_num = crate::server::tmdb::season_from_label(disc_name).unwrap_or(1);
     // An operator First episode out of range fails before the blocking TMDB fetch.
-    crate::server::planner::check_episode_range(episode_start, indices.len())?;
+    if let Err(e) = crate::server::planner::check_episode_range(episode_start, indices.len()) {
+        return plan(Err(e));
+    }
     // TMDB episode list, best-effort (empty on any failure → sequential naming).
-    let episodes = crate::server::tmdb::season_episodes(tmdb_id, season_num, &cfg.tmdb_api_key);
-    plan_episode_outputs(
-        titles,
-        &indices,
-        disc_name,
-        &episodes,
-        movie_filename,
-        episode_start,
-    )
+    let episodes = season_episodes(tmdb_id, season_num, &cfg.tmdb_api_key);
+    CapturePlan {
+        outputs: plan_episode_outputs(
+            titles,
+            &indices,
+            disc_name,
+            &episodes,
+            movie_filename,
+            episode_start,
+        ),
+        without_tmdb: episodes.is_empty(),
+    }
 }
 
 // Name the fanned-out episode `indices` against the season's TMDB `episodes`.

@@ -30,9 +30,9 @@ fn accept_damage_after_a_loss_abort_remuxes_the_planned_title() {
         "Movie.mkv",
         None,
     );
-    assert!(plan.as_ref().is_some_and(|p| p.is_ok()));
+    assert!(plan.as_ref().is_some_and(|p| p.outputs.is_ok()));
     staging::start_sweep(&dir, |s| {
-        staging::stamp_capture_plan(s, plan.as_ref());
+        staging::stamp_capture_plan(s, plan.as_ref().map(|p| &p.outputs));
     })
     .unwrap();
     // The sweep loss-aborts; the operator accepts the damage.
