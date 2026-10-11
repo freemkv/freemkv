@@ -30,7 +30,6 @@ fn authored_roster(titles: &mut [libfreemkv::DiscTitle], members: std::ops::Rang
         title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
             roster: "test-menu".into(),
             title_count,
-            member: members.contains(&index),
             ordinal: members.contains(&index).then(|| index - members.start),
         };
     }

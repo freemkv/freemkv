@@ -71,7 +71,6 @@ fn authored_tv_evidence_allows_capture_and_replan() {
         title.selection_evidence.episodes = EpisodeEvidence::Authored {
             roster: "test-authored-roster".into(),
             title_count,
-            member: true,
             ordinal: Some(ordinal),
         };
     }

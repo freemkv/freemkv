@@ -15,6 +15,7 @@
 
 ### Changed
 
+- **A saved "Episodes" title mode no longer applies to the next disc you open** (app only: the selection bar): every disc starts on the default selection, and Episodes is offered when the disc has an episode roster. Audio and subtitle choices are kept as before.
 - **Reboot library restarts the server process** (server only: System page): running work stops at its next safe point (rips within 60 s, other services within 120 s), then the server starts again. On Linux and in the container it replaces itself in place (same process, so Docker's restart count is unchanged) and picks up an upgraded binary; on macOS it exits for launchd to start it again. A stop signal during the reboot still stops the server. The page waits for the new server and reconnects by itself.
 - **Reboot needs a service manager on macOS and Windows** (server only): it is refused unless the server runs as the launchd login service (`macos/install-library-service.sh`), because a server started by hand would only stop. On Windows it is not available.
 

@@ -3313,7 +3313,11 @@ impl App {
                     .trim()
                     .parse::<f64>()
                     .unwrap_or(0.0);
-                self.pick_mode = self.settings.selection.clone();
+                // Episodes is a per-disc choice offered when a roster exists, never inherited.
+                self.pick_mode = match self.settings.selection.as_str() {
+                    "Episodes" => PICK_TITLES[0].to_string(),
+                    saved => saved.to_string(),
+                };
                 self.pick_prefs = LangPrefs::from_settings(&self.settings);
                 self.pick_min_secs = min_secs;
                 self.tree = Tree::from_scan(&sc, &self.pick_mode, min_secs, &self.pick_prefs);
