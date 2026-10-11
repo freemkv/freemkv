@@ -29,6 +29,10 @@ fn a_plan_hold_keeps_the_rip_keys_for_the_corrected_remux() {
         Some(&libfreemkv::keys::KeyRing::none()),
         "held",
     );
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove("dev-hold");
     let st = staging::read_state(&dir).unwrap();
     assert_eq!(st.state, staging::StagingState::Review);
     assert_eq!(st.failure_reason.as_deref(), Some("held"));
@@ -58,9 +62,48 @@ fn a_hold_that_cannot_be_written_raises_a_card() {
         None,
         "held",
     );
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove("dev-hold-2");
     let card = card_for(&dir).expect("no card for the lost hold");
     assert_eq!(card.reason, "held");
     assert!(card.hint.contains("could not be saved"), "{}", card.hint);
+}
+
+// The drive card says a capture's hold was not saved, as a resume's hold does.
+#[test]
+fn a_capture_hold_that_could_not_be_saved_says_so_on_the_drive() {
+    crate::strings::set_locale("en");
+    let dir = scratch("unsaved-drive").join("gone");
+    let device = "_capture_hold_unsaved_test";
+    hold_capture_for_review(
+        device,
+        &dir,
+        ("/x/Show.iso", "/x/Show.iso.mapfile"),
+        None,
+        "needs review",
+    );
+    crate::server::muxer::MUX_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(dir.to_string_lossy().as_ref());
+    let row = STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(device)
+        .unwrap();
+    assert_eq!(row.status, "error");
+    assert!(
+        row.last_error.starts_with("needs review"),
+        "{}",
+        row.last_error
+    );
+    assert!(
+        row.last_error.contains("Could not save the review hold:"),
+        "{}",
+        row.last_error
+    );
 }
 
 // A capture held at the hand-off is surfaced as a resume's hold is: a card naming why.
@@ -82,6 +125,10 @@ fn a_capture_held_for_review_is_surfaced_like_a_resume_hold() {
         None,
         "held",
     );
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove("dev-hold-3");
     assert_eq!(
         staging::read_state(&dir).unwrap().state,
         staging::StagingState::Review
@@ -121,6 +168,10 @@ fn a_rip_time_hold_is_dispatched_by_the_mux_worker_once_corrected() {
         None,
         "held",
     );
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove("dev-hold-rip-time");
     let verdict = || {
         crate::server::muxer::mux_dispatch_verdict(staging::snapshot_staging_disc(&dir).as_ref())
     };

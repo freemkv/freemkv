@@ -168,3 +168,68 @@ fn a_review_hold_that_could_not_be_saved_says_so_on_the_drive() {
         row.last_error
     );
 }
+
+// A resume whose saved plan cannot be rebound to the image, and whose Review hold could
+// not be saved, says so on the drive too.
+#[cfg(unix)]
+#[test]
+fn a_resume_rebind_hold_that_could_not_be_saved_says_so_on_the_drive() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root writes into the read-only folder anyway
+    }
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::strings::set_locale("en");
+    let k = crate::ku_fixture::K1;
+    let image = crate::ku_fixtures::bd_image(&[Some(k), Some(k), Some(k)], 1)
+        .img
+        .image;
+    let dir = scratch("rebind-unsaved");
+    let iso = dir.join("Show.iso");
+    let map = dir.join("Show.iso.mapfile");
+    std::fs::write(&iso, image).unwrap();
+    std::fs::write(&map, b"# map").unwrap();
+    let mut st = staging::DiscState::new(staging::StagingState::Ripped);
+    st.title = "Show".into();
+    st.outputs = vec![staging::Output {
+        filename: "Show.mkv".into(),
+        ..Default::default()
+    }];
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.mapfile_path = map.to_string_lossy().into_owned();
+    staging::try_write_state(&dir, &st).unwrap();
+    // The share refuses writes: the Review hold cannot be saved.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let class = ResumeClass::Remux {
+        iso_path: iso,
+        mapfile_path: map,
+        display_name: "Show".into(),
+        title_confident: Some(true),
+    };
+    let device = "plan-hold-rebind-unsaved";
+    let cfg = Arc::new(RwLock::new(Config::default()));
+    resume_remux_within(&cfg, device, class, std::time::Duration::ZERO, || ());
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::server::muxer::MUX_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(dir.to_string_lossy().as_ref());
+    let row = super::super::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(device)
+        .unwrap();
+    assert!(
+        row.last_error.contains("predates title identity proof"),
+        "{}",
+        row.last_error
+    );
+    assert!(
+        row.last_error.contains("Could not save the review hold:"),
+        "{}",
+        row.last_error
+    );
+}

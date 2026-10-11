@@ -809,7 +809,7 @@ fn review_unsaved(error: &std::io::Error) -> String {
 }
 
 // The drive's text for a Review hold: `reason`, and whether the hold could not be saved.
-fn review_status(reason: &str, held: &std::io::Result<()>) -> String {
+pub(super) fn review_status(reason: &str, held: &std::io::Result<()>) -> String {
     match held {
         Ok(()) => reason.to_string(),
         Err(error) => format!("{reason} {}", review_unsaved(error)),

@@ -4273,10 +4273,6 @@ fn rip_disc_inner(
                     rip_keys.as_ref().ok(),
                     &reason,
                 );
-                update_state_with(device, |s| {
-                    s.status = "error".into();
-                    s.last_error = reason;
-                });
                 unregister_halt(device);
                 return;
             }
@@ -5341,7 +5337,7 @@ fn hand_off_to_mux_worker(
 
 // Hold a finished capture whose plan only the operator can settle in Review, as a resume
 // holds one (`resume::hold_in_review`), keeping the rip's keys for the remux its correction
-// triggers. A hold that did not land leaves the capture as it was, and its card says so.
+// triggers. A hold that did not land leaves the capture as it was; its card and drive say so.
 fn hold_capture_for_review(
     device: &str,
     staging_path: &std::path::Path,
@@ -5355,11 +5351,17 @@ fn hold_capture_for_review(
         "The saved ISO and plan are retained.",
     );
     let paths = (staging_path, iso, std::path::Path::new(mapfile));
-    if resume::hold_in_review(device, paths, reason, &hint).is_ok()
+    let held = resume::hold_in_review(device, paths, reason, &hint);
+    if held.is_ok()
         && let Some(set) = keys
     {
         crate::server::keysource::hold_rip_keys(iso, set.clone());
     }
+    let status = resume::review_status(reason, &held);
+    update_state_with(device, |s| {
+        s.status = "error".into();
+        s.last_error = status;
+    });
 }
 
 // The sweep damage figures the passes pushed into `device`'s STATE row.
