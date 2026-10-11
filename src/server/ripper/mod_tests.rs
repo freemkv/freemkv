@@ -8,9 +8,8 @@ use super::{
     format_pass_error, header_phase_disposition, incomplete_mux_status, is_fmts_key_missing_error,
     is_safe_staging_segment, list_staging_basenames, patch_made_progress, patch_pass_decision,
     plan_passes, pre_pass_converged, prune_intermediate_iso, register_halt, resumable_dir_blocked,
-    resumable_for_disc, resume_remaining_iso_bytes, scope_bad_bytes, scope_converged,
-    skip_diskcheck_value, staging_dir_matches_disc, staging_disc_owned_by_worker,
-    staging_free_bytes,
+    resumable_for_job, resume_remaining_iso_bytes, scope_bad_bytes, scope_converged,
+    skip_diskcheck_value, staging_disc_owned_by_worker, staging_free_bytes,
 };
 use crate::server::ripper::session::device_halt;
 use crate::server::ripper::staging;
@@ -337,41 +336,6 @@ fn prune_tolerates_already_absent_files() {
     prune_intermediate_iso("sr0", &iso, &map, 1, false);
     assert!(!iso.exists());
     assert!(!map.exists());
-}
-
-// Resume/completion matching is EXACT, never prefix ("Redshift" vs "Redshift_2"). Locks in
-// the already-fixed HIGH bug.
-#[test]
-fn staging_match_is_exact_not_prefix() {
-    // Direct predicate: exact equality only.
-    assert!(staging_dir_matches_disc("Redshift", "Redshift"));
-    assert!(!staging_dir_matches_disc("Redshift_2", "Redshift"));
-    assert!(!staging_dir_matches_disc("Redshift", "Redshift_2"));
-    assert!(!staging_dir_matches_disc("Redshift_2_Extras", "Redshift_2"));
-
-    // End-to-end over a real temp staging dir: both "Redshift" and "Redshift_2"
-    // exist; scanning with the production predicate must select ONLY the
-    // exact "Redshift".
-    let tmp = tempfile::TempDir::new().unwrap();
-    for name in ["Redshift", "Redshift_2"] {
-        std::fs::create_dir_all(tmp.path().join(name)).unwrap();
-    }
-    let sanitized = "Redshift";
-    let matches: Vec<String> = std::fs::read_dir(tmp.path())
-        .unwrap()
-        .flatten()
-        .filter_map(|e| {
-            e.path()
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-        })
-        .filter(|basename| staging_dir_matches_disc(basename, sanitized))
-        .collect();
-    assert_eq!(
-        matches,
-        vec!["Redshift".to_string()],
-        "only the exact 'Redshift' dir must match, not the 'Redshift_2' sibling"
-    );
 }
 
 // Regression: `output_opened=false` + `finalize_error=Some` must classify as a terminal
@@ -2830,8 +2794,7 @@ fn list_staging_basenames_union_does_not_duplicate() {
     assert!(got.contains(&"Wraithline_Part_Two".to_string()));
 }
 
-// Regression: `resumable_for_disc` must find an existing resumable staging dir via
-// `list_staging_basenames` (3-retry NFS defense), not a bare `read_dir().flatten()`.
+// Regression: `resumable_for_job` finds the job's partial sweep, and not one mid-reset.
 #[test]
 fn resumable_for_disc_detects_partial_sweep() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2852,17 +2815,14 @@ fn resumable_for_disc_detects_partial_sweep() {
     let mapfile_path = disc_dir.join(format!("{sanitized}.iso.mapfile"));
     freemkv_engine::Mapfile::create(&mapfile_path, 4096, "test").unwrap();
 
-    assert_eq!(
-        resumable_for_disc(&cfg, display_name, ""),
-        Some(Resumable::Sweep),
-    );
+    assert_eq!(resumable_for_job(&cfg, &sanitized), Some(Resumable::Sweep),);
     let mut reset = staging::DiscState::new(staging::StagingState::Stopped);
     reset.reset_in_progress = true;
     staging::try_write_state(&disc_dir, &reset).unwrap();
-    assert_eq!(resumable_for_disc(&cfg, display_name, ""), None);
+    assert_eq!(resumable_for_job(&cfg, &sanitized), None);
 }
 
-// R3 finding 1 regression: `resumable_for_disc` must return None when the dir carries a
+// R3 finding 1 regression: `resumable_for_job` must return None when the dir carries a
 // terminal `.failed` or held `.review` marker, even with pending bytes.
 #[test]
 fn resumable_for_disc_blocked_by_failed_or_review() {
@@ -2884,21 +2844,21 @@ fn resumable_for_disc_blocked_by_failed_or_review() {
         freemkv_engine::Mapfile::create(&mapfile_path, 4096, "test").unwrap();
         // Sanity: without the terminal/held marker it IS Sweep-resumable.
         assert_eq!(
-            resumable_for_disc(&cfg, display_name, ""),
+            resumable_for_job(&cfg, &sanitized),
             Some(Resumable::Sweep),
             "precondition: partial sweep is resumable before {marker}"
         );
         // …but a terminal/held marker blocks the Resume affordance entirely.
         std::fs::write(disc_dir.join(marker), b"{}").unwrap();
         assert_eq!(
-            resumable_for_disc(&cfg, display_name, ""),
+            resumable_for_job(&cfg, &sanitized),
             None,
             "{marker} must suppress the Resume affordance (operator must Wipe)"
         );
     }
 }
 
-// Owner decision #2 regression: `resumable_for_disc` must return None when the dir is owned
+// Owner decision #2 regression: `resumable_for_job` must return None when the dir is owned
 // by the mux worker (`.ripped`/`.muxing`).
 #[test]
 fn resumable_for_disc_blocked_when_owned_by_mux_worker() {
@@ -2920,14 +2880,14 @@ fn resumable_for_disc_blocked_when_owned_by_mux_worker() {
         freemkv_engine::Mapfile::create(&mapfile_path, 4096, "test").unwrap();
         // Sanity: without the worker-owned marker it IS Sweep-resumable.
         assert_eq!(
-            resumable_for_disc(&cfg, display_name, ""),
+            resumable_for_job(&cfg, &sanitized),
             Some(Resumable::Sweep),
             "precondition: partial sweep is resumable before {marker}"
         );
         // …but a worker-owned marker blocks the Resume affordance entirely.
         std::fs::write(disc_dir.join(marker), b"{}").unwrap();
         assert_eq!(
-            resumable_for_disc(&cfg, display_name, ""),
+            resumable_for_job(&cfg, &sanitized),
             None,
             "{marker} must suppress Resume (mux worker owns the dir)"
         );
@@ -3502,8 +3462,8 @@ fn loss_aborted(
     super::disc_staging_hold(cfg, device, false) == Some(super::StagingHold::LossAborted)
 }
 
-/// Seed `STATE[device].disc_name` and hand back a `Config` pointing at
-/// `staging_root`, exactly as the drive thread sees them after a scan.
+/// Seed `STATE[device]` with a scanned disc whose job is its sanitized name and
+/// hand back a `Config` pointing at `staging_root`, as the drive thread sees them.
 fn seed_scanned_disc(
     device: &str,
     disc_name: &str,
@@ -3517,6 +3477,7 @@ fn seed_scanned_disc(
             super::RipState {
                 device: device.to_string(),
                 disc_name: disc_name.to_string(),
+                job_id: crate::server::util::sanitize_path_compact(disc_name),
                 ..Default::default()
             },
         );
@@ -3526,116 +3487,27 @@ fn seed_scanned_disc(
     }))
 }
 
-/// As [`seed_scanned_disc`], but also records the disc's RAW volume label —
-/// what the drive thread puts in `RipState::disc_label` at identify time,
-/// and the only thing that tells two discs of a boxset apart.
-fn seed_scanned_disc_labelled(
-    device: &str,
-    disc_name: &str,
-    disc_label: &str,
-    staging_root: &std::path::Path,
-) -> std::sync::Arc<std::sync::RwLock<crate::server::config::Config>> {
-    let cfg = seed_scanned_disc(device, disc_name, staging_root);
-    super::STATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(device.to_string())
-        .and_modify(|s| s.disc_label = disc_label.to_string());
-    cfg
-}
-
-// THE boxset bug: disc 2 shares disc 1's clean_title, so a title-only staging dir would
-// wrongly read disc 2 as "already ripped".
+// THE boxset bug: disc 2 shares disc 1's title, so a title-keyed staging dir would
+// wrongly read disc 2 as "already ripped". Each disc's located job is its own.
 #[test]
 fn disc_two_of_a_boxset_is_not_skipped_as_already_ripped() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
-    // One TMDB title, because clean_title already stripped "Disc N".
-    let title = "Boxset Movie";
     let d1 = "sg_boxset_disc1_test";
     let d2 = "sg_boxset_disc2_test";
-
-    // ── Disc 1 rips to completion ────────────────────────────────────
-    let cfg1 = seed_scanned_disc_labelled(d1, title, "BOXSET_DISC_1", root);
-    let base1 = {
-        let c = cfg1.read().unwrap();
-        super::staging_basename_for_device(&c, d1).expect("disc 1 has a staging basename")
-    };
-    assert_eq!(
-        base1,
-        crate::server::util::sanitize_path_compact(title),
-        "the first disc keeps the plain TMDB-title dir — display and output \
-             naming must not change"
-    );
-    staging_disc_with_markers(root, &base1, &[".completed"]);
-    staging::write_disc_label(&root.join(&base1), "BOXSET_DISC_1");
-
-    // Same disc back in the drive (container restart, disc still loaded):
-    // it must find ITS OWN dir and still be recognised as finished.
+    let cfg1 = seed_scanned_disc(d1, "Boxset Movie", root);
+    let job1 = crate::server::util::sanitize_path_compact("Boxset Movie");
+    staging_disc_with_markers(root, &job1, &[".completed"]);
     assert!(
         already_completed(&cfg1, d1),
-        "re-inserting the SAME disc must still resolve to its own completed \
-             dir — otherwise every restart re-sweeps a finished rip"
+        "disc 1 finds its own finished job"
     );
-
-    // ── Disc 2 goes in ───────────────────────────────────────────────
-    let cfg2 = seed_scanned_disc_labelled(d2, title, "BOXSET_DISC_2", root);
-    assert!(
-        !already_completed(&cfg2, d2),
-        "disc 2 of a boxset shares disc 1's TMDB title but is a DIFFERENT \
-             disc: it must be ripped, not skipped as already completed"
-    );
-    let base2 = {
-        let c = cfg2.read().unwrap();
-        super::staging_basename_for_device(&c, d2).expect("disc 2 has a staging basename")
-    };
-    assert_ne!(
-        base2, base1,
-        "disc 2 must not be handed disc 1's staging dir — the raw volume \
-             label is what distinguishes them"
-    );
-
-    // And it isn't offered disc 1's staging to resume onto either.
-    assert!(
-        !super::disc_owned_by_worker(&cfg2, d2),
-        "disc 2 must not inherit disc 1's worker-ownership verdict"
-    );
-
+    let cfg2 = seed_scanned_disc(d2, "Boxset Movie", root);
+    super::update_state_with(d2, |s| s.job_id = "disc-two".into());
+    assert!(!already_completed(&cfg2, d2), "disc 2 must rip");
+    assert!(!super::disc_owned_by_worker(&cfg2, d2));
     forget_device(d1);
     forget_device(d2);
-}
-
-// Upgrade path: a pre-`.disc-label` staging dir must keep reading as "this disc" until
-// adopted, not re-rip or orphan.
-#[test]
-fn a_legacy_unlabelled_staging_dir_still_counts_as_the_inserted_disc() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path();
-    let device = "sg_boxset_legacy_test";
-    let title = "Legacy Movie";
-    let sanitized = crate::server::util::sanitize_path_compact(title);
-
-    // Pre-upgrade staging: `.completed`, no `.disc-label`.
-    staging_disc_with_markers(root, &sanitized, &[".completed"]);
-
-    let cfg = seed_scanned_disc_labelled(device, title, "LEGACY_DISC_1", root);
-    assert!(
-        already_completed(&cfg, device),
-        "an unlabelled legacy dir must still stop the unattended path \
-             re-ripping a disc it already finished"
-    );
-
-    // Once adopted, the sibling disc gets its own dir.
-    staging::adopt_disc_label(&root.join(&sanitized), "LEGACY_DISC_1");
-    let other = "sg_boxset_legacy_sibling_test";
-    let cfg2 = seed_scanned_disc_labelled(other, title, "LEGACY_DISC_2", root);
-    assert!(
-        !already_completed(&cfg2, other),
-        "after adoption, a different disc of the same title must rip"
-    );
-
-    forget_device(device);
-    forget_device(other);
 }
 
 fn forget_device(device: &str) {
@@ -4360,7 +4232,7 @@ fn resumable_for_disc_refuses_finished_rips() {
         freemkv_engine::Mapfile::create(&mapfile, 4096, "test").unwrap();
         arm(&disc_dir);
         assert_eq!(
-            resumable_for_disc(&cfg, display_name, ""),
+            resumable_for_job(&cfg, &sanitized),
             None,
             "a {label} dir must not be offered for a resume sweep"
         );

@@ -456,9 +456,8 @@ pub fn device_known(device: &str) -> bool {
     s.contains_key(device)
 }
 
-// `current_disc_name` lived here but was removed with the boxset fix: the
-// display name alone can't identify a disc (every disc of a set shares one
-// TMDB title). Staging lookups now go through `staging_basename_for_device`.
+// A display name can't identify a disc (boxset discs share one title): staging
+// lookups go through the scan's job, `staging_job_for_device`.
 
 pub fn is_busy(device: &str) -> bool {
     // Recover a poisoned guard instead of treating poison as "not busy":

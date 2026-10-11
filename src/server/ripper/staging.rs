@@ -118,10 +118,8 @@ pub const SWEEPING_MARKER: &str = ".sweeping";
 pub const MUXING_MARKER: &str = ".muxing";
 pub const RESTART_COUNT_FILE: &str = ".restart_count";
 
-/// The disc's RAW volume label (UDF `meta_title`, else `volume_id`), recorded in its staging
-/// dir at creation. Used to tell apart same-title boxset discs (dir names collapse after
-/// `tmdb::clean_title` strips "disc N"). Absent in dirs written before this existed; a missing
-/// label reads as "same disc" (legacy skip-on-`.completed` behaviour).
+/// The raw volume label older versions stamped into title-named staging dirs. Only read
+/// when upgrading a legacy marker dir; still ripper bookkeeping for cleanup.
 pub const DISC_LABEL_FILE: &str = ".disc-label";
 
 // Unified per-disc state (`state.json`) supersedes the old marker-file machine
@@ -256,8 +254,7 @@ pub struct DiscState {
     pub needs_disc: bool,
 
     // --- identity / routing (was the `.disc-label` file + done body) -------
-    /// Raw volume label — the same value the `.disc-label` file held; used by
-    /// `dir_is_same_disc` to tell boxset discs apart.
+    /// Raw volume label of the captured disc (the value legacy `.disc-label` held).
     #[serde(default)]
     pub disc_label: String,
     /// The disc's own label as displayed (distinct from the resolved `title`).
@@ -1840,8 +1837,8 @@ fn upgrade_legacy_to_state(dir: &Path, obs: &ScanObservations) {
         return;
     }
 
-    // Strip the now-superseded legacy marker files (keep `.disc-label`; it is
-    // identity, not lifecycle state, and stays its own file).
+    // Strip the now-superseded legacy marker files (`.disc-label` is left as
+    // harmless bookkeeping).
     for name in [
         DONE_MARKER,
         REVIEW_MARKER,
@@ -1904,89 +1901,12 @@ fn apply_legacy_handoff_body(dir: &Path, st: &mut DiscState) {
         .and_then(|n| u16::try_from(n).ok());
 }
 
-/// Record the disc's raw volume label in its staging dir. Best-effort: a
-/// failure just means the dir reads as "unlabelled" later, which falls back to
-/// the pre-existing same-disc assumption.
-pub fn write_disc_label(dir: &Path, raw_label: &str) {
-    let p = dir.join(DISC_LABEL_FILE);
-    if let Err(e) = std::fs::write(&p, raw_label.as_bytes()) {
-        tracing::warn!(path = %p.display(), error = %e, "failed to record the disc label; this dir will read as any disc's");
-    }
-}
-
-/// The raw volume label recorded in a staging dir, if any.
-pub fn read_disc_label(dir: &Path) -> Option<String> {
+/// The raw volume label a pre-state.json dir recorded, if any (legacy upgrade only).
+fn read_disc_label(dir: &Path) -> Option<String> {
     std::fs::read_to_string(dir.join(DISC_LABEL_FILE))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// Does `dir` belong to the disc with raw label `raw_label`?
-///
-/// An unlabelled dir (written before labels existed) counts as a match: the
-/// conservative answer, because treating legacy staging as a DIFFERENT disc
-/// would re-rip it on the first insert after an upgrade.
-pub fn dir_is_same_disc(dir: &Path, raw_label: &str) -> bool {
-    match read_disc_label(dir) {
-        Some(recorded) => recorded == raw_label,
-        None => true,
-    }
-}
-
-/// Pick a staging dir name for `raw_label` under `staging_root`, given the title-derived `base`
-/// name. Returns `base` when free or already this disc's; `base_2`, `base_3`,... when taken by
-/// a DIFFERENT disc (boxset discs share a title). Does NOT uniquify for the same disc:
-/// re-inserting after a restart must still find its own dir. An EMPTY `raw_label` (caller
-/// doesn't know which disc) takes the same conservative `base` answer.
-pub fn staging_name_for_disc(staging_root: &Path, base: &str, raw_label: &str) -> String {
-    if raw_label.is_empty() {
-        return base.to_string();
-    }
-    // The suffix policy itself lives in `util::disc_variant` — shared with the
-    // mover's output naming, so the two can't drift. All this supplies is what
-    // "claimable" means for a staging dir: free, or carrying this disc's label.
-    crate::server::util::disc_variant(|n| {
-        let path = staging_root.join(crate::server::util::disc_variant_name(base, n));
-        !path.exists() || dir_is_same_disc(&path, raw_label)
-    })
-    .map(|n| crate::server::util::disc_variant_name(base, n))
-    // Every variant belongs to a different disc. Fall back to the plain title:
-    // the caller's own `.completed` / collision checks then run against it, so
-    // this degrades to the pre-existing behaviour rather than inventing a name.
-    .unwrap_or_else(|| base.to_string())
-}
-
-/// THE staging-directory naming rule. Every caller that needs the staging dir
-/// for a disc goes through here: sanitize the TMDB display title into a path
-/// segment, then let [`staging_name_for_disc`] hand back a `_2`/`_3` variant if
-/// that segment is already owned by a DIFFERENT disc.
-///
-/// One function on purpose. This bug — disc 2 of a boxset silently skipped as
-/// "already ripped" — exists because the "staging dir name" rule was spelled
-/// out inline at ten call sites, so hardening any one of them fixed nothing.
-/// Do not re-derive a staging basename anywhere else; call this.
-pub fn staging_basename(staging_root: &Path, display_name: &str, raw_label: &str) -> String {
-    let base = crate::server::util::sanitize_path_compact(display_name);
-    staging_name_for_disc(staging_root, &base, raw_label)
-}
-
-/// Adopt `dir` for the disc with raw label `raw_label`, writing the label if
-/// the dir does not already carry one.
-///
-/// The "if absent" half is what upgrades legacy staging: a dir created before
-/// labels existed reads as every disc's dir (see [`dir_is_same_disc`]), which
-/// is right once but would keep matching disc 2 as well. The first disc to use
-/// it stamps its label and takes ownership, so the next different disc gets its
-/// own directory. An existing, different label is left alone — that dir is
-/// someone else's and `staging_basename` should not have routed here.
-pub fn adopt_disc_label(dir: &Path, raw_label: &str) {
-    if raw_label.is_empty() {
-        return;
-    }
-    if read_disc_label(dir).is_none() {
-        write_disc_label(dir, raw_label);
-    }
 }
 
 /// Probe a single per-disc staging dir from one listing of it. Returns None if

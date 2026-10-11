@@ -861,8 +861,7 @@ fn keyless_not_ripping_error(msg: &str) -> String {
 }
 
 use session::{
-    DriveSession, drop_session, rip_thread_running, session_disc_hash, session_is_scanned,
-    store_session, take_session,
+    DriveSession, drop_session, rip_thread_running, session_is_scanned, store_session, take_session,
 };
 use staging::staging_free_bytes;
 use state::{PassContext, PassProgressState, is_in_cooldown, push_pass_state};
@@ -1030,8 +1029,8 @@ fn auto_rip_fresh(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     // Held from before the wipe until rip_disc returns: the same disc in a second drive
     // stands down instead of wiping this rip's dir before its `.sweeping` lands.
     let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let staging_dir = staging_basename_for_device(&cfg_read, device)
-        .map(|b| std::path::Path::new(&cfg_read.staging_dir).join(b));
+    let staging_dir =
+        staging_job_for_device(device).map(|b| std::path::Path::new(&cfg_read.staging_dir).join(b));
     let _claim = match staging_dir {
         Some(dir) => match claim_fresh_rip(&dir.to_string_lossy(), device) {
             Some(claim) => Some(claim),
@@ -1891,8 +1890,6 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         .unwrap_or_default();
     let codecs = disc.titles.first().map(format_codecs).unwrap_or_default();
 
-    let disc_hash = (!identity.is_empty()).then_some(identity.clone());
-
     // Store session — drive stays open for rip
     store_session(
         device,
@@ -1922,7 +1919,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
 
     // Does this disc have resumable partial staging? Drives the dashboard's
     // Resume-vs-Rip choice. Computed before `display_name` moves into the state.
-    let resumable = resumable_for_disc_with_hash(&cfg_read, &job_id, disc_hash.as_deref());
+    let resumable = resumable_for_job(&cfg_read, &job_id);
 
     update_state(
         device,
@@ -2009,7 +2006,7 @@ fn dispatch_rip_request(
     mode: crate::server::web::ResumeMode,
 ) {
     let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let needs_capture = staging_basename_for_device(&c, device)
+    let needs_capture = staging_job_for_device(device)
         .and_then(|job| staging::read_state(&std::path::Path::new(&c.staging_dir).join(job)))
         .is_some_and(|s| s.replan_required && s.needs_disc && !s.muxing);
     if mode != crate::server::web::ResumeMode::Wipe && needs_capture {
@@ -2268,21 +2265,15 @@ fn disc_staging_hold(
 ) -> Option<StagingHold> {
     // Recover a poisoned lock instead of failing open.
     let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let sanitized = staging_basename_for_device(&cfg_read, device)?;
+    let job = staging_job_for_device(device)?;
     let root = std::path::Path::new(&cfg_read.staging_dir);
-    let dir = root.join(&sanitized);
+    let dir = root.join(&job);
     match std::fs::symlink_metadata(&dir) {
         Ok(_) => {}
         // A cold-cache lookup can miss an existing dir: confirm with the retrying listing.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return match list_staging_basenames(root) {
-                Some(names)
-                    if !names
-                        .iter()
-                        .any(|b| staging_dir_matches_disc(b, &sanitized)) =>
-                {
-                    None
-                }
+                Some(names) if !names.contains(&job) => None,
                 None if std::fs::symlink_metadata(root)
                     .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
                 {
@@ -2305,7 +2296,7 @@ fn disc_staging_hold(
         };
     }
     snapshot_hold(&snap).or_else(|| {
-        (snap.has_sweeping && another_drive_sweeping(&cfg_read, device, &sanitized))
+        (snap.has_sweeping && another_drive_sweeping(device, &job))
             .then_some(StagingHold::LiveSweep)
     })
 }
@@ -2330,7 +2321,7 @@ fn snapshot_hold(snap: &staging::StagingSnapshot) -> Option<StagingHold> {
 
 // Is another drive's live rip thread working in the same staging dir (same disc in two drives)?
 // A `.sweeping` dir no thread owns is a crash leftover.
-fn another_drive_sweeping(cfg: &Config, device: &str, sanitized: &str) -> bool {
+fn another_drive_sweeping(device: &str, job: &str) -> bool {
     let others: Vec<String> = STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -2338,9 +2329,9 @@ fn another_drive_sweeping(cfg: &Config, device: &str, sanitized: &str) -> bool {
         .filter(|d| d.as_str() != device)
         .cloned()
         .collect();
-    others.iter().any(|d| {
-        rip_thread_running(d) && staging_basename_for_device(cfg, d).as_deref() == Some(sanitized)
-    })
+    others
+        .iter()
+        .any(|d| rip_thread_running(d) && staging_job_for_device(d).as_deref() == Some(job))
 }
 
 // Leave a skipped disc idle (not stuck "scanning") and release its drive session.
@@ -2351,12 +2342,6 @@ fn stand_down_idle(device: &str, loss_aborted: bool) {
         s.loss_aborted = loss_aborted;
     });
     drop_session(device);
-}
-
-// True if a staging-dir basename is the resume/completion match for a sanitized disc name.
-// EXACT equality only — a prefix match would collide.
-fn staging_dir_matches_disc(basename: &str, sanitized: &str) -> bool {
-    basename == sanitized
 }
 
 // List the immediate-child basenames of the staging root with the same NFS cold-cache
@@ -2410,71 +2395,31 @@ fn list_staging_basenames(staging_dir: &std::path::Path) -> Option<Vec<String>> 
     }
 }
 
-/// The staging-dir basename for the disc currently in `device`, or None
-/// when STATE has no disc name for it (nothing scanned — the sanitized
-/// empty name would otherwise point at the staging ROOT).
-///
-/// The single entry point for every STATE-reading caller that needs a staging path. Reads both
-/// halves of the disc's identity (TMDB display title + raw volume label) and hands them to
-/// [`staging::staging_basename`], the one place the naming rule lives.
-pub fn staging_basename_for_device(cfg: &Config, device: &str) -> Option<String> {
-    // Recover from a poisoned mutex rather than silently returning None:
-    // callers read this to decide "already ripped?" / "resumable?", and a
-    // dropped answer either re-rips a finished disc or hides a resume.
-    let (display_name, disc_label) = {
-        let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let rs = s.get(device)?;
-        if !rs.job_id.is_empty() {
-            return Some(rs.job_id.clone());
-        }
-        (rs.disc_name.clone(), rs.disc_label.clone())
-    };
-    if display_name.is_empty() {
-        return None;
-    }
-    Some(staging::staging_basename(
-        std::path::Path::new(&cfg.staging_dir),
-        &display_name,
-        &disc_label,
-    ))
+/// The staging job the scan resolved for the disc in `device` (`jobs::locate`,
+/// or an isolated unverified job); None until a scan has identified it.
+pub fn staging_job_for_device(device: &str) -> Option<String> {
+    let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    s.get(device)
+        .map(|rs| rs.job_id.clone())
+        .filter(|job| !job.is_empty())
 }
 
-// Does the currently-scanned disc have a staging dir OWNED by the mux worker (`.ripped`
-// pending, or `.muxing` held)? Refuses a fresh sweep that would truncate the ISO the worker is
-// reading.
+// Is the scanned disc's staging job OWNED by the mux worker (`.ripped` pending, or `.muxing`
+// held)? Refuses a fresh sweep that would truncate the ISO the worker is reading.
 fn disc_owned_by_worker(cfg: &Arc<RwLock<Config>>, device: &str) -> bool {
-    // Recover a poisoned lock instead of failing open: returning false here
-    // risks a fresh sweep truncating an in-flight mux ISO the worker is reading.
     let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let Some(sanitized) = staging_basename_for_device(&cfg_read, device) else {
+    let Some(job) = staging_job_for_device(device) else {
         return false;
     };
-    let staging_root = std::path::Path::new(&cfg_read.staging_dir);
-    staging_disc_owned_by_worker(staging_root, &sanitized)
+    staging_disc_owned_by_worker(std::path::Path::new(&cfg_read.staging_dir), &job)
 }
 
-/// Pure core of `disc_owned_by_worker`: does a staging dir whose basename
-/// exactly matches `sanitized` carry `.ripped` or `.muxing`? Split out (no
-/// `STATE`/`Config` reads) so the H1 exclusion is unit-testable.
-fn staging_disc_owned_by_worker(staging_root: &std::path::Path, sanitized: &str) -> bool {
-    let Some(basenames) = list_staging_basenames(staging_root) else {
-        return false;
-    };
-    for basename in basenames {
-        let path = staging_root.join(&basename);
-        if !staging_dir_matches_disc(&basename, sanitized) {
-            continue;
-        }
-        // NFS-resilient snapshot, not two bare `.exists()` stats: a cold-cache
-        // mount after a restart can hide the marker from a raw stat, letting
-        // Default auto-rip fall through to rip_disc and O_TRUNC the ISO.
-        if let Some(snap) = staging::snapshot_staging_disc(&path)
-            && ((snap.has_ripped && !snap.needs_disc) || snap.has_muxing)
-        {
-            return true;
-        }
-    }
-    false
+/// Pure core of `disc_owned_by_worker` over the job's own dir (no `STATE` reads).
+fn staging_disc_owned_by_worker(staging_root: &std::path::Path, job: &str) -> bool {
+    // NFS-resilient snapshot, not bare stats: a cold-cache miss of the marker
+    // would let auto-rip O_TRUNC the ISO the worker is reading.
+    staging::snapshot_staging_disc(&staging_root.join(job))
+        .is_some_and(|snap| (snap.has_ripped && !snap.needs_disc) || snap.has_muxing)
 }
 
 // Is this staging dir blocked from drive-resume (Remux) by an owner, held, or terminal marker?
@@ -2490,87 +2435,41 @@ fn resumable_dir_blocked(snap: &staging::StagingSnapshot) -> bool {
         || snap.completed
 }
 
-// Look at the staging dirs for a Remux-eligible entry matching the sanitized display_name of
-// the currently-scanned disc; returns the `ResumeClass::Remux` payload if found, else None.
+// The scanned disc's own staging job, if it is Remux-eligible: the `ResumeClass::Remux`
+// payload, else None.
 fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<resume::ResumeClass> {
-    // Recover from a poisoned mutex rather than silently returning None (which
-    // would fail to resume a valid staged ISO). Matches disc_staging_hold.
     let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let sanitized = staging_basename_for_device(&cfg_read, device)?;
-    let disc_hash = session_disc_hash(device);
-    // NFS-resilient listing, not `read_dir(...).flatten()`, which would
-    // silently drop the disc's dir on a cold-cache error and fall through
-    // to a fresh sweep instead of resuming the existing ISO.
-    let staging_root = std::path::Path::new(&cfg_read.staging_dir);
-    let basenames = list_staging_basenames(staging_root)?;
-    for basename in basenames {
-        let path = staging_root.join(&basename);
-        // EXACT name match: a prefix match would collide (e.g. "Feature" vs
-        // "Feature_2") and resume onto a different title's partial ISO.
-        if staging_dir_matches_disc(&basename, &sanitized) || disc_hash.is_some() {
-            // User-initiated resume goes straight to the remux-eligibility
-            // check, still refusing OWNED (.ripped/.muxing), HELD (.review),
-            // or TERMINAL (.failed) dirs — see resumable_dir_blocked above.
-            let Some(snap) = staging::snapshot_staging_disc(&path) else {
-                continue;
-            };
-            // Owned/held/terminal dirs are not drive-resumable — see
-            // `resumable_dir_blocked` for the per-marker reasoning (H1/M3).
-            if resumable_dir_blocked(&snap) {
-                continue;
-            }
-            if !snap.has_iso || !snap.has_mapfile {
-                continue;
-            }
-            let matched = match disc_hash.as_deref() {
-                Some(identity) => jobs::dir_matches_identity(&path, identity),
-                None => staging_dir_matches_disc(&basename, &sanitized),
-            };
-            if !matched {
-                continue;
-            }
-            let Some((iso_path, mapfile_path)) = resume::find_iso_and_mapfile(&path) else {
-                continue;
-            };
-            let map = match freemkv_engine::Mapfile::load(&mapfile_path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let stats = map.stats();
-            if stats.bytes_pending != 0 {
-                continue;
-            }
-            // Same truncation guard as classify_resume: the mapfile can read
-            // fully-swept while its ISO was truncated afterward (crash/OOM/
-            // disk-full). Refuse and re-sweep fresh rather than resume onto it.
-            if std::fs::metadata(&iso_path).is_ok_and(|m| m.len() < stats.bytes_total) {
-                continue;
-            }
-            // FILE basename (ISO stem), never `basename` — that's the dir
-            // name carrying the `_2` boxset suffix the files never take.
-            // Same invariant as classify_resume; resume_remux names output from it.
-            let display_name = match iso_path.file_stem() {
-                Some(n) => n.to_string_lossy().into_owned(),
-                None => continue,
-            };
-            let saved = staging::read_state(&path);
-            let display_name = saved
-                .as_ref()
-                .filter(|s| !s.title.is_empty())
-                .map(|s| s.title.clone())
-                .unwrap_or(display_name);
-            return Some(resume::ResumeClass::Remux {
-                iso_path,
-                mapfile_path,
-                display_name,
-                // Cold disc-insert resume from preserved staging: no `.ripped`
-                // hand-off and no operator-override concept, so confidence is
-                // unknown — resume_remux falls back to its own match check.
-                title_confident: saved.as_ref().map(|s| s.title_confident),
-            });
-        }
+    let job = staging_job_for_device(device)?;
+    let path = std::path::Path::new(&cfg_read.staging_dir).join(job);
+    // Owned/held/terminal dirs are not drive-resumable (H1/M3).
+    let snap = staging::snapshot_staging_disc(&path)?;
+    if resumable_dir_blocked(&snap) || !snap.has_iso || !snap.has_mapfile {
+        return None;
     }
-    None
+    let (iso_path, mapfile_path) = resume::find_iso_and_mapfile(&path)?;
+    let stats = freemkv_engine::Mapfile::load(&mapfile_path).ok()?.stats();
+    if stats.bytes_pending != 0 {
+        return None;
+    }
+    // Same truncation guard as classify_resume: a fully-swept mapfile can
+    // outlive a truncated ISO (crash/OOM/disk-full); re-sweep instead.
+    if std::fs::metadata(&iso_path).is_ok_and(|m| m.len() < stats.bytes_total) {
+        return None;
+    }
+    // The ISO stem (what resume_remux names output from), unless state has a title.
+    let stem = iso_path.file_stem()?.to_string_lossy().into_owned();
+    let saved = staging::read_state(&path);
+    let display_name = saved
+        .as_ref()
+        .filter(|s| !s.title.is_empty())
+        .map_or(stem, |s| s.title.clone());
+    Some(resume::ResumeClass::Remux {
+        iso_path,
+        mapfile_path,
+        display_name,
+        // Cold insert resume: confidence is whatever the job recorded, if any.
+        title_confident: saved.as_ref().map(|s| s.title_confident),
+    })
 }
 
 // True if `seg` is safe to use as a single staging-directory path segment: rejects empty,
@@ -2587,96 +2486,46 @@ fn is_safe_staging_segment(seg: &str) -> bool {
         )
 }
 
-// Detect whether `display_name`'s disc has resumable staging state and of what kind: Remux
-// only when the mapfile is 100% Finished (no pending, no unreadable bytes), else Sweep.
-#[cfg(test)]
-fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Option<Resumable> {
-    if display_name.is_empty() {
+// Whether staging job `job` is resumable and of what kind: Remux only when the
+// mapfile is 100% Finished (no pending, no unreadable bytes), else Sweep.
+fn resumable_for_job(cfg: &Config, job: &str) -> Option<Resumable> {
+    let path = std::path::Path::new(&cfg.staging_dir).join(job);
+    let st = staging::read_state(&path);
+    if st.as_ref().is_some_and(|s| s.reset_in_progress) {
         return None;
     }
-    // Disc-specific, not title-specific: `disc_label` is what stops disc 2 of a
-    // boxset being offered disc 1's partial ISO to "resume" onto.
-    let sanitized = staging::staging_basename(
-        std::path::Path::new(&cfg.staging_dir),
-        display_name,
-        disc_label,
-    );
-    resumable_for_disc_with_hash(cfg, &sanitized, None)
-}
-
-fn resumable_for_disc_with_hash(
-    cfg: &Config,
-    sanitized: &str,
-    disc_hash: Option<&str>,
-) -> Option<Resumable> {
-    // NFS-resilient listing, not `read_dir(...).flatten()`, which could hide
-    // an existing resumable dir and make the operator re-sweep instead of
-    // resuming. Mirrors disc_staging_hold.
-    let staging_root = std::path::Path::new(&cfg.staging_dir);
-    let basenames = list_staging_basenames(staging_root)?;
-    for basename in basenames {
-        let path = staging_root.join(&basename);
-        // A title may have been corrected between runs, so the basename is
-        // only a fallback. When the live scan has a disc hash, let the
-        // mapfile identity decide below.
-        let matched = match disc_hash {
-            Some(identity) => jobs::dir_matches_identity(&path, identity),
-            None => basename == sanitized,
-        };
-        if !matched {
-            continue;
-        }
-        if staging::read_state(&path).is_some_and(|s| s.reset_in_progress) {
-            continue;
-        }
-        if staging::read_state(&path)
-            .is_some_and(|s| s.replan_required && s.needs_disc && !s.muxing)
-        {
-            return Some(Resumable::Sweep);
-        }
-        // A terminal `.failed` (or held `.review`) dir is NOT resumable: a
-        // re-rip wouldn't clear stale `.failed`, and the mux worker would
-        // skip it forever. Mirrors resumable_dir_blocked; forces a Wipe.
-        if let Some(snap) = staging::snapshot_staging_disc(&path) {
-            // Nor a finished rip (`.completed`/`.done`): the mover may be copying it.
-            if snap.has_failed || snap.has_review || snap.completed || snap.has_done {
-                return None;
-            }
-            // A dir the mux worker owns (.ripped/.muxing) must NOT be offered
-            // as resumable — resuming would race a fresh sweep against the
-            // worker's reads. Mirrors disc_owned_by_worker's Wipe guard.
-            if (snap.has_ripped && !snap.needs_disc) || snap.has_muxing {
-                return None;
-            }
-        }
-        let (_iso_path, mapfile_path) = match resume::find_iso_and_mapfile(&path) {
-            Some(p) => p,
-            None => continue,
-        };
-        let map = match freemkv_engine::Mapfile::load(&mapfile_path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        let st = map.stats();
-        // Any not-good data (pending or previously Unreadable) is retryable —
-        // there is NO terminal "won't retry" state. Only a mapfile that is
-        // 100% Finished resumes straight to remux.
-        return Some(if st.bytes_pending == 0 && st.bytes_unreadable == 0 {
-            Resumable::Remux
-        } else {
-            Resumable::Sweep
-        });
+    if st
+        .as_ref()
+        .is_some_and(|s| s.replan_required && s.needs_disc && !s.muxing)
+    {
+        return Some(Resumable::Sweep);
     }
-    None
+    if let Some(snap) = staging::snapshot_staging_disc(&path) {
+        // Terminal, held or finished (the mover may be copying it): not
+        // resumable, the operator must Wipe. Mirrors resumable_dir_blocked.
+        if snap.has_failed || snap.has_review || snap.completed || snap.has_done {
+            return None;
+        }
+        // Owned by the mux worker: a resume would race the worker's reads.
+        if (snap.has_ripped && !snap.needs_disc) || snap.has_muxing {
+            return None;
+        }
+    }
+    let (_iso, mapfile_path) = resume::find_iso_and_mapfile(&path)?;
+    let st = freemkv_engine::Mapfile::load(&mapfile_path).ok()?.stats();
+    // Any not-good data (pending or Unreadable) is retryable; there is no
+    // terminal "won't retry" state.
+    Some(if st.bytes_pending == 0 && st.bytes_unreadable == 0 {
+        Resumable::Remux
+    } else {
+        Resumable::Sweep
+    })
 }
 
-/// STATE-reading wrapper of [`resumable_for_disc`] used by the `?resume=yes`
-/// action (the disc has been scanned, so its name is in STATE).
+/// STATE-reading wrapper of [`resumable_for_job`] for the scanned disc in `device`.
 fn resumable_for_device(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<Resumable> {
     let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    // The scan's job (an unverified disc's isolated one included), else the legacy name.
-    let sanitized = staging_basename_for_device(&cfg_read, device)?;
-    resumable_for_disc_with_hash(&cfg_read, &sanitized, session_disc_hash(device).as_deref())
+    resumable_for_job(&cfg_read, &staging_job_for_device(device)?)
 }
 
 // RAII guard that unregisters a device's halt-map entry on drop, so
@@ -2815,12 +2664,15 @@ fn rip_disc_inner(
         }
     };
 
-    let known_path = staging_basename_for_device(&cfg_read, device)
-        .map(|job| jobs::path(std::path::Path::new(&cfg_read.staging_dir), &job))
-        .transpose();
-    let known_path = match known_path {
-        Ok(path) => path,
-        Err(e) => {
+    // The scan's staging job: every step below works in exactly this dir.
+    let job_id = staging_job_for_device(device)
+        .ok_or_else(|| "The disc is not identified yet; rescan it and retry".to_string());
+    let job_path = job_id
+        .clone()
+        .and_then(|job| jobs::path(std::path::Path::new(&cfg_read.staging_dir), &job));
+    let (job_id, job_path) = match (job_id, job_path) {
+        (Ok(job), Ok(path)) => (job, path),
+        (Err(e), _) | (_, Err(e)) => {
             update_state_with(device, |s| {
                 s.status = "error".into();
                 s.last_error = e;
@@ -2828,10 +2680,10 @@ fn rip_disc_inner(
             return;
         }
     };
-    let known_lease = known_path.as_deref().map(staging::job_lease);
-    let _known_owner = match known_lease.as_ref().map(|lease| lease.try_lock()) {
-        Some(Ok(owner)) => Some(owner),
-        Some(Err(_)) => {
+    let job_lease = staging::job_lease(&job_path);
+    let _job_owner = match job_lease.try_lock() {
+        Ok(owner) => owner,
+        Err(_) => {
             update_state_with(device, |s| {
                 s.status = "error".into();
                 s.last_error =
@@ -2840,38 +2692,21 @@ fn rip_disc_inner(
             });
             return;
         }
-        None => None,
     };
     if wipe {
-        let reset = known_path
-            .as_deref()
-            .ok_or_else(|| std::io::Error::other("disc staging identity is unavailable"))
-            .and_then(|path| {
-                if disc_owned_by_worker(cfg, device) {
-                    return Err(std::io::Error::other(
-                        "the staged image is queued for muxing",
-                    ));
-                }
-                let row = STATE
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(device)
-                    .cloned()
-                    .ok_or_else(|| std::io::Error::other("disc staging identity changed"))?;
-                let job = if row.job_id.is_empty() {
-                    staging::staging_basename(
-                        std::path::Path::new(&cfg_read.staging_dir),
-                        &row.disc_name,
-                        &row.disc_label,
-                    )
-                } else {
-                    row.job_id
-                };
-                if path.file_name() != Some(std::ffi::OsStr::new(&job)) {
-                    return Err(std::io::Error::other("disc staging identity changed"));
-                }
-                staging::reset_capture_preserving_metadata(path, &row.disc_identity)
-            });
+        let reset = if disc_owned_by_worker(cfg, device) {
+            Err(std::io::Error::other(
+                "the staged image is queued for muxing",
+            ))
+        } else {
+            let identity = STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(device)
+                .map(|row| row.disc_identity.clone())
+                .unwrap_or_default();
+            staging::reset_capture_preserving_metadata(&job_path, &identity)
+        };
         if let Err(e) = reset {
             update_state_with(device, |s| {
                 s.status = "error".into();
@@ -3081,30 +2916,28 @@ fn rip_disc_inner(
         .get(device)
         .map(|s| s.disc_identity.clone())
         .unwrap_or_default();
-    let saved_state = if let Some(path) = &known_path {
-        let started = if crate::server::health::share_unmounted(path) {
-            Err(std::io::Error::other(
-                "staging network share is not mounted",
-            ))
-        } else {
-            std::fs::create_dir_all(path).and_then(|()| {
-                staging::begin_capture(path, cfg_read.max_retries, &verified_identity)
-            })
-        };
-        match started {
-            Ok(st) => Some(st),
-            Err(e) => {
-                update_state_with(device, |s| {
-                    s.status = "error".into();
-                    s.last_error = format!("Cannot begin capture: {e}");
-                });
-                return;
-            }
-        }
+    let started = if crate::server::health::share_unmounted(&job_path) {
+        Err(std::io::Error::other(
+            "staging network share is not mounted",
+        ))
     } else {
-        None
+        std::fs::create_dir_all(&job_path).and_then(|()| {
+            staging::begin_capture(&job_path, cfg_read.max_retries, &verified_identity)
+        })
     };
-    let _metadata_sweeping_guard = known_path.clone().map(|staging| SweepingGuard { staging });
+    let saved_state = match started {
+        Ok(st) => Some(st),
+        Err(e) => {
+            update_state_with(device, |s| {
+                s.status = "error".into();
+                s.last_error = format!("Cannot begin capture: {e}");
+            });
+            return;
+        }
+    };
+    let _metadata_sweeping_guard = SweepingGuard {
+        staging: job_path.clone(),
+    };
     let saved_confident = saved_state
         .as_ref()
         .is_some_and(|s| s.user_metadata.is_some() || s.title_confident);
@@ -3387,41 +3220,16 @@ fn rip_disc_inner(
 
     let ext = output_extension_for(&output_format, &disc);
 
-    // `disc_name` is the RAW volume label, the only thing distinguishing two
-    // discs of a boxset behind one shared TMDB title. Must resolve to the
-    // same dir disc_staging_hold/find_resumable_for_disc just checked.
-    let job_id = staging_basename_for_device(&cfg_read, device).unwrap_or_else(|| {
-        staging::staging_basename(
-            std::path::Path::new(&cfg_read.staging_dir),
-            &display_name,
-            &disc_name,
-        )
-    });
+    // Same job the guards and begin_capture used; a rescan in between refuses.
+    if staging_job_for_device(device).as_deref() != Some(job_id.as_str()) {
+        update_state_with(device, |s| {
+            s.status = "error".into();
+            s.last_error =
+                "The staging job changed before capture started; refresh and retry".into();
+        });
+        return;
+    }
     let staging = cfg_read.staging_device_dir(&job_id);
-    let job_lease = staging::job_lease(std::path::Path::new(&staging));
-    let _job_owner = if let Some(path) = &known_path {
-        if path != std::path::Path::new(&staging) {
-            update_state_with(device, |s| {
-                s.status = "error".into();
-                s.last_error =
-                    "The staging job changed before capture started; refresh and retry".into();
-            });
-            return;
-        }
-        None
-    } else {
-        match job_lease.try_lock() {
-            Ok(owner) => Some(owner),
-            Err(_) => {
-                update_state_with(device, |s| {
-                    s.status = "error".into();
-                    s.last_error =
-                        "The staging job is already active; retry when it finishes".into();
-                });
-                return;
-            }
-        }
-    };
     // Under an unmounted share the dir would be made on the container's own disk.
     let made = if crate::server::health::share_unmounted(std::path::Path::new(&staging)) {
         Err(std::io::Error::other("its network share is not mounted"))
@@ -3445,10 +3253,6 @@ fn rip_disc_inner(
         unregister_halt(device);
         return;
     }
-    // Stamp the dir with this disc's raw volume label so the NEXT disc of the
-    // same boxset routes to its own dir instead of reading this `.completed`.
-    // Also adopts a legacy pre-label dir; never overwrites a different label.
-    staging::adopt_disc_label(std::path::Path::new(&staging), &disc_name);
     let identity = STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())

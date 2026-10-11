@@ -558,24 +558,6 @@ pub(super) fn session_is_scanned(device: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn session_disc_hash(device: &str) -> Option<String> {
-    if let Some(identity) = super::STATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(device)
-        .map(|s| s.disc_identity.clone())
-        .filter(|id| !id.is_empty())
-    {
-        return Some(identity);
-    }
-    let sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    sessions
-        .get(device)
-        .and_then(|sess| sess.disc.as_ref())
-        .and_then(|disc| disc.intrinsic_id())
-        .and_then(super::jobs::aacs_identity)
-}
-
 /// The key set and Volume ID the scan of `device`'s disc resolved (memory only): what an
 /// inserted disc lends its staged image's resume.
 pub(super) fn session_rip_keys(

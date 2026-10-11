@@ -3599,6 +3599,7 @@ mod http {
                 device: device.to_string(),
                 status: "ripping".to_string(),
                 disc_name: disc_name.to_string(),
+                job_id: crate::server::util::sanitize_path_compact(disc_name),
                 ..Default::default()
             },
         );
@@ -3643,6 +3644,7 @@ mod http {
                 device: device.to_string(),
                 status: "idle".to_string(),
                 disc_name: disc_name.to_string(),
+                job_id: crate::server::util::sanitize_path_compact(disc_name),
                 ..Default::default()
             },
         );
