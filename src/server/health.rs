@@ -268,6 +268,11 @@ pub fn status_for(path: &Path) -> Option<Mount> {
         .cloned()
 }
 
+/// Whether the health monitor already reports `path` unusable, and so already logged it.
+pub fn already_reported(path: &Path) -> bool {
+    status_for(path).is_some_and(|m| !m.ok)
+}
+
 /// The remux engine's local staging folder, when one is set.
 pub fn remux_stage_dir() -> Option<PathBuf> {
     std::env::var_os("FREEMKV_REMUX_STAGING_DIR")

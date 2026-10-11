@@ -1450,7 +1450,14 @@ fn check_and_move(cfg: &Config) {
                 .map(|reason| (r.clone(), reason))
         });
         if let Some((dest_root, reason)) = blocked_root {
-            record_error(
+            // Health already logged an unusable root; the error row still updates.
+            let logged = crate::server::health::already_reported(Path::new(&dest_root));
+            let sink = |line: &str| {
+                if !logged {
+                    crate::server::log::syslog(line);
+                }
+            };
+            record_error_with(
                 &dir_str,
                 &format!(
                     "destination not available — refusing to move (output preserved in staging): {reason}"
@@ -1460,13 +1467,16 @@ fn check_and_move(cfg: &Config) {
                  bind-mount (e.g. the NAS share) is present and writable. The \
                  mover will NOT auto-create the root — fix the mount, then it \
                  retries on the next tick.",
+                sink,
             );
-            crate::server::log::syslog(&format!(
-                "Move BLOCKED — destination root {} unavailable: {} (output preserved in staging: {})",
-                absolute_for_log(&dest_root),
-                reason,
-                dir.display()
-            ));
+            if !logged {
+                crate::server::log::syslog(&format!(
+                    "Move BLOCKED — destination root {} unavailable: {} (output preserved in staging: {})",
+                    absolute_for_log(&dest_root),
+                    reason,
+                    dir.display()
+                ));
+            }
             continue;
         }
 

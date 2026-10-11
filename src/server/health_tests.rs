@@ -565,3 +565,20 @@ fn empty_or_relative_roots_are_warned_about() {
     assert!(w[0].contains("Output") && w[0].contains("not set"));
     assert!(w[1].contains("Staging") && w[1].contains("absolute"));
 }
+
+#[test]
+fn an_unusable_folder_counts_as_already_reported() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let down = Path::new("/test/reported-down");
+    let up = Path::new("/test/reported-up");
+    publish(
+        vec![
+            Mount::blank("Output", down).failed(Fault::Other, "gone".into()),
+            Mount::blank("Movies", up).passed(),
+        ],
+        true,
+    );
+    assert!(already_reported(&down.join("Movies")));
+    assert!(!already_reported(up));
+    assert!(!already_reported(Path::new("/test/unknown")));
+}

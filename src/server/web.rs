@@ -2628,14 +2628,10 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
     // in-flight work uses the old pool, the next rip picks up the new size.
     config::apply_decrypt_threads(snapshot.decrypt_threads);
 
-    // Fail-loud-EARLY destination check: warn NOW if a configured directory
-    // is missing/unwritable, rather than only discovering the dead mount
-    // hours later at move time. Non-blocking — the save still succeeds.
+    // Warn early if a configured directory is missing/unwritable. The health monitor owns
+    // the syslog line for the failure, so this only traces; the save still succeeds.
     for (root, reason) in crate::server::mover::check_configured_destinations(&snapshot) {
-        crate::server::log::syslog(&format!(
-            "WARNING: configured destination '{root}' is not usable: {reason}. \
-             Rips will be PRESERVED in staging (not moved) until this is fixed."
-        ));
+        tracing::warn!(target: "web", root = %root, reason = %reason, "configured destination is not usable");
     }
 
     // A save that fails puts the running config back, unless a newer save
