@@ -1950,8 +1950,6 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
     );
 }
 
-// ─── Rip ───────────────────────────────────────────────────────────────────
-
 // The scanned disc's (identity, staging job, warning). Verified fingerprints may adopt one
 // capture; unreadable samples get an isolated namespace and a warning, never a synthetic
 // identity. `None` once the drive shows why not; `insert` as for `hold_for_staging`.
@@ -2007,6 +2005,8 @@ fn scan_staging_job(
         }
     }
 }
+
+// ─── Rip ───────────────────────────────────────────────────────────────────
 
 /// Entry point for `/api/rip[?resume=yes|no]`. Scans the disc to
 /// identify it, then dispatches to `resume_remux` or `rip_disc`

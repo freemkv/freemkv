@@ -1122,12 +1122,12 @@ fn a_preflight_waits_one_hang_bound_in_all() {
     );
 }
 
-// A writability probe left behind (its removal failed) is ours to sweep: a later
-// successful preflight removes our stale markers, and nothing else.
 // The probe sweep's remembered leftovers are process-wide and capped: the tests that fill
 // them run one at a time, so one never drops another's.
 static SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+// A writability probe left behind (its removal failed) is ours to sweep: a later
+// successful preflight removes our stale markers, and nothing else.
 #[test]
 fn leftover_probe_files_are_swept_by_a_later_preflight() {
     let _g = SWEEP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
