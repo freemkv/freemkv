@@ -3474,6 +3474,31 @@ fn quit_writes_the_queued_latest_settings_after_a_slow_write() {
     );
 }
 
+// A write still out when Quit gives up on it is reported as not saved, not dropped silently.
+#[test]
+fn quit_reports_a_write_it_could_not_wait_for() {
+    let mut app = picking(pick_disc());
+    app.save_fn = |_| {
+        std::thread::sleep(std::time::Duration::from_millis(2600));
+        Ok(())
+    };
+    app.pick_audio(Some("deu"));
+    assert_eq!(app.dispatch(Cmd::Quit), vec![Effect::Quit]);
+    let unsaved = crate::strings::fmt_or(
+        "gui.log.settings_save_error",
+        "Could not save settings: {e}",
+        &[("e", "")],
+    );
+    assert!(app.settings_unsaved, "the change may be lost");
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.text.starts_with(unsaved.trim_end())),
+        "{:?}",
+        app.log.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+}
+
 // A writer that died (panicked) does not take the queued latest settings with it.
 #[test]
 fn quit_writes_the_queued_settings_when_the_writer_died() {

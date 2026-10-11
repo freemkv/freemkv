@@ -2101,6 +2101,21 @@ const KEYSERVER_CHECK: fn(&str) -> Result<(), String> = if cfg!(test) {
     freemkv_keysources::validate_keyserver_url
 };
 
+// A Settings write Quit waited for: one still out (or whose writer died) counts as not
+// saved, and is logged, so the existing "Could not save settings" path reports it.
+fn awaited_write(
+    r: Result<Result<(), String>, std::sync::mpsc::RecvTimeoutError>,
+) -> Result<(), String> {
+    r.unwrap_or_else(|e| {
+        let kind = match e {
+            std::sync::mpsc::RecvTimeoutError::Timeout => std::io::ErrorKind::TimedOut,
+            std::sync::mpsc::RecvTimeoutError::Disconnected => std::io::ErrorKind::Interrupted,
+        };
+        tracing::warn!(?kind, "settings write unfinished at quit");
+        Err(std::io::Error::from(kind).to_string())
+    })
+}
+
 // One Settings write at a time, in the order asked (`order` is the App's): a later write
 // waits for an earlier one still running, so the newest settings land last.
 fn ordered_write(
@@ -2828,12 +2843,15 @@ impl App {
     // settings after it (bounded), so a choice made just before Quit is not lost.
     fn flush_settings(&mut self) {
         const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
-        if let Some((rx, announce)) = self.saving.take()
-            && let Ok(r) = rx.recv_timeout(BOUND)
-        {
-            self.settings_written(r, announce);
+        let queued = self.save_queued.take();
+        if let Some((rx, announce)) = self.saving.take() {
+            let r = awaited_write(rx.recv_timeout(BOUND));
+            // A queued write of the latest settings follows: its outcome is the one to report.
+            if r.is_ok() || queued.is_none() {
+                self.settings_written(r, announce);
+            }
         }
-        if self.save_queued.take().is_none() {
+        if queued.is_none() {
             return;
         }
         let (save, settings) = (self.save_fn, self.settings.clone());
@@ -2841,16 +2859,10 @@ impl App {
         let r = match spawn_worker("settings-save", move || {
             ordered_write(&order, save, &settings)
         }) {
-            Ok(rx) => rx.recv_timeout(BOUND).ok(),
-            Err(_) => Some(ordered_write(
-                &self.write_order,
-                self.save_fn,
-                &self.settings,
-            )),
+            Ok(rx) => awaited_write(rx.recv_timeout(BOUND)),
+            Err(_) => ordered_write(&self.write_order, self.save_fn, &self.settings),
         };
-        if let Some(r) = r {
-            self.settings_written(r, false);
-        }
+        self.settings_written(r, false);
     }
 
     // Check a key-service URL by the rule the key layer uses, so the form cannot accept a
