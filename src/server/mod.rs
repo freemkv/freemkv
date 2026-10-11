@@ -12,6 +12,20 @@ use std::sync::atomic::AtomicBool;
 /// Set by SIGTERM/SIGINT or a reboot request; every worker loop polls it to drain.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Sleep up to `total`, waking early once [`SHUTDOWN`] is set; whether it is.
+pub(crate) fn sleep_unless_shutdown(total: std::time::Duration) -> bool {
+    use std::sync::atomic::Ordering;
+    let until = std::time::Instant::now() + total;
+    while !SHUTDOWN.load(Ordering::Acquire) {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(left.min(std::time::Duration::from_millis(200)));
+    }
+    true
+}
+
 /// Set only by SIGTERM/SIGINT: the process must stop. It vetoes the relaunch a
 /// reboot would do.
 pub static TERMINATE: AtomicBool = AtomicBool::new(false);

@@ -20,18 +20,11 @@ pub(crate) fn shutting_down() -> bool {
     crate::server::SHUTDOWN.load(Ordering::Relaxed)
 }
 
-fn nap(d: Duration) {
-    let until = Instant::now() + d;
-    while Instant::now() < until && !shutting_down() {
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 /// The worker loop: waits while a rip holds the slot or the queue is paused.
 pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     tracing::info!("library worker starting");
     // No remux runs yet: the one moment the staging folder may be swept.
-    if let Some(dir) = remux_stage_dir() {
+    if let Some(dir) = health::remux_stage_dir() {
         let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
         let library = super::dirs(&snapshot).library;
         housekeep_staging(lib, &dir, &StagingLimits::of(&snapshot, &dir), &library);
@@ -42,7 +35,7 @@ pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
         let output = |dir: &Path| health::preflight("output", dir);
         let now = crate::server::util::epoch_secs();
         let Some((job, epoch)) = next_job(lib, arbiter, &d, &output, now) else {
-            nap(Duration::from_secs(1));
+            crate::server::sleep_unless_shutdown(Duration::from_secs(1));
             continue;
         };
         run_job(lib, &snapshot, arbiter, epoch, job);
@@ -459,7 +452,7 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     let result = if let Some(kept) = &job.staged {
         // Only the copy, its sync and verify, and the replacement run again.
         resume_kept(kept, &job.target, sink)
-    } else if let Some(dir) = remux_stage_dir() {
+    } else if let Some(dir) = health::remux_stage_dir() {
         deliver::remux_via_stage(&request, &keys, sink, &dir, job.id).map(|r| r.writing_app)
     } else {
         freemkv_engine::remux_iso(&request, &keys, sink).map(|r| r.writing_app)
@@ -484,7 +477,7 @@ fn remux_planned(
     sink: &JobSink<'_>,
 ) -> Ending {
     let keys = crate::server::keysource::key_params(cfg);
-    let stage = remux_stage_dir();
+    let stage = health::remux_stage_dir();
     remux_planned_with(job, plan, cfg, sink, |request, kept, ordinal| {
         if let Some(kept) = kept {
             resume_kept(kept, &request.target, sink)
@@ -827,10 +820,6 @@ fn planned_target_ok(
         }
     }
     safe_to_create(&super::dirs(cfg), target)
-}
-
-fn remux_stage_dir() -> Option<std::path::PathBuf> {
-    health::remux_stage_dir()
 }
 
 // Only this directory and these numeric job files (`<id>.mkv` and its `.partial` and
@@ -1318,7 +1307,7 @@ pub(crate) fn folder_problem(lib: &Library, job: &Job) -> Option<Problem> {
             return Some(p);
         }
     }
-    let stage = remux_stage_dir()?;
+    let stage = health::remux_stage_dir()?;
     health::preflight("remux staging", &stage).err()
 }
 
@@ -1845,7 +1834,7 @@ pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbit
         }
         let library = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner())).library;
         if !quick_turn(lib, &library, remux_or_rip_busy(lib, arbiter)) {
-            nap(Duration::from_secs(2));
+            crate::server::sleep_unless_shutdown(Duration::from_secs(2));
         }
     }
 }
@@ -1858,11 +1847,11 @@ pub(crate) fn deep_audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arb
     while !shutting_down() {
         let ffmpeg = super::deep::ffmpeg();
         if !enabled() || busy() || ffmpeg.is_none() {
-            nap(Duration::from_secs(2));
+            crate::server::sleep_unless_shutdown(Duration::from_secs(2));
             continue;
         }
         let Some(path) = lib.audits.next_deep() else {
-            nap(Duration::from_secs(2));
+            crate::server::sleep_unless_shutdown(Duration::from_secs(2));
             continue;
         };
         let library = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner())).library;

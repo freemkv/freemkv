@@ -20,7 +20,7 @@ const RESTART_EXIT_CODE: i32 = 75;
 // Slack past the drain bounds before a stalled reboot tail (a hung log disk) is cut short.
 const RELAUNCH_SLACK: Duration = Duration::from_secs(30);
 // Cadence of the KEYDB refresh and log prune threads, in one-second SHUTDOWN polls.
-const DAILY_SECS: u64 = 24 * 3600;
+const DAILY: Duration = Duration::from_secs(24 * 3600);
 
 /// Run the server shell. `argv` is everything after `freemkv server`.
 ///
@@ -133,17 +133,11 @@ pub fn run(argv: Vec<String>) {
     // Load config
     let cfg = config::load();
 
-    // Warn at boot if a configured movie/tv/output dir is missing or not writable
-    // (finished rips stay in staging meanwhile). Own thread: a hung network mount
-    // must never hold startup, and the web server, back.
+    // Folder warnings come from the health monitor's first check, off the startup path.
+    if let Some(msg) =
+        keysource::keyserver_url_startup_warning(&cfg.read().unwrap_or_else(|e| e.into_inner()))
     {
-        let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(msg) = keysource::keyserver_url_startup_warning(&c) {
-            log::syslog(&msg);
-        }
-        if let Err(e) = spawn_destination_check(c, mover::check_configured_destinations) {
-            tracing::warn!(error = %e, "could not start the startup destination check");
-        }
+        log::syslog(&msg);
     }
 
     // The local KEYDB only matters for the `local` key source. In `online`
@@ -203,13 +197,9 @@ pub fn run(argv: Vec<String>) {
         let cfg2 = cfg.clone();
         move || {
             tracing::info!("keydb update thread starting (24h interval)");
-            'outer: loop {
-                // 24h sleep in 1s chunks so SHUTDOWN is observed within ~1s.
-                for _ in 0..DAILY_SECS {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if SHUTDOWN.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
+            loop {
+                if crate::server::sleep_unless_shutdown(DAILY) {
+                    break;
                 }
                 // Online key source resolves out-of-band; no local keydb to keep
                 // fresh (and refreshing one would only shadow the service).
@@ -221,7 +211,7 @@ pub fn run(argv: Vec<String>) {
                     continue;
                 }
                 tracing::info!(url_origin = %crate::server::webhook::webhook_url_origin(&url), "keydb: starting daily update");
-                // SSRF-guarded fetch (see web::guarded_get) — the daily
+                // SSRF-guarded fetch (see keysource::refresh_keydb) — the daily
                 // refresh must not bypass the address allow-list that the
                 // settings save and manual update already enforce.
                 fetch_keydb(&cfg2, &url, false);
@@ -237,15 +227,12 @@ pub fn run(argv: Vec<String>) {
         let cfg = cfg.clone();
         move || {
             tracing::info!("log prune thread starting (24h interval)");
-            'outer: loop {
+            loop {
                 // Prune first, then wait: a daemon restarted more often than daily
                 // would otherwise never reach a tick.
                 log_prune_tick(&cfg);
-                for _ in 0..DAILY_SECS {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if SHUTDOWN.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
+                if crate::server::sleep_unless_shutdown(DAILY) {
+                    break;
                 }
             }
             tracing::info!("log prune thread stopping");
@@ -427,9 +414,10 @@ fn exit_now(code: i32) {
     std::process::exit(code);
 }
 
-// Fetch KEYDB from `url` through the address guard and save it. `boot` picks the
+// Fetch KEYDB from `url` (`keysource::refresh_keydb`) and log the outcome. `boot` picks the
 // first-boot download's log wording over the daily refresh's.
 fn fetch_keydb(cfg: &std::sync::RwLock<config::Config>, url: &str, boot: bool) {
+    use keysource::KeydbError;
     let (saved, save_failed, too_large, read_failed, fetch_failed) = if boot {
         (
             "KEYDB downloaded",
@@ -447,47 +435,20 @@ fn fetch_keydb(cfg: &std::sync::RwLock<config::Config>, url: &str, boot: bool) {
             "KEYDB update failed",
         )
     };
-    match web::guarded_get(url) {
-        Ok(resp) => {
-            match web::read_capped_keydb_body(resp.into_body().into_reader(), web::KEYDB_MAX_BYTES)
-            {
-                Ok(buf) => match keysource::save_keydb(cfg, &buf) {
-                    Ok(r) => log::syslog(&format!(
-                        "{saved}: {} entries -> {}",
-                        r.entries,
-                        r.path.display()
-                    )),
-                    Err(e) => log::syslog(&format!("{save_failed}: {e}")),
-                },
-                Err(web::KeydbReadError::TooLarge) => log::syslog(too_large),
-                Err(web::KeydbReadError::Io) => log::syslog(read_failed),
-            }
-        }
+    match keysource::refresh_keydb(cfg, url, crate::server::web::KEYDB_TRANSFER_BUDGET) {
+        Ok(r) => log::syslog(&format!(
+            "{saved}: {} entries -> {}",
+            r.entries,
+            r.path.display()
+        )),
+        Err(KeydbError::Save(e)) => log::syslog(&format!("{save_failed}: {e}")),
+        Err(KeydbError::TooLarge) => log::syslog(too_large),
+        Err(KeydbError::Read) => log::syslog(read_failed),
         Err(e) => log::syslog(&format!(
             "{fetch_failed} for {}: {e}",
             crate::server::webhook::webhook_url_origin(url)
         )),
     }
-}
-
-// Run the startup destination `check` over `cfg` on its own thread and warn about each
-// unusable root; returns at once, whatever the check's folders do.
-fn spawn_destination_check<F>(
-    cfg: config::Config,
-    check: F,
-) -> std::io::Result<std::thread::JoinHandle<()>>
-where
-    F: FnOnce(&config::Config) -> Vec<(String, String)> + Send + 'static,
-{
-    std::thread::Builder::new().name("destination-check".into()).spawn(move || {
-        for (root, reason) in check(&cfg) {
-            log::syslog(&format!(
-                "WARNING: configured destination '{root}' is not usable at startup: {reason}. \
-                     Finished rips will be PRESERVED in staging (not moved) until this is fixed \
-                     (check the directory exists and its bind-mount/NAS share is present and writable)."
-            ));
-        }
-    })
 }
 
 // Join `handle` (`None` counts as joined), giving up after `timeout` so a wedged

@@ -170,7 +170,7 @@ fn a_stuck_check_is_never_doubled() {
     let late = Instant::now() - Duration::from_secs(1);
     IN_FLIGHT.folders.lock().unwrap().push((p.clone(), late));
     let started = Instant::now();
-    let m = check_bounded("Library", p.clone(), false);
+    let m = check_folders(vec![("Library", p.clone(), false)]).remove(0);
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "a hung folder answers at once"
@@ -187,7 +187,7 @@ fn a_stuck_check_is_never_doubled() {
         .count();
     assert_eq!(n, 1);
     release(&p);
-    let fine = check_bounded("Library", t.path().to_path_buf(), false);
+    let fine = check_folders(vec![("Library", t.path().to_path_buf(), false)]).remove(0);
     assert!(fine.ok);
     assert!(
         !IN_FLIGHT
@@ -394,22 +394,34 @@ fn a_folder_keeps_its_history_across_checks() {
 
 #[test]
 fn folders_are_checked_concurrently_in_order() {
-    let folders: Vec<_> = (0..5)
-        .map(|i| ("Output", PathBuf::from(format!("/dead/{i}")), false))
+    let items: Vec<_> = (0..5)
+        .map(|i| (PathBuf::from(format!("/dead/{i}")), i))
         .collect();
     let started = Instant::now();
-    let out = check_each(folders, |role, path, _| {
+    let out = bounded_each(items, Duration::from_secs(2), |i| {
         std::thread::sleep(Duration::from_millis(300));
-        ok_mount(role, &path)
+        i
     });
     assert!(
         started.elapsed() < Duration::from_millis(900),
         "5 x 300ms checks ran one after another: {:?}",
         started.elapsed()
     );
-    let paths: Vec<_> = out.iter().map(|m| m.path.clone()).collect();
-    assert_eq!(paths[0], Path::new("/dead/0"));
-    assert_eq!(paths[4], Path::new("/dead/4"));
+    assert_eq!(out, (0..5).map(Bounded::Done).collect::<Vec<_>>());
+}
+
+#[test]
+fn hung_folders_in_one_batch_cost_one_timeout() {
+    let items: Vec<_> = (0..3)
+        .map(|i| (PathBuf::from(format!("/hung-batch/{i}")), i))
+        .collect();
+    let started = Instant::now();
+    let out = bounded_each(items, Duration::from_millis(300), |i| {
+        std::thread::sleep(Duration::from_secs(2));
+        i
+    });
+    assert!(started.elapsed() < Duration::from_millis(900));
+    assert!(out.iter().all(|r| *r == Bounded::TimedOut), "{out:?}");
 }
 
 #[cfg(unix)]
@@ -503,4 +515,84 @@ fn remount_discards_old_generation_reports_only() {
     );
     reports.record(1, path, Some(Fault::Stale));
     assert!(reports.paths.contains(path));
+}
+
+#[test]
+fn a_writable_folder_going_bad_gets_a_syslog_line() {
+    let mut m = ok_mount("Movies", Path::new("/mnt/movies"));
+    m = m.failed(Fault::Missing, "missing".into());
+    let line = unusable_line("Movies", &m);
+    assert!(line.contains("Movies folder '/mnt/movies' is not usable: missing"));
+    assert!(line.contains("PRESERVED in staging"));
+    let line = unusable_line("Library", &m);
+    assert!(!line.contains("PRESERVED"), "{line}");
+}
+
+#[test]
+fn a_batch_over_busy_folders_costs_one_limit_not_one_per_folder() {
+    let keys: Vec<PathBuf> = (0..3)
+        .map(|i| PathBuf::from(format!("/test/batch-busy-{i}")))
+        .collect();
+    let running: Vec<_> = keys
+        .iter()
+        .map(|k| {
+            begin(k, Duration::from_secs(5), || {
+                std::thread::sleep(Duration::from_millis(1500));
+            })
+        })
+        .collect();
+    let items: Vec<_> = keys.iter().map(|k| (k.clone(), ())).collect();
+    let t = Instant::now();
+    let out = bounded_each(items, Duration::from_millis(400), |_| ());
+    let took = t.elapsed();
+    assert!(took < Duration::from_millis(800), "took {took:?}");
+    assert!(out.iter().all(|o| *o != Bounded::Done(())));
+    for p in running {
+        let _ = p.wait();
+    }
+}
+
+#[test]
+fn empty_or_relative_roots_are_warned_about() {
+    let cfg = Config {
+        output_dir: "/data/out".into(),
+        staging_dir: "/data/stage".into(),
+        ..Config::default()
+    };
+    assert!(root_warnings(&cfg).is_empty());
+    let cfg = Config {
+        output_dir: String::new(),
+        staging_dir: "stage".into(),
+        ..Config::default()
+    };
+    let w = root_warnings(&cfg);
+    assert_eq!(w.len(), 2);
+    assert!(w[0].contains("Output") && w[0].contains("not set"));
+    assert!(w[1].contains("Staging") && w[1].contains("absolute"));
+}
+
+#[test]
+fn an_unusable_folder_counts_as_already_reported() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let down = Path::new("/test/reported-down");
+    let up = Path::new("/test/reported-up");
+    publish(
+        vec![
+            Mount::blank("Output", down).failed(Fault::Other, "gone".into()),
+            Mount::blank("Movies", up).passed(),
+        ],
+        true,
+    );
+    assert!(already_reported(&down.join("Movies")));
+    assert!(!already_reported(up));
+    assert!(!already_reported(Path::new("/test/unknown")));
+}
+
+#[test]
+fn a_probe_file_that_cannot_be_removed_keeps_the_folder_usable() {
+    let t = tempfile::tempdir().unwrap();
+    let result = probe_write_with(t.path(), |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    });
+    assert!(result.is_ok(), "{result:?}");
 }

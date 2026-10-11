@@ -1993,12 +1993,12 @@ fn validate_fetch_url_allows_lan_and_rejects_invalid_and_bad_scheme() {
 }
 
 #[test]
-fn guarded_get_rejects_invalid_address_and_scheme_before_connecting() {
-    // guarded_get runs the address guard FIRST: an unreachable literal is refused with no
+fn the_keydb_fetch_rejects_invalid_address_and_scheme_before_connecting() {
+    // The fetch runs the address guard FIRST: an unreachable literal is refused with no
     // socket opened (LAN literals pass the guard, so they would connect).
-    assert!(guarded_get("http://0.0.0.0/keydb.zip").is_err());
-    assert!(guarded_get("http://[ff02::1]:9000/keydb.zip").is_err());
-    assert!(guarded_get("file:///etc/passwd").is_err());
+    assert!(validate_fetch_url("http://0.0.0.0/keydb.zip").is_err());
+    assert!(validate_fetch_url("http://[ff02::1]:9000/keydb.zip").is_err());
+    assert!(validate_fetch_url("file:///etc/passwd").is_err());
 }
 
 // A KEYDB body that is SLOW but PROGRESSING must finish. ureq 3.4.1 (#1194) made
@@ -2236,17 +2236,20 @@ fn guarded_agent_connects_to_the_pinned_address_not_dns() {
     );
 }
 
-// Secret-leak guard: guarded_get error strings must never embed the full
+// Secret-leak guard: refresh_keydb error strings must never embed the full
 // request URL (path/query may hold a token). Uses a public IP with
 // nothing listening to reach ureq's Transport error arm, not the SSRF guard.
 #[test]
-fn guarded_get_ureq_error_does_not_embed_url() {
+fn refresh_keydb_ureq_error_does_not_embed_url() {
     // Port 1 on a public IP: passes SSRF guard (it's public) but the
     // connection will be refused immediately (nothing listens on port 1).
     // The URL has a fake token in the path that must not appear in the error.
     let token = "supersecret_api_token_12345";
     let url = format!("http://8.8.8.8:1/keydb/{token}.zip");
-    let err = guarded_get(&url).unwrap_err();
+    let cfg = std::sync::RwLock::new(crate::server::config::Config::default());
+    let err = crate::server::keysource::refresh_keydb(&cfg, &url, KEYDB_FETCH_TIMEOUT)
+        .unwrap_err()
+        .to_string();
     assert!(
         !err.contains(token),
         "ureq transport error must not leak the URL token; got: {err:?}"
@@ -2476,17 +2479,17 @@ fn ureq_error_kind_surfaces_os_error_detail() {
 // reaching autorip.jsonl and unauthenticated GET /api/debug.
 #[test]
 fn the_keydb_update_handler_masks_its_ureq_error() {
-    let src = crate::server::util::source_lf(include_str!("web.rs"));
+    let src = crate::server::util::source_lf(include_str!("keysource.rs"));
     // Anchored on the DEFINITION, not the name (this test mentions it
     // too). Both ends are `expect`ed — an anchor that stops matching
-    // would otherwise silently widen the slice to other handlers' logs.
+    // would otherwise silently widen the slice to other fns' logs.
     let start = src
-        .find("\nfn handle_update_keydb(request: tiny_http::Request")
-        .expect("handle_update_keydb definition present");
+        .find("\npub fn refresh_keydb(")
+        .expect("refresh_keydb definition present");
     let end = start
         + src[start..]
-            .find("\n    // Write to the service-canonical keydb path")
-            .expect("the handler's post-fetch section still starts here");
+            .find("\n    let body = web::read_capped_keydb_body")
+            .expect("the fetch section still ends here");
     let body = &src[start..end];
     assert!(
         body.contains("ureq_error_kind(&e)"),

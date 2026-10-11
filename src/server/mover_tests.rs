@@ -3553,11 +3553,10 @@ fn check_configured_destinations_gives_up_on_a_hung_root() {
         format!("{base}/output"),
     );
     let cfg = cfg_with_dirs(&movies, &tv, &output);
-    let hung = [movies.clone(), tv.clone()];
     let limit = std::time::Duration::from_millis(400);
     let started = std::time::Instant::now();
-    let problems = check_destinations_with(&cfg, limit, move |root: &str| {
-        if hung.iter().any(|h| h == root) {
+    let problems = check_configured_destinations_with(&cfg, limit, |p: &Path| {
+        if p.ends_with("movies") || p.ends_with("tv") {
             // A stat that never comes back (until long after the limit).
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
@@ -3575,14 +3574,29 @@ fn check_configured_destinations_gives_up_on_a_hung_root() {
     }
 }
 
+// The mover's per-delivery gate is bounded too: a root whose write probe never comes back
+// fails as not responding within the limit instead of blocking the mover thread.
+#[test]
+fn validate_destination_root_gives_up_on_a_hung_root() {
+    let root = format!("/test/hung-validate-{}", std::process::id());
+    let started = std::time::Instant::now();
+    let err = validate_destination_root_with(&root, std::time::Duration::from_millis(300), |_| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(err.contains("not responding"), "{err}");
+}
+
 // The real check still runs through the bounded path: a broken root keeps its own reason.
 #[test]
 fn check_configured_destinations_keeps_the_roots_own_reason() {
-    let problems = check_destinations_with(
-        &cfg_with_dirs("", "", "relative/output"),
-        std::time::Duration::from_secs(5),
-        validate_destination_root,
-    );
+    let problems = check_configured_destinations(&cfg_with_dirs("", "", "relative/output"));
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
         problems[0].1.contains("not an absolute path"),

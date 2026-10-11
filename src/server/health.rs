@@ -268,6 +268,11 @@ pub fn status_for(path: &Path) -> Option<Mount> {
         .cloned()
 }
 
+/// Whether the health monitor already reports `path` unusable, and so already logged it.
+pub fn already_reported(path: &Path) -> bool {
+    status_for(path).is_some_and(|m| !m.ok)
+}
+
 /// The remux engine's local staging folder, when one is set.
 pub fn remux_stage_dir() -> Option<PathBuf> {
     std::env::var_os("FREEMKV_REMUX_STAGING_DIR")
@@ -293,7 +298,7 @@ pub fn folders(cfg: &Config) -> Vec<(&'static str, PathBuf, bool)> {
         ("TV", under(&cfg.tv_dir), true),
         ("ISOs", under(&cfg.iso_dir), true),
         ("Library", Some(lib.library), true),
-        ("Source ISOs", lib.isos, false),
+        (READ_ONLY_ROLE, lib.isos, false),
         ("Remux staging", remux_stage_dir(), true),
     ];
     let mut out: Vec<(&'static str, PathBuf, bool)> = Vec::new();
@@ -476,30 +481,45 @@ fn release(key: &Path) {
     IN_FLIGHT.done.notify_all();
 }
 
-/// Run `probe` for the folder `key` on its own thread and wait at most `limit`.
-/// A probe of `key` already running is waited for within the same limit; one past its own
-/// limit means the folder hangs, and the answer is `Busy` at once. A probe that outlives
-/// its caller is left running: it may touch only its own probe artifacts.
-pub fn bounded<T, F>(key: &Path, limit: Duration, probe: F) -> Bounded<T>
+/// A started probe: wait for it with [`Pending::wait`].
+pub struct Pending<T> {
+    rx: Option<std::sync::mpsc::Receiver<T>>,
+    deadline: Instant,
+}
+
+/// Begin `probe` for the folder `key` on its own thread. A probe of `key` already running is
+/// waited for within `limit`; one past its own limit means the folder hangs, and the answer is
+/// `Busy` at once. A probe that outlives its caller is left running: it may touch only its own
+/// probe artifacts.
+pub fn begin<T, F>(key: &Path, limit: Duration, probe: F) -> Pending<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let deadline = Instant::now() + limit;
+    begin_until(key, Instant::now() + limit, probe)
+}
+
+/// [`begin`] with the deadline given, so a batch can share one deadline across its folders.
+pub fn begin_until<T, F>(key: &Path, deadline: Instant, probe: F) -> Pending<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let busy = Pending { rx: None, deadline };
     {
-        let mut busy = IN_FLIGHT.folders.lock().unwrap_or_else(|e| e.into_inner());
-        while let Some(late_at) = busy.iter().find(|(p, _)| p == key).map(|(_, t)| *t) {
+        let mut held = IN_FLIGHT.folders.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(late_at) = held.iter().find(|(p, _)| p == key).map(|(_, t)| *t) {
             let now = Instant::now();
             if now >= deadline || now >= late_at {
-                return Bounded::Busy;
+                return busy;
             }
-            busy = IN_FLIGHT
+            held = IN_FLIGHT
                 .done
-                .wait_timeout(busy, deadline.min(late_at) - now)
+                .wait_timeout(held, deadline.min(late_at) - now)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
-        busy.push((key.to_path_buf(), deadline));
+        held.push((key.to_path_buf(), deadline));
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let owned = key.to_path_buf();
@@ -519,12 +539,54 @@ where
         });
     if spawned.is_err() {
         release(key);
-        return Bounded::Busy;
+        return busy;
     }
-    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(v) => Bounded::Done(v),
-        Err(_) => Bounded::TimedOut,
+    Pending {
+        rx: Some(rx),
+        deadline,
     }
+}
+
+impl<T> Pending<T> {
+    /// The probe's answer, or `TimedOut` once its limit has run out; `Busy` if none started.
+    pub fn wait(self) -> Bounded<T> {
+        let Some(rx) = self.rx else {
+            return Bounded::Busy;
+        };
+        match rx.recv_timeout(self.deadline.saturating_duration_since(Instant::now())) {
+            Ok(v) => Bounded::Done(v),
+            Err(_) => Bounded::TimedOut,
+        }
+    }
+}
+
+/// [`begin`] and wait: `probe` for `key` within `limit`.
+pub fn bounded<T, F>(key: &Path, limit: Duration, probe: F) -> Bounded<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    begin(key, limit, probe).wait()
+}
+
+/// Run `f` on every item at once, each bounded by `limit` on its folder, so folders on one
+/// dead mount cost one timeout between them. Results keep the input order.
+pub fn bounded_each<I, T, F>(items: Vec<(PathBuf, I)>, limit: Duration, f: F) -> Vec<Bounded<T>>
+where
+    I: Send + 'static,
+    T: Send + 'static,
+    F: Fn(I) -> T + Send + Sync + 'static,
+{
+    let f = Arc::new(f);
+    let deadline = Instant::now() + limit;
+    let started: Vec<_> = items
+        .into_iter()
+        .map(|(key, item)| {
+            let f = f.clone();
+            begin_until(&key, deadline, move || f(item))
+        })
+        .collect();
+    started.into_iter().map(Pending::wait).collect()
 }
 
 // Keep stale-handle evidence even when its probe finishes after the caller timed out.
@@ -565,19 +627,32 @@ fn report_fault(generation: u64, path: &Path, fault: Option<Fault>) {
         .record(generation, path, fault);
 }
 
-// `check` through `bounded`, abandoned after CHECK_TIMEOUT.
-fn check_bounded(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
-    let p = path.clone();
+// `check` for one folder, reporting a stale handle even when the caller gave up on it.
+fn check_reporting(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
     let generation = probe_generation();
-    match bounded(&path, CHECK_TIMEOUT, move || {
-        let result = check(role, &p, want_write);
-        report_fault(generation, &p, result.fault);
-        tracing::debug!(role, path = %p.display(), fault = ?result.fault, "folder probe completed");
-        result
-    }) {
-        Bounded::Done(m) => m,
-        Bounded::TimedOut | Bounded::Busy => not_responding(role, &path, CHECK_TIMEOUT),
-    }
+    let result = check(role, &path, want_write);
+    report_fault(generation, &path, result.fault);
+    tracing::debug!(role, path = %path.display(), fault = ?result.fault, "folder probe completed");
+    result
+}
+
+// Check every folder at once, each abandoned after CHECK_TIMEOUT; results keep the input order.
+fn check_folders(folders: Vec<(&'static str, PathBuf, bool)>) -> Vec<Mount> {
+    let items = folders
+        .iter()
+        .map(|(role, path, w)| (path.clone(), (*role, path.clone(), *w)))
+        .collect();
+    let results = bounded_each(items, CHECK_TIMEOUT, |(role, path, w)| {
+        check_reporting(role, path, w)
+    });
+    folders
+        .iter()
+        .zip(results)
+        .map(|((role, path, _), r)| match r {
+            Bounded::Done(m) => m,
+            Bounded::TimedOut | Bounded::Busy => not_responding(role, path, CHECK_TIMEOUT),
+        })
+        .collect()
 }
 
 fn not_responding(role: &'static str, path: &Path, after: Duration) -> Mount {
@@ -588,40 +663,6 @@ fn not_responding(role: &'static str, path: &Path, after: Duration) -> Mount {
             after.as_secs()
         ),
     )
-}
-
-/// Whether the last check of `path` found it usable. `None` if never checked.
-pub fn folder_ok(path: &Path) -> Option<bool> {
-    LAST.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find(|m| m.path == path)
-        .map(|m| m.ok)
-}
-
-// Run `check` for every folder at once, so folders on one dead mount cost one timeout between
-// them, not one each. Results keep the input order.
-fn check_each<F>(folders: Vec<(&'static str, PathBuf, bool)>, check: F) -> Vec<Mount>
-where
-    F: Fn(&'static str, PathBuf, bool) -> Mount + Sync,
-{
-    std::thread::scope(|scope| {
-        let running: Vec<_> = folders
-            .into_iter()
-            .map(|(role, path, w)| {
-                let check = &check;
-                let again = path.clone();
-                (role, again, scope.spawn(move || check(role, path, w)))
-            })
-            .collect();
-        running
-            .into_iter()
-            .map(|(role, path, h)| {
-                h.join()
-                    .unwrap_or_else(|_| not_responding(role, &path, CHECK_TIMEOUT))
-            })
-            .collect()
-    })
 }
 
 // Carry a folder's history (since, last good, last error) from its previous check.
@@ -640,6 +681,29 @@ fn merge(prev: Option<&Mount>, mut next: Mount) -> Mount {
     next
 }
 
+/// The one watched folder that is only read, never written.
+const READ_ONLY_ROLE: &str = "Source ISOs";
+
+// The syslog line for a writable folder that has just stopped working; where finished rips
+// land, it says they wait in staging.
+fn unusable_line(role: &str, m: &Mount) -> String {
+    let mut line = format!(
+        "WARNING: {role} folder '{}' is not usable: {}.",
+        m.path.display(),
+        m.problem.as_deref().unwrap_or("unknown problem")
+    );
+    if matches!(
+        role.to_lowercase().as_str(),
+        "output" | "movies" | "tv" | "isos"
+    ) {
+        line.push_str(
+            " Finished rips will be PRESERVED in staging (not moved) until this is fixed \
+             (check the directory exists and its bind-mount/NAS share is present and writable).",
+        );
+    }
+    line
+}
+
 // Publish `results` (every folder) or one result (a preflight), keeping each folder's history.
 fn publish(results: Vec<Mount>, replace_all: bool) {
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
@@ -649,10 +713,15 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
             .collect()
     };
     let before = shape(&last);
+    let mut lines = Vec::new();
     let merged: Vec<Mount> = results
         .into_iter()
         .map(|m| {
             let previous = last.iter().find(|p| p.path == m.path);
+            let role = previous.map_or(m.role, |p| p.role);
+            if !m.ok && role != READ_ONLY_ROLE && previous.is_none_or(|p| p.ok) {
+                lines.push(unusable_line(role, &m));
+            }
             if previous.is_none_or(|p| p.fault != m.fault || p.state != m.state) {
                 if m.ok {
                     tracing::info!(role = m.role, path = %m.path.display(), latency_ms = ?m.latency_ms, "folder healthy");
@@ -681,11 +750,16 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
     if shape(&last) != before {
         GENERATION.fetch_add(1, Ordering::SeqCst);
     }
+    drop(last);
+    for line in lines {
+        crate::server::log::syslog(&line);
+    }
 }
 
 /// Check every folder once and publish the result.
 pub fn refresh(cfg: &Config) {
-    publish(check_each(folders(cfg), check_bounded), true);
+    let mounts = check_folders(folders(cfg));
+    publish(mounts, true);
 }
 
 /// Why a folder failed its preflight, in words the UI shows as they are.
@@ -731,13 +805,24 @@ impl Problem {
     }
 }
 
+/// The detail of a preflight that found a file where the folder should be.
+pub const NOT_A_FOLDER: &str = "not a folder";
+
 /// The write test: `dir` is a folder, and a file can be created in it and removed.
 pub fn probe_write(dir: &Path) -> std::io::Result<()> {
+    probe_write_with(dir, |p| std::fs::remove_file(p))
+}
+
+// [`probe_write`] with the removal given: the seam the tests use.
+fn probe_write_with(
+    dir: &Path,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let meta = std::fs::metadata(dir)?;
     if !meta.is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotADirectory,
-            "not a folder",
+            NOT_A_FOLDER,
         ));
     }
     let nanos = std::time::SystemTime::now()
@@ -749,7 +834,11 @@ pub fn probe_write(dir: &Path) -> std::io::Result<()> {
         .write(true)
         .create_new(true)
         .open(&probe)?;
-    std::fs::remove_file(&probe)
+    // Writability is proven; a marker left behind is a warning, never a failed folder.
+    if let Err(e) = remove(&probe) {
+        tracing::warn!(probe = %probe.display(), error = %e, "writability probe left behind");
+    }
+    Ok(())
 }
 
 /// Before a remux or a move starts: `dir` must answer a stat and a create-and-delete
@@ -769,17 +858,63 @@ pub fn preflight_with<F>(
 where
     F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
 {
+    let started = preflight_begin(role, dir, Instant::now() + limit, probe);
+    preflight_finish(role, dir, limit, started)
+}
+
+/// [`preflight_with`] for several folders at once, so folders on one dead mount cost one
+/// limit between them. Results keep the input order.
+pub fn preflight_each<F>(
+    role: &'static str,
+    dirs: &[PathBuf],
+    limit: Duration,
+    probe: F,
+) -> Vec<Result<(), Problem>>
+where
+    F: Fn(&Path) -> std::io::Result<()> + Copy + Send + 'static,
+{
+    let deadline = Instant::now() + limit;
+    let started: Vec<_> = dirs
+        .iter()
+        .map(|d| preflight_begin(role, d, deadline, probe))
+        .collect();
+    dirs.iter()
+        .zip(started)
+        .map(|(d, s)| preflight_finish(role, d, limit, s))
+        .collect()
+}
+
+// A preflight under way: refused up front, or its probe running.
+type Started = (Instant, Result<Pending<std::io::Result<()>>, Problem>);
+
+fn preflight_begin<F>(role: &'static str, dir: &Path, deadline: Instant, probe: F) -> Started
+where
+    F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
+{
     let started = Instant::now();
+    if share_unmounted(dir) {
+        let p = Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into());
+        return (started, Err(p));
+    }
     let owned = dir.to_path_buf();
-    let result = if share_unmounted(dir) {
-        Err(Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into()))
-    } else {
-        let generation = probe_generation();
-        match bounded(dir, limit, move || {
-            let result = probe(&owned);
-            report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
-            result
-        }) {
+    let generation = probe_generation();
+    let pending = begin_until(dir, deadline, move || {
+        let result = probe(&owned);
+        report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
+        result
+    });
+    (started, Ok(pending))
+}
+
+fn preflight_finish(
+    role: &'static str,
+    dir: &Path,
+    limit: Duration,
+    (started, begun): Started,
+) -> Result<(), Problem> {
+    let result = match begun {
+        Err(p) => Err(p),
+        Ok(pending) => match pending.wait() {
             Bounded::Done(Ok(())) => Ok(()),
             Bounded::Done(Err(e)) => Err(Problem::new(role, dir, Fault::of(&e), e.to_string())),
             Bounded::TimedOut => Err(Problem::new(
@@ -794,7 +929,7 @@ where
                 Fault::Unresponsive,
                 "an earlier check of this folder never came back".into(),
             )),
-        }
+        },
     };
     let mount = match &result {
         Ok(()) => {
@@ -871,23 +1006,42 @@ fn heal(cfg: &Config) {
     refresh(cfg);
 }
 
+/// Warnings for destination roots that are empty or relative: the checks resolve them against
+/// the working directory, so such a root can look healthy. Pure; no I/O.
+pub fn root_warnings(cfg: &Config) -> Vec<String> {
+    [("Output", &cfg.output_dir), ("Staging", &cfg.staging_dir)]
+        .into_iter()
+        .filter_map(|(role, dir)| {
+            let why = if dir.trim().is_empty() {
+                "is not set"
+            } else if !Path::new(dir).is_absolute() {
+                "is not an absolute path"
+            } else {
+                return None;
+            };
+            Some(format!(
+                "WARNING: {role} folder '{dir}' {why}; use an absolute path or finished rips may land in the wrong place."
+            ))
+        })
+        .collect()
+}
+
 /// Start the health thread; `None` if it could not be spawned.
 pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
     let cfg = cfg.clone();
     std::thread::Builder::new()
         .name("health".into())
         .spawn(move || {
+            let first = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+            for line in root_warnings(&first) {
+                crate::server::log::syslog(&line);
+            }
             while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                 let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
                 refresh(&c);
                 #[cfg(unix)]
                 heal(&c);
-                let until = Instant::now() + Duration::from_secs(INTERVAL_SECS);
-                while Instant::now() < until
-                    && !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
+                crate::server::sleep_unless_shutdown(Duration::from_secs(INTERVAL_SECS));
             }
         })
         .ok()
