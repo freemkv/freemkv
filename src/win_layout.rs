@@ -465,15 +465,6 @@ pub fn form_metrics(dpi: u32) -> FormMetrics {
     }
 }
 
-/// The number of rows in a dropdown's single vertical list.
-///
-/// Native popup menus handle lists taller than the screen with their own scrolling;
-/// keeping every item in one list ensures all dropdowns open straight down consistently.
-#[must_use]
-pub fn menu_rows(items: usize) -> usize {
-    items.max(1)
-}
-
 // ── the title tree's columns ──────────────────────────────────────────────
 
 /// Height of the column header strip over the title tree.

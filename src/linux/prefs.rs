@@ -89,6 +89,8 @@ pub(super) struct Prefs {
     combos: Vec<(&'static str, adw::ComboRow)>,
     langs: Vec<(&'static str, Rc<LangRow>)>,
     keydb_row: adw::ActionRow,
+    /// Test was pressed: the key-service verdict is toasted when it lands.
+    awaiting_verdict: Cell<bool>,
 }
 
 /// Collects rows while the pages are built, so the form can be read back by
@@ -394,6 +396,7 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
         combos: f.combos,
         langs: f.langs,
         keydb_row: keydb_row.clone(),
+        awaiting_verdict: Cell::new(false),
     });
     prefs.populate(st);
     let v = shell.app.borrow().view();
@@ -488,6 +491,14 @@ impl Prefs {
         let mut edited = shell.app.borrow().settings_form().clone();
         self.read_form(&mut edited);
         shell.act(Cmd::CommitSettings(Box::new(edited)));
+        // A refused value (an unknown presentation language) shows the kept one again.
+        let base = shell.app.borrow().settings_form().clone();
+        for (k, r) in &self.entries {
+            let kept = base.get(k);
+            if r.text() != kept.as_str() {
+                r.set_text(&kept);
+            }
+        }
     }
 
     /// The language applies at once: commit, swap the catalog, rebuild the
@@ -510,12 +521,18 @@ impl Prefs {
             .add_toast(adw::Toast::new(&glib::markup_escape_text(text)));
     }
 
-    // The core checks the live URL and logs its verdict; shown here too.
+    // The core checks the live URL (the host lookup off the UI thread) and logs its
+    // verdict; `paint_keyserver` toasts it here too once it lands.
     fn test_keyserver(&self, shell: &Rc<Shell>) {
+        self.awaiting_verdict.set(true);
         shell.act(Cmd::TestKeyserver(self.field("keyserver_url")));
-        let verdict = shell.app.borrow().keyserver_verdict().map(str::to_owned);
-        if let Some(text) = verdict {
-            self.toast(&text);
+    }
+
+    /// Toast the verdict of the Test pressed in this window, once it lands.
+    pub(super) fn paint_keyserver(&self, verdict: Option<&str>) {
+        if let Some(text) = verdict.filter(|_| self.awaiting_verdict.get()) {
+            self.awaiting_verdict.set(false);
+            self.toast(text);
         }
     }
 

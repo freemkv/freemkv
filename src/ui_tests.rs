@@ -1,5 +1,20 @@
 use super::*;
 
+thread_local! {
+    /// Every `spawn_worker` on this thread fails, as when the process is out of threads.
+    pub(super) static SPAWN_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// Tick until every Settings write and key-service check in flight has answered.
+fn settle_workers(app: &mut App) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.saving.is_some() || app.keyserver_check.is_some() {
+        assert!(std::time::Instant::now() < until, "a worker never answered");
+        app.tick();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 #[test]
 fn free_space_is_measured_off_the_caller_for_the_latest_folder() {
     use std::sync::atomic::AtomicUsize;
@@ -580,11 +595,37 @@ fn the_audio_choice_toggles_languages_and_all_clears_them() {
 
 #[test]
 fn stream_preference_persistence_can_be_disabled() {
-    let mut app = App::new();
+    static SAVES: AtomicUsize = AtomicUsize::new(0);
+    let mut app = picking(pick_disc());
+    app.save_fn = |_| {
+        SAVES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
     app.settings.persist_stream_preferences = false;
-    let before = app.log.len();
-    app.pick_audio(None);
-    assert_eq!(app.log.len(), before);
+    app.pick_audio(Some("deu"));
+    settle_workers(&mut app);
+    assert!(
+        app.settings.audio_langs.is_empty(),
+        "the pick reached Settings"
+    );
+    assert_eq!(SAVES.load(Ordering::SeqCst), 0, "a pick was written");
+    assert_eq!(app.pick_prefs.audio, vec!["deu".to_string()]);
+}
+
+// #19: a remembered bar pick is written off the UI thread, not in the click.
+#[test]
+fn a_remembered_pick_is_saved_off_the_ui_thread() {
+    static WRITER: Mutex<Option<String>> = Mutex::new(None);
+    let mut app = picking(pick_disc());
+    app.save_fn = |_| {
+        *WRITER.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+        Ok(())
+    };
+    let fx = app.pick_audio(Some("deu"));
+    assert!(fx.contains(&Effect::StartTicking), "{fx:?}");
+    settle_workers(&mut app);
+    assert_eq!(WRITER.lock().unwrap().as_deref(), Some("settings-save"));
+    assert_eq!(app.settings.audio_langs, "deu");
 }
 
 #[test]
@@ -1015,7 +1056,10 @@ fn pending_open_keeps_ticks_and_blocks_ripping_until_result_is_applied() {
     tx.send(OpenedSource {
         path: "scanned.iso".into(),
         scanned: Ok(probe_scan()),
-        preflight: Some(Ok(vec![])),
+        preflight: Some((
+            open_preflight_titles(&probe_scan(), &app.settings),
+            Ok(vec![]),
+        )),
     })
     .unwrap();
     let fx = app.tick();
@@ -1086,21 +1130,23 @@ pub(super) fn no_drive_scan(
     path: &str,
     keys: &KeyConfig,
     tok: &OpenToken,
+    ticks: OpenTicks,
 ) -> Result<Scanned, String> {
     if crate::engine::is_disc_source(path) {
         return Err(NO_DRIVE_IN_TESTS.to_string());
     }
-    scan_source(path, keys, tok)
+    scan_source(path, keys, tok, ticks)
 }
 pub(super) fn no_drive_probe(
     path: &str,
     keys: &KeyConfig,
     tok: &OpenToken,
+    ticks: OpenTicks,
 ) -> Result<Scanned, String> {
     if crate::engine::is_disc_source(path) {
         return Err(NO_DRIVE_IN_TESTS.to_string());
     }
-    probe_source(path, keys, tok)
+    probe_source(path, keys, tok, ticks)
 }
 const NO_DRIVE_IN_TESTS: &str = "unit tests never open a drive";
 pub(super) fn no_drive_presence(_: &str) -> Option<bool> {
@@ -1175,7 +1221,12 @@ fn settle(app: &mut App) -> std::time::Duration {
 // Released by the test once its probe has progressed for four windows.
 static PROGRESSING_DONE: AtomicBool = AtomicBool::new(false);
 
-fn progressing_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn progressing_probe(
+    _: &str,
+    _: &KeyConfig,
+    tok: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     while !PROGRESSING_DONE.load(Ordering::Acquire) && !tok.halt.is_cancelled() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
@@ -1224,7 +1275,12 @@ fn probe_progressing_past_30s_is_kept() {
 }
 
 // One READ in recovery: `busy()` held for 3 windows with no CDB completing.
-fn recovering_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn recovering_probe(
+    _: &str,
+    _: &KeyConfig,
+    tok: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     let _read = tok.progress.busy();
     std::thread::sleep(T29 * 3);
     match tok.halt.is_cancelled() {
@@ -1245,7 +1301,7 @@ fn probe_not_cancelled_during_long_recovery_read() {
 }
 
 static FROZEN_SAW_STOP: AtomicBool = AtomicBool::new(false);
-fn frozen_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn frozen_probe(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     let stopped = stopped_within(tok, std::time::Duration::from_secs(3));
     FROZEN_SAW_STOP.store(stopped, Ordering::SeqCst);
     Err(String::new())
@@ -1274,14 +1330,14 @@ fn probe_frozen_30s_is_cancelled_and_releases() {
 }
 
 static HOLD_RELEASED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-fn holding_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn holding_probe(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     stopped_within(tok, std::time::Duration::from_secs(3));
     std::thread::sleep(std::time::Duration::from_millis(50));
     *HOLD_RELEASED.lock().unwrap() = Some(std::time::Instant::now());
     Err("stopped".to_string())
 }
 static OTHER_OPENED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-fn other_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn other_open(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     *OTHER_OPENED.lock().unwrap() = Some(std::time::Instant::now());
     Ok(probe_scan())
 }
@@ -1316,7 +1372,7 @@ fn open_during_probe_cancels_probe_then_opens() {
 }
 
 static IDLE_SAW_STOP: AtomicBool = AtomicBool::new(false);
-fn idle_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn idle_probe(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     if stopped_within(tok, T29 * 4) {
         IDLE_SAW_STOP.store(true, Ordering::SeqCst);
         return Err("stopped".to_string());
@@ -1325,7 +1381,7 @@ fn idle_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String
 }
 
 static FT15D_RESCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-fn counted_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn counted_open(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     FT15D_RESCANS.fetch_add(1, Ordering::SeqCst);
     Ok(probe_scan())
 }
@@ -1364,7 +1420,7 @@ fn adopted_probe_is_never_cancelled_by_t29() {
 }
 
 static FT14_HELD: Mutex<Vec<OpenToken>> = Mutex::new(Vec::new());
-fn held_open(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn held_open(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     FT14_HELD.lock().unwrap().push(tok.clone());
     stopped_within(tok, std::time::Duration::from_secs(3));
     Err("stopped".to_string())
@@ -1425,7 +1481,7 @@ fn a_probe_that_never_answers_is_abandoned_instead_of_ticking_forever() {
 }
 
 static FRESH_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-fn fresh_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn fresh_open(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     FRESH_OPENS.fetch_add(1, Ordering::SeqCst);
     Ok(probe_scan())
 }
@@ -1474,7 +1530,12 @@ fn tick_until_settled(app: &mut App) {
 }
 
 static ADOPT_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-fn busy_drive_adopt(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn busy_drive_adopt(
+    _: &str,
+    _: &KeyConfig,
+    _: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     ADOPT_SCANS.fetch_add(1, Ordering::SeqCst);
     Err("drive busy".to_string())
 }
@@ -1504,7 +1565,12 @@ fn a_prompted_open_of_the_probed_drive_adopts_the_probe() {
 }
 
 static ADOPT_ASYNC_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-fn busy_drive_adopt_async(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn busy_drive_adopt_async(
+    _: &str,
+    _: &KeyConfig,
+    _: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     ADOPT_ASYNC_SCANS.fetch_add(1, Ordering::SeqCst);
     Err("drive busy".to_string())
 }
@@ -1523,7 +1589,7 @@ fn a_background_open_of_the_probed_drive_adopts_the_probe() {
 }
 
 /// Adopted, the probe's failure is the answer to a question the user asked.
-fn drive_busy(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn drive_busy(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     Err("drive busy".to_string())
 }
 
@@ -1555,7 +1621,12 @@ fn an_adopted_probe_failure_is_reported() {
 }
 
 static QUEUED_SCANS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-fn record_queued(path: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn record_queued(
+    path: &str,
+    _: &KeyConfig,
+    _: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     QUEUED_SCANS.lock().unwrap().push(path.to_string());
     Ok(probe_scan())
 }
@@ -2945,7 +3016,8 @@ fn a_settings_commit_saves_and_follows_only_a_new_default_folder() {
     let mut form = opened_form(&mut app);
     form.filename_template = "{title}".into();
     let fx = app.dispatch(Cmd::CommitSettings(Box::new(form.clone())));
-    assert_eq!(fx, vec![Effect::Redraw]);
+    assert_eq!(fx, vec![Effect::StartTicking, Effect::Redraw]);
+    settle_workers(&mut app);
     assert_eq!(app.settings.filename_template, "{title}");
     assert_eq!(
         app.output_dir, "/one-off",
@@ -3112,6 +3184,7 @@ fn a_failed_settings_save_is_reported_as_a_notice() {
     let mut form = opened_form(&mut app);
     form.filename_template = "{title}".into();
     app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
     let last = app.log.last().cloned();
     assert_eq!(last.as_ref().map(|l| l.kind), Some(LogKind::Notice));
     assert!(last.is_some_and(|l| l.text.contains("disk full")));
@@ -3164,4 +3237,286 @@ fn a_saved_episodes_mode_does_not_apply_to_a_newly_opened_disc() {
     assert_eq!(app.tree.ticked_titles(), vec![2, 4]);
     app.apply_scan("/b.iso", Ok(pick_disc()), true);
     assert_eq!(app.pick_mode, "Main film only");
+}
+
+// With the Default selection set to "All titles", Open keys every title the tree ticks, so
+// its preflight does not refuse a source the rip decrypts (encrypted-no-key for title 2).
+#[test]
+fn open_preflight_is_keyed_for_every_ticked_title() {
+    use crate::ku_fixtures::*;
+    let fx = bd_image(&[Some(K1), Some(K1)], 1);
+    let dir = TempDir::new("open-all-titles");
+    let iso = fx.write(dir.path(), "disc.iso").display().to_string();
+    let mut app = App::new();
+    app.settings.selection = "All titles".into();
+    app.settings.min_title_secs = "0".into();
+    let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+    crate::rip_keys::with_sources(f, || app.open(&iso));
+    assert_eq!(app.tree.ticked_titles(), vec![0, 1]);
+    let log: Vec<&str> = app.log.iter().map(|l| l.text.as_str()).collect();
+    assert!(
+        logged(&app, &crate::strings::get("gui.log.ready_rip")),
+        "{log:?}"
+    );
+}
+
+// A Settings commit while the background scan ran changes the ticks: the worker's verdict
+// was for other titles, so they are checked again on a worker, with keys looked up for the
+// titles Open did not key, and the UI thread never re-scans the image.
+#[test]
+fn a_stale_background_preflight_is_rechecked_with_keys_for_the_new_ticks() {
+    use crate::ku_fixtures::*;
+    let fx = bd_image(&[Some(K1), Some(K1)], 1);
+    let dir = TempDir::new("stale-recheck");
+    let iso = fx.write(dir.path(), "disc.iso").display().to_string();
+    let f = || factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+    let only_main: &dyn Fn(&Scanned) -> Vec<usize> = &|_| vec![0];
+    let scanned = crate::rip_keys::with_sources(f(), || {
+        crate::engine::scan_with_keys_under(
+            &iso,
+            &KeyConfig::default(),
+            &OpenToken::default(),
+            only_main,
+        )
+    })
+    .unwrap();
+    let mut app = App::new();
+    app.settings.selection = "All titles".into();
+    app.settings.min_title_secs = "0".into();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.opening = Some(rx);
+    tx.send(OpenedSource {
+        path: iso.clone(),
+        scanned: Ok(scanned),
+        preflight: Some((vec![0], Ok(vec![]))),
+    })
+    .unwrap();
+    let ready = crate::strings::get("gui.log.ready_rip");
+    let cannot = crate::strings::fmt("gui.log.cannot_rip", &[("reasons", "")]);
+    let fx = crate::rip_keys::with_sources(f(), || app.tick());
+    assert_eq!(app.tree.ticked_titles(), vec![0, 1]);
+    assert!(fx.contains(&Effect::StartTicking), "{fx:?}");
+    assert!(
+        !logged(&app, &ready) && !logged(&app, cannot.trim_end()),
+        "judged on the UI thread"
+    );
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.recheck.is_some() {
+        assert!(
+            std::time::Instant::now() < until,
+            "the recheck never answered"
+        );
+        app.tick();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let log: Vec<&str> = app.log.iter().map(|l| l.text.as_str()).collect();
+    assert!(logged(&app, &ready), "{log:?}");
+    assert!(
+        !log.iter().any(|l| l.contains("encrypted-no-key")),
+        "{log:?}"
+    );
+    let both = libfreemkv::keys::KeyScope::Titles(vec![0, 1]);
+    assert!(
+        app.seed.as_ref().is_some_and(|k| k.covers(&both)),
+        "Start reuses the topped-up set"
+    );
+}
+
+// A failed write leaves the edit in memory only; committing the same form again (after
+// freeing space) retries the write instead of returning as "unchanged".
+#[test]
+fn a_failed_settings_save_is_retried_by_the_next_commit() {
+    static FULL: AtomicBool = AtomicBool::new(true);
+    static WRITES: AtomicUsize = AtomicUsize::new(0);
+    let mut app = App::new();
+    app.save_fn = |_| {
+        WRITES.fetch_add(1, Ordering::SeqCst);
+        if FULL.load(Ordering::SeqCst) {
+            Err("disk full".into())
+        } else {
+            Ok(())
+        }
+    };
+    let mut form = opened_form(&mut app);
+    form.filename_template = "{title}".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form.clone())));
+    settle_workers(&mut app);
+    FULL.store(false, Ordering::SeqCst);
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
+    assert_eq!(WRITES.load(Ordering::SeqCst), 2, "the retry wrote nothing");
+    let saved = crate::strings::get_or("gui.log.settings_saved", "Settings saved");
+    assert_eq!(app.log.last().map(|l| l.text.clone()), Some(saved));
+    // Saved now: the same form again is the silent no-op.
+    let lines = app.log.len();
+    let form = app.settings_form().clone();
+    assert!(app.dispatch(Cmd::CommitSettings(Box::new(form))).is_empty());
+    assert_eq!(app.log.len(), lines);
+}
+
+// The refused presentation language is the only edit: the refusal is said once, nothing is
+// written, no "Settings saved"; the base keeps the old value for the shell to refill.
+#[test]
+fn a_commit_whose_only_edit_is_refused_saves_and_reports_nothing() {
+    static WRITES: AtomicUsize = AtomicUsize::new(0);
+    let mut app = App::new();
+    app.save_fn = |_| {
+        WRITES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    let mut form = opened_form(&mut app);
+    form.presentation_language = "xx".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
+    let saved = crate::strings::get_or("gui.log.settings_saved", "Settings saved");
+    assert!(!logged(&app, &saved), "a refused edit reported a save");
+    assert_eq!(WRITES.load(Ordering::SeqCst), 0);
+    assert_eq!(app.settings_form().presentation_language, "");
+    let refilled = app.settings_form().clone();
+    let lines = app.log.len();
+    assert!(
+        app.dispatch(Cmd::CommitSettings(Box::new(refilled)))
+            .is_empty()
+    );
+    assert_eq!(app.log.len(), lines);
+}
+
+// No Settings control shows the bar's subtitle mode: subtitle languages set in Settings
+// end a remembered "None", which would else drop them from every rip.
+#[test]
+fn settings_subtitle_languages_end_a_remembered_no_subtitles_mode() {
+    let mut app = App::new();
+    app.settings.subtitle_mode = "none".into();
+    let mut form = opened_form(&mut app);
+    form.sub_langs = "eng".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
+    assert_eq!(app.settings.subtitle_mode, "all");
+    let prefs = LangPrefs::from_settings(&app.settings);
+    assert!(!prefs.no_subtitles && prefs.subtitles == vec!["eng".to_string()]);
+    // An edit elsewhere keeps the mode.
+    app.settings.subtitle_mode = "forced".into();
+    let mut form = opened_form(&mut app);
+    form.filename_template = "{title}".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    assert_eq!(app.settings.subtitle_mode, "forced");
+}
+
+// The key-service check resolves the host: it runs on a worker, and the tick logs it.
+#[test]
+fn the_key_service_check_resolves_off_the_ui_thread() {
+    static CHECKER: Mutex<Option<String>> = Mutex::new(None);
+    let mut app = App::new();
+    app.keyserver_fn = |_| {
+        *CHECKER.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+        Ok(())
+    };
+    let fx = app.dispatch(Cmd::TestKeyserver("https://keys.example/".into()));
+    assert!(fx.contains(&Effect::StartTicking), "{fx:?}");
+    assert_eq!(app.keyserver_verdict(), None, "no verdict while it runs");
+    settle_workers(&mut app);
+    assert_eq!(CHECKER.lock().unwrap().as_deref(), Some("keyserver-check"));
+    assert_eq!(app.log.last().map(|l| l.kind), Some(LogKind::Result));
+    assert!(app.keyserver_verdict().is_some());
+}
+
+// A keydb worker that cannot start says so in the log and in the Keys note, replacing an
+// earlier success there.
+#[test]
+fn a_keydb_worker_that_cannot_start_says_so_in_the_note() {
+    let mut app = App::new();
+    app.keydb_note = Some("keydb updated — 1 entries".into());
+    SPAWN_FAILS.with(|f| f.set(true));
+    app.dispatch(Cmd::UpdateKeydb {
+        url: "https://keys.example/keydb.zip".into(),
+        path: "/k/keydb.cfg".into(),
+    });
+    SPAWN_FAILS.with(|f| f.set(false));
+    let want = crate::strings::get_or(
+        "gui.log.keydb_worker_failed",
+        "keydb update failed — internal error",
+    );
+    assert_eq!(app.view().keydb_note.as_deref(), Some(want.as_str()));
+    assert_eq!(
+        app.log.last().map(|l| (l.kind, l.text.clone())),
+        Some((LogKind::Notice, want))
+    );
+    assert!(app.keydb.is_none() && !app.view().keydb_busy);
+}
+
+// Quit with a remembered pick queued behind a slow write (>2 s) still writes the latest
+// settings: the queued write follows the one in flight instead of being dropped.
+#[test]
+fn quit_writes_the_queued_latest_settings_after_a_slow_write() {
+    static OPEN: AtomicBool = AtomicBool::new(false);
+    static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut app = picking(pick_disc());
+    app.save_fn = |s| {
+        while !OPEN.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        WRITTEN.lock().unwrap().push(s.audio_langs.clone());
+        Ok(())
+    };
+    app.pick_audio(Some("deu"));
+    app.pick_audio(Some("eng"));
+    let latest = app.settings.audio_langs.clone();
+    let release = std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(2600));
+        OPEN.store(true, Ordering::SeqCst);
+    });
+    assert_eq!(app.dispatch(Cmd::Quit), vec![Effect::Quit]);
+    release.join().unwrap();
+    assert_eq!(
+        WRITTEN.lock().unwrap().last(),
+        Some(&latest),
+        "the latest was lost"
+    );
+}
+
+// A writer that died (panicked) does not take the queued latest settings with it.
+#[test]
+fn quit_writes_the_queued_settings_when_the_writer_died() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut app = picking(pick_disc());
+    app.save_fn = |s| {
+        if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            panic!("writer died");
+        }
+        WRITTEN.lock().unwrap().push(s.audio_langs.clone());
+        Ok(())
+    };
+    app.pick_audio(Some("deu"));
+    app.pick_audio(Some("eng"));
+    let latest = app.settings.audio_langs.clone();
+    app.dispatch(Cmd::Quit);
+    assert_eq!(WRITTEN.lock().unwrap().last(), Some(&latest));
+}
+
+// Picks made during a write are written once it ends, the latest settings last.
+#[test]
+fn a_queued_save_writes_the_latest_settings() {
+    static GATE: Mutex<()> = Mutex::new(());
+    static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut app = picking(pick_disc());
+    app.save_fn = |s| {
+        let _slow = GATE.lock().unwrap_or_else(|e| e.into_inner());
+        WRITTEN.lock().unwrap().push(s.audio_langs.clone());
+        Ok(())
+    };
+    let held = GATE.lock().unwrap();
+    app.pick_audio(Some("deu"));
+    app.pick_audio(Some("eng"));
+    app.pick_audio(None);
+    drop(held);
+    settle_workers(&mut app);
+    let written = WRITTEN.lock().unwrap().clone();
+    assert_eq!(
+        written.len(),
+        2,
+        "{written:?}: one write in flight, one queued"
+    );
+    assert_eq!(written.last(), Some(&app.settings.audio_langs));
 }

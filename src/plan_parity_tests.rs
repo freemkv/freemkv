@@ -45,18 +45,10 @@ fn gui_keys(local_only: bool, online_only: bool) -> KeyConfig {
     }
 }
 
+// The CLI's own plan builder (`pipe::cli_plan` delegates to it), the keydb defaulting to the
+// path the app and server are given.
 fn cli(source: &str, dest: &str, flags: (bool, bool, bool), keys: CliKeys) -> Plan {
-    let (raw, multipass, force) = flags;
-    Plan {
-        source: source.into(),
-        dest: dest.into(),
-        titles: freemkv_engine::Selection::default(),
-        streams: freemkv_engine::StreamChoice::default(),
-        raw,
-        multipass,
-        keys: key_params(&cli_key_settings(&keys, "/k/keydb.cfg")),
-        force,
-    }
+    cli_plan(source, dest, &keys, "/k/keydb.cfg", flags)
 }
 
 #[cfg(feature = "server")]

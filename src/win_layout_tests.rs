@@ -395,15 +395,21 @@ fn settings_and_about_chrome_scale() {
     assert_eq!((f.row_step, f.check_step, f.note_step), (60, 56, 76));
 }
 
-/// The real list the language pickers show. Kept as a number rather than
-/// reading `ui::PICKER_LANGUAGES` so this file stays pure arithmetic.
-const LANGS: usize = 38;
-
+// The language picker is one vertical list: a native popup menu scrolls a list taller than
+// the screen, so the picker must add no column breaks of its own.
 #[test]
 fn dropdowns_keep_every_entry_in_one_vertical_list() {
-    assert_eq!(menu_rows(LANGS), LANGS);
-    assert_eq!(menu_rows(1), 1);
-    assert_eq!(menu_rows(0), 1);
+    let src = include_str!("windows.rs").replace("\r\n", "\n");
+    let at = src.find("fn track_once(").expect("the language picker");
+    let body = &src[at..at + src[at..].find("\n    }\n").expect("end")];
+    assert!(
+        body.contains("AppendMenu("),
+        "the picker no longer builds its menu here"
+    );
+    assert!(
+        !body.contains("MENUBREAK") && !body.contains("MENUBARBREAK"),
+        "{body}"
+    );
 }
 
 // Settings pages stack downwards from `top` with no scrolling, so a page that grows past

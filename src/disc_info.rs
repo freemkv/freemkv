@@ -255,10 +255,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
 
     // Report the unlocker that actually handled this rip. Keep the matrix as the
     // source of truth, but do not expose the internal capability list here.
-    {
-        let matched = matched_unlocker(&disc.unlocker_matrix(&drive));
-        out.raw(Normal, &format!("Unlocker: {matched}"));
-    }
+    out.raw(Normal, &unlocker_line(&disc.unlocker_matrix(&drive)));
 
     // Verbose: hardware/disc facts, blank line, then the AACS crypto block. Key
     // resolution runs only here (`-v`): sample ciphertext from the live drive and
@@ -298,14 +295,20 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
     print_titles(&out, &disc, full, verbose, basic);
 }
 
-/// Select the user-facing unlocker label from the registry-derived runtime
-/// results. The matrix remains available to diagnostics; this is the compact
-/// rendering used by disc info and autorip.
-pub(crate) fn matched_unlocker(matrix: &[(&'static str, bool)]) -> &'static str {
-    matrix
-        .iter()
-        .find_map(|(name, ok)| ok.then_some(*name))
-        .unwrap_or("none")
+/// The unlocker that handled the disc: the first match in the registry-derived
+/// runtime results (the matrix stays with diagnostics). The server's log line
+/// applies the same rule in its own code (`server::ripper`).
+pub(crate) fn matched_unlocker(matrix: &[(&'static str, bool)]) -> Option<&'static str> {
+    matrix.iter().find_map(|(name, ok)| ok.then_some(*name))
+}
+
+/// The report's `Unlocker:` line, in the active locale.
+pub(crate) fn unlocker_line(matrix: &[(&'static str, bool)]) -> String {
+    let name = match matched_unlocker(matrix) {
+        Some(name) => name.to_string(),
+        None => strings::get_or("disc.unlocker_none", "none"),
+    };
+    strings::fmt_or("disc.unlocker", "Unlocker: {name}", &[("name", &name)])
 }
 
 /// Print a full, localized title list for an already-scanned `Disc` using a

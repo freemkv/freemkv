@@ -49,5 +49,14 @@ behind each claim:
   [ROADMAP.md](ROADMAP.md) for the effort to add a second maintainer and
   two-person review. The keydb URL may be user-configured to a plain-HTTP
   endpoint; prefer an `https://` source.
+- **Known limitation: the Library server (`freemkv server`) has no
+  authentication.** Its web pages and API answer anyone who can reach the
+  port. State-changing requests are refused when their Origin/Referer names
+  another host, but a web page using DNS rebinding sends matching headers, so
+  a page the operator visits could change settings or reboot the server.
+  Reboots are refused within a minute of a start or of the last request, so
+  such a page can reboot it at most once a minute, not hold it in a restart
+  loop. Run the Library only
+  on a network you trust, and do not expose its port to the internet.
 
 This assurance case is revisited as the threat model and the code change.

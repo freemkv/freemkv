@@ -5,9 +5,29 @@ use libfreemkv::disc::DiscRegion;
 fn unlocker_display_reports_only_the_successful_match() {
     assert_eq!(
         super::matched_unlocker(&[("freemkv", false), ("LD", true), ("AACS", false)]),
-        "LD"
+        Some("LD")
     );
-    assert_eq!(super::matched_unlocker(&[("freemkv", false)]), "none");
+    assert_eq!(super::matched_unlocker(&[("freemkv", false)]), None);
+}
+
+// The `Unlocker:` line is catalog text like every other line of the report, "none" too.
+#[test]
+fn the_unlocker_line_comes_from_the_catalog() {
+    let line = super::unlocker_line(&[("LD", true)]);
+    assert_eq!(
+        line,
+        strings::fmt_or("disc.unlocker", "Unlocker: {name}", &[("name", "LD")])
+    );
+    let none = strings::get_or("disc.unlocker_none", "none");
+    assert_eq!(
+        super::unlocker_line(&[("LD", false)]),
+        strings::fmt_or("disc.unlocker", "Unlocker: {name}", &[("name", &none)])
+    );
+    let src = include_str!("disc_info.rs");
+    assert!(
+        !src.contains("\"Unlocker: {matched}\""),
+        "hard-coded English"
+    );
 }
 
 // `info` flag validation is the same for every URL scheme: `disc:// --typo`

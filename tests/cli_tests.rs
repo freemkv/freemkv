@@ -649,5 +649,11 @@ fn presentation_language_is_validated_and_needs_no_scan() {
         .expect("failed to run");
     let combined = combined_output(&stream);
     assert_eq!(stream.status.code(), Some(1), "{combined}");
-    assert!(combined.contains("m2ts://in.m2ts"), "{combined}");
+    // The selection refusal itself (error.selection_disc_only), not a later open failure.
+    assert!(
+        combined.contains("(-t / -a / -s) applies only to a disc:// or iso:// source")
+            && combined.contains("'m2ts://in.m2ts' is a stream/file source"),
+        "{combined}"
+    );
+    assert!(!combined.contains("Opening m2ts://"), "{combined}");
 }

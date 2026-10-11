@@ -229,6 +229,12 @@ fn open_preflight_titles(sc: &Scanned, settings: &crate::settings::Settings) -> 
     Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles()
 }
 
+// What an open keys under `settings`: the titles its tree will tick.
+fn open_ticks(settings: &crate::settings::Settings) -> impl Fn(&Scanned) -> Vec<usize> + use<> {
+    let settings = settings.clone();
+    move |sc| open_preflight_titles(sc, &settings)
+}
+
 /// An empty list means "no preference", which the engine spells `All`.
 fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
     if tags.is_empty() {
@@ -1421,6 +1427,29 @@ pub fn needs_rip_confirmation(running: bool, already_confirmed: bool) -> bool {
     running && !already_confirmed
 }
 
+// A key-service URL check's outcome as a log line: a rejection is a Notice.
+fn keyserver_check_line(url: &str, r: Result<(), String>) -> (LogKind, String) {
+    use crate::strings::fmt_or;
+    match r {
+        Ok(()) => (
+            LogKind::Result,
+            fmt_or(
+                "gui.log.keyserver_valid",
+                "Key service URL is valid: {url}",
+                &[("url", url)],
+            ),
+        ),
+        Err(e) => (
+            LogKind::Notice,
+            fmt_or(
+                "gui.log.keyserver_rejected",
+                "Key service URL rejected: {e}",
+                &[("e", &e)],
+            ),
+        ),
+    }
+}
+
 /// A keydb worker's outcome as a log line: a failure is a Notice, never the
 /// success style, and a panic's payload (it can quote keydb bytes) is dropped.
 pub fn keydb_update_line(r: std::thread::Result<Result<String, String>>) -> (LogKind, String) {
@@ -2019,29 +2048,39 @@ pub enum LogKind {
 // Scan a source by its kind. The ONE dispatch from a URL to a scan, shared
 // by the synchronous open and the launch probe's worker thread. Free-standing
 // rather than a method because the worker holds no `App`.
-fn scan_source(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn scan_source(
+    path: &str,
+    keys: &KeyConfig,
+    tok: &OpenToken,
+    ticks: OpenTicks,
+) -> Result<Scanned, String> {
     if is_container(path) {
         crate::engine::scan_stream_under(path, keys, tok)
     } else if crate::engine::is_disc_source(path) {
-        crate::engine::scan_disc_with_keys(path, keys, tok)
+        crate::engine::scan_disc_with_keys(path, keys, tok, ticks)
     } else {
-        crate::engine::scan_with_keys_under(path, keys, tok)
+        crate::engine::scan_with_keys_under(path, keys, tok, ticks)
     }
 }
 
 // The launch probe's scan: no drive at all is the same quiet failure as an empty tray.
-fn probe_source(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn probe_source(
+    path: &str,
+    keys: &KeyConfig,
+    tok: &OpenToken,
+    ticks: OpenTicks,
+) -> Result<Scanned, String> {
     if crate::engine::is_disc_source(path) && crate::engine::list_optical_drives().is_empty() {
         return Err(String::new());
     }
-    scan_source(path, keys, tok)
+    scan_source(path, keys, tok, ticks)
 }
 
-use crate::engine::OpenToken;
+use crate::engine::{OpenTicks, OpenToken};
 
-/// A source scan under its open's token, as a value so unit tests can swap in one that
-/// never touches a drive.
-type ScanFn = fn(&str, &KeyConfig, &OpenToken) -> Result<Scanned, String>;
+/// A source scan under its open's token, keying the titles `ticks` picks, as a value so
+/// unit tests can swap in one that never touches a drive.
+type ScanFn = fn(&str, &KeyConfig, &OpenToken, OpenTicks) -> Result<Scanned, String>;
 
 /// (open scan, probe scan). Unit tests get a pair that refuses `disc://` outright.
 #[cfg(not(test))]
@@ -2054,6 +2093,42 @@ const SCANNERS: (ScanFn, ScanFn) = (tests::no_drive_scan, tests::no_drive_probe)
 const PRESENCE: fn(&str) -> Option<bool> = crate::engine::disc_present;
 #[cfg(test)]
 const PRESENCE: fn(&str) -> Option<bool> = tests::no_drive_presence;
+
+/// The key-service URL check with its DNS guard. Unit tests resolve nothing.
+const KEYSERVER_CHECK: fn(&str) -> Result<(), String> = if cfg!(test) {
+    |_| Ok(())
+} else {
+    freemkv_keysources::validate_keyserver_url
+};
+
+// One Settings write at a time, in the order asked (`order` is the App's): a later write
+// waits for an earlier one still running, so the newest settings land last.
+fn ordered_write(
+    order: &Mutex<()>,
+    save: fn(&Settings) -> Result<(), String>,
+    settings: &Settings,
+) -> Result<(), String> {
+    let _order = order.lock().unwrap_or_else(|e| e.into_inner());
+    save(settings)
+}
+
+// Run `job` on a named worker thread; its answer arrives on the returned channel.
+fn spawn_worker<T: Send + 'static>(
+    name: &str,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<std::sync::mpsc::Receiver<T>> {
+    #[cfg(test)]
+    if tests::SPAWN_FAILS.with(|f| f.get()) {
+        return Err(std::io::Error::other("no threads in this test"));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _ = tx.send(job());
+        })?;
+    Ok(rx)
+}
 
 /// Writes Settings to disk. Unit tests write nothing: they share one settings file.
 const SAVE_SETTINGS: fn(&Settings) -> Result<(), String> = if cfg!(test) {
@@ -2187,6 +2262,20 @@ pub struct App {
     /// Settings ▸ Keys note: the keydb update's progress or verdict.
     keydb_note: Option<String>,
     keyserver_verdict: Option<String>,
+    /// A key-service URL check in flight (it resolves the host): its verdict.
+    keyserver_check: Option<std::sync::mpsc::Receiver<(LogKind, String)>>,
+    /// The full key-service URL check the worker runs — a seam so tests never resolve DNS.
+    keyserver_fn: fn(&str) -> Result<(), String>,
+    /// A Settings write in flight, and whether its success is reported.
+    saving: Option<(std::sync::mpsc::Receiver<Result<(), String>>, bool)>,
+    /// Another write of the latest settings after the one in flight (and whether reported).
+    save_queued: Option<bool>,
+    /// The last Settings write failed: committing the form again retries it.
+    settings_unsaved: bool,
+    /// Held by the Settings write running, so writes land in the order asked.
+    write_order: Arc<Mutex<()>>,
+    /// An open preflight checked again for changed ticks: its source, Stop and verdict.
+    recheck: Option<(String, libfreemkv::Halt, std::sync::mpsc::Receiver<Recheck>)>,
     /// The operator chose "Stop & Quit": the close that follows is not asked again.
     quit_confirmed: bool,
     /// The Settings write — a seam so tests never touch the shared settings file.
@@ -2281,10 +2370,19 @@ struct PendingOpen {
     background: bool,
 }
 
+/// The titles a background open's preflight checked, and its verdict.
+type CheckedPreflight = (Vec<usize>, Result<Vec<String>, String>);
+
+/// A recheck's answer: the key set it judged with (topped up), and its verdict.
+type Recheck = (
+    Option<libfreemkv::keys::KeyRing>,
+    Result<Vec<String>, String>,
+);
+
 struct OpenedSource {
     path: String,
     scanned: Result<Scanned, String>,
-    preflight: Option<Result<Vec<String>, String>>,
+    preflight: Option<CheckedPreflight>,
 }
 
 /// An explicit Open Disc, given the drives found: the log line and the URL to scan (`None` =
@@ -2395,6 +2493,13 @@ impl App {
             keydb_fn: crate::settings::update_keydb,
             keydb_note: None,
             keyserver_verdict: None,
+            keyserver_check: None,
+            keyserver_fn: KEYSERVER_CHECK,
+            saving: None,
+            save_queued: None,
+            settings_unsaved: false,
+            write_order: Arc::default(),
+            recheck: None,
             quit_confirmed: false,
             save_fn: SAVE_SETTINGS,
             reported_bad: 0,
@@ -2560,10 +2665,7 @@ impl App {
             }
             Cmd::CommitSettings(edited) => self.commit_form(*edited),
             Cmd::UpdateKeydb { url, path } => self.update_keydb(url, path),
-            Cmd::TestKeyserver(url) => {
-                self.test_keyserver(&url);
-                vec![Effect::Redraw]
-            }
+            Cmd::TestKeyserver(url) => self.test_keyserver(&url),
             Cmd::About => vec![Effect::ShowAbout],
             Cmd::Docs => vec![Effect::OpenUrl("https://freemkv.org/docs".into())],
             Cmd::CheckUpdates => {
@@ -2600,6 +2702,7 @@ impl App {
             }
             Cmd::Quit => {
                 self.stop_opens();
+                self.flush_settings();
                 vec![Effect::Quit]
             }
             Cmd::QuitRequested => {
@@ -2607,6 +2710,7 @@ impl App {
                     return vec![Effect::ConfirmQuit];
                 }
                 self.stop_opens();
+                self.flush_settings();
                 vec![Effect::Quit]
             }
         }
@@ -2621,6 +2725,7 @@ impl App {
         if let Some(run) = self.run.clone() {
             crate::engine::await_worker_exit(&run, crate::engine::QUIT_GRACE);
         }
+        self.flush_settings();
     }
 
     /// What the shell fills the Settings form from and reads it back onto.
@@ -2628,18 +2733,20 @@ impl App {
         &self.settings_form
     }
 
-    // Apply a committed form: unchanged is silent; otherwise merge (see
-    // `commit_settings`), follow a new default folder, save and report.
+    // Apply a committed form: unchanged is silent (unless the last write failed, which a
+    // commit retries); otherwise merge (see `commit_settings`), follow a new default folder,
+    // save and report. A commit whose only edit was refused writes and reports nothing.
     fn commit_form(&mut self, edited: Settings) -> Vec<Effect> {
         let before = self.settings_form.clone();
-        if edited == before {
+        if edited == before && !self.settings_unsaved {
             return Vec::new();
         }
         let dest = edited.dest_dir.clone();
         let new_dest = dest != before.dest_dir && !dest.trim().is_empty();
-        // The form base is what the controls hold after validation; the
-        // merge (which keeps bar picks) lives only in `self.settings`.
+        // The form base is what the controls hold after validation (a shell refills a
+        // refused field from it); the merge, which keeps bar picks, lives in `self.settings`.
         let mut read = edited.clone();
+        let prior = self.settings.clone();
         let merged = self.commit_settings(&before, edited);
         read.presentation_language = merged.presentation_language;
         self.settings_form = read;
@@ -2647,11 +2754,47 @@ impl App {
         if new_dest {
             self.output_dir = dest;
         }
-        match (self.save_fn)(&self.settings) {
-            Ok(()) => self.say(
+        if self.settings == prior && !self.settings_unsaved {
+            return vec![Effect::Redraw];
+        }
+        let mut fx = self.save_settings(true);
+        fx.push(Effect::Redraw);
+        fx
+    }
+
+    // Write the settings off the UI thread, one write at a time: a request during a write
+    // queues one more, of the settings as they are then. `announce` reports success.
+    fn save_settings(&mut self, announce: bool) -> Vec<Effect> {
+        if self.saving.is_some() {
+            self.save_queued = Some(self.save_queued.unwrap_or(false) || announce);
+            return vec![Effect::StartTicking];
+        }
+        let (save, settings) = (self.save_fn, self.settings.clone());
+        let order = self.write_order.clone();
+        match spawn_worker("settings-save", move || {
+            ordered_write(&order, save, &settings)
+        }) {
+            Ok(rx) => {
+                self.saving = Some((rx, announce));
+                vec![Effect::StartTicking]
+            }
+            // No thread to spare: write here rather than lose the change.
+            Err(_) => {
+                let r = (self.save_fn)(&self.settings);
+                self.settings_written(r, announce);
+                Vec::new()
+            }
+        }
+    }
+
+    fn settings_written(&mut self, r: Result<(), String>, announce: bool) {
+        self.settings_unsaved = r.is_err();
+        match r {
+            Ok(()) if announce => self.say(
                 LogKind::Result,
                 &crate::strings::get_or("gui.log.settings_saved", "Settings saved"),
             ),
+            Ok(()) => {}
             Err(e) => self.say(
                 LogKind::Notice,
                 &crate::strings::fmt_or(
@@ -2661,43 +2804,109 @@ impl App {
                 ),
             ),
         }
-        vec![Effect::Redraw]
     }
 
-    // Check a key-service URL by the rule the key layer uses, so the form
-    // cannot accept a URL the engine would later reject.
-    fn test_keyserver(&mut self, url: &str) {
-        use crate::strings::{fmt_or, get_or};
-        let (kind, msg) = if url.trim().is_empty() {
-            (
-                LogKind::Result,
-                get_or("gui.log.no_keyserver", "No key service URL set."),
-            )
-        } else {
-            match freemkv_keysources::validate_keyserver_url(url) {
-                Ok(_) => (
-                    LogKind::Result,
-                    fmt_or(
-                        "gui.log.keyserver_valid",
-                        "Key service URL is valid: {url}",
-                        &[("url", url)],
-                    ),
-                ),
-                Err(e) => (
-                    LogKind::Notice,
-                    fmt_or(
-                        "gui.log.keyserver_rejected",
-                        "Key service URL rejected: {e}",
-                        &[("e", &e.to_string())],
-                    ),
-                ),
+    // Report a finished Settings write, then start the one queued behind it.
+    fn poll_save(&mut self) -> Vec<Effect> {
+        let r = match self.saving.as_ref().map(|(rx, _)| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(r)) => r,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted).to_string())
             }
         };
+        let announce = self.saving.take().is_some_and(|(_, a)| a);
+        self.settings_written(r, announce);
+        let mut fx = vec![Effect::Redraw];
+        if let Some(again) = self.save_queued.take() {
+            fx.extend(self.save_settings(again));
+        }
+        fx
+    }
+
+    // Quitting: wait (bounded) for the write in flight, then write the queued latest
+    // settings after it (bounded), so a choice made just before Quit is not lost.
+    fn flush_settings(&mut self) {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+        if let Some((rx, announce)) = self.saving.take()
+            && let Ok(r) = rx.recv_timeout(BOUND)
+        {
+            self.settings_written(r, announce);
+        }
+        if self.save_queued.take().is_none() {
+            return;
+        }
+        let (save, settings) = (self.save_fn, self.settings.clone());
+        let order = self.write_order.clone();
+        let r = match spawn_worker("settings-save", move || {
+            ordered_write(&order, save, &settings)
+        }) {
+            Ok(rx) => rx.recv_timeout(BOUND).ok(),
+            Err(_) => Some(ordered_write(
+                &self.write_order,
+                self.save_fn,
+                &self.settings,
+            )),
+        };
+        if let Some(r) = r {
+            self.settings_written(r, false);
+        }
+    }
+
+    // Check a key-service URL by the rule the key layer uses, so the form cannot accept a
+    // URL the engine would later reject. The host lookup runs off the UI thread.
+    fn test_keyserver(&mut self, url: &str) -> Vec<Effect> {
+        use crate::strings::get_or;
+        if url.trim().is_empty() {
+            let msg = get_or("gui.log.no_keyserver", "No key service URL set.");
+            self.keyserver_verdict_is(LogKind::Result, msg);
+            return vec![Effect::Redraw];
+        }
+        if let Err(r) = freemkv_keysources::check_keyserver_url_static(url) {
+            let verdict = keyserver_check_line(url, Err(r.message));
+            self.keyserver_verdict_is(verdict.0, verdict.1);
+            return vec![Effect::Redraw];
+        }
+        let (check, owned) = (self.keyserver_fn, url.to_owned());
+        match spawn_worker("keyserver-check", move || {
+            keyserver_check_line(&owned, check(&owned))
+        }) {
+            Ok(rx) => {
+                // A later check replaces one still running; its verdict is the one shown.
+                self.keyserver_check = Some(rx);
+                self.keyserver_verdict = None;
+                vec![Effect::Redraw, Effect::StartTicking]
+            }
+            Err(_) => {
+                let verdict = keyserver_check_line(url, (self.keyserver_fn)(url));
+                self.keyserver_verdict_is(verdict.0, verdict.1);
+                vec![Effect::Redraw]
+            }
+        }
+    }
+
+    fn keyserver_verdict_is(&mut self, kind: LogKind, msg: String) {
         self.say(kind, &msg);
         self.keyserver_verdict = Some(msg);
     }
 
-    /// The last key-service check's verdict line, for a shell to show.
+    // Log a finished key-service URL check.
+    fn poll_keyserver(&mut self) -> Vec<Effect> {
+        let (kind, msg) = match self.keyserver_check.as_ref().map(|rx| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(verdict)) => verdict,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => keyserver_check_line(
+                "",
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted).to_string()),
+            ),
+        };
+        self.keyserver_check = None;
+        self.keyserver_verdict_is(kind, msg);
+        vec![Effect::Redraw]
+    }
+
+    /// The last key-service check's verdict line, for a shell to show; `None` while a
+    /// check runs.
     #[allow(dead_code)] // the server bin compiles `ui` without a Settings window
     pub fn keyserver_verdict(&self) -> Option<&str> {
         self.keyserver_verdict.as_deref()
@@ -2731,18 +2940,19 @@ impl App {
             &get_or("gui.log.fetching_keydb", "Fetching keydb …"),
         );
         let fetch = self.keydb_fn;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let spawned = std::thread::Builder::new()
-            .name("keydb-update".into())
-            .spawn(move || {
-                let r =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(&url, &path)));
-                let _ = tx.send(keydb_update_line(r));
-            });
-        if let Err(e) = spawned {
-            self.say(LogKind::Notice, &e.to_string());
+        let spawned = spawn_worker("keydb-update", move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(&url, &path)));
+            keydb_update_line(r)
+        });
+        let Ok(rx) = spawned else {
+            let msg = get_or(
+                "gui.log.keydb_worker_failed",
+                "keydb update failed — internal error",
+            );
+            self.say(LogKind::Notice, &msg);
+            self.keydb_note = Some(msg);
             return vec![Effect::Redraw];
-        }
+        };
         self.keydb_note = Some(get_or(
             "gui.set.keydb_updating",
             "Updating keydb… downloading, please wait.",
@@ -2829,6 +3039,9 @@ impl App {
 
     // Cancel every open in flight: the source changing, the window closing, or Quit (§4.3).
     fn stop_opens(&mut self) {
+        if let Some((_, halt, _)) = self.recheck.take() {
+            halt.cancel();
+        }
         if let Some(tok) = self.open_token.take() {
             tok.halt.cancel();
         }
@@ -2858,7 +3071,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("open-source".into())
             .spawn(move || {
-                let scanned = scan(&path, &keys, &tok);
+                let scanned = scan(&path, &keys, &tok, &open_ticks(&settings));
                 // The preflight reuses Open's key set: no second key request (KU §2.5). It
                 // checks the titles the tree will tick.
                 let seed = scanned.as_ref().ok().and_then(|sc| sc.keys.as_ref());
@@ -2869,7 +3082,10 @@ impl App {
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
                     && !crate::engine::is_disc_source(&path))
-                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &ticked, seed));
+                .then(|| {
+                    let verdict = crate::engine::preflight_with_keys(&path, "/tmp", &ticked, seed);
+                    (ticked, verdict)
+                });
                 let _ = tx.send(OpenedSource {
                     path,
                     scanned,
@@ -3153,10 +3369,9 @@ impl App {
         })
     }
 
-    // Re-tick for a bar pick and, when "Remember audio and subtitle choices" is
-    // on, record it in Settings and save. Off, the choice stays in `pick_prefs`
-    // only, so a later unrelated Settings save cannot write it out. Title mode
-    // is never remembered: it is disc-driven and may change between discs.
+    // Re-tick for a bar pick; with "Remember audio and subtitle choices" on, also record it
+    // in Settings and save (off, it stays in `pick_prefs`, out of any later save). Title
+    // mode is never remembered: it is disc-driven.
     fn persist_picks(
         &mut self,
         record: impl FnOnce(&mut crate::settings::Settings, &LangPrefs),
@@ -3166,31 +3381,23 @@ impl App {
             return fx;
         }
         record(&mut self.settings, &self.pick_prefs);
-        if let Err(e) = (self.save_fn)(&self.settings) {
-            self.say(
-                LogKind::Notice,
-                &crate::strings::fmt_or(
-                    "gui.log.settings_save_error",
-                    "Could not save settings: {e}",
-                    &[("e", &e)],
-                ),
-            );
-            fx.push(Effect::Redraw);
-        }
+        fx.extend(self.save_settings(false));
         fx
     }
 
-    /// Apply a committed Settings form. The form was filled in from a copy that
-    /// may predate bar picks, so each remembered-stream field it did not itself
-    /// change (`edited` equal to `before`) keeps the App's current value rather
-    /// than reverting it. Returns the merged settings for the shell to store
-    /// and save.
+    /// Apply a committed Settings form to `self.settings` (no save: `Cmd::CommitSettings`
+    /// saves). The form may predate bar picks, so each remembered-stream field it did not
+    /// change (`edited` equal to `before`) keeps the App's current value. Changed subtitle
+    /// languages end a bar "None"/"Forced only" mode, which no form control shows. Returns
+    /// the merged settings.
     pub fn commit_settings(
         &mut self,
         before: &crate::settings::Settings,
         mut edited: crate::settings::Settings,
     ) -> crate::settings::Settings {
         let cur = &self.settings;
+        let subs_edited = edited.sub_langs != before.sub_langs
+            || edited.forced_sub_langs != before.forced_sub_langs;
         if edited.audio_langs == before.audio_langs {
             edited.audio_langs = cur.audio_langs.clone();
         }
@@ -3201,7 +3408,11 @@ impl App {
             edited.forced_sub_langs = cur.forced_sub_langs.clone();
         }
         if edited.subtitle_mode == before.subtitle_mode {
-            edited.subtitle_mode = cur.subtitle_mode.clone();
+            edited.subtitle_mode = if subs_edited {
+                LangPrefs::default().subtitle_mode().into()
+            } else {
+                cur.subtitle_mode.clone()
+            };
         }
         if !valid_presentation_language(&edited.presentation_language) {
             let tag = std::mem::replace(
@@ -3242,13 +3453,14 @@ impl App {
         // Everything the scan needs is copied out HERE, on the UI thread. The
         // worker gets no reference to `App`.
         let keys = KeyConfig::from_settings(&self.settings);
+        let ticks = open_ticks(&self.settings);
         let path = path.to_string();
         let scan = self.probe_scan;
         let worker = state.clone();
         let spawned = std::thread::Builder::new()
             .name("launch-probe".into())
             .spawn(move || {
-                let scanned = scan(&path, &keys, &worker.token);
+                let scanned = scan(&path, &keys, &worker.token, &ticks);
                 if let Ok(mut slot) = worker.result.lock() {
                     *slot = Some(scanned);
                 }
@@ -3265,7 +3477,8 @@ impl App {
 
     fn open_inner(&mut self, path: &str, quiet: bool) -> Vec<Effect> {
         let tok = OpenToken::default();
-        let scanned = (self.scan)(path, &KeyConfig::from_settings(&self.settings), &tok);
+        let keys = KeyConfig::from_settings(&self.settings);
+        let scanned = (self.scan)(path, &keys, &tok, &open_ticks(&self.settings));
         self.apply_scan(path, scanned, quiet)
     }
 
@@ -3286,7 +3499,7 @@ impl App {
         path: &str,
         scanned: Result<Scanned, String>,
         quiet: bool,
-        preflight: Option<Result<Vec<String>, String>>,
+        preflight: Option<CheckedPreflight>,
     ) -> Vec<Effect> {
         let container = is_container(path);
         let disc = crate::engine::is_disc_source(path);
@@ -3356,21 +3569,18 @@ impl App {
                     // the rip itself surfaces any missing-key error.
                     self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"));
                 } else {
-                    match preflight.unwrap_or_else(|| {
-                        let ticked = self.tree.ticked_titles();
-                        crate::engine::preflight_with_keys(path, "/tmp", &ticked, sc.keys.as_ref())
-                    }) {
-                        Ok(v) if v.is_empty() => {
-                            self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
-                        }
-                        Ok(v) => self.say(
-                            LogKind::Notice,
-                            &crate::strings::fmt(
-                                "gui.log.cannot_rip",
-                                &[("reasons", &v.join(", "))],
-                            ),
-                        ),
-                        Err(e) => self.say(LogKind::Notice, &e),
+                    // A Settings commit during a background scan can change the ticks:
+                    // the worker's verdict stands only for the titles the tree ticks now.
+                    let ticked = self.tree.ticked_titles();
+                    match preflight {
+                        Some((titles, v)) if titles == ticked => self.say_preflight(v),
+                        Some(_) => return self.recheck_preflight(path, ticked, sc.keys),
+                        None => self.say_preflight(crate::engine::preflight_with_keys(
+                            path,
+                            "/tmp",
+                            &ticked,
+                            sc.keys.as_ref(),
+                        )),
                     }
                 }
             }
@@ -3389,6 +3599,81 @@ impl App {
                     self.disc_present = Some(false);
                 }
             }
+        }
+        vec![Effect::Redraw]
+    }
+
+    fn say_preflight(&mut self, verdict: Result<Vec<String>, String>) {
+        match verdict {
+            Ok(v) if v.is_empty() => {
+                self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
+            }
+            Ok(v) => self.say(
+                LogKind::Notice,
+                &crate::strings::fmt("gui.log.cannot_rip", &[("reasons", &v.join(", "))]),
+            ),
+            Err(e) => self.say(LogKind::Notice, &e),
+        }
+    }
+
+    // Judge the ticked titles again on a worker, looking up keys Open did not resolve.
+    fn recheck_preflight(
+        &mut self,
+        path: &str,
+        titles: Vec<usize>,
+        seed: Option<libfreemkv::keys::KeyRing>,
+    ) -> Vec<Effect> {
+        let sources = crate::engine::key_sources(&KeyConfig::from_settings(&self.settings));
+        let halt = libfreemkv::Halt::new();
+        let (owned, stop) = (path.to_owned(), halt.clone());
+        let job =
+            move || crate::engine::preflight_ticked(&owned, &titles, seed.as_ref(), sources, &stop);
+        match spawn_worker("open-recheck", job) {
+            Ok(rx) => {
+                self.recheck = Some((path.to_owned(), halt, rx));
+                vec![Effect::Redraw, Effect::StartTicking]
+            }
+            Err(e) => {
+                self.say(
+                    LogKind::Notice,
+                    &crate::strings::fmt_or(
+                        "gui.log.scan_not_started",
+                        "Could not start scanning the source: {detail}",
+                        &[("detail", &e.to_string())],
+                    ),
+                );
+                vec![Effect::Redraw]
+            }
+        }
+    }
+
+    // Report a finished recheck for the source still open; Start reuses its key set.
+    fn poll_recheck(&mut self) -> Vec<Effect> {
+        let answer = match self.recheck.as_ref().map(|(_, _, rx)| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(answer)) => Some(answer),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => None,
+        };
+        let Some((path, _, _)) = self.recheck.take() else {
+            return Vec::new();
+        };
+        if path != self.source {
+            return Vec::new();
+        }
+        match answer {
+            Some((set, verdict)) => {
+                if set.is_some() {
+                    self.seed = set;
+                }
+                self.say_preflight(verdict);
+            }
+            None => self.say(
+                LogKind::Notice,
+                &crate::strings::get_or(
+                    "gui.log.scan_worker_stopped",
+                    "Source scan worker stopped before returning a result.",
+                ),
+            ),
         }
         vec![Effect::Redraw]
     }
@@ -3650,6 +3935,9 @@ impl App {
         probe_fx.extend(self.poll_eject());
         probe_fx.extend(self.poll_update());
         probe_fx.extend(self.poll_keydb());
+        probe_fx.extend(self.poll_keyserver());
+        probe_fx.extend(self.poll_recheck());
+        probe_fx.extend(self.poll_save());
         probe_fx.extend(self.poll_presence());
         if let Some(rx) = &self.opening {
             match rx.try_recv() {
@@ -3685,6 +3973,9 @@ impl App {
                 && self.ejecting.is_none()
                 && self.update_check.is_none()
                 && self.keydb.is_none()
+                && self.keyserver_check.is_none()
+                && self.saving.is_none()
+                && self.recheck.is_none()
             {
                 // An idle disc keeps the tick for its watch, without a redraw per tick.
                 if self.presence.is_none() && !self.watching_disc() {
