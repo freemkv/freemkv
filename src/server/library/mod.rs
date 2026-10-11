@@ -668,7 +668,7 @@ impl Library {
             at.entry(m.path.clone()).or_insert(i);
         }
         for target in links.keys() {
-            if !at.contains_key(target) {
+            if !at.contains_key(target) && injectable(d, target) {
                 at.insert(target.clone(), mkvs.files.len());
                 mkvs.files.push(index::MkvFile {
                     path: target.clone(),
@@ -695,7 +695,7 @@ impl Library {
                     .into_owned();
                 if let Some(&i) = at.get(&output.target) {
                     mkvs.files[i].title = title;
-                } else {
+                } else if injectable(d, &output.target) {
                     at.insert(output.target.clone(), mkvs.files.len());
                     mkvs.files.push(index::MkvFile {
                         path: output.target.clone(),
@@ -1307,6 +1307,24 @@ fn without_raw(mut a: AuditReport) -> AuditReport {
         d.raw.clear();
     }
     a
+}
+
+/// How long a link target inside a scanned root may take to stat.
+const INJECT_STAT_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+// A recorded target joins the scan when it exists, or lies outside both scanned roots,
+// where the listing says nothing about it.
+fn injectable(d: &Dirs, path: &Path) -> bool {
+    let inside =
+        path.starts_with(&d.library) || d.tv.as_deref().is_some_and(|t| path.starts_with(t));
+    if !inside {
+        return true;
+    }
+    let owned = path.to_path_buf();
+    matches!(
+        health::bounded(path, INJECT_STAT_LIMIT, move || owned.is_file()),
+        health::Bounded::Done(true)
+    )
 }
 
 fn gone(p: &Path) -> bool {

@@ -458,3 +458,33 @@ fn queueing_many_rows_writes_the_queue_once() {
         .collect();
     assert_eq!(titles, ["A (2001)", "B (2002)", "C (2003)"]);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_recorded_target_that_is_gone_makes_no_row_but_one_outside_the_roots_that_exists_does() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    std::fs::create_dir_all(&d.library).unwrap();
+    std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+    let cfg = t.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let iso = d.isos.as_ref().unwrap().join("A (2000).iso");
+    std::fs::write(&iso, b"x").unwrap();
+    // A missing file whose parent is a regular file fails with ENOTDIR, not NotFound.
+    std::fs::write(d.library.join("plain"), b"x").unwrap();
+    let broken = d.library.join("plain").join("A (2000).mkv");
+    let elsewhere = t.path().join("elsewhere").join("B (2001).mkv");
+    links::record(&cfg, &broken, &iso).unwrap();
+    links::record(&cfg, &elsewhere, &iso).unwrap();
+    let lib = Library::open(&cfg, &t.path().join("logs"));
+    lib.rescan(&d);
+    let snap = lib.snapshot();
+    assert!(
+        !snap.mkvs.iter().any(|m| m.path == broken),
+        "a gone file inside a scanned root is no row"
+    );
+    std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    std::fs::write(&elsewhere, b"x").unwrap();
+    lib.rescan(&d);
+    assert!(lib.snapshot().mkvs.iter().any(|m| m.path == elsewhere));
+}
