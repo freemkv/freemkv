@@ -108,6 +108,22 @@ fn an_empty_title_list_picks_no_playlist() {
     assert!(sel.contains("\"picked_playlist_id\": null"), "{sel}");
 }
 
+// The capture names the format by its stable id (as staging and history do), not Debug.
+#[test]
+fn capture_artifacts_name_the_format_by_id() {
+    let mut disc = disc_with(None);
+    disc.format = DiscFormat::Fmts;
+    let sel = selection_json(&disc);
+    assert!(sel.contains("\"format\": \"fmts\","), "{sel}");
+    let summary = DiscSummary {
+        file_count: 0,
+        total_bytes: 0,
+        skipped: Vec::new(),
+    };
+    let body = issue_body(&disc, &summary, "QUJD").0;
+    assert!(body.contains("Format:          fmts\n"), "{body}");
+}
+
 // aacs_diag's normalisation: a bare, prefixed or padded hash is keyed `0x<hash>`; a blank
 // one is no hash; the VID flag follows the bytes.
 #[test]

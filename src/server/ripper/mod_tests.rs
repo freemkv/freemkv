@@ -1935,8 +1935,9 @@ fn a_keyless_set_does_not_cover_a_title_rip() {
     use libfreemkv::keys::{KeyRing, KeyScope};
     let disc = crate::ku_fixture::bd_image().disc;
     let none = KeyRing::none();
-    assert!(!super::keys_cover(&disc, &none, &KeyScope::Titles(vec![0])));
-    assert!(super::keys_cover(&disc, &none, &KeyScope::None));
+    let covers = freemkv_engine::keys::covers_scope;
+    assert!(!covers(&none, &disc, &KeyScope::Titles(vec![0])));
+    assert!(covers(&none, &disc, &KeyScope::None));
 }
 
 // KU-E1: the rip's refusal names the cause; a keyed set is ready.

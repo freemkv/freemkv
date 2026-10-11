@@ -35,7 +35,7 @@ pub(super) fn fingerprint(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
 ) -> Result<String, String> {
-    if let Some(hash) = disc.aacs.as_ref().and_then(|a| aacs_identity(&a.disc_hash)) {
+    if let Some(hash) = disc.intrinsic_id().and_then(aacs_identity) {
         return Ok(hash);
     }
     sample_fingerprint(disc.capacity_bytes, reader)

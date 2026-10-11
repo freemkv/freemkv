@@ -1545,9 +1545,7 @@ fn dest_is_directory(dest: &str, parsed_dest: &libfreemkv::StreamUrl) -> bool {
 pub(crate) fn drive_credentials(
     keydb_path: &Option<String>,
 ) -> Option<libfreemkv::DriveCredentials> {
-    let path = resolved_keydb_path(keydb_path);
-    let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
-    (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
+    freemkv_engine::keys::drive_credentials(&resolved_keydb_path(keydb_path))
 }
 
 /// `freemkv info -v`'s key status (KU §2.5: "`freemkv info` … `Titles([main])` for status"):
