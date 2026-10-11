@@ -516,3 +516,14 @@ fn remount_discards_old_generation_reports_only() {
     reports.record(1, path, Some(Fault::Stale));
     assert!(reports.paths.contains(path));
 }
+
+#[test]
+fn a_writable_folder_going_bad_gets_a_syslog_line() {
+    let mut m = ok_mount("Movies", Path::new("/mnt/movies"));
+    m = m.failed(Fault::Missing, "missing".into());
+    let line = unusable_line("Movies", &m);
+    assert!(line.contains("Movies folder '/mnt/movies' is not usable: missing"));
+    assert!(line.contains("PRESERVED in staging"));
+    let line = unusable_line("Library", &m);
+    assert!(!line.contains("PRESERVED"), "{line}");
+}

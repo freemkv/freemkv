@@ -133,17 +133,11 @@ pub fn run(argv: Vec<String>) {
     // Load config
     let cfg = config::load();
 
-    // Warn at boot if a configured movie/tv/output dir is missing or not writable
-    // (finished rips stay in staging meanwhile). Own thread: a hung network mount
-    // must never hold startup, and the web server, back.
+    // Folder warnings come from the health monitor's first check, off the startup path.
+    if let Some(msg) =
+        keysource::keyserver_url_startup_warning(&cfg.read().unwrap_or_else(|e| e.into_inner()))
     {
-        let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(msg) = keysource::keyserver_url_startup_warning(&c) {
-            log::syslog(&msg);
-        }
-        if let Err(e) = spawn_destination_check(c, mover::check_configured_destinations) {
-            tracing::warn!(error = %e, "could not start the startup destination check");
-        }
+        log::syslog(&msg);
     }
 
     // The local KEYDB only matters for the `local` key source. In `online`
@@ -468,26 +462,6 @@ fn fetch_keydb(cfg: &std::sync::RwLock<config::Config>, url: &str, boot: bool) {
             crate::server::webhook::webhook_url_origin(url)
         )),
     }
-}
-
-// Run the startup destination `check` over `cfg` on its own thread and warn about each
-// unusable root; returns at once, whatever the check's folders do.
-fn spawn_destination_check<F>(
-    cfg: config::Config,
-    check: F,
-) -> std::io::Result<std::thread::JoinHandle<()>>
-where
-    F: FnOnce(&config::Config) -> Vec<(String, String)> + Send + 'static,
-{
-    std::thread::Builder::new().name("destination-check".into()).spawn(move || {
-        for (root, reason) in check(&cfg) {
-            log::syslog(&format!(
-                "WARNING: configured destination '{root}' is not usable at startup: {reason}. \
-                     Finished rips will be PRESERVED in staging (not moved) until this is fixed \
-                     (check the directory exists and its bind-mount/NAS share is present and writable)."
-            ));
-        }
-    })
 }
 
 // Join `handle` (`None` counts as joined), giving up after `timeout` so a wedged

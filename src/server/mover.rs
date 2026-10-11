@@ -2201,20 +2201,38 @@ fn destination_root_for(cfg: &Config, tmdb: &Option<tmdb::TmdbResult>, filename:
     destination_root(cfg, tmdb)
 }
 
-// Fail-loud destination-root validation: the configured root must ALREADY EXIST as a directory
-// AND be writable, so the caller preserves output in staging on failure.
+// Fail-loud destination-root validation, so the caller preserves output in staging on failure.
+// A relative or empty root is refused without touching a disk; the rest is health's bounded
+// preflight (the root must already exist as a writable folder; it is never created).
 fn validate_destination_root(root: &str) -> Result<(), String> {
+    validate_destination_root_with(
+        root,
+        crate::server::health::PREFLIGHT_TIMEOUT,
+        crate::server::health::probe_write,
+    )
+}
+
+// `validate_destination_root` with the limit and the probe given (the tests inject a slow one).
+fn validate_destination_root_with<F>(
+    root: &str,
+    limit: std::time::Duration,
+    probe: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
+{
+    root_shape(root)?;
+    crate::server::health::preflight_with("output", Path::new(root), limit, probe)
+        .map_err(|p| root_reason(root, &p))
+}
+
+// What needs no I/O: an empty root would write cwd-relative, and a relative root resolves
+// against the process cwd (how the Mercy incident wrote inside the container).
+fn root_shape(root: &str) -> Result<(), String> {
     if root.is_empty() {
-        // An empty root means "no configured dir". An empty string would
-        // `create_dir_all("")` → cwd-relative writes, the exact
-        // silent-wrong-path failure this check exists to close.
         return Err("destination root is empty (no output/movie/tv directory configured)".into());
     }
-    let root_path = Path::new(root);
-    // 1. The root must be ABSOLUTE. A relative root resolves against the
-    //    process cwd — how the incident wrote inside the container. A
-    //    destination mount is always an absolute path.
-    if !root_path.is_absolute() {
+    if !Path::new(root).is_absolute() {
         return Err(format!(
             "destination root '{root}' is not an absolute path; \
              a destination mount must be configured as an absolute path \
@@ -2222,47 +2240,28 @@ fn validate_destination_root(root: &str) -> Result<(), String> {
              relative to the container's working directory"
         ));
     }
-    // 2. The root must already EXIST as a directory. If it doesn't, the
-    //    mount is absent — do NOT create it (that writes into the overlay).
-    match std::fs::metadata(root_path) {
-        Ok(m) if m.is_dir() => {}
-        Ok(_) => {
-            return Err(format!(
-                "destination root '{root}' exists but is not a directory"
-            ));
+    Ok(())
+}
+
+// A failed preflight of `root`, worded for the move's error and the startup/settings warning.
+fn root_reason(root: &str, p: &crate::server::health::Problem) -> String {
+    use crate::server::health::{Fault, NOT_A_FOLDER};
+    match p.fault {
+        Fault::Missing => format!(
+            "destination root '{root}' does not exist (mount missing?): {}",
+            p.detail
+        ),
+        _ if p.detail == NOT_A_FOLDER => {
+            format!("destination root '{root}' exists but is not a directory")
         }
-        Err(e) => {
-            return Err(format!(
-                "destination root '{root}' does not exist (mount missing?): {e}"
-            ));
+        Fault::Unresponsive => format!(
+            "destination root '{root}' is not responding: {} (a stale network mount?)",
+            p.detail
+        ),
+        Fault::Denied | Fault::ReadOnly | Fault::Other => {
+            format!("destination root '{root}' is not writable: {}", p.detail)
         }
-    }
-    // 3. The root must be WRITABLE. Probe by creating + removing a unique
-    //    temp marker (honest test of dir write/exec perms, RO fs, NFS
-    //    squash); unique-named so concurrent ticks can't collide.
-    let probe = root_path.join(format!(
-        ".autorip-writable-probe-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-    {
-        Ok(_) => {
-            // Writability is proven; clean up the probe. A failure here is
-            // near-impossible right after a successful create_new, but log it
-            // rather than leave a zero-byte marker in the user's media library.
-            if std::fs::remove_file(&probe).is_err() {
-                tracing::warn!(probe = %probe.display(), "writability probe left behind");
-            }
-            Ok(())
-        }
-        Err(e) => Err(format!("destination root '{root}' is not writable: {e}")),
+        _ => format!("destination root '{root}' is not usable: {}", p.detail),
     }
 }
 
@@ -2327,47 +2326,45 @@ fn unreachable_root(
 }
 
 /// Fail-loud-EARLY destination check: validates every configured, non-empty destination root
-/// (movie/tv/output). Each root is checked at once on its own thread and given up on after the
-/// folder health check's limit, so a hung network mount reads "not responding" instead of
-/// blocking the caller (startup, a settings save).
+/// (movie/tv/output). The roots are preflighted at once and given up on after the folder health
+/// check's limit, so a hung network mount reads "not responding" instead of blocking the
+/// caller (a settings save).
 pub(crate) fn check_configured_destinations(cfg: &Config) -> Vec<(String, String)> {
-    check_destinations_with(
+    check_configured_destinations_with(
         cfg,
         crate::server::health::CHECK_TIMEOUT,
-        validate_destination_root,
+        crate::server::health::probe_write,
     )
 }
 
-// `check_configured_destinations` with the limit and the per-root check given (the tests
-// inject one that hangs).
-fn check_destinations_with<F>(
+// `check_configured_destinations` with the limit and the probe given (the tests inject a slow one).
+fn check_configured_destinations_with<F>(
     cfg: &Config,
     limit: std::time::Duration,
-    validate: F,
+    probe: F,
 ) -> Vec<(String, String)>
 where
-    F: Fn(&str) -> Result<(), String> + Send + Sync + 'static,
+    F: Fn(&Path) -> std::io::Result<()> + Copy + Send + 'static,
 {
-    use crate::server::health::{Bounded, bounded_each};
     let roots = configured_destination_roots(cfg);
-    let items = roots
+    let dirs: Vec<std::path::PathBuf> = roots
         .iter()
-        .map(|r| (std::path::PathBuf::from(r), r.clone()))
+        .filter(|r| root_shape(r).is_ok())
+        .map(std::path::PathBuf::from)
         .collect();
-    let results = bounded_each(items, limit, move |r| validate(&r));
+    let mut probed =
+        crate::server::health::preflight_each("output", &dirs, limit, probe).into_iter();
     roots
         .into_iter()
-        .zip(results)
-        .filter_map(|(root, r)| match r {
-            Bounded::Done(Ok(())) => None,
-            Bounded::Done(Err(reason)) => Some((root, reason)),
-            Bounded::TimedOut | Bounded::Busy => {
-                let reason = format!(
-                    "destination root '{root}' is not responding after {}s (a stale network mount?)",
-                    limit.as_secs().max(1)
-                );
-                Some((root, reason))
-            }
+        .filter_map(|root| {
+            let checked = match root_shape(&root) {
+                Err(reason) => Err(reason),
+                Ok(()) => match probed.next() {
+                    Some(Err(p)) => Err(root_reason(&root, &p)),
+                    _ => Ok(()),
+                },
+            };
+            checked.err().map(|reason| (root, reason))
         })
         .collect()
 }

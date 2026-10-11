@@ -293,7 +293,7 @@ pub fn folders(cfg: &Config) -> Vec<(&'static str, PathBuf, bool)> {
         ("TV", under(&cfg.tv_dir), true),
         ("ISOs", under(&cfg.iso_dir), true),
         ("Library", Some(lib.library), true),
-        ("Source ISOs", lib.isos, false),
+        (READ_ONLY_ROLE, lib.isos, false),
         ("Remux staging", remux_stage_dir(), true),
     ];
     let mut out: Vec<(&'static str, PathBuf, bool)> = Vec::new();
@@ -667,6 +667,29 @@ fn merge(prev: Option<&Mount>, mut next: Mount) -> Mount {
     next
 }
 
+/// The one watched folder that is only read, never written.
+const READ_ONLY_ROLE: &str = "Source ISOs";
+
+// The syslog line for a writable folder that has just stopped working; where finished rips
+// land, it says they wait in staging.
+fn unusable_line(role: &str, m: &Mount) -> String {
+    let mut line = format!(
+        "WARNING: {role} folder '{}' is not usable: {}.",
+        m.path.display(),
+        m.problem.as_deref().unwrap_or("unknown problem")
+    );
+    if matches!(
+        role.to_lowercase().as_str(),
+        "output" | "movies" | "tv" | "isos"
+    ) {
+        line.push_str(
+            " Finished rips will be PRESERVED in staging (not moved) until this is fixed \
+             (check the directory exists and its bind-mount/NAS share is present and writable).",
+        );
+    }
+    line
+}
+
 // Publish `results` (every folder) or one result (a preflight), keeping each folder's history.
 fn publish(results: Vec<Mount>, replace_all: bool) {
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
@@ -676,10 +699,15 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
             .collect()
     };
     let before = shape(&last);
+    let mut lines = Vec::new();
     let merged: Vec<Mount> = results
         .into_iter()
         .map(|m| {
             let previous = last.iter().find(|p| p.path == m.path);
+            let role = previous.map_or(m.role, |p| p.role);
+            if !m.ok && role != READ_ONLY_ROLE && previous.is_none_or(|p| p.ok) {
+                lines.push(unusable_line(role, &m));
+            }
             if previous.is_none_or(|p| p.fault != m.fault || p.state != m.state) {
                 if m.ok {
                     tracing::info!(role = m.role, path = %m.path.display(), latency_ms = ?m.latency_ms, "folder healthy");
@@ -707,6 +735,10 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
     }
     if shape(&last) != before {
         GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+    drop(last);
+    for line in lines {
+        crate::server::log::syslog(&line);
     }
 }
 
@@ -759,13 +791,16 @@ impl Problem {
     }
 }
 
+/// The detail of a preflight that found a file where the folder should be.
+pub const NOT_A_FOLDER: &str = "not a folder";
+
 /// The write test: `dir` is a folder, and a file can be created in it and removed.
 pub fn probe_write(dir: &Path) -> std::io::Result<()> {
     let meta = std::fs::metadata(dir)?;
     if !meta.is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotADirectory,
-            "not a folder",
+            NOT_A_FOLDER,
         ));
     }
     let nanos = std::time::SystemTime::now()
@@ -797,17 +832,62 @@ pub fn preflight_with<F>(
 where
     F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
 {
+    let started = preflight_begin(role, dir, limit, probe);
+    preflight_finish(role, dir, limit, started)
+}
+
+/// [`preflight_with`] for several folders at once, so folders on one dead mount cost one
+/// limit between them. Results keep the input order.
+pub fn preflight_each<F>(
+    role: &'static str,
+    dirs: &[PathBuf],
+    limit: Duration,
+    probe: F,
+) -> Vec<Result<(), Problem>>
+where
+    F: Fn(&Path) -> std::io::Result<()> + Copy + Send + 'static,
+{
+    let started: Vec<_> = dirs
+        .iter()
+        .map(|d| preflight_begin(role, d, limit, probe))
+        .collect();
+    dirs.iter()
+        .zip(started)
+        .map(|(d, s)| preflight_finish(role, d, limit, s))
+        .collect()
+}
+
+// A preflight under way: refused up front, or its probe running.
+type Started = (Instant, Result<Pending<std::io::Result<()>>, Problem>);
+
+fn preflight_begin<F>(role: &'static str, dir: &Path, limit: Duration, probe: F) -> Started
+where
+    F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
+{
     let started = Instant::now();
+    if share_unmounted(dir) {
+        let p = Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into());
+        return (started, Err(p));
+    }
     let owned = dir.to_path_buf();
-    let result = if share_unmounted(dir) {
-        Err(Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into()))
-    } else {
-        let generation = probe_generation();
-        match bounded(dir, limit, move || {
-            let result = probe(&owned);
-            report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
-            result
-        }) {
+    let generation = probe_generation();
+    let pending = begin(dir, limit, move || {
+        let result = probe(&owned);
+        report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
+        result
+    });
+    (started, Ok(pending))
+}
+
+fn preflight_finish(
+    role: &'static str,
+    dir: &Path,
+    limit: Duration,
+    (started, begun): Started,
+) -> Result<(), Problem> {
+    let result = match begun {
+        Err(p) => Err(p),
+        Ok(pending) => match pending.wait() {
             Bounded::Done(Ok(())) => Ok(()),
             Bounded::Done(Err(e)) => Err(Problem::new(role, dir, Fault::of(&e), e.to_string())),
             Bounded::TimedOut => Err(Problem::new(
@@ -822,7 +902,7 @@ where
                 Fault::Unresponsive,
                 "an earlier check of this folder never came back".into(),
             )),
-        }
+        },
     };
     let mount = match &result {
         Ok(()) => {
