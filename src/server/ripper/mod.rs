@@ -66,7 +66,7 @@ pub fn retitle_staging_for_device(
             "the staging network share is not mounted; the correction was not saved",
         ));
     }
-    std::fs::create_dir_all(&dir)
+    create_job_dir(&c, &dir)
         .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create staging: {e}")))?;
     staging::save_user_metadata_for_device(
         &dir,
@@ -1728,8 +1728,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             }
         }
         Err(e) => {
-            let root = std::path::Path::new(&cfg_read.staging_dir);
-            let job = match jobs::fresh_unverified_job(root) {
+            let job = match jobs::fresh_unverified_job(&cfg_read) {
                 Ok(job) => job,
                 Err(alloc) => {
                     update_state_with(device, |s| {
@@ -1771,11 +1770,8 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     // User-facing unlocker matrix — which unlockers RAN, emitted right after disc-identify and
     // BEFORE the keyserver (depends only on drive-init + scan state, not key resolution).
     {
-        let matched = disc
-            .unlocker_matrix(&drive)
-            .into_iter()
-            .find_map(|(name, ok)| ok.then_some(name))
-            .unwrap_or("none");
+        let matched =
+            crate::unlocker::matched_unlocker(&disc.unlocker_matrix(&drive)).unwrap_or("none");
         crate::server::log::device_log(device, &format!("Unlocker: {matched}"));
     }
 
@@ -2346,6 +2342,16 @@ fn stand_down_idle(device: &str, loss_aborted: bool) {
         s.loss_aborted = loss_aborted;
     });
     drop_session(device);
+}
+
+// Create staging job folder `dir`, one level under the staging root, making the root as
+// `create_staging_root` does, so neither lands on an unmounted share's mount point.
+fn create_job_dir(cfg: &Config, dir: &std::path::Path) -> std::io::Result<()> {
+    crate::server::config::create_staging_root(cfg)?;
+    match std::fs::create_dir(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        other => other,
+    }
 }
 
 // List the immediate-child basenames of the staging root with the same NFS cold-cache
@@ -2938,7 +2944,7 @@ fn rip_disc_inner(
             "staging network share is not mounted",
         ))
     } else {
-        std::fs::create_dir_all(&job_path).and_then(|()| {
+        create_job_dir(&cfg_read, &job_path).and_then(|()| {
             staging::begin_capture(&job_path, cfg_read.max_retries, &verified_identity)
         })
     };
@@ -3257,7 +3263,7 @@ fn rip_disc_inner(
     let made = if crate::server::health::share_unmounted(std::path::Path::new(&staging)) {
         Err(std::io::Error::other("its network share is not mounted"))
     } else {
-        std::fs::create_dir_all(&staging)
+        create_job_dir(&cfg_read, std::path::Path::new(&staging))
     };
     if let Err(e) = made {
         // Bail loudly instead of pressing on: a missing staging dir
@@ -5355,7 +5361,7 @@ pub(super) fn planning_label(label: &str, operator: Option<MediaKind>) -> &str {
 
 // Whether a disc is TV for `tv_auto` planning (1.7.7): TMDB says tv, or its label
 // names a season even without a TMDB tv match. Evidence gates still apply.
-pub(super) fn plan_kind(
+pub(crate) fn plan_kind(
     media_type: MediaKind,
     disc_name: &str,
 ) -> Option<crate::server::planner::MediaKind> {

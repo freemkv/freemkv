@@ -217,12 +217,12 @@ fn unreadable_identity_gets_an_isolated_namespace_without_claiming_identity() {
     let existing = job(root.path(), "existing", "known");
     assert!(existing.exists());
 
-    let first = fresh_unverified_job(root.path()).unwrap();
+    let first = fresh_unverified_job(&staging_cfg(root.path())).unwrap();
     assert!(first.starts_with("unverified-"));
     assert_ne!(first, "known");
     assert!(root.path().join(&first).is_dir());
 
-    let second = fresh_unverified_job(root.path()).unwrap();
+    let second = fresh_unverified_job(&staging_cfg(root.path())).unwrap();
     assert_ne!(second, first);
     assert!(second.starts_with("unverified-"));
 }
@@ -236,7 +236,7 @@ fn concurrent_unverified_scans_reserve_distinct_jobs() {
             .map(|_| {
                 scope.spawn(|| {
                     barrier.wait();
-                    fresh_unverified_job(root.path()).unwrap()
+                    fresh_unverified_job(&staging_cfg(root.path())).unwrap()
                 })
             })
             .collect();
@@ -376,6 +376,13 @@ fn seed_job(device: &str, job: &str, identity: &str) {
     );
 }
 
+fn staging_cfg(root: &Path) -> crate::server::config::Config {
+    crate::server::config::Config {
+        staging_dir: root.to_string_lossy().into_owned(),
+        ..Default::default()
+    }
+}
+
 fn shared_cfg(root: &Path) -> std::sync::Arc<std::sync::RwLock<crate::server::config::Config>> {
     std::sync::Arc::new(std::sync::RwLock::new(crate::server::config::Config {
         staging_dir: root.to_string_lossy().into_owned(),
@@ -391,7 +398,7 @@ fn an_unverified_disc_is_never_offered_another_jobs_capture() {
     let legacy = root.path().join("Same_Title");
     std::fs::create_dir(&legacy).unwrap();
     partial_capture(&legacy, "Same_Title", Some(hash));
-    let job = fresh_unverified_job(root.path()).unwrap();
+    let job = fresh_unverified_job(&staging_cfg(root.path())).unwrap();
     let cfg = shared_cfg(root.path());
     let device = "job-unverified-resume";
     seed_job(device, &job, "");
@@ -609,4 +616,21 @@ fn locate_refuses_a_partial_listing_or_an_uninspectable_entry() {
     assert!(locate_listed(root.path(), "hash", listing(&["Other"], false)).is_err());
     let gone = locate_listed(root.path(), "hash", listing(&["Other", "Vanished"], true));
     assert!(gone.unwrap_err().contains("Vanished"));
+}
+
+// A configured staging folder whose share is not mounted (its mount point is an empty
+// folder) is not made on the local disk; nor is the isolated job inside it.
+#[test]
+fn an_unverified_job_is_not_made_under_an_unmounted_shares_mount_point() {
+    let base = tempfile::tempdir().unwrap();
+    let mount_point = base.path().join("nas");
+    std::fs::create_dir(&mount_point).unwrap();
+    let root = mount_point.join("staging");
+    let error = fresh_unverified_job(&staging_cfg(&root)).unwrap_err();
+    assert!(error.contains("empty"), "{error}");
+    assert!(!root.exists());
+    // Mounted (the share holds folders): made, one level.
+    std::fs::create_dir(mount_point.join("Movies")).unwrap();
+    let job = fresh_unverified_job(&staging_cfg(&root)).unwrap();
+    assert!(root.join(job).is_dir());
 }

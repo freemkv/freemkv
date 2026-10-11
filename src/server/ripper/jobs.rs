@@ -71,11 +71,13 @@ pub(super) fn dir_matches_identity(dir: &Path, identity: &str) -> bool {
 /// Allocate a fresh staging namespace when a non-AACS fingerprint cannot be
 /// verified. This is deliberately not an identity: callers must not persist
 /// the returned value as `disc_identity` or use it to adopt an existing job.
-pub(super) fn fresh_unverified_job(root: &Path) -> Result<String, String> {
+pub(super) fn fresh_unverified_job(cfg: &crate::server::config::Config) -> Result<String, String> {
+    let root = Path::new(&cfg.staging_dir);
     if crate::server::health::share_unmounted(root) {
         return Err("cannot create staging: its network share is not mounted".into());
     }
-    std::fs::create_dir_all(root).map_err(|e| format!("cannot create staging: {e}"))?;
+    crate::server::config::create_staging_root(cfg)
+        .map_err(|e| format!("cannot create staging: {e}"))?;
     let stamp = crate::server::util::epoch_secs();
     for n in 0..1000u32 {
         let prefix = staging::UNVERIFIED_JOB_PREFIX;
