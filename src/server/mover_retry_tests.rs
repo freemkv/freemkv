@@ -816,3 +816,36 @@ fn a_current_hand_off_with_a_missing_output_is_held_not_taken_as_legacy() {
         );
     }
 }
+
+// Journal updates from two threads (the stall monitor committing an attempt while the
+// copy worker checkpoints its candidate) never lose one another's change.
+#[test]
+fn concurrent_journal_updates_are_not_lost() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_cfg, job, _dest) = journaled(tmp.path(), "Racing");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (writer_job, writer_stop) = (job.clone(), stop.clone());
+    let writer = std::thread::spawn(move || {
+        let mut attempts = 0;
+        while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            attempts += 1;
+            super::manifest::Manifest::record_retry(
+                &writer_job,
+                Some(super::manifest::RetryState {
+                    attempts,
+                    not_before: None,
+                    reason: String::new(),
+                    hint: String::new(),
+                }),
+            )
+            .unwrap();
+        }
+    });
+    std::thread::sleep(Duration::from_millis(20));
+    super::manifest::Manifest::mark_announced(&job).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+    let journal = super::manifest::Manifest::load(&job).unwrap().unwrap();
+    assert!(journal.announced(), "an update was lost");
+}
