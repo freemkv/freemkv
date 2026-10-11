@@ -572,7 +572,7 @@ fn a_failed_delivery_keeps_its_backoff_across_a_restart() {
     );
     std::fs::set_permissions(source, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-    super::super::reset_after_drain();
+    super::super::forget_process_state();
     super::super::check_and_move(&cfg);
     assert!(
         source.exists() && !manifest.entries[0].destination.exists(),
@@ -606,7 +606,7 @@ fn a_held_delivery_stays_held_across_a_restart_until_retry() {
         hint: "fix the destination, then choose Retry".into(),
     };
     Manifest::record_retry(&dir, Some(held.clone())).unwrap();
-    super::super::reset_after_drain();
+    super::super::forget_process_state();
     super::super::check_and_move(&cfg);
     assert!(
         manifest

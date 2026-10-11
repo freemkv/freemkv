@@ -742,10 +742,6 @@ fn run_save_writer(path: &str) {
     }
 }
 
-pub(crate) fn reset_after_drain() {
-    SAVE_SLOTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-}
-
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;

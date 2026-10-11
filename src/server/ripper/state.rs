@@ -5,18 +5,6 @@
 use crate::server::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC, SECTOR_BYTES};
 use std::sync::Mutex;
 
-pub(super) fn reset_after_drain() {
-    STATE.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    STOPPED_INSERTIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    STOP_COOLDOWNS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-}
-
 /// One contiguous bad range as seen in the UI. Derived from the mapfile
 /// during a multi-pass rip; chapter/time-offset come from the scanned title's
 /// playlist metadata when the bad region lands in AV content.

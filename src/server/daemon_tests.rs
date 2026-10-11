@@ -1,35 +1,5 @@
 use super::*;
 
-#[test]
-fn timed_out_mux_join_retains_handle_and_cancellation_until_drained() {
-    use std::sync::{Arc, Barrier, atomic::AtomicBool};
-    use std::time::Duration;
-    let blocked = Arc::new(Barrier::new(2));
-    let cancelled = Arc::new(AtomicBool::new(true));
-    let wrote = Arc::new(AtomicBool::new(false));
-    let mut handle = Some(std::thread::spawn({
-        let (blocked, cancelled, wrote) = (blocked.clone(), cancelled.clone(), wrote.clone());
-        move || {
-            blocked.wait();
-            if !cancelled.load(Ordering::Acquire) {
-                wrote.store(true, Ordering::Release);
-            }
-        }
-    }));
-    assert!(!join_bounded(&mut handle, "mux", Duration::ZERO));
-    assert!(
-        handle.is_some(),
-        "timeout must not detach the old generation"
-    );
-    assert!(cancelled.load(Ordering::Acquire));
-    blocked.wait();
-    assert!(join_bounded(&mut handle, "mux", Duration::from_secs(5)));
-    assert!(handle.is_none());
-    assert!(!wrote.load(Ordering::Acquire));
-    cancelled.store(false, Ordering::Release);
-    assert!(join_bounded(&mut handle, "already joined", Duration::ZERO));
-}
-
 // On a long-uptime daemon the system log only shrank at boot; the prune tick must
 // also rotate an oversized one.
 #[test]
@@ -321,7 +291,7 @@ fn filetime_set(path: &std::path::Path, t: std::time::SystemTime) {
 // Covers a wedged mover/muxer thread: shutdown must neither hang forever nor abandon an
 // in-flight move too early.
 #[test]
-fn join_bounded_waits_for_a_healthy_worker_but_retains_a_wedged_one() {
+fn join_bounded_waits_for_a_healthy_worker_but_abandons_a_wedged_one() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -335,9 +305,8 @@ fn join_bounded_waits_for_a_healthy_worker_but_retains_a_wedged_one() {
         d.store(true, Ordering::SeqCst);
     });
     let t0 = Instant::now();
-    let mut h = Some(h);
     assert!(super::join_bounded(
-        &mut h,
+        Some(h),
         "healthy",
         Duration::from_secs(5)
     ));
@@ -350,14 +319,15 @@ fn join_bounded_waits_for_a_healthy_worker_but_retains_a_wedged_one() {
         "must return as soon as the worker finishes, not sit out the timeout"
     );
 
-    // A timeout returns without detaching; release and join it afterwards.
-    let (release, wait) = std::sync::mpsc::channel();
-    let mut h = Some(std::thread::spawn(move || {
-        wait.recv().unwrap();
-    }));
+    // A worker that outlives its deadline must be abandoned at roughly the
+    // timeout — NOT waited on until it happens to finish.
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let h = std::thread::spawn(move || {
+        let _ = wait.recv();
+    });
     let t0 = Instant::now();
     assert!(!super::join_bounded(
-        &mut h,
+        Some(h),
         "wedged",
         Duration::from_millis(150)
     ));
@@ -370,13 +340,8 @@ fn join_bounded_waits_for_a_healthy_worker_but_retains_a_wedged_one() {
         waited >= Duration::from_millis(100),
         "must actually give the worker its timeout: waited {waited:?}"
     );
-    assert!(h.is_some());
-    release.send(()).unwrap();
-    assert!(super::join_bounded(
-        &mut h,
-        "wedged",
-        Duration::from_secs(5)
-    ));
+    drop(release);
+    assert!(super::join_bounded(None, "absent", Duration::ZERO));
 }
 
 // Reject fail-open lock-poison handling throughout production source.
@@ -644,12 +609,21 @@ fn in_child(name: &str) -> bool {
     false
 }
 
-// A soft reboot sets SHUTDOWN itself; the first real SIGTERM during its drain is
-// a stop request to honour gracefully, not a "second signal" force-exit.
+// Short bounds for the stop tests: nothing in them is meant to drain slowly.
+fn short_bounds() -> Bounds {
+    Bounds {
+        rips: Duration::ZERO,
+        services: Duration::from_millis(100),
+        web: Duration::from_millis(100),
+    }
+}
+
+// A reboot sets SHUTDOWN itself; the first real SIGTERM during its drain is a
+// stop request to honour gracefully, not a "second signal" force-exit.
 #[cfg(unix)]
 #[test]
-fn first_sigterm_during_soft_reboot_drains_instead_of_force_exiting() {
-    if !in_child("first_sigterm_during_soft_reboot_drains_instead_of_force_exiting") {
+fn first_sigterm_during_reboot_drain_is_a_graceful_stop() {
+    if !in_child("first_sigterm_during_reboot_drain_is_a_graceful_stop") {
         return;
     }
     REBOOT.store(true, Ordering::Release);
@@ -657,22 +631,89 @@ fn first_sigterm_during_soft_reboot_drains_instead_of_force_exiting() {
     handle_signal(libc::SIGTERM);
     assert!(SHUTDOWN.load(Ordering::Acquire));
     assert!(TERMINATE.load(Ordering::Acquire));
-    assert!(!take_restart(), "a stop request vetoes the pending reboot");
+    assert!(
+        !relaunch_requested(),
+        "a stop request vetoes the pending reboot"
+    );
 }
 
-// SIGTERM accepted before the reboot handler stores REBOOT must not become a restart,
-// and one landing while admission reopens must leave the new generation stopping.
+// A stop signal that lands while the reboot drains turns it into a plain stop.
+#[cfg(unix)]
 #[test]
-fn termination_vetoes_restart_and_survives_admission_reopen() {
-    if !in_child("termination_vetoes_restart_and_survives_admission_reopen") {
+fn sigterm_during_reboot_drain_returns_without_relaunch() {
+    if !in_child("sigterm_during_reboot_drain_returns_without_relaunch") {
         return;
     }
-    TERMINATE.store(true, Ordering::Release);
-    SHUTDOWN.store(true, Ordering::Release);
+    let staging = tempfile::tempdir().unwrap();
     REBOOT.store(true, Ordering::Release);
-    assert!(!take_restart());
-    reopen_admission();
-    assert!(SHUTDOWN.load(Ordering::Acquire));
+    SHUTDOWN.store(true, Ordering::Release);
+    assert!(relaunch_requested());
+    let rips = |_: Duration| {
+        handle_signal(libc::SIGTERM);
+        true
+    };
+    assert!(stop_services(
+        staging.path(),
+        rips,
+        vec![],
+        None,
+        &short_bounds()
+    ));
+    assert!(!relaunch_requested());
+}
+
+// A second stop signal force-exits with status 1 instead of waiting for the drain.
+#[cfg(unix)]
+#[test]
+fn second_stop_signal_force_exits() {
+    const CHILD: &str = "FREEMKV_TEST_SECOND_SIGNAL_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        handle_signal(libc::SIGTERM);
+        assert!(TERMINATE.load(Ordering::Acquire));
+        handle_signal(libc::SIGINT);
+        unreachable!("the second signal must _exit(1)");
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "server::daemon::tests::second_stop_signal_force_exits",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(1), "{status}");
+}
+
+// A drain stuck on one worker gives up at its bound and the reboot still proceeds.
+#[test]
+fn wedged_worker_still_reaches_relaunch_after_timeout() {
+    if !in_child("wedged_worker_still_reaches_relaunch_after_timeout") {
+        return;
+    }
+    let staging = tempfile::tempdir().unwrap();
+    REBOOT.store(true, Ordering::Release);
+    SHUTDOWN.store(true, Ordering::Release);
+    let (release, wedged) = std::sync::mpsc::channel::<()>();
+    let mover = std::thread::spawn(move || {
+        let _ = wedged.recv();
+    });
+    let started = std::time::Instant::now();
+    let workers = vec![("mover", Some(mover))];
+    assert!(!stop_services(
+        staging.path(),
+        |_| true,
+        workers,
+        None,
+        &short_bounds()
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(relaunch_requested());
+    drop(release);
 }
 
 fn muxing_staging() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -684,47 +725,35 @@ fn muxing_staging() -> (tempfile::TempDir, std::path::PathBuf) {
     (staging, marker)
 }
 
-// Graceful process stop is not a crash: even when a wedged writer keeps the drain
-// from finishing, in-progress markers must not survive into the next start.
+// A stop or a reboot is not a crash: markers are cleared before the drain (a SIGKILL
+// at the stop grace finds them clean) and again after it (a rip a late request started).
 #[test]
-fn failed_shutdown_drain_still_clears_in_progress_markers() {
-    if !in_child("failed_shutdown_drain_still_clears_in_progress_markers") {
+fn markers_are_cleared_before_the_drain_and_again_after_it() {
+    if !in_child("markers_are_cleared_before_the_drain_and_again_after_it") {
         return;
     }
-    let (staging, marker) = muxing_staging();
     SHUTDOWN.store(true, Ordering::Release);
-    let mut cleared_before_drain = false;
-    assert!(!stop_generation(staging.path(), || {
-        cleared_before_drain = !marker.exists();
-        false
-    }));
-    assert!(
-        cleared_before_drain,
-        "a SIGKILL mid-drain must find clean markers"
-    );
-    assert!(!marker.exists());
-}
-
-// A reboot drain waits for writers before touching markers, and a SIGTERM while it
-// waits turns it into a bounded process stop.
-#[test]
-fn sigterm_during_refused_reboot_stops_with_clean_markers() {
-    if !in_child("sigterm_during_refused_reboot_stops_with_clean_markers") {
-        return;
+    for reboot in [false, true] {
+        REBOOT.store(reboot, Ordering::Release);
+        let (staging, marker) = muxing_staging();
+        let rips = |_: Duration| {
+            assert!(
+                !marker.exists(),
+                "marker still set during the drain (reboot={reboot})"
+            );
+            std::fs::write(&marker, b"").unwrap();
+            false
+        };
+        assert!(!stop_services(
+            staging.path(),
+            rips,
+            vec![],
+            None,
+            &short_bounds()
+        ));
+        assert!(
+            !marker.exists(),
+            "late marker survived the stop (reboot={reboot})"
+        );
     }
-    let (staging, marker) = muxing_staging();
-    REBOOT.store(true, Ordering::Release);
-    SHUTDOWN.store(true, Ordering::Release);
-    let mut calls = 0;
-    let drained = stop_generation(staging.path(), || {
-        calls += 1;
-        if calls == 1 {
-            assert!(marker.exists(), "an old writer may still own it");
-            TERMINATE.store(true, Ordering::Release);
-        }
-        calls == 3
-    });
-    assert!(!drained);
-    assert_eq!(calls, 2);
-    assert!(!marker.exists());
 }

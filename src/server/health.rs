@@ -546,12 +546,6 @@ impl StaleReports {
         self.generation = self.generation.wrapping_add(1);
         self.paths.retain(|p| !p.starts_with(mountpoint));
     }
-
-    // Old-generation probes may still report; advancing past them discards those reports.
-    fn after_drain(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        self.paths.clear();
-    }
 }
 
 static STALE_REPORTS: std::sync::LazyLock<Mutex<StaleReports>> =
@@ -824,8 +818,6 @@ where
 
 /// The least time between two remounts of the network share.
 const REMOUNT_GAP: Duration = Duration::from_secs(60);
-#[cfg(unix)]
-static LAST_REMOUNT: Mutex<Option<Instant>> = Mutex::new(None);
 
 // Whether the share wants mounting afresh: it is not mounted, or a folder under it reports a
 // stale handle; and the last attempt is old enough.
@@ -846,6 +838,7 @@ fn wants_remount(
 // failed mount is retried, so do that.
 #[cfg(unix)]
 fn heal(cfg: &Config) {
+    static LAST_REMOUNT: Mutex<Option<Instant>> = Mutex::new(None);
     let Some(share) = crate::server::daemon::nfs_share() else {
         return;
     };
@@ -897,21 +890,6 @@ pub fn start(cfg: &Arc<RwLock<Config>>) {
                 }
             }
         });
-}
-
-/// Called only after the daemon has drained all services. Abandoned folder probes may
-/// still be running; their late reports carry an older generation and are ignored.
-pub(crate) fn reset_after_drain() {
-    LAST.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    GENERATION.store(0, Ordering::SeqCst);
-    STALE_REPORTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .after_drain();
-    #[cfg(unix)]
-    {
-        *LAST_REMOUNT.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    }
 }
 
 #[cfg(test)]

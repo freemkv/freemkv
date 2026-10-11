@@ -93,16 +93,6 @@ pub(crate) fn scan_opts_for(cfg: &Config) -> libfreemkv::ScanOptions {
     }
 }
 
-pub(crate) fn reset_after_drain() {
-    session::reset_after_drain();
-    state::reset_after_drain();
-    FRESH_RIP_CLAIMS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    resume::reset_after_drain();
-}
-
 // Scan-phase watchdog: emits a WARN every 15s while structure scan / key resolve are in flight,
 // so a wedged drive is visible instead of leaving the UI stuck silently.
 struct ScanWatchdog {

@@ -204,7 +204,7 @@ static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashSet<Str
     once_cell::sync::Lazy::new(Default::default);
 
 // Mirror a staging dir's budget or hold into its delivery journal, if it has one,
-// so neither a restart nor an internal reboot buys another full-file copy.
+// so a restart does not buy another full-file copy.
 fn persist_retry(path: &str) {
     let Some(row) = MOVE_ERRORS
         .lock()
@@ -947,7 +947,9 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
 static STRANDED_WARNED: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
-pub(crate) fn reset_after_drain() {
+// Forget in-memory mover state, as a process restart would.
+#[cfg(test)]
+pub(super) fn forget_process_state() {
     MOVE_STATE.lock().unwrap_or_else(|e| e.into_inner()).clear();
     *ACTIVE_MOVE_DIR.lock().unwrap_or_else(|e| e.into_inner()) = None;
     MOVE_ERRORS

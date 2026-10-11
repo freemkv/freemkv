@@ -34,27 +34,6 @@ fn aggregate_handle_waits_for_every_library_service() {
 }
 
 #[test]
-fn drained_instance_reopens_saved_queue_instead_of_reusing_old_arc() {
-    let t = tempfile::tempdir().unwrap();
-    let cfg = Config {
-        autorip_dir: t.path().join("cfg").to_string_lossy().into_owned(),
-        ..Config::default()
-    };
-    let slot = Mutex::new(None);
-    std::fs::create_dir_all(&cfg.autorip_dir).unwrap();
-    reload_instance(&slot, &cfg);
-    let old = slot.lock().unwrap().clone().unwrap();
-    assert!(!old.queue.snapshot().paused);
-    let on_disk = queue::Queue::open(Path::new(&cfg.autorip_dir));
-    on_disk.set_paused(true);
-    reload_instance(&slot, &cfg);
-    let fresh = slot.lock().unwrap().clone().unwrap();
-    assert!(!Arc::ptr_eq(&old, &fresh));
-    assert!(fresh.queue.snapshot().paused);
-    assert!(!old.queue.snapshot().paused);
-}
-
-#[test]
 fn dirs_fall_back_to_where_rips_are_filed() {
     let mut c = Config {
         output_dir: "/media".into(),

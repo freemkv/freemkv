@@ -251,15 +251,6 @@ pub fn join_all_rip_threads(timeout: Duration) -> bool {
     drained
 }
 
-pub(super) fn reset_after_drain() {
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    DISC_IDENTITY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    HALTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-}
-
 // Per-device cooperative-cancel tokens; the rip thread spawn site allocates one Halt per rip
 // and stashes its clone here so the HTTP stop handler (and `eject_drive`) can find it.
 static HALTS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, Halt>>> =

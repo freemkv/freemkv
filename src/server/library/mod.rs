@@ -320,19 +320,6 @@ pub fn get() -> Option<Arc<Library>> {
     INSTANCE.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// The caller must drain every service and HTTP handler before replacing state.
-pub fn reload_after_drain(cfg: &Config) {
-    reload_instance(&INSTANCE, cfg);
-}
-
-fn reload_instance(instance: &Mutex<Option<Arc<Library>>>, cfg: &Config) {
-    let fresh = Arc::new(Library::open(
-        Path::new(&cfg.autorip_dir),
-        &Path::new(&cfg.log_dir()).join("library"),
-    ));
-    *instance.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh);
-}
-
 /// Ask the indexer to rescan now (settings changed, a rip landed, a button).
 pub fn wake() {
     if let Some(lib) = get() {
