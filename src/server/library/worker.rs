@@ -163,11 +163,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
         landing: Mutex::new(None),
     };
     let cmd = match &job.staged {
-        Some(kept) => format!(
-            "Finishing the remux kept at {}: copying it to {}",
-            kept.display(),
-            job.target.display()
-        ),
+        Some(kept) => kept_line(&job, kept),
         None => command_line(&job),
     };
     sink.emit(LineKind::Cmd, cmd);
@@ -191,6 +187,40 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
     sink.close_open_line();
     finish(lib, &job, ending, started.elapsed(), &sink);
     lib.set_running(|r| *r = None);
+}
+
+// The console's first line for a job that only copies in the file it kept: its ISO, and the
+// output that file was made for; a Change match's queue key is never named.
+fn kept_line(job: &Job, kept: &Path) -> String {
+    let made_for = job
+        .outputs
+        .iter()
+        .find(|o| o.staged.as_deref() == Some(kept))
+        .map(|o| o.target.clone());
+    let targets = job.output_targets();
+    let dest = made_for.or_else(|| match targets.as_slice() {
+        _ if job.retire && job.plan.is_none() => None,
+        [one] => Some(one.clone()),
+        _ => None,
+    });
+    let iso = job.iso.display().to_string();
+    let kept = kept.display().to_string();
+    match dest {
+        Some(dest) => crate::strings::fmt_or(
+            "server.library.kept_copy_to",
+            "Finishing the remux of {iso} kept at {kept}: copying it to {target}",
+            &[
+                ("iso", &iso),
+                ("kept", &kept),
+                ("target", &dest.display().to_string()),
+            ],
+        ),
+        None => crate::strings::fmt_or(
+            "server.library.kept_copy",
+            "Finishing the remux of {iso} kept at {kept}",
+            &[("iso", &iso), ("kept", &kept)],
+        ),
+    }
 }
 
 // The job as the CLI command it runs: its ISO and the file it writes, or the folder its
