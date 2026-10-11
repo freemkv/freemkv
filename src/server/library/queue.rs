@@ -62,6 +62,9 @@ pub struct OutputProgress {
     pub state: OutputState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<PathBuf>,
+    /// The new file as it was about to land: found at the target, it landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<crate::server::util::Stamp>,
 }
 
 /// One queued remux.
@@ -533,6 +536,7 @@ impl Queue {
                         target: item.target.clone(),
                         state: OutputState::Pending,
                         staged: None,
+                        landing: None,
                     }],
                 ))
             });
@@ -647,6 +651,7 @@ impl Queue {
                     },
                     state: OutputState::Pending,
                     staged: None,
+                    landing: None,
                 })
                 .collect();
             job.plan = Some(plan);
@@ -704,6 +709,28 @@ impl Queue {
                 .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
             {
                 output.state = state;
+                if state == OutputState::Done {
+                    output.landing = None;
+                }
+            }
+        });
+    }
+
+    /// Record the file output `output_id` of job `id` is about to land as, before it lands.
+    pub(crate) fn set_output_landing(
+        &self,
+        id: u64,
+        output_id: &str,
+        landing: crate::server::util::Stamp,
+    ) {
+        self.mutate(|f| {
+            if let Some(output) = f
+                .jobs
+                .iter_mut()
+                .find(|j| j.id == id)
+                .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
+            {
+                output.landing = Some(landing);
             }
         });
     }

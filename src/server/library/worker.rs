@@ -115,6 +115,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
         iso_url: format!("iso://{}", job.iso.display()),
         last_activity: AtomicU64::new(crate::server::util::epoch_secs()),
         term: Mutex::new(Term::default()),
+        landing: Mutex::new(None),
     };
     let cmd = match &job.staged {
         Some(kept) => format!(
@@ -709,7 +710,9 @@ fn remux_planned_with(
         if progress.is_some_and(|p| p.state == OutputState::Done || p.staged.is_some()) {
             continue;
         }
-        if landed_by_this_job(&sink.lib.config_dir, &job.iso, target) {
+        if landed_by_this_job(&sink.lib.config_dir, &job.iso, target)
+            || progress.is_some_and(|p| landed_before(p, target))
+        {
             continue;
         }
         if let Err(e) = refuse_unowned(target, &owned) {
@@ -738,6 +741,26 @@ fn remux_planned_with(
             continue;
         }
         let target = targets[ordinal].clone();
+        // A restart after the rename and before Done: the file there is the one that landed.
+        if let Some(progress) = current.outputs.iter().find(|p| p.id == output.id)
+            && let Some(landed) = progress
+                .landing
+                .filter(|_| landed_before(progress, &target))
+        {
+            sink.lib
+                .queue
+                .finish_output(job.id, &output.id, OutputState::Done);
+            if let Err(e) = super::links::record_output(
+                &sink.lib.config_dir,
+                &target,
+                &job.iso,
+                Some(landed),
+                episode,
+            ) {
+                return Ending::Failed(e);
+            }
+            continue;
+        }
         let unowned = !owned.iter().any(|o| o.path == target);
         if unowned
             && target.is_file()
@@ -780,8 +803,25 @@ fn remux_planned_with(
                 running.target = target.clone();
             }
         });
+        let replaces = owned
+            .iter()
+            .find(|o| replace && o.path == target)
+            .map(|o| o.stamp);
+        sink.expect_landing(&target, &output.id, replaces);
         writing_app = match execute(&request, staged, ordinal) {
             Ok(app) => app,
+            Err(_) if let Some(changed) = sink.landing_refused() => {
+                sink.lib
+                    .queue
+                    .finish_output(job.id, &output.id, OutputState::Failed);
+                return Ending::Failed(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "{} changed while this remux ran; it was not touched",
+                        changed.display()
+                    ),
+                ));
+            }
             Err(e) => {
                 if let Some(kept) = deliver::kept_of(&e) {
                     sink.lib
@@ -843,6 +883,13 @@ fn outputs_all_done(queue: &super::queue::QueueFile, id: u64) -> bool {
         .iter()
         .find(|j| j.id == id)
         .is_some_and(|j| j.outputs.iter().all(|o| o.state == OutputState::Done))
+}
+
+// True when the file at `target` is the one `progress` recorded as about to land.
+fn landed_before(progress: &super::queue::OutputProgress, target: &Path) -> bool {
+    progress.landing.is_some_and(|landing| {
+        matches!(super::owned::present(target), Ok(super::owned::Present::File(now)) if now == landing)
+    })
 }
 
 // True when links.json maps `target` to the job's ISO with the file there now: an earlier
@@ -1651,9 +1698,67 @@ struct JobSink<'a> {
     iso_url: String,
     last_activity: AtomicU64,
     term: Mutex<Term>,
+    landing: Mutex<Option<Landing>>,
+}
+
+// The output a remux is about to land, checked once more at the engine's "replace" phase.
+struct Landing {
+    target: std::path::PathBuf,
+    output_id: String,
+    /// The owned file it replaces, as captured; `None` when it creates the file.
+    replaces: Option<crate::server::util::Stamp>,
+    refused: bool,
 }
 
 impl JobSink<'_> {
+    // Expect `target` (output `output_id`) to land next, replacing `replaces` if set.
+    fn expect_landing(
+        &self,
+        target: &Path,
+        output_id: &str,
+        replaces: Option<crate::server::util::Stamp>,
+    ) {
+        *self.landing.lock().unwrap_or_else(|e| e.into_inner()) = Some(Landing {
+            target: target.to_path_buf(),
+            output_id: output_id.to_string(),
+            replaces,
+            refused: false,
+        });
+    }
+
+    // Whether the last check before landing found the replaced file changed.
+    fn landing_refused(&self) -> Option<std::path::PathBuf> {
+        let landing = self.landing.lock().unwrap_or_else(|e| e.into_inner());
+        landing
+            .as_ref()
+            .filter(|l| l.refused)
+            .map(|l| l.target.clone())
+    }
+
+    // Just before the rename: refuse a replaced file that changed since it was captured, else
+    // record the new file's stamp so a restart after the rename knows it landed.
+    fn before_landing(&self) {
+        let mut guard = self.landing.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(landing) = guard.as_mut() else {
+            return;
+        };
+        if let Some(captured) = landing.replaces {
+            landing.refused = match super::owned::present(&landing.target) {
+                Ok(super::owned::Present::File(now)) => now != captured,
+                Ok(super::owned::Present::Gone) => false,
+                _ => true,
+            };
+        }
+        if landing.refused {
+            return;
+        }
+        let partial = super::queue::partial_path(&landing.target);
+        if let Ok(stamp) = crate::server::util::Stamp::read(&partial) {
+            self.lib
+                .queue
+                .set_output_landing(self.job_id, &landing.output_id, stamp);
+        }
+    }
     fn preempted(&self) -> bool {
         self.arbiter.rip_active() || self.arbiter.rip_started_since(self.epoch)
     }
@@ -1791,7 +1896,12 @@ impl Sink for JobSink<'_> {
     fn event(&self, e: &Event<'_>) {
         self.alive();
         match e {
-            Event::Phase { name } => self.phase(name),
+            Event::Phase { name } => {
+                if *name == "replace" {
+                    self.before_landing();
+                }
+                self.phase(name)
+            }
             Event::TitleStart { idx, dest } => {
                 self.print_opened(*idx);
                 self.term().mux_started = Some(Instant::now());
@@ -1848,6 +1958,7 @@ impl Sink for JobSink<'_> {
             || shutting_down()
             || self.lib.stall_cancel.load(Ordering::SeqCst)
             || self.lib.cancelled(self.job_id)
+            || self.landing_refused().is_some()
     }
 }
 

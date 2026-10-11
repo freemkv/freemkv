@@ -21,6 +21,7 @@ fn sink<'a>(lib: &'a Library, arbiter: &'a Arbiter, job: &Job) -> JobSink<'a> {
         iso_url: format!("iso://{}", job.iso.display()),
         last_activity: AtomicU64::new(0),
         term: Mutex::new(Term::default()),
+        landing: Mutex::new(None),
     }
 }
 

@@ -172,3 +172,21 @@ fn a_missing_new_file_does_not_fail_when_there_is_nothing_to_retire() {
     assert_eq!(e.kind(), io::ErrorKind::NotConnected);
     assert!(old.path.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn an_owned_file_swapped_for_a_symlink_is_kept_and_disowned_not_a_failed_pass() {
+    let f = fixture();
+    let swapped = f.old("Old E01.mkv", Some(&f.iso));
+    let after = f.old("Old E02.mkv", Some(&f.iso));
+    let elsewhere = f.root.join("Show/copy.mkv");
+    std::fs::write(&elsewhere, b"a copy").unwrap();
+    std::fs::remove_file(&swapped.path).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &swapped.path).unwrap();
+    let kept = f.run(&[swapped.clone(), after.clone()]).unwrap();
+    assert_eq!(kept, vec![swapped.path.clone()]);
+    assert!(std::fs::symlink_metadata(&swapped.path).is_ok());
+    assert_eq!(f.linked(&swapped.path), None, "disowned");
+    assert!(!after.path.exists(), "the pass went on past it");
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"a copy");
+}

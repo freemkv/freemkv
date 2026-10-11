@@ -247,6 +247,7 @@ fn test_sink<'a>(lib: &'a Library, arbiter: &'a Arbiter) -> JobSink<'a> {
         iso_url: "iso:///i/A.iso".into(),
         last_activity: AtomicU64::new(0),
         term: Mutex::new(Term::default()),
+        landing: Mutex::new(None),
     }
 }
 
@@ -1686,3 +1687,6 @@ mod ownership;
 
 #[path = "worker_episode_tests.rs"]
 mod episode;
+
+#[path = "worker_landing_tests.rs"]
+mod landing;
