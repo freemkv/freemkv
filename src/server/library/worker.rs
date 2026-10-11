@@ -238,8 +238,8 @@ fn episode_alone(job: &Job) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         crate::strings::fmt_or(
-            "server.library.episode_alone",
-            "{path} is one episode of a disc that was split into several files, and its title cannot be told apart from the others, so nothing was written. Use Change match on its ISO to remux the whole disc.",
+            "server.library.episode_unplanned",
+            "{path} is one episode of a disc that was split into several files, and this remux could not find which of the disc's titles it is, so nothing was written. Use Change match on its ISO to remux the whole disc.",
             &[("path", &job.target.display().to_string())],
         ),
     )

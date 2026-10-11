@@ -50,6 +50,22 @@ fn an_episode_row_is_never_planned_as_one_movie_over_the_episode() {
     let mut job = lib.queue.claim_next().unwrap();
     let error = maybe_attach_tv_plan(&lib, &no_key_tv_auto(&dirs), &mut job).unwrap_err();
     assert!(error.to_string().contains("Change match"), "{error}");
+    // With automatic TV planning off nothing was compared: the text says only what is true.
+    let off = Config {
+        tv_auto: false,
+        ..no_key_tv_auto(&dirs)
+    };
+    for error in [
+        error,
+        maybe_attach_tv_plan(&lib, &off, &mut job).unwrap_err(),
+    ] {
+        let text = error.to_string();
+        assert!(
+            text.contains("could not find which of the disc's titles"),
+            "{text}"
+        );
+        assert!(!text.contains("cannot be told apart"), "{text}");
+    }
     assert!(job.plan.is_none());
     assert!(lib.queue.snapshot().jobs[0].plan.is_none());
     assert_eq!(std::fs::read(&episodes[0]).unwrap(), b"an episode");
