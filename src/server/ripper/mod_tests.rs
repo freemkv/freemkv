@@ -3850,8 +3850,8 @@ fn fresh_wipe_cannot_delete_artifacts_while_job_lease_is_held() {
         "leased staging was wiped"
     );
     assert_eq!(
-        st.status, "idle",
-        "fresh dispatch should stand down: {st:?}"
+        st.status, "error",
+        "an operator wipe must say it stood down: {st:?}"
     );
 }
 
@@ -4056,7 +4056,8 @@ fn fresh_insert_spares_a_live_sweep_but_wipes_a_dead_one() {
 }
 
 // Lease contention is a typed busy: whoever holds the job (another drive's rip
-// before its sweep lands, the mux worker, a delivery), every rip mode stands down idle.
+// before its sweep lands, the mux worker, a delivery), every rip mode stands down; an
+// automatic insert rip idles, an operator's Rip / Start over shows an error card.
 #[test]
 fn a_held_job_lease_stands_every_rip_mode_down_idle() {
     for (label, mode) in [
@@ -4081,8 +4082,55 @@ fn a_held_job_lease_stands_every_rip_mode_down_idle() {
             dir.join("Sentinel.iso").exists(),
             "{label}: leased job touched"
         );
-        assert_eq!(st.status, "idle", "{label} must stand down: {st:?}");
+        if label == "fresh" {
+            assert_eq!(st.status, "idle", "{label} must stand down: {st:?}");
+        } else {
+            assert_eq!(st.status, "error", "{label} must say why: {st:?}");
+            assert!(
+                st.last_error.contains("nothing was reset"),
+                "{label}: {:?}",
+                st.last_error
+            );
+        }
     }
+}
+
+// Drive B must not delete the empty dir drive A just created and still holds the lease on.
+#[test]
+fn insert_does_not_remove_an_empty_dir_while_its_lease_is_held() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let device = "sg_lease_empty_dir_test";
+    let cfg = seed_scanned_disc(device, "Empty Disc", tmp.path());
+    super::update_state_with(device, |s| s.status = "scanning".to_string());
+    let dir = tmp
+        .path()
+        .join(crate::server::util::sanitize_path_compact("Empty Disc"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lease = staging::job_lease(&dir);
+    let owner = lease.lock().unwrap();
+    let mode = super::auto_insert_rip_mode("rip").expect("mode");
+    super::dispatch_rip_request(&cfg, device, "/nonexistent/autorip-test-drive", mode);
+    drop(owner);
+    let st = super::STATE.lock().unwrap().get(device).cloned().unwrap();
+    forget_device(device);
+    assert!(dir.exists(), "a leased empty dir was removed");
+    assert_eq!(st.status, "idle", "{st:?}");
+}
+
+// The job and identity come from one row read, so they always describe the same scan.
+#[test]
+fn scan_ids_pairs_the_job_with_its_own_identity() {
+    let device = "sg_scan_ids_test";
+    assert_eq!(super::scan_ids(device), None);
+    super::update_state_with(device, |s| {
+        s.job_id = "job-a".into();
+        s.disc_identity = "id-a".into();
+    });
+    assert_eq!(
+        super::scan_ids(device),
+        Some(("job-a".to_string(), "id-a".to_string()))
+    );
+    forget_device(device);
 }
 
 // Run `mode` over an existing but EMPTY staging dir; returns (dir, status).
