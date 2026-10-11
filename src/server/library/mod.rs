@@ -270,6 +270,8 @@ pub struct Snapshot {
     pub rows: Vec<Row>,
     /// Size and mtime of each MKV as the scan saw it.
     pub sigs: HashMap<PathBuf, FileSig>,
+    /// Each ISO with a stamped saved match, as the scan saw it.
+    pub iso_stamps: HashMap<PathBuf, Option<crate::server::util::Stamp>>,
     pub incomplete: bool,
     /// The library folder listed with no entries at all (an unmounted share
     /// looks exactly like this).
@@ -860,6 +862,15 @@ impl Library {
                     true
                 }
             });
+        let iso_stamps = isos
+            .files
+            .iter()
+            .filter(|i| {
+                self.loaded_match(&i.path)
+                    .is_some_and(|m| m.iso_stamp.is_some())
+            })
+            .map(|i| (i.path.clone(), links::iso_stamp(&i.path)))
+            .collect();
         let rows = index::classify(&d.library, &mkvs.files, &isos.files, &links);
         let library_empty = std::fs::read_dir(&d.library).is_ok_and(|mut r| r.next().is_none());
         Snapshot {
@@ -869,6 +880,7 @@ impl Library {
             isos: isos.files,
             rows,
             sigs,
+            iso_stamps,
             incomplete: mkvs.incomplete || isos.incomplete,
             scanned_at: Some(crate::server::util::epoch_secs()),
             scan_ms: started.elapsed().as_millis() as u64,
@@ -1110,7 +1122,11 @@ impl Library {
                     ),
                     None => (None, None),
                 };
-                let source_match = r.iso.as_deref().and_then(|iso| self.loaded_match(iso));
+                // A match confirmed for an earlier disc filed at this path is not this row's.
+                let source_match = r.iso.as_deref().and_then(|iso| {
+                    self.loaded_match(iso)
+                        .filter(|m| snap.iso_stamps.get(iso).is_none_or(|now| m.is_for(*now)))
+                });
                 let title = source_match
                     .as_ref()
                     .map(|m| {

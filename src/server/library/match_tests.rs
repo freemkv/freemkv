@@ -269,3 +269,33 @@ fn two_isos_with_one_name_in_different_folders_each_get_their_own_correction() {
     assert_eq!(jobs.len(), 2);
     assert_ne!(jobs[0].target, jobs[1].target);
 }
+
+#[test]
+fn the_listing_does_not_present_a_match_saved_for_an_earlier_disc_at_the_path() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    lib.match_store()
+        .unwrap()
+        .save(&sources[0], 0, show())
+        .unwrap();
+    let row_match = |lib: &Library| {
+        lib.listing(&d)
+            .rows
+            .into_iter()
+            .find(|r| r.iso.as_deref() == Some(sources[0].as_path()))
+            .unwrap()
+            .source_match
+    };
+    lib.index_now(&d);
+    assert!(row_match(&lib).is_some());
+    let later =
+        links::iso_stamp(&sources[0]).unwrap().modified + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&sources[0])
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    lib.index_now(&d);
+    assert_eq!(row_match(&lib), None);
+}

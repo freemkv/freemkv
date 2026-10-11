@@ -185,11 +185,17 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
         return Ok(());
     }
     if let Some(saved) = lib.match_store()?.get(&job.iso) {
-        if saved.is_for(super::links::iso_stamp(&job.iso)) {
+        let now = super::links::iso_stamp(&job.iso);
+        if saved.is_for(now) {
             return attach_corrected_plan(lib, cfg, job, &saved.media);
         }
         // Confirmed for an earlier disc filed at this ISO path: not this disc's identity.
-        if job.retire {
+        // At the same size only the time moved, so it may be the same disc: never guess.
+        let same_size = saved
+            .iso_stamp
+            .zip(now)
+            .is_some_and(|(a, b)| a.size == b.size);
+        if job.retire || same_size {
             return Err(std::io::Error::other(crate::strings::fmt_or(
                 "server.library.stale_match",
                 "The match saved for {path} was confirmed for an earlier disc filed at that path, so nothing was written. Open Change match again for this disc.",

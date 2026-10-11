@@ -219,3 +219,37 @@ fn a_remux_of_a_disc_refiled_at_a_matched_iso_path_ignores_the_earlier_match() {
     assert_ne!(plan.media.title, "Show", "{plan:?}");
     assert_eq!(plan.media.tmdb_id, 0);
 }
+
+#[test]
+fn a_remux_of_a_matched_iso_restamped_at_the_same_size_fails_rather_than_auto_planning() {
+    let (_t, cfg, lib, sources) = super::super::super::match_tests::corrected_library(&["Show"]);
+    let iso = sources[0].clone();
+    std::fs::write(&iso, &crate::ku_fixture::bd_image().img.image).unwrap();
+    lib.rescan(&super::super::super::dirs(&cfg));
+    lib.confirm_match_and_queue(&cfg, &iso, 0, super::super::super::match_tests::show())
+        .unwrap();
+    let id = lib.queue.snapshot().jobs[0].id;
+    lib.queue.drop_job(id);
+    // Same size, new time: the same disc or another one, which cannot be told.
+    let later = links::iso_stamp(&iso).unwrap().modified + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&iso)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let target = super::super::super::dirs(&cfg)
+        .library
+        .join("Show/Show.mkv");
+    lib.queue.add(vec![NewJob {
+        title: "Show".into(),
+        iso,
+        target,
+        replace: false,
+    }]);
+    let mut job = lib.queue.claim_next().unwrap();
+    assert!(!job.retire);
+    let error = maybe_attach_tv_plan(&lib, &cfg, &mut job).unwrap_err();
+    assert!(error.to_string().contains("Change match"), "{error}");
+    assert!(lib.queue.snapshot().jobs[0].plan.is_none());
+}
