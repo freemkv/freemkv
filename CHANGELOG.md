@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **A delivery to an SMB share is no longer held forever after the share is remounted** (server only: the mover's delivery journal): files are recognised by their size and pinned modification time instead of device and inode numbers, which SMB renumbers on remount and derives from names. Journals written by earlier versions load as they are; a delivery already held by this needs one Retry.
+- **A delivery whose destination folder disappeared waits instead of recreating it** (server only: the mover): the share may have fallen off its mount point, and the folder would have landed on local disk. The row shows the missing folder; choose Retry to recreate it if it was removed on purpose.
+- **A file found at a destination after a crash is adopted only if its content matches** (server only: the mover's delivery journal): its first and last 64 KiB must match the staged rip, not just its size and time.
+
 ## [1.8.3] — 2026-10-08
 
 ### Changed
