@@ -29,8 +29,8 @@ fn production_src() -> String {
 }
 
 // Every rip-side quarantine must go through `quarantine_or_log` so a refused
-// or failed `.failed` write is surfaced in the device log, and the live-disc
-// sweep seed must be the one that may replace an unreadable state.json.
+// or failed `.failed` write is surfaced in the device log; nothing on the rip
+// side replaces an unreadable state.json.
 #[test]
 fn rip_side_quarantines_log_when_not_persisted() {
     let prod = production_src();
@@ -44,6 +44,6 @@ fn rip_side_quarantines_log_when_not_persisted() {
         7,
         "6 call sites + the fn"
     );
-    assert!(prod.contains("staging::seed_sweeping_for_live_rip("));
+    assert!(!prod.contains("UNREADABLE_STATE_ASIDE"));
     assert!(!prod.contains("staging::write_sweeping_marker("));
 }

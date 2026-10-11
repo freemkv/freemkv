@@ -145,13 +145,12 @@ pub enum Resolve {
 static RESOLVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Resolve a held rip. `dir` is the staging subdir name (not a path — guarded
-/// against traversal). When the unified `state.json` is present it is
-/// mutated in place (`StagingState`); otherwise the legacy marker files are
-/// used. Actions:
-/// * `Proceed`            — promote to `Done` / `.review` → `.done` as-named.
-/// * `Retitle{title,year}`— rewrite the title/year, then promote to `Done`.
-/// * `Cancel`             — mark `Failed` / `.failed` (so it isn't retried),
-///   then drop `.review` in the legacy case.
+/// against traversal). A unified (`state.json`) hold is only cancelled here
+/// (`Failed`); web.rs commits its proceed/retitle as a metadata correction.
+/// Legacy marker dirs:
+/// * `Proceed`            — `.review` → `.done` as-named.
+/// * `Retitle{title,year}`— rewrite the title/year into `.done`.
+/// * `Cancel`             — write `.failed` (so it isn't retried), drop `.review`.
 pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), String> {
     // Path-traversal guard: a held-rip handle is a single staging subdir
     // name. Inspect path components rather than substring-matching `..`,
@@ -176,83 +175,63 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
     if !d.is_dir() || !held {
         return Err("not a held rip".into());
     }
+    let action = match (unified, action) {
+        (Some(mut st), Resolve::Cancel) => {
+            // Terminal (so it isn't retried); a failed write keeps the hold.
+            st.state = crate::server::ripper::staging::StagingState::Failed;
+            st.failure_reason = Some("cancelled by operator".to_string());
+            st.muxing = false;
+            st.title_identity_review = false;
+            return crate::server::ripper::staging::try_write_state_abandoning_hold(&d, &st)
+                .map_err(|e| e.to_string());
+        }
+        // web.rs commits a unified proceed/retitle as a metadata correction.
+        (Some(_), _) => return Err("held rip changed; refresh and retry".into()),
+        (None, action) => action,
+    };
     match action {
         Resolve::Proceed => {
-            // Promote the held rip to the mover-facing state, carrying the
-            // existing metadata forward (a durable transition — no bare rename,
-            // which wouldn't fsync the dirent).
-            if let Some(mut st) = unified {
-                st.state = crate::server::ripper::staging::StagingState::Done;
-                st.title_confident = true;
-                crate::server::ripper::staging::try_write_state(&d, &st)
-                    .map_err(|e| e.to_string())?;
-            } else {
-                let body = std::fs::read(&review).map_err(|e| e.to_string())?;
-                crate::server::ripper::staging::write_handoff_marker(&d.join(".done"), &body)
-                    .map_err(|e| e.to_string())?;
-                std::fs::remove_file(&review).map_err(|e| e.to_string())?;
-            }
+            // Durable `.done` carrying the marker body forward, never a bare rename.
+            let body = std::fs::read(&review).map_err(|e| e.to_string())?;
+            crate::server::ripper::staging::write_handoff_marker(&d.join(".done"), &body)
+                .map_err(|e| e.to_string())?;
+            std::fs::remove_file(&review).map_err(|e| e.to_string())?;
         }
         Resolve::Retitle { title, year } => {
             if title.trim().is_empty() {
                 return Err("title required".into());
             }
-            if let Some(mut st) = unified {
-                st.title = title;
-                st.year = year;
-                // A non-movie (TV) media_type must survive a retitle; only
-                // default to "movie" when the rip has no media_type at all.
-                if st.media_type.is_empty() {
-                    st.media_type = "movie".into();
-                }
-                st.state = crate::server::ripper::staging::StagingState::Done;
-                st.title_confident = true;
-                crate::server::ripper::staging::try_write_state(&d, &st)
-                    .map_err(|e| e.to_string())?;
-            } else {
-                let mut m = legacy_marker(&d);
-                if !m.is_object() {
-                    m = serde_json::json!({});
-                }
-                m["title"] = serde_json::json!(title);
-                m["year"] = serde_json::json!(year);
-                if m.get("media_type").and_then(|v| v.as_str()).is_none() {
-                    m["media_type"] = serde_json::json!("movie");
-                }
-                let serialized = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
-                crate::server::ripper::staging::write_handoff_marker(
-                    &d.join(".done"),
-                    serialized.as_bytes(),
-                )
-                .map_err(|e| e.to_string())?;
-                std::fs::remove_file(&review).map_err(|e| e.to_string())?;
+            let mut m = legacy_marker(&d);
+            if !m.is_object() {
+                m = serde_json::json!({});
             }
+            m["title"] = serde_json::json!(title);
+            m["year"] = serde_json::json!(year);
+            if m.get("media_type").and_then(|v| v.as_str()).is_none() {
+                m["media_type"] = serde_json::json!("movie");
+            }
+            let serialized = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
+            crate::server::ripper::staging::write_handoff_marker(
+                &d.join(".done"),
+                serialized.as_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::remove_file(&review).map_err(|e| e.to_string())?;
         }
         Resolve::Cancel => {
-            // Terminal `.failed` (so it isn't retried). The contract requires
-            // propagating a write error and preserving held state on failure,
-            // so use the fallible transition, not `write_failed_marker`.
-            if let Some(mut st) = unified {
-                st.state = crate::server::ripper::staging::StagingState::Failed;
-                st.failure_reason = Some("cancelled by operator".to_string());
-                st.muxing = false;
-                st.title_identity_review = false;
-                crate::server::ripper::staging::try_write_state_abandoning_hold(&d, &st)
-                    .map_err(|e| e.to_string())?;
-            } else {
-                let failed_body = serde_json::json!({
-                    "reason": "cancelled by operator",
-                    "timestamp": crate::server::util::format_iso_datetime(),
-                });
-                let failed_str =
-                    serde_json::to_string_pretty(&failed_body).map_err(|e| e.to_string())?;
-                crate::server::ripper::staging::write_handoff_marker(
-                    &d.join(".failed"),
-                    failed_str.as_bytes(),
-                )
-                .map_err(|e| e.to_string())?;
-                std::fs::remove_file(&review).map_err(|e| e.to_string())?;
-            }
+            // Propagate a write error and keep `.review` on failure.
+            let failed_body = serde_json::json!({
+                "reason": "cancelled by operator",
+                "timestamp": crate::server::util::format_iso_datetime(),
+            });
+            let failed_str =
+                serde_json::to_string_pretty(&failed_body).map_err(|e| e.to_string())?;
+            crate::server::ripper::staging::write_handoff_marker(
+                &d.join(".failed"),
+                failed_str.as_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::remove_file(&review).map_err(|e| e.to_string())?;
         }
     }
     Ok(())

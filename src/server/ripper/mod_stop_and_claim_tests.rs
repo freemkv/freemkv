@@ -52,17 +52,6 @@ fn the_poll_view_leaves_a_claimed_row_alone() {
     STATE.lock().unwrap().remove(&dev);
 }
 
-// The same disc in two drives: the second fresh rip cannot claim the staging dir the
-// first is about to wipe and sweep, until the first returns.
-#[test]
-fn a_fresh_rip_claim_excludes_another_drive_until_dropped() {
-    let base = format!("/staging/FA_Claim_{}", std::process::id());
-    let first = claim_fresh_rip(&base, "fa_drive_a").expect("first claim");
-    assert!(claim_fresh_rip(&base, "fa_drive_b").is_none());
-    drop(first);
-    assert!(claim_fresh_rip(&base, "fa_drive_b").is_some());
-}
-
 // A disc whose scan failed is not ripped: rip_disc would rescan and sweep into a staging
 // dir no guard checked (the failed scan left no name to check it by).
 #[test]

@@ -354,44 +354,99 @@ fn resume_probes_use_the_same_identity_rule_as_job_location() {
         staging_dir: root.path().to_string_lossy().into_owned(),
         ..Default::default()
     };
+    let located = locate(root.path(), live).unwrap();
     assert_eq!(
-        super::super::resumable_for_disc_with_hash(&cfg, "OtherDisc", Some(live)),
+        super::super::resumable_for_job(&cfg, &located),
         None,
         "a job that location would not adopt is not offered for resume"
     );
 }
 
-#[test]
-fn an_unverified_disc_is_never_offered_another_jobs_capture() {
-    use crate::server::{config::Config, ripper};
-    use std::sync::{Arc, RwLock};
-    let root = tempfile::tempdir().unwrap();
-    let legacy = root.path().join(staging::staging_basename(
-        root.path(),
-        "Same Title",
-        "SAME_LABEL",
-    ));
-    std::fs::create_dir(&legacy).unwrap();
-    partial_capture(&legacy, "Same Title", None);
-    std::fs::create_dir(root.path().join("unverified-1")).unwrap();
-    let cfg = Arc::new(RwLock::new(Config {
-        staging_dir: root.path().to_string_lossy().into_owned(),
-        ..Default::default()
-    }));
-    let device = "job-unverified-resume";
-    ripper::update_state(
+fn seed_job(device: &str, job: &str, identity: &str) {
+    crate::server::ripper::update_state(
         device,
-        ripper::RipState {
+        crate::server::ripper::RipState {
             disc_present: true,
             disc_name: "Same Title".into(),
             disc_label: "SAME_LABEL".into(),
-            job_id: "unverified-1".into(),
+            job_id: job.into(),
+            disc_identity: identity.into(),
             ..Default::default()
         },
     );
+}
+
+fn shared_cfg(root: &Path) -> std::sync::Arc<std::sync::RwLock<crate::server::config::Config>> {
+    std::sync::Arc::new(std::sync::RwLock::new(crate::server::config::Config {
+        staging_dir: root.to_string_lossy().into_owned(),
+        ..Default::default()
+    }))
+}
+
+#[test]
+fn an_unverified_disc_is_never_offered_another_jobs_capture() {
+    let hash = "0123456789abcdef0123456789abcdef01234567";
+    let root = tempfile::tempdir().unwrap();
+    // An older title-named capture of the same title/label, identity-bearing or not.
+    let legacy = root.path().join("Same_Title");
+    std::fs::create_dir(&legacy).unwrap();
+    partial_capture(&legacy, "Same_Title", Some(hash));
+    let job = fresh_unverified_job(root.path()).unwrap();
+    let cfg = shared_cfg(root.path());
+    let device = "job-unverified-resume";
+    seed_job(device, &job, "");
     let offered = super::super::resumable_for_device(&cfg, device);
-    ripper::STATE.lock().unwrap().remove(device);
+    let remux = super::super::find_resumable_for_disc(&cfg, device);
+    crate::server::ripper::STATE.lock().unwrap().remove(device);
     assert_eq!(offered, None);
+    assert!(remux.is_none());
+}
+
+#[test]
+fn two_boxset_discs_with_one_title_get_two_jobs() {
+    let one = "1111111111111111111111111111111111111111";
+    let two = "2222222222222222222222222222222222222222";
+    let root = tempfile::tempdir().unwrap();
+    // Disc one is mid-rip in a 1.8.3 title-named dir.
+    let legacy = root.path().join("Boxset_Movie");
+    std::fs::create_dir(&legacy).unwrap();
+    partial_capture(&legacy, "Boxset_Movie", Some(one));
+    let job_one = locate(root.path(), one).unwrap();
+    let job_two = locate(root.path(), two).unwrap();
+    assert_eq!(job_one, "Boxset_Movie");
+    assert_eq!(job_two, format!("disc-{two}"));
+    let cfg = shared_cfg(root.path());
+    let device = "job-boxset-disc-two";
+    seed_job(device, &job_two, two);
+    let offered = super::super::resumable_for_device(&cfg, device);
+    crate::server::ripper::STATE.lock().unwrap().remove(device);
+    assert_eq!(
+        offered, None,
+        "disc two is never offered disc one's capture"
+    );
+}
+
+#[test]
+fn a_1_8_3_title_named_partial_still_resumes() {
+    let hash = "0123456789abcdef0123456789abcdef01234567";
+    let root = tempfile::tempdir().unwrap();
+    // 1.8.3 layout: title-named dir, no state.json identity, AACS hash in the map.
+    let legacy = root.path().join("Old_Movie");
+    std::fs::create_dir(&legacy).unwrap();
+    partial_capture(&legacy, "Old_Movie", Some(hash));
+    std::fs::write(legacy.join(staging::DISC_LABEL_FILE), b"OLD_MOVIE").unwrap();
+    let job = locate(root.path(), hash).unwrap();
+    assert_eq!(job, "Old_Movie", "adopted in place, never renamed");
+    let cfg = shared_cfg(root.path());
+    let device = "job-legacy-resume";
+    seed_job(device, &job, hash);
+    let offered = super::super::resumable_for_device(&cfg, device);
+    crate::server::ripper::STATE.lock().unwrap().remove(device);
+    assert_eq!(offered, Some(crate::server::ripper::Resumable::Sweep));
+    // The first capture stamps the identity; the job is identity-keyed from then on.
+    staging::begin_capture(&legacy, 0, hash).unwrap();
+    assert_eq!(staging::read_state(&legacy).unwrap().disc_identity, hash);
+    assert_eq!(locate(root.path(), hash).unwrap(), "Old_Movie");
 }
 
 #[test]
@@ -419,4 +474,51 @@ fn a_capture_that_returns_before_its_sweep_stays_locatable() {
     let other = "fedcba9876543210fedcba9876543210fedcba98";
     assert!(staging::begin_capture(&dir, 0, other).is_err());
     assert_eq!(staging::read_state(&dir).unwrap().disc_identity, identity);
+}
+
+#[test]
+fn a_disc_whose_identity_was_not_resolved_has_no_staging_job() {
+    use crate::server::{config::Config, ripper};
+    use std::sync::{Arc, RwLock};
+    let root = tempfile::tempdir().unwrap();
+    let title_dir = root.path().join("Same_Title");
+    std::fs::create_dir(&title_dir).unwrap();
+    partial_capture(&title_dir, "Same_Title", None);
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: root.path().to_string_lossy().into_owned(),
+        ..Default::default()
+    }));
+    // Location refused (duplicate hold): the card keeps its title, no job.
+    let device = "job-unresolved-identity";
+    ripper::update_state(
+        device,
+        ripper::RipState {
+            disc_present: true,
+            disc_name: "Same Title".into(),
+            disc_label: "SAME_LABEL".into(),
+            ..Default::default()
+        },
+    );
+    let offered = super::super::resumable_for_device(&cfg, device);
+    let remux = super::super::find_resumable_for_disc(&cfg, device);
+    ripper::STATE.lock().unwrap().remove(device);
+    assert_eq!(offered, None, "a title-named dir is not this disc's job");
+    assert!(remux.is_none());
+}
+
+#[test]
+fn a_scan_that_read_disk_before_a_correction_published_keeps_the_correction() {
+    // Retitle passed its not-scanning check, then the scan read rev 0 from disk
+    // while the correction committed rev 1 and published it to the card.
+    let mut row = crate::server::ripper::RipState {
+        job_id: "job".into(),
+        ..Default::default()
+    };
+    row.publish_user_metadata("job", 1, selection("Cast Away"));
+    row.restore_job_metadata("job", "hash", None, 0);
+    assert_eq!(row.user_metadata, Some(selection("Cast Away")));
+    assert_eq!(row.metadata_revision, 1);
+    // A different job's scan resets it.
+    row.restore_job_metadata("other", "hash2", None, 0);
+    assert!(row.user_metadata.is_none());
 }

@@ -3042,16 +3042,14 @@ fn accept_loss_entry_verdict(dir_exists: bool, is_muxing: bool) -> AcceptLossEnt
 // deliver the existing rip. Writes .accept-loss, clears terminal/abort
 // markers, then re-muxes the EXISTING ISO — fixing the exhaust->.failed loop.
 fn handle_accept_loss(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &str) {
-    // Resolve via the one naming rule, not the title alone: with a boxset
-    // in the drive, Accept must arm the marker on THIS disc's dir, not a
-    // sibling disc that happens to share its title.
+    // The scan's staging job, never the title: a boxset sibling shares it.
     let staging = {
         let c = match cfg.read() {
             Ok(c) => c,
             Err(e) => e.into_inner(),
         };
-        match ripper::staging_basename_for_device(&c, device) {
-            Some(base) => c.staging_device_dir(&base),
+        match ripper::staging_job_for_device(device) {
+            Some(job) => c.staging_device_dir(&job),
             None => {
                 drop(c);
                 json_response(
