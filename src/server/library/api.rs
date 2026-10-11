@@ -318,23 +318,9 @@ pub fn handle(
             if let Some(remux_stage) = crate::server::health::remux_stage_dir()
                 && remux_stage != root
             {
-                let targets: Vec<PathBuf> = lib
-                    .queue
-                    .snapshot()
-                    .jobs
-                    .iter()
-                    .filter(|j| j.staged.is_some())
-                    .map(|j| j.target.clone())
-                    .collect();
-                for target in targets {
-                    match discard_kept(&lib, &target, Some(&remux_stage)) {
-                        Ok(()) => discarded += 1,
-                        Err((_, msg)) => {
-                            failed += 1;
-                            tracing::warn!(target = %target.display(), error = %msg, "legacy remux staging file was not cleared");
-                        }
-                    }
-                }
+                let (gone, kept) = clear_kept_remuxes(&lib, &remux_stage);
+                discarded += gone;
+                failed += kept;
             }
             // 1.8.3 folders no disc can match again are listed for the operator, never deleted.
             let legacy = crate::server::ripper::staging::unmatchable_legacy_jobs(&root);
@@ -403,6 +389,30 @@ pub fn handle(
 // Clear staging deletes only what holds nothing undelivered; staging owns the rule.
 fn clear_idle_staging(root: &std::path::Path) -> (usize, usize) {
     crate::server::ripper::staging::clear_abandoned_staging(root)
+}
+
+// Delete the finished remuxes kept for Library jobs that failed or finished; one still
+// queued to be copied in is not abandoned. Returns how many went and how many could not.
+fn clear_kept_remuxes(lib: &Library, stage: &std::path::Path) -> (usize, usize) {
+    let targets: Vec<PathBuf> = lib
+        .queue
+        .snapshot()
+        .jobs
+        .iter()
+        .filter(|j| j.staged.is_some() && matches!(j.state, JobState::Failed | JobState::Done))
+        .map(|j| j.target.clone())
+        .collect();
+    let (mut discarded, mut failed) = (0, 0);
+    for target in targets {
+        match discard_kept(lib, &target, Some(stage)) {
+            Ok(()) => discarded += 1,
+            Err((_, msg)) => {
+                failed += 1;
+                tracing::warn!(target = %target.display(), error = %msg, "kept remux was not cleared");
+            }
+        }
+    }
+    (discarded, failed)
 }
 
 // Delete the finished file kept for `target`. Only a kept pair directly in the staging folder

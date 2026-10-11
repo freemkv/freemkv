@@ -49,8 +49,10 @@ async function requestReboot(call) {
   return before || {boot: r.boot};
 }
 
-// What Clear staging removes, as `clear_if_abandoned` decides it.
-const CLEAR_STAGING_NOTE = 'Removes failed rips (including their saved disc images), stopped captures of discs whose identity could not be verified (no rip can resume them, even when their match was corrected) and empty leftover entries. Anything else ripping, muxing, held for review, resumable, corrected or not yet delivered is kept.';
+// What Clear staging removes: the rips `clear_if_abandoned` takes, and the kept remuxes of
+// failed Library jobs (`clear_kept_remuxes`).
+const CLEAR_STAGING_NOTE = 'Removes failed rips (including their saved disc images), stopped captures of discs whose identity could not be verified (no rip can resume them, even when their match was corrected), empty leftover entries, and finished remuxes kept on local staging whose Library job failed. Anything else ripping, muxing, held for review, resumable, corrected or not yet delivered is kept, including a kept remux still queued to be copied in.';
+const CLEAR_STAGING_CONFIRM = 'Confirm: remove failed and unverified stopped rips, and kept remuxes of failed jobs';
 
 // The toast for Clear staging: what was removed and, as a warning, what could not be.
 function stagedClearToast(r) {
@@ -156,6 +158,6 @@ export default {
         if (r.legacy && r.legacy.length) toast(staleLegacyNote(r.legacy), 'warn');
         load();
       }
-    }, 'Confirm: remove failed and unverified stopped rips'));
+    }, CLEAR_STAGING_CONFIRM));
   },
 };
