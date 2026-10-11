@@ -2133,6 +2133,7 @@ pub fn resume_or_quarantine_staging(staging_dir: &str) -> Vec<StagingResumeHint>
             }
         };
         let path = entry.path();
+        surface_interrupted_reset(&path, finish_interrupted_reset(&path));
         let Some(snap) = snapshot_staging_disc(&path) else {
             continue;
         };
@@ -2421,6 +2422,11 @@ pub(crate) fn clear_abandoned_staging(root: &Path) -> (usize, usize) {
         let Ok(_idle) = lease.try_lock() else {
             continue;
         };
+        surface_interrupted_reset(&dir, finish_interrupted_reset_owned(&dir));
+        if !dir.exists() {
+            removed += 1;
+            continue;
+        }
         match clear_if_abandoned(&dir) {
             Ok(true) => removed += 1,
             Ok(false) => {}
@@ -2611,6 +2617,12 @@ fn reset_capture_with(
     // without the state lock and never blocks a request on a multi-GB unlink.
     drop(state_owner);
     after_prepare()?;
+    complete_reset(dir, fresh, keep)
+}
+
+// The deletion half of a Start over whose state is already marked `reset_in_progress`.
+// The caller owns the job lease; the state lock is taken only for the final write.
+fn complete_reset(dir: &Path, mut fresh: DiscState, keep: bool) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_name() == STATE_FILE {
@@ -2623,12 +2635,52 @@ fn reset_capture_with(
         }
     }
     fresh.reset_in_progress = false;
+    let lock = state_lock(dir);
     let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     if keep {
         write_state_unlocked(dir, &fresh)
     } else {
         std::fs::remove_file(state_path(dir))?;
         std::fs::remove_dir(dir)
+    }
+}
+
+/// Finish a Start over interrupted after it marked the job (restart, crash, an unlink
+/// error): delete the old capture artifacts and clear the mark. A live reset holds the
+/// job lease and is left alone. Returns whether one was finished.
+pub(crate) fn finish_interrupted_reset(dir: &Path) -> io::Result<bool> {
+    let lease = job_lease(dir);
+    let Ok(_owner) = lease.try_lock() else {
+        return Ok(false);
+    };
+    finish_interrupted_reset_owned(dir)
+}
+
+// [`finish_interrupted_reset`] for a caller that already owns the job lease.
+fn finish_interrupted_reset_owned(dir: &Path) -> io::Result<bool> {
+    let st = match read_state_checked(dir) {
+        StateRead::Valid(st) if st.reset_in_progress => *st,
+        _ => return Ok(false),
+    };
+    let keep = !st.disc_identity.is_empty() || st.user_metadata.is_some() || !st.title.is_empty();
+    complete_reset(dir, st, keep)?;
+    Ok(true)
+}
+
+// Finish an interrupted Start over found while walking staging, and say so: a failure
+// raises a card (the job stays hidden until it is finished), a success a syslog line.
+fn surface_interrupted_reset(dir: &Path, finished: io::Result<bool>) {
+    match finished {
+        Ok(true) => crate::server::log::syslog(&format!(
+            "Finished an interrupted Start over: {}",
+            dir.display()
+        )),
+        Ok(false) => {}
+        Err(e) => crate::server::muxer::record_error(
+            &dir.to_string_lossy(),
+            &format!("an interrupted Start over could not finish deleting the old capture: {e}"),
+            "fix the staging share (permissions, a busy or stale file), then restart the server or choose Start over on this disc",
+        ),
     }
 }
 

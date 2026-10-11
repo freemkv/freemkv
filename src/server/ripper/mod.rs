@@ -2257,6 +2257,13 @@ fn disc_staging_hold(
         }
         Err(_) => return Some(StagingHold::Unreadable),
     }
+    // A Start over interrupted by a restart is finished here, not reported as unreadable.
+    if let Err(e) = staging::finish_interrupted_reset(&dir) {
+        crate::server::log::device_log(
+            device,
+            &format!("An interrupted Start over could not finish deleting the old capture: {e}"),
+        );
+    }
     let snap = match staging::snapshot_staging_disc(&dir) {
         Some(s) if !s.had_entry_error && s.state_unreadable.is_none() => s,
         _ => return Some(StagingHold::Unreadable),

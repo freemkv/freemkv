@@ -2312,3 +2312,50 @@ fn state_json_media_type_round_trips_old_values() {
     st.media_type = MediaKind::Tv;
     assert_eq!(serde_json::to_value(&st).unwrap()["media_type"], "tv");
 }
+
+// A Start over interrupted by a restart is finished at startup (and by Clear staging or a
+// drive's access), instead of leaving the job invisible to every guard and the mux queue.
+#[test]
+fn startup_finishes_an_interrupted_start_over() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("disc-abc");
+    fs::create_dir(&dir).unwrap();
+    let mut old = DiscState::new(StagingState::Stopped);
+    old.disc_identity = "abc".into();
+    old.title = "Heat".into();
+    try_write_state(&dir, &old).unwrap();
+    fs::write(dir.join("Heat.iso"), b"old capture").unwrap();
+    fs::write(dir.join("Heat.iso.mapfile"), b"old map").unwrap();
+    {
+        let lease = job_lease(&dir);
+        let _owner = lease.lock().unwrap();
+        assert!(reset_capture_with(&dir, "abc", || Err(io::Error::other("restart"))).is_err());
+    }
+    assert!(snapshot_staging_disc(&dir).is_none());
+    resume_or_quarantine_staging(&root.path().to_string_lossy());
+    let st = read_state(&dir).unwrap();
+    assert!(
+        !st.reset_in_progress,
+        "the interrupted reset was left pending"
+    );
+    assert_eq!(st.disc_identity, "abc");
+    assert_eq!(st.title, "Heat");
+    assert!(!dir.join("Heat.iso").exists());
+    assert!(!dir.join("Heat.iso.mapfile").exists());
+    assert!(snapshot_staging_disc(&dir).is_some());
+}
+
+#[test]
+fn a_live_start_over_is_not_finished_by_another_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.reset_in_progress = true;
+    st.disc_identity = "abc".into();
+    try_write_state(dir.path(), &DiscState::new(StagingState::Stopped)).unwrap();
+    mutate_state(dir.path(), StagingState::Stopped, |s| *s = st.clone()).unwrap();
+    fs::write(dir.path().join("Heat.iso"), b"capture").unwrap();
+    let lease = job_lease(dir.path());
+    let _resetting = lease.lock().unwrap();
+    assert!(!finish_interrupted_reset(dir.path()).unwrap());
+    assert!(dir.path().join("Heat.iso").exists());
+}
