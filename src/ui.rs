@@ -1427,6 +1427,29 @@ pub fn needs_rip_confirmation(running: bool, already_confirmed: bool) -> bool {
     running && !already_confirmed
 }
 
+// A key-service URL check's outcome as a log line: a rejection is a Notice.
+fn keyserver_check_line(url: &str, r: Result<(), String>) -> (LogKind, String) {
+    use crate::strings::fmt_or;
+    match r {
+        Ok(()) => (
+            LogKind::Result,
+            fmt_or(
+                "gui.log.keyserver_valid",
+                "Key service URL is valid: {url}",
+                &[("url", url)],
+            ),
+        ),
+        Err(e) => (
+            LogKind::Notice,
+            fmt_or(
+                "gui.log.keyserver_rejected",
+                "Key service URL rejected: {e}",
+                &[("e", &e)],
+            ),
+        ),
+    }
+}
+
 /// A keydb worker's outcome as a log line: a failure is a Notice, never the
 /// success style, and a panic's payload (it can quote keydb bytes) is dropped.
 pub fn keydb_update_line(r: std::thread::Result<Result<String, String>>) -> (LogKind, String) {
@@ -2071,6 +2094,31 @@ const PRESENCE: fn(&str) -> Option<bool> = crate::engine::disc_present;
 #[cfg(test)]
 const PRESENCE: fn(&str) -> Option<bool> = tests::no_drive_presence;
 
+/// The key-service URL check with its DNS guard. Unit tests resolve nothing.
+const KEYSERVER_CHECK: fn(&str) -> Result<(), String> = if cfg!(test) {
+    |_| Ok(())
+} else {
+    freemkv_keysources::validate_keyserver_url
+};
+
+// Run `job` on a named worker thread; its answer arrives on the returned channel.
+fn spawn_worker<T: Send + 'static>(
+    name: &str,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<std::sync::mpsc::Receiver<T>> {
+    #[cfg(test)]
+    if tests::SPAWN_FAILS.with(|f| f.get()) {
+        return Err(std::io::Error::other("no threads in this test"));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _ = tx.send(job());
+        })?;
+    Ok(rx)
+}
+
 /// Writes Settings to disk. Unit tests write nothing: they share one settings file.
 const SAVE_SETTINGS: fn(&Settings) -> Result<(), String> = if cfg!(test) {
     |_| Ok(())
@@ -2203,6 +2251,16 @@ pub struct App {
     /// Settings ▸ Keys note: the keydb update's progress or verdict.
     keydb_note: Option<String>,
     keyserver_verdict: Option<String>,
+    /// A key-service URL check in flight (it resolves the host): its verdict.
+    keyserver_check: Option<std::sync::mpsc::Receiver<(LogKind, String)>>,
+    /// The full key-service URL check the worker runs — a seam so tests never resolve DNS.
+    keyserver_fn: fn(&str) -> Result<(), String>,
+    /// A Settings write in flight, and whether its success is reported.
+    saving: Option<(std::sync::mpsc::Receiver<Result<(), String>>, bool)>,
+    /// Another write of the latest settings after the one in flight (and whether reported).
+    save_queued: Option<bool>,
+    /// The last Settings write failed: committing the form again retries it.
+    settings_unsaved: bool,
     /// The operator chose "Stop & Quit": the close that follows is not asked again.
     quit_confirmed: bool,
     /// The Settings write — a seam so tests never touch the shared settings file.
@@ -2414,6 +2472,11 @@ impl App {
             keydb_fn: crate::settings::update_keydb,
             keydb_note: None,
             keyserver_verdict: None,
+            keyserver_check: None,
+            keyserver_fn: KEYSERVER_CHECK,
+            saving: None,
+            save_queued: None,
+            settings_unsaved: false,
             quit_confirmed: false,
             save_fn: SAVE_SETTINGS,
             reported_bad: 0,
@@ -2579,10 +2642,7 @@ impl App {
             }
             Cmd::CommitSettings(edited) => self.commit_form(*edited),
             Cmd::UpdateKeydb { url, path } => self.update_keydb(url, path),
-            Cmd::TestKeyserver(url) => {
-                self.test_keyserver(&url);
-                vec![Effect::Redraw]
-            }
+            Cmd::TestKeyserver(url) => self.test_keyserver(&url),
             Cmd::About => vec![Effect::ShowAbout],
             Cmd::Docs => vec![Effect::OpenUrl("https://freemkv.org/docs".into())],
             Cmd::CheckUpdates => {
@@ -2619,6 +2679,7 @@ impl App {
             }
             Cmd::Quit => {
                 self.stop_opens();
+                self.flush_settings();
                 vec![Effect::Quit]
             }
             Cmd::QuitRequested => {
@@ -2626,6 +2687,7 @@ impl App {
                     return vec![Effect::ConfirmQuit];
                 }
                 self.stop_opens();
+                self.flush_settings();
                 vec![Effect::Quit]
             }
         }
@@ -2640,6 +2702,7 @@ impl App {
         if let Some(run) = self.run.clone() {
             crate::engine::await_worker_exit(&run, crate::engine::QUIT_GRACE);
         }
+        self.flush_settings();
     }
 
     /// What the shell fills the Settings form from and reads it back onto.
@@ -2647,18 +2710,20 @@ impl App {
         &self.settings_form
     }
 
-    // Apply a committed form: unchanged is silent; otherwise merge (see
-    // `commit_settings`), follow a new default folder, save and report.
+    // Apply a committed form: unchanged is silent (unless the last write failed, which a
+    // commit retries); otherwise merge (see `commit_settings`), follow a new default folder,
+    // save and report. A commit whose only edit was refused writes and reports nothing.
     fn commit_form(&mut self, edited: Settings) -> Vec<Effect> {
         let before = self.settings_form.clone();
-        if edited == before {
+        if edited == before && !self.settings_unsaved {
             return Vec::new();
         }
         let dest = edited.dest_dir.clone();
         let new_dest = dest != before.dest_dir && !dest.trim().is_empty();
-        // The form base is what the controls hold after validation; the
-        // merge (which keeps bar picks) lives only in `self.settings`.
+        // The form base is what the controls hold after validation (a shell refills a
+        // refused field from it); the merge, which keeps bar picks, lives in `self.settings`.
         let mut read = edited.clone();
+        let prior = self.settings.clone();
         let merged = self.commit_settings(&before, edited);
         read.presentation_language = merged.presentation_language;
         self.settings_form = read;
@@ -2666,11 +2731,44 @@ impl App {
         if new_dest {
             self.output_dir = dest;
         }
-        match (self.save_fn)(&self.settings) {
-            Ok(()) => self.say(
+        if self.settings == prior && !self.settings_unsaved {
+            return vec![Effect::Redraw];
+        }
+        let mut fx = self.save_settings(true);
+        fx.push(Effect::Redraw);
+        fx
+    }
+
+    // Write the settings off the UI thread, one write at a time: a request during a write
+    // queues one more, of the settings as they are then. `announce` reports success.
+    fn save_settings(&mut self, announce: bool) -> Vec<Effect> {
+        if self.saving.is_some() {
+            self.save_queued = Some(self.save_queued.unwrap_or(false) || announce);
+            return vec![Effect::StartTicking];
+        }
+        let (save, settings) = (self.save_fn, self.settings.clone());
+        match spawn_worker("settings-save", move || save(&settings)) {
+            Ok(rx) => {
+                self.saving = Some((rx, announce));
+                vec![Effect::StartTicking]
+            }
+            // No thread to spare: write here rather than lose the change.
+            Err(_) => {
+                let r = (self.save_fn)(&self.settings);
+                self.settings_written(r, announce);
+                Vec::new()
+            }
+        }
+    }
+
+    fn settings_written(&mut self, r: Result<(), String>, announce: bool) {
+        self.settings_unsaved = r.is_err();
+        match r {
+            Ok(()) if announce => self.say(
                 LogKind::Result,
                 &crate::strings::get_or("gui.log.settings_saved", "Settings saved"),
             ),
+            Ok(()) => {}
             Err(e) => self.say(
                 LogKind::Notice,
                 &crate::strings::fmt_or(
@@ -2680,43 +2778,96 @@ impl App {
                 ),
             ),
         }
-        vec![Effect::Redraw]
     }
 
-    // Check a key-service URL by the rule the key layer uses, so the form
-    // cannot accept a URL the engine would later reject.
-    fn test_keyserver(&mut self, url: &str) {
-        use crate::strings::{fmt_or, get_or};
-        let (kind, msg) = if url.trim().is_empty() {
-            (
-                LogKind::Result,
-                get_or("gui.log.no_keyserver", "No key service URL set."),
-            )
-        } else {
-            match freemkv_keysources::validate_keyserver_url(url) {
-                Ok(_) => (
-                    LogKind::Result,
-                    fmt_or(
-                        "gui.log.keyserver_valid",
-                        "Key service URL is valid: {url}",
-                        &[("url", url)],
-                    ),
-                ),
-                Err(e) => (
-                    LogKind::Notice,
-                    fmt_or(
-                        "gui.log.keyserver_rejected",
-                        "Key service URL rejected: {e}",
-                        &[("e", &e.to_string())],
-                    ),
-                ),
+    // Report a finished Settings write, then start the one queued behind it.
+    fn poll_save(&mut self) -> Vec<Effect> {
+        let r = match self.saving.as_ref().map(|(rx, _)| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(r)) => r,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted).to_string())
             }
         };
+        let announce = self.saving.take().is_some_and(|(_, a)| a);
+        self.settings_written(r, announce);
+        let mut fx = vec![Effect::Redraw];
+        if let Some(again) = self.save_queued.take() {
+            fx.extend(self.save_settings(again));
+        }
+        fx
+    }
+
+    // Quitting: wait (briefly) for the write in flight and make the queued one here, so a
+    // choice made just before Quit is not lost with the process.
+    fn flush_settings(&mut self) {
+        if let Some((rx, announce)) = self.saving.take() {
+            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(r) => self.settings_written(r, announce),
+                // Still writing: a second write now would race it on the temp file.
+                Err(_) => return,
+            }
+        }
+        if self.save_queued.take().is_some() {
+            let r = (self.save_fn)(&self.settings);
+            self.settings_written(r, false);
+        }
+    }
+
+    // Check a key-service URL by the rule the key layer uses, so the form cannot accept a
+    // URL the engine would later reject. The host lookup runs off the UI thread.
+    fn test_keyserver(&mut self, url: &str) -> Vec<Effect> {
+        use crate::strings::get_or;
+        if url.trim().is_empty() {
+            let msg = get_or("gui.log.no_keyserver", "No key service URL set.");
+            self.keyserver_verdict_is(LogKind::Result, msg);
+            return vec![Effect::Redraw];
+        }
+        if let Err(r) = freemkv_keysources::check_keyserver_url_static(url) {
+            let verdict = keyserver_check_line(url, Err(r.message));
+            self.keyserver_verdict_is(verdict.0, verdict.1);
+            return vec![Effect::Redraw];
+        }
+        let (check, owned) = (self.keyserver_fn, url.to_owned());
+        match spawn_worker("keyserver-check", move || {
+            keyserver_check_line(&owned, check(&owned))
+        }) {
+            Ok(rx) => {
+                // A later check replaces one still running; its verdict is the one shown.
+                self.keyserver_check = Some(rx);
+                self.keyserver_verdict = None;
+                vec![Effect::Redraw, Effect::StartTicking]
+            }
+            Err(_) => {
+                let verdict = keyserver_check_line(url, (self.keyserver_fn)(url));
+                self.keyserver_verdict_is(verdict.0, verdict.1);
+                vec![Effect::Redraw]
+            }
+        }
+    }
+
+    fn keyserver_verdict_is(&mut self, kind: LogKind, msg: String) {
         self.say(kind, &msg);
         self.keyserver_verdict = Some(msg);
     }
 
-    /// The last key-service check's verdict line, for a shell to show.
+    // Log a finished key-service URL check.
+    fn poll_keyserver(&mut self) -> Vec<Effect> {
+        let (kind, msg) = match self.keyserver_check.as_ref().map(|rx| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(verdict)) => verdict,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => keyserver_check_line(
+                "",
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted).to_string()),
+            ),
+        };
+        self.keyserver_check = None;
+        self.keyserver_verdict_is(kind, msg);
+        vec![Effect::Redraw]
+    }
+
+    /// The last key-service check's verdict line, for a shell to show; `None` while a
+    /// check runs.
     #[allow(dead_code)] // the server bin compiles `ui` without a Settings window
     pub fn keyserver_verdict(&self) -> Option<&str> {
         self.keyserver_verdict.as_deref()
@@ -2750,18 +2901,19 @@ impl App {
             &get_or("gui.log.fetching_keydb", "Fetching keydb …"),
         );
         let fetch = self.keydb_fn;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let spawned = std::thread::Builder::new()
-            .name("keydb-update".into())
-            .spawn(move || {
-                let r =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(&url, &path)));
-                let _ = tx.send(keydb_update_line(r));
-            });
-        if let Err(e) = spawned {
-            self.say(LogKind::Notice, &e.to_string());
+        let spawned = spawn_worker("keydb-update", move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(&url, &path)));
+            keydb_update_line(r)
+        });
+        let Ok(rx) = spawned else {
+            let msg = get_or(
+                "gui.log.keydb_worker_failed",
+                "keydb update failed — internal error",
+            );
+            self.say(LogKind::Notice, &msg);
+            self.keydb_note = Some(msg);
             return vec![Effect::Redraw];
-        }
+        };
         self.keydb_note = Some(get_or(
             "gui.set.keydb_updating",
             "Updating keydb… downloading, please wait.",
@@ -3175,10 +3327,9 @@ impl App {
         })
     }
 
-    // Re-tick for a bar pick and, when "Remember audio and subtitle choices" is
-    // on, record it in Settings and save. Off, the choice stays in `pick_prefs`
-    // only, so a later unrelated Settings save cannot write it out. Title mode
-    // is never remembered: it is disc-driven and may change between discs.
+    // Re-tick for a bar pick; with "Remember audio and subtitle choices" on, also record it
+    // in Settings and save (off, it stays in `pick_prefs`, out of any later save). Title
+    // mode is never remembered: it is disc-driven.
     fn persist_picks(
         &mut self,
         record: impl FnOnce(&mut crate::settings::Settings, &LangPrefs),
@@ -3188,31 +3339,23 @@ impl App {
             return fx;
         }
         record(&mut self.settings, &self.pick_prefs);
-        if let Err(e) = (self.save_fn)(&self.settings) {
-            self.say(
-                LogKind::Notice,
-                &crate::strings::fmt_or(
-                    "gui.log.settings_save_error",
-                    "Could not save settings: {e}",
-                    &[("e", &e)],
-                ),
-            );
-            fx.push(Effect::Redraw);
-        }
+        fx.extend(self.save_settings(false));
         fx
     }
 
-    /// Apply a committed Settings form. The form was filled in from a copy that
-    /// may predate bar picks, so each remembered-stream field it did not itself
-    /// change (`edited` equal to `before`) keeps the App's current value rather
-    /// than reverting it. Returns the merged settings for the shell to store
-    /// and save.
+    /// Apply a committed Settings form to `self.settings` (no save: `Cmd::CommitSettings`
+    /// saves). The form may predate bar picks, so each remembered-stream field it did not
+    /// change (`edited` equal to `before`) keeps the App's current value. Changed subtitle
+    /// languages end a bar "None"/"Forced only" mode, which no form control shows. Returns
+    /// the merged settings.
     pub fn commit_settings(
         &mut self,
         before: &crate::settings::Settings,
         mut edited: crate::settings::Settings,
     ) -> crate::settings::Settings {
         let cur = &self.settings;
+        let subs_edited = edited.sub_langs != before.sub_langs
+            || edited.forced_sub_langs != before.forced_sub_langs;
         if edited.audio_langs == before.audio_langs {
             edited.audio_langs = cur.audio_langs.clone();
         }
@@ -3223,7 +3366,11 @@ impl App {
             edited.forced_sub_langs = cur.forced_sub_langs.clone();
         }
         if edited.subtitle_mode == before.subtitle_mode {
-            edited.subtitle_mode = cur.subtitle_mode.clone();
+            edited.subtitle_mode = if subs_edited {
+                LangPrefs::default().subtitle_mode().into()
+            } else {
+                cur.subtitle_mode.clone()
+            };
         }
         if !valid_presentation_language(&edited.presentation_language) {
             let tag = std::mem::replace(
@@ -3677,6 +3824,8 @@ impl App {
         probe_fx.extend(self.poll_eject());
         probe_fx.extend(self.poll_update());
         probe_fx.extend(self.poll_keydb());
+        probe_fx.extend(self.poll_keyserver());
+        probe_fx.extend(self.poll_save());
         probe_fx.extend(self.poll_presence());
         if let Some(rx) = &self.opening {
             match rx.try_recv() {
@@ -3712,6 +3861,8 @@ impl App {
                 && self.ejecting.is_none()
                 && self.update_check.is_none()
                 && self.keydb.is_none()
+                && self.keyserver_check.is_none()
+                && self.saving.is_none()
             {
                 // An idle disc keeps the tick for its watch, without a redraw per tick.
                 if self.presence.is_none() && !self.watching_disc() {

@@ -1,5 +1,20 @@
 use super::*;
 
+thread_local! {
+    /// Every `spawn_worker` on this thread fails, as when the process is out of threads.
+    pub(super) static SPAWN_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// Tick until every Settings write and key-service check in flight has answered.
+fn settle_workers(app: &mut App) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.saving.is_some() || app.keyserver_check.is_some() {
+        assert!(std::time::Instant::now() < until, "a worker never answered");
+        app.tick();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 #[test]
 fn free_space_is_measured_off_the_caller_for_the_latest_folder() {
     use std::sync::atomic::AtomicUsize;
@@ -580,11 +595,37 @@ fn the_audio_choice_toggles_languages_and_all_clears_them() {
 
 #[test]
 fn stream_preference_persistence_can_be_disabled() {
-    let mut app = App::new();
+    static SAVES: AtomicUsize = AtomicUsize::new(0);
+    let mut app = picking(pick_disc());
+    app.save_fn = |_| {
+        SAVES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
     app.settings.persist_stream_preferences = false;
-    let before = app.log.len();
-    app.pick_audio(None);
-    assert_eq!(app.log.len(), before);
+    app.pick_audio(Some("deu"));
+    settle_workers(&mut app);
+    assert!(
+        app.settings.audio_langs.is_empty(),
+        "the pick reached Settings"
+    );
+    assert_eq!(SAVES.load(Ordering::SeqCst), 0, "a pick was written");
+    assert_eq!(app.pick_prefs.audio, vec!["deu".to_string()]);
+}
+
+// #19: a remembered bar pick is written off the UI thread, not in the click.
+#[test]
+fn a_remembered_pick_is_saved_off_the_ui_thread() {
+    static WRITER: Mutex<Option<String>> = Mutex::new(None);
+    let mut app = picking(pick_disc());
+    app.save_fn = |_| {
+        *WRITER.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+        Ok(())
+    };
+    let fx = app.pick_audio(Some("deu"));
+    assert!(fx.contains(&Effect::StartTicking), "{fx:?}");
+    settle_workers(&mut app);
+    assert_eq!(WRITER.lock().unwrap().as_deref(), Some("settings-save"));
+    assert_eq!(app.settings.audio_langs, "deu");
 }
 
 #[test]
@@ -2975,7 +3016,8 @@ fn a_settings_commit_saves_and_follows_only_a_new_default_folder() {
     let mut form = opened_form(&mut app);
     form.filename_template = "{title}".into();
     let fx = app.dispatch(Cmd::CommitSettings(Box::new(form.clone())));
-    assert_eq!(fx, vec![Effect::Redraw]);
+    assert_eq!(fx, vec![Effect::StartTicking, Effect::Redraw]);
+    settle_workers(&mut app);
     assert_eq!(app.settings.filename_template, "{title}");
     assert_eq!(
         app.output_dir, "/one-off",
@@ -3142,6 +3184,7 @@ fn a_failed_settings_save_is_reported_as_a_notice() {
     let mut form = opened_form(&mut app);
     form.filename_template = "{title}".into();
     app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
     let last = app.log.last().cloned();
     assert_eq!(last.as_ref().map(|l| l.kind), Some(LogKind::Notice));
     assert!(last.is_some_and(|l| l.text.contains("disk full")));
@@ -3235,4 +3278,126 @@ fn a_stale_background_preflight_is_rechecked_for_the_current_ticks() {
         !logged(&app, &crate::strings::get("gui.log.ready_rip")),
         "a verdict for titles 8 and 9 is not one for the ticked title"
     );
+}
+
+// A failed write leaves the edit in memory only; committing the same form again (after
+// freeing space) retries the write instead of returning as "unchanged".
+#[test]
+fn a_failed_settings_save_is_retried_by_the_next_commit() {
+    static FULL: AtomicBool = AtomicBool::new(true);
+    static WRITES: AtomicUsize = AtomicUsize::new(0);
+    let mut app = App::new();
+    app.save_fn = |_| {
+        WRITES.fetch_add(1, Ordering::SeqCst);
+        if FULL.load(Ordering::SeqCst) {
+            Err("disk full".into())
+        } else {
+            Ok(())
+        }
+    };
+    let mut form = opened_form(&mut app);
+    form.filename_template = "{title}".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form.clone())));
+    settle_workers(&mut app);
+    FULL.store(false, Ordering::SeqCst);
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
+    assert_eq!(WRITES.load(Ordering::SeqCst), 2, "the retry wrote nothing");
+    let saved = crate::strings::get_or("gui.log.settings_saved", "Settings saved");
+    assert_eq!(app.log.last().map(|l| l.text.clone()), Some(saved));
+    // Saved now: the same form again is the silent no-op.
+    let lines = app.log.len();
+    let form = app.settings_form().clone();
+    assert!(app.dispatch(Cmd::CommitSettings(Box::new(form))).is_empty());
+    assert_eq!(app.log.len(), lines);
+}
+
+// The refused presentation language is the only edit: the refusal is said once, nothing is
+// written, no "Settings saved"; the base keeps the old value for the shell to refill.
+#[test]
+fn a_commit_whose_only_edit_is_refused_saves_and_reports_nothing() {
+    static WRITES: AtomicUsize = AtomicUsize::new(0);
+    let mut app = App::new();
+    app.save_fn = |_| {
+        WRITES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    let mut form = opened_form(&mut app);
+    form.presentation_language = "xx".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
+    let saved = crate::strings::get_or("gui.log.settings_saved", "Settings saved");
+    assert!(!logged(&app, &saved), "a refused edit reported a save");
+    assert_eq!(WRITES.load(Ordering::SeqCst), 0);
+    assert_eq!(app.settings_form().presentation_language, "");
+    let refilled = app.settings_form().clone();
+    let lines = app.log.len();
+    assert!(
+        app.dispatch(Cmd::CommitSettings(Box::new(refilled)))
+            .is_empty()
+    );
+    assert_eq!(app.log.len(), lines);
+}
+
+// No Settings control shows the bar's subtitle mode: subtitle languages set in Settings
+// end a remembered "None", which would else drop them from every rip.
+#[test]
+fn settings_subtitle_languages_end_a_remembered_no_subtitles_mode() {
+    let mut app = App::new();
+    app.settings.subtitle_mode = "none".into();
+    let mut form = opened_form(&mut app);
+    form.sub_langs = "eng".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
+    assert_eq!(app.settings.subtitle_mode, "all");
+    let prefs = LangPrefs::from_settings(&app.settings);
+    assert!(!prefs.no_subtitles && prefs.subtitles == vec!["eng".to_string()]);
+    // An edit elsewhere keeps the mode.
+    app.settings.subtitle_mode = "forced".into();
+    let mut form = opened_form(&mut app);
+    form.filename_template = "{title}".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    assert_eq!(app.settings.subtitle_mode, "forced");
+}
+
+// The key-service check resolves the host: it runs on a worker, and the tick logs it.
+#[test]
+fn the_key_service_check_resolves_off_the_ui_thread() {
+    static CHECKER: Mutex<Option<String>> = Mutex::new(None);
+    let mut app = App::new();
+    app.keyserver_fn = |_| {
+        *CHECKER.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+        Ok(())
+    };
+    let fx = app.dispatch(Cmd::TestKeyserver("https://keys.example/".into()));
+    assert!(fx.contains(&Effect::StartTicking), "{fx:?}");
+    assert_eq!(app.keyserver_verdict(), None, "no verdict while it runs");
+    settle_workers(&mut app);
+    assert_eq!(CHECKER.lock().unwrap().as_deref(), Some("keyserver-check"));
+    assert_eq!(app.log.last().map(|l| l.kind), Some(LogKind::Result));
+    assert!(app.keyserver_verdict().is_some());
+}
+
+// A keydb worker that cannot start says so in the log and in the Keys note, replacing an
+// earlier success there.
+#[test]
+fn a_keydb_worker_that_cannot_start_says_so_in_the_note() {
+    let mut app = App::new();
+    app.keydb_note = Some("keydb updated — 1 entries".into());
+    SPAWN_FAILS.with(|f| f.set(true));
+    app.dispatch(Cmd::UpdateKeydb {
+        url: "https://keys.example/keydb.zip".into(),
+        path: "/k/keydb.cfg".into(),
+    });
+    SPAWN_FAILS.with(|f| f.set(false));
+    let want = crate::strings::get_or(
+        "gui.log.keydb_worker_failed",
+        "keydb update failed — internal error",
+    );
+    assert_eq!(app.view().keydb_note.as_deref(), Some(want.as_str()));
+    assert_eq!(
+        app.log.last().map(|l| (l.kind, l.text.clone())),
+        Some((LogKind::Notice, want))
+    );
+    assert!(app.keydb.is_none() && !app.view().keydb_busy);
 }

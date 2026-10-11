@@ -3526,6 +3526,14 @@ impl Prefs {
             let mut edited = sh.app.borrow().settings_form().clone();
             self.read_form(&mut edited);
             sh.act(Cmd::CommitSettings(Box::new(edited)));
+            // A refused value (an unknown presentation language) shows the kept one again.
+            let base = sh.app.borrow().settings_form().clone();
+            for (k, f) in &self.fields {
+                let kept = base.get(k);
+                if f.text().is_ok_and(|t| t != kept) {
+                    let _ = f.set_text(&kept);
+                }
+            }
         }
         if plan.close {
             self.hide();
