@@ -1659,3 +1659,24 @@ fn a_wrong_title_iso_corrected_to_tv_honours_tv_auto_and_takes_the_shows_name() 
 
 #[path = "worker_retire_tests.rs"]
 mod retire_runs;
+
+// A dead share used to read healthy for the minute its check hung: a folder whose check is
+// out past the health thread's wait reads "checking", and the remux queue waits for it.
+#[test]
+fn a_folder_still_being_checked_holds_new_jobs() {
+    use crate::server::health::tests::{LAST_LOCK, checking_mount, ok_mount, set_mounts};
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_t, lib, dirs) = library_with(&["A"]);
+    lib.index_now(&dirs);
+    lib.enqueue(&dirs, |_| true);
+    let arbiter = Arbiter::new();
+    let ok = |_: &Path| Ok(());
+    set_mounts(vec![checking_mount("Library", &dirs.library)]);
+    assert!(next_job(&lib, &arbiter, &dirs, &ok, 1).is_none());
+    let hold = lib.hold().expect("held");
+    assert_eq!(hold.state, crate::server::health::State::Checking);
+    assert!(hold.message.contains("still checking"), "{}", hold.message);
+    set_mounts(vec![ok_mount("Library", &dirs.library)]);
+    assert!(next_job(&lib, &arbiter, &dirs, &ok, 2).is_some());
+    set_mounts(Vec::new());
+}

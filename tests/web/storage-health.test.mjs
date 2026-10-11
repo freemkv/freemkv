@@ -28,3 +28,11 @@ test('missing folder results do not claim good health', async () => {
   assert.equal(await summary({}), 'checking folders');
   assert.equal(await summary({mounts: [{ok: true}]}), 'every folder answering');
 });
+
+test('a folder still being checked is slow, not failed', async () => {
+  const slow = await summary({mounts: [{ok: true}, {ok: false, state: 'checking'}]});
+  assert.match(slow, /slow to answer/);
+  assert.doesNotMatch(slow, /every folder answering/);
+  const bad = await summary({mounts: [{ok: false, state: 'checking'}, {ok: false, state: 'unresponsive'}]});
+  assert.match(bad, /needs attention/);
+});

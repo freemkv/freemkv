@@ -3561,8 +3561,9 @@ fn check_configured_destinations_gives_up_on_a_hung_root() {
     );
     let roots: Vec<&str> = problems.iter().map(|(r, _)| r.as_str()).collect();
     assert_eq!(roots, [movies.as_str(), tv.as_str()], "{problems:?}");
+    // A wait shorter than the hang bound says so: not answered yet, not "not responding".
     for (_, reason) in &problems {
-        assert!(reason.contains("not responding"), "{reason}");
+        assert!(reason.contains("has not answered yet"), "{reason}");
     }
 }
 
@@ -3582,7 +3583,8 @@ fn validate_destination_root_gives_up_on_a_hung_root() {
         "{:?}",
         started.elapsed()
     );
-    assert!(err.contains("not responding"), "{err}");
+    assert!(err.contains("has not answered yet"), "{err}");
+    assert!(!err.contains("stale network mount"), "{err}");
 }
 
 // The real check still runs through the bounded path: a broken root keeps its own reason.
@@ -3744,6 +3746,7 @@ fn a_move_write_tests_its_root_once() {
     let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
     mkv.extend_from_slice(&[0xAAu8; 1024]);
     std::fs::write(disc_dir.join("Probed Once.mkv"), &mkv).unwrap();
+    let probes = test_hooks::count_preflights(&movie_dir);
     check_and_move(&cfg);
     assert!(
         movie_dir
@@ -3751,5 +3754,5 @@ fn a_move_write_tests_its_root_once() {
             .exists(),
         "moved"
     );
-    assert_eq!(test_hooks::preflights(&movie_dir), 1);
+    assert_eq!(probes.count(), 1);
 }

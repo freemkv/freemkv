@@ -2221,40 +2221,54 @@ fn validate_root_checked(root: &str, checks: &mut RootChecks) -> Result<(), Stri
 }
 
 // The bounded write test of each destination root, run at most once per move attempt.
-#[derive(Default)]
-struct RootChecks(
-    Vec<(
+struct RootChecks {
+    limit: std::time::Duration,
+    probe: fn(&Path) -> std::io::Result<()>,
+    done: Vec<(
         std::path::PathBuf,
         Result<(), crate::server::health::Problem>,
     )>,
-);
+}
+
+impl Default for RootChecks {
+    fn default() -> Self {
+        Self::with(
+            crate::server::health::PREFLIGHT_TIMEOUT,
+            crate::server::health::probe_write,
+        )
+    }
+}
 
 impl RootChecks {
+    // The limit and the probe given (the tests inject a slow one).
+    fn with(limit: std::time::Duration, probe: fn(&Path) -> std::io::Result<()>) -> Self {
+        RootChecks {
+            limit,
+            probe,
+            done: Vec::new(),
+        }
+    }
+
     fn check(&mut self, root: &Path) -> Result<(), crate::server::health::Problem> {
-        if let Some((_, done)) = self.0.iter().find(|(p, _)| p == root) {
+        if let Some((_, done)) = self.done.iter().find(|(p, _)| p == root) {
             return done.clone();
         }
         #[cfg(test)]
         test_hooks::preflighted(root);
-        let result = crate::server::health::preflight("output", root);
-        self.0.push((root.to_path_buf(), result.clone()));
+        let result = crate::server::health::preflight_with("output", root, self.limit, self.probe);
+        self.done.push((root.to_path_buf(), result.clone()));
         result
     }
 }
 
-// `validate_destination_root` with the limit and the probe given (the tests inject a slow one).
+// `validate_destination_root` with the limit and the probe given.
 #[cfg(test)]
-fn validate_destination_root_with<F>(
+fn validate_destination_root_with(
     root: &str,
     limit: std::time::Duration,
-    probe: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
-{
-    root_shape(root)?;
-    crate::server::health::preflight_with("output", Path::new(root), limit, probe)
-        .map_err(|p| root_reason(root, &p))
+    probe: fn(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    validate_root_checked(root, &mut RootChecks::with(limit, probe))
 }
 
 // What needs no I/O: an empty root would write cwd-relative, and a relative root resolves
@@ -2284,6 +2298,12 @@ fn root_reason(root: &str, p: &crate::server::health::Problem) -> String {
         ),
         _ if p.detail == NOT_A_FOLDER => {
             format!("destination root '{root}' exists but is not a directory")
+        }
+        Fault::Unresponsive if p.detail.contains(crate::server::health::STILL_CHECKING) => {
+            format!(
+                "destination root '{root}' has not answered yet: {} (a NAS may be waking its disks)",
+                p.detail
+            )
         }
         Fault::Unresponsive => format!(
             "destination root '{root}' is not responding: {} (a stale network mount?)",
@@ -2686,21 +2706,39 @@ pub(crate) mod test_hooks {
             hook();
         }
     }
-    static PREFLIGHTS: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
-    pub fn preflighted(root: &std::path::Path) {
-        PREFLIGHTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(root.to_path_buf());
+    type Counter = (u64, PathBuf, Arc<AtomicU64>);
+    static PREFLIGHTS: Mutex<Vec<Counter>> = Mutex::new(Vec::new());
+    /// Counts the write tests of roots under its scope until dropped.
+    pub struct Preflights(u64, Arc<AtomicU64>);
+    impl Preflights {
+        pub fn count(&self) -> u64 {
+            self.1.load(Ordering::SeqCst)
+        }
     }
-    /// How many write tests `root` has had.
-    pub fn preflights(root: &std::path::Path) -> usize {
-        PREFLIGHTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .filter(|p| *p == root)
-            .count()
+    impl Drop for Preflights {
+        fn drop(&mut self) {
+            PREFLIGHTS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(id, ..)| *id != self.0);
+        }
+    }
+    pub fn count_preflights(scope: &Path) -> Preflights {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let n = Arc::new(AtomicU64::new(0));
+        PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).push((
+            id,
+            scope.to_path_buf(),
+            n.clone(),
+        ));
+        Preflights(id, n)
+    }
+    pub fn preflighted(root: &Path) {
+        for (_, scope, n) in PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            if root.starts_with(scope) {
+                n.fetch_add(1, Ordering::SeqCst);
+            }
+        }
     }
 }
 
