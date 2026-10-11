@@ -223,6 +223,24 @@ impl Manifest {
         Ok(())
     }
 
+    /// Every destination frozen by the journal of another staging dir under `root`, in
+    /// both its planned and its canonical form. An unreadable journal reserves nothing.
+    pub fn reserved_elsewhere(root: &Path, except: &Path) -> Vec<PathBuf> {
+        let Ok(dirs) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut reserved = Vec::new();
+        for dir in dirs.flatten().map(|e| e.path()).filter(|d| d != except) {
+            if let Ok(Some(journal)) = Self::load(&dir) {
+                for e in journal.entries {
+                    reserved.extend(e.planned.map(PathBuf::from));
+                    reserved.push(e.destination);
+                }
+            }
+        }
+        reserved
+    }
+
     pub fn moves(&self) -> Vec<(PathBuf, String)> {
         self.entries
             .iter()

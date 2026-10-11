@@ -261,3 +261,37 @@ fn a_restored_backoff_is_clamped_to_the_longest_real_one() {
         );
     }
 }
+
+// Disc 1's journal froze `Twin.mkv` but has not published it yet (held, backing off or cut
+// off by a restart). Disc 2 must not freeze the same name: it is filed as `_2`.
+#[test]
+fn a_destination_frozen_by_another_delivery_is_taken() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, first, frozen) = journaled(tmp.path(), "Twin");
+    let first_key = first.to_string_lossy().into_owned();
+    record_error_with(&first_key, "copy to destination failed", "retry", |_| {});
+    hold_for_operator(&first_key);
+    let second = tmp.path().join("staging/Twin disc 2");
+    std::fs::create_dir_all(&second).unwrap();
+    let marker = serde_json::json!({"title": "Twin", "year": 2024, "media_type": "movie"});
+    std::fs::write(second.join(".done"), marker.to_string()).unwrap();
+    std::fs::write(
+        second.join("Twin.mkv"),
+        std::fs::read(first.join("Twin.mkv")).unwrap(),
+    )
+    .unwrap();
+
+    check_and_move(&cfg);
+    let second_row = row(&second.to_string_lossy());
+    clear_error(&first_key);
+    clear_error(&second.to_string_lossy());
+    assert!(
+        !frozen.exists(),
+        "disc 1's frozen name is left to disc 1: {second_row:?}"
+    );
+    assert!(
+        frozen.with_file_name("Twin_2.mkv").exists(),
+        "disc 2 filed beside it: {second_row:?}"
+    );
+}

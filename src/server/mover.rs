@@ -1582,12 +1582,17 @@ fn check_and_move(cfg: &Config) {
         if delivery.is_none() {
             let mut uncertain = None;
             let mut residue = None;
+            // Names another disc's journal froze are taken, published yet or not.
+            let reserved = manifest::Manifest::reserved_elsewhere(Path::new(staging_root), &dir);
             let variant = crate::server::util::disc_variant(|n| {
                 if uncertain.is_some() || residue.is_some() {
                     return false;
                 }
                 for (_, dest) in planned_moves.iter() {
                     let candidate = dest_with_variant(dest, n);
+                    if is_reserved(&candidate, &reserved) {
+                        return false;
+                    }
                     match unowned_dest_claim(&candidate) {
                         DestClaim::Claimable => {}
                         DestClaim::OtherFile => return false,
@@ -2204,6 +2209,19 @@ enum DestClaim {
     /// We could not find out. NOT a licence to try another name — see
     /// [`dest_claim`].
     Unknown,
+}
+
+// Whether `candidate` is one of `reserved`, as planned or through its folder's real path.
+fn is_reserved(candidate: &str, reserved: &[std::path::PathBuf]) -> bool {
+    let path = Path::new(candidate);
+    let canonical = path
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .zip(path.file_name())
+        .map(|(parent, name)| parent.join(name));
+    reserved
+        .iter()
+        .any(|r| r == path || canonical.as_ref() == Some(r))
 }
 
 // A new plan owns no existing files, even when their bytes happen to match.
