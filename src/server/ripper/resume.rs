@@ -681,6 +681,63 @@ fn hold_unreadable_plan(
     reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
 }
 
+// How long a resume waits for another rip, mux or delivery to release its job.
+const LEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+// The outcome of waiting for a job's lease.
+pub(super) enum LeaseWait<'a> {
+    /// Owned; `waited` when another owner held it first (its classification may be stale).
+    Acquired {
+        guard: std::sync::MutexGuard<'a, ()>,
+        waited: bool,
+    },
+    /// Stop or shutdown landed while waiting.
+    Stopped,
+    /// Still held after `max`.
+    Busy,
+}
+
+// Wait up to `max` for `lease`, giving up at once on the device's Stop or shutdown.
+pub(super) fn wait_for_job_lease<'a>(
+    device: &str,
+    lease: &'a std::sync::Mutex<()>,
+    max: std::time::Duration,
+) -> LeaseWait<'a> {
+    let deadline = std::time::Instant::now() + max;
+    let mut waited = false;
+    loop {
+        match lease.try_lock() {
+            Ok(guard) => return LeaseWait::Acquired { guard, waited },
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                return LeaseWait::Acquired {
+                    guard: e.into_inner(),
+                    waited,
+                };
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let stopped = super::device_halt(device).is_some_and(|h| h.is_cancelled())
+            || crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed);
+        if stopped {
+            return LeaseWait::Stopped;
+        }
+        if std::time::Instant::now() >= deadline {
+            return LeaseWait::Busy;
+        }
+        waited = true;
+        std::thread::sleep(libfreemkv::halt::WAIT_SLICE);
+    }
+}
+
+// Whether a job a resume waited for changed lifecycle meanwhile (e.g. the other
+// drive's mux finished it), so the resume's classification no longer holds.
+pub(super) fn changed_while_waiting(
+    before: Option<staging::StagingState>,
+    after: Option<staging::StagingState>,
+) -> bool {
+    before != after
+}
+
 // A plan only the operator can settle (E9086, numbering): hold it in Review with the
 // ISO and outputs kept, so the mux worker stops re-dispatching it until a correction.
 fn hold_plan_for_review(
@@ -945,7 +1002,39 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from(&cfg_read.staging_dir));
     let job_lease = staging::job_lease(&staging_dir);
-    let _job_owner = job_lease.lock().unwrap_or_else(|e| e.into_inner());
+    let lifecycle = || staging::read_state(&staging_dir).map(|s| s.state);
+    let before = lifecycle();
+    let _job_owner = match wait_for_job_lease(device, &job_lease, LEASE_WAIT) {
+        LeaseWait::Acquired { guard, waited } => {
+            if waited && changed_while_waiting(before, lifecycle()) {
+                let msg = "this rip changed while another drive or the mux worker finished with it; nothing was re-muxed".to_string();
+                crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
+                reset_status_after_ripping(device, "idle", &display_name, "", "", Some(msg));
+                return;
+            }
+            guard
+        }
+        LeaseWait::Stopped => {
+            crate::server::log::device_log(
+                device,
+                "Auto-resume stopped while waiting for this disc's staging job; staging preserved.",
+            );
+            reset_status_after_ripping(device, "idle", &display_name, "", "", None);
+            return;
+        }
+        LeaseWait::Busy => {
+            crate::server::log::device_log(device, super::JOB_BUSY_REFUSED);
+            reset_status_after_ripping(
+                device,
+                "error",
+                &display_name,
+                "",
+                "",
+                Some(super::JOB_BUSY_REFUSED.to_string()),
+            );
+            return;
+        }
+    };
 
     // The deliverable plan the rip recorded in `state.json` (movie = 1 output;
     // TV = one per episode). Absent = legacy/movie; present-but-unreadable is
@@ -2489,3 +2578,7 @@ mod planning_label_tests;
 #[cfg(test)]
 #[path = "resume_capture_plan_tests.rs"]
 mod capture_plan_tests;
+
+#[cfg(test)]
+#[path = "resume_lease_wait_tests.rs"]
+mod lease_wait_tests;
