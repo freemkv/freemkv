@@ -1754,41 +1754,11 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
     };
     tracing::info!(device = %device, elapsed_ms = scan_t0.elapsed().as_millis() as u64, "scan: structure done");
 
-    // Verified fingerprints may adopt one capture; unreadable samples get an
-    // isolated namespace and an operator warning, never a synthetic identity.
-    let (identity, job_id, identity_warning) = match jobs::fingerprint(&disc, &mut drive) {
-        Ok(identity) => {
-            match jobs::locate(std::path::Path::new(&cfg_read.staging_dir), &identity) {
-                Ok(job) => (identity, job, None),
-                Err(e) => {
-                    update_state_with(device, |s| {
-                        s.status = "error".into();
-                        s.last_error = e;
-                    });
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
-                hold_for_staging(device, &problem, crate::server::util::epoch_secs(), insert);
-                return;
-            }
-            let job = match jobs::fresh_unverified_job(&cfg_read) {
-                Ok(job) => job,
-                Err(alloc) => {
-                    update_state_with(device, |s| {
-                        s.status = "error".into();
-                        s.last_error = alloc;
-                    });
-                    return;
-                }
-            };
-            let warning = format!(
-                "Disc identity could not be verified ({e}); starting an isolated fresh capture. No existing staging job will be reused."
-            );
-            (String::new(), job, Some(warning))
-        }
+    let fingerprinted = jobs::fingerprint(&disc, &mut drive);
+    let Some((identity, job_id, identity_warning)) =
+        scan_staging_job(device, &cfg_read, fingerprinted, insert)
+    else {
+        return;
     };
     let saved_state = jobs::path(std::path::Path::new(&cfg_read.staging_dir), &job_id)
         .ok()
@@ -1978,6 +1948,62 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
             ..Default::default()
         },
     );
+}
+
+// The scanned disc's (identity, staging job, warning). Verified fingerprints may adopt one
+// capture; unreadable samples get an isolated namespace and a warning, never a synthetic
+// identity. `None` once the drive shows why not; `insert` as for `hold_for_staging`.
+fn scan_staging_job(
+    device: &str,
+    cfg_read: &Config,
+    fingerprinted: Result<String, String>,
+    insert: bool,
+) -> Option<(String, String, Option<String>)> {
+    let staging_problem = || crate::server::config::staging_root_ready(cfg_read).err();
+    match fingerprinted {
+        Ok(identity) => {
+            match jobs::locate(std::path::Path::new(&cfg_read.staging_dir), &identity) {
+                Ok(job) => Some((identity, job, None)),
+                Err(e) => {
+                    // A staging folder that cannot be used is named, not a generic listing error.
+                    if let Some(problem) = staging_problem() {
+                        hold_for_staging(
+                            device,
+                            &problem,
+                            crate::server::util::epoch_secs(),
+                            insert,
+                        );
+                        return None;
+                    }
+                    update_state_with(device, |s| {
+                        s.status = "error".into();
+                        s.last_error = e;
+                    });
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            if let Some(problem) = staging_problem() {
+                hold_for_staging(device, &problem, crate::server::util::epoch_secs(), insert);
+                return None;
+            }
+            let job = match jobs::fresh_unverified_job(cfg_read) {
+                Ok(job) => job,
+                Err(alloc) => {
+                    update_state_with(device, |s| {
+                        s.status = "error".into();
+                        s.last_error = alloc;
+                    });
+                    return None;
+                }
+            };
+            let warning = format!(
+                "Disc identity could not be verified ({e}); starting an isolated fresh capture. No existing staging job will be reused."
+            );
+            Some((String::new(), job, Some(warning)))
+        }
+    }
 }
 
 // ─── Rip ───────────────────────────────────────────────────────────────────
@@ -2432,6 +2458,21 @@ fn hold_for_staging(
         s.status = "error".into();
         s.last_error = text.clone();
     });
+}
+
+// rip_disc_inner's staging check: whether the folder stops this rip, held for an insert
+// and refused for the operator's.
+fn rip_held_for_staging(device: &str, cfg: &Config, operator: bool) -> bool {
+    let Err(problem) = crate::server::config::staging_root_ready(cfg) else {
+        return false;
+    };
+    hold_for_staging(
+        device,
+        &problem,
+        crate::server::util::epoch_secs(),
+        !operator,
+    );
+    true
 }
 
 // The drive's text for a staging folder that cannot be used: its path and the cause.
@@ -3078,13 +3119,7 @@ fn rip_disc_inner(
     // Freeze actual execution mode before a correction can alter the plan. The
     // scan's verified identity lands in the same first write, so an early return
     // never leaves an identity-less job that location refuses for good.
-    if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
-        hold_for_staging(
-            device,
-            &problem,
-            crate::server::util::epoch_secs(),
-            !operator,
-        );
+    if rip_held_for_staging(device, &cfg_read, operator) {
         return;
     }
     let started = if crate::server::health::share_unmounted(&job_path) {
@@ -3408,13 +3443,7 @@ fn rip_disc_inner(
     }
     let staging = cfg_read.staging_device_dir(&job_id);
     // Under an unmounted share the dir would be made on the container's own disk.
-    if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
-        hold_for_staging(
-            device,
-            &problem,
-            crate::server::util::epoch_secs(),
-            !operator,
-        );
+    if rip_held_for_staging(device, &cfg_read, operator) {
         unregister_halt(device);
         return;
     }
@@ -4273,10 +4302,6 @@ fn rip_disc_inner(
                     rip_keys.as_ref().ok(),
                     &reason,
                 );
-                update_state_with(device, |s| {
-                    s.status = "error".into();
-                    s.last_error = reason;
-                });
                 unregister_halt(device);
                 return;
             }
@@ -5341,7 +5366,7 @@ fn hand_off_to_mux_worker(
 
 // Hold a finished capture whose plan only the operator can settle in Review, as a resume
 // holds one (`resume::hold_in_review`), keeping the rip's keys for the remux its correction
-// triggers. A hold that did not land leaves the capture as it was, and its card says so.
+// triggers. A hold that did not land leaves the capture as it was; its card and drive say so.
 fn hold_capture_for_review(
     device: &str,
     staging_path: &std::path::Path,
@@ -5355,11 +5380,17 @@ fn hold_capture_for_review(
         "The saved ISO and plan are retained.",
     );
     let paths = (staging_path, iso, std::path::Path::new(mapfile));
-    if resume::hold_in_review(device, paths, reason, &hint).is_ok()
+    let held = resume::hold_in_review(device, paths, reason, &hint);
+    if held.is_ok()
         && let Some(set) = keys
     {
         crate::server::keysource::hold_rip_keys(iso, set.clone());
     }
+    let status = resume::review_status(reason, &held);
+    update_state_with(device, |s| {
+        s.status = "error".into();
+        s.last_error = status;
+    });
 }
 
 // The sweep damage figures the passes pushed into `device`'s STATE row.

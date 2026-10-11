@@ -1511,8 +1511,14 @@ impl Library {
         for mut job in jobs {
             let selected = self.source_match(&job.iso).map_err(|error| {
                 added += self.queue.add(std::mem::take(&mut plain));
-                added += self.add_matched(std::mem::take(&mut matched));
-                format!("{added} jobs queued; saved source matches unavailable: {error}")
+                let links = match self.add_matched(std::mem::take(&mut matched)) {
+                    Ok(n) => {
+                        added += n;
+                        String::new()
+                    }
+                    Err(why) => format!(" {why}"),
+                };
+                format!("{added} jobs queued; saved source matches unavailable: {error}{links}")
             })?;
             // A match confirmed for an earlier disc filed at this path is not this disc's.
             // One saved after the stamps were read goes in plain; the worker applies it at claim.
@@ -1523,19 +1529,27 @@ impl Library {
             job.replace = false;
             matched.push(job);
         }
+        // Matched rows go first: links that cannot be read refuse the whole request.
+        added += self.add_matched(matched).map_err(|why| {
+            crate::strings::fmt_or(
+                "server.library.nothing_queued",
+                "{reason} Nothing was queued.",
+                &[("reason", &why)],
+            )
+        })?;
         if !plain.is_empty() {
             added += self.queue.add(plain);
         }
-        Ok(added + self.add_matched(matched))
+        Ok(added)
     }
 
     // Queue rows planned from their ISO's saved match, in one write: a linked episode plans
     // only itself; any other row plans the whole disc, once for all of its ISO's rows.
-    fn add_matched(&self, mut rows: Vec<NewJob>) -> usize {
+    fn add_matched(&self, mut rows: Vec<NewJob>) -> Result<usize, String> {
         if rows.is_empty() {
-            return 0;
+            return Ok(0);
         }
-        let links = links::entries(&self.config_dir);
+        let links = worker::links_for_job(&self.config_dir).map_err(|e| e.to_string())?;
         let episode = |j: &NewJob| {
             links
                 .get(&j.target)
@@ -1548,7 +1562,7 @@ impl Library {
             .collect();
         let mut planned = HashSet::new();
         rows.retain(|j| !whole.contains(&j.iso) || (!episode(j) && planned.insert(j.iso.clone())));
-        self.queue.add_fresh(rows, false)
+        Ok(self.queue.add_fresh(rows, false))
     }
 
     /// Per-title log file. The title is reduced to one safe path segment.

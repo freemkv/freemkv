@@ -1122,10 +1122,15 @@ fn a_preflight_waits_one_hang_bound_in_all() {
     );
 }
 
+// The probe sweep's remembered leftovers are process-wide and capped: the tests that fill
+// them run one at a time, so one never drops another's.
+static SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 // A writability probe left behind (its removal failed) is ours to sweep: a later
 // successful preflight removes our stale markers, and nothing else.
 #[test]
 fn leftover_probe_files_are_swept_by_a_later_preflight() {
+    let _g = SWEEP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = tempfile::tempdir().unwrap();
     let dir = t.path();
     let old = std::time::SystemTime::now() - Duration::from_secs(2 * 3600);
@@ -1178,6 +1183,7 @@ fn leftover_probe_files_are_swept_by_a_later_preflight() {
 // swept of stale markers, at most once an hour, and what we remember of ours stays bounded.
 #[test]
 fn markers_that_cannot_be_removed_are_still_swept_and_bounded() {
+    let _g = SWEEP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = tempfile::tempdir().unwrap();
     let dir = t.path();
     let aged = |name: &str| {
@@ -1218,6 +1224,14 @@ fn markers_that_cannot_be_removed_are_still_swept_and_bounded() {
     PROBE_SWEEP.lock().unwrap().last.remove(dir);
     probe_write_with(dir, denied).unwrap();
     eventually("swept again after the hour", || !again.exists());
+    eventually("the last sweep ends", || {
+        !PROBE_SWEEP.lock().unwrap().running.contains(dir)
+    });
+    PROBE_SWEEP
+        .lock()
+        .unwrap()
+        .leftovers
+        .retain(|p| p.parent() != Some(dir));
 }
 
 // The mover's preflight of a watched root is published under that folder's own name, not

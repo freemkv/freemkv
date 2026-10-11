@@ -1501,7 +1501,8 @@ fn a_hand_off_waiting_for_its_job_does_not_take_the_mux_slot() {
         assert!(std::time::Instant::now() < deadline, "the mux never waited");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let slot_taken = crate::server::library::arbiter::ARBITER.rip_active();
+    // Only this test's worker: other tests' rips may hold the process-wide slot.
+    let slot_taken = crate::server::library::arbiter::ARBITER.held_by(worker.thread().id());
     halt.cancel();
     drop(held);
     worker.join().unwrap();
@@ -1558,7 +1559,8 @@ fn the_mux_worker_takes_no_slot_while_a_hand_off_waits_for_its_job() {
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let slot_taken = crate::server::library::arbiter::ARBITER.rip_active();
+    // Only this test's worker: other tests' rips may hold the process-wide slot.
+    let slot_taken = crate::server::library::arbiter::ARBITER.held_by(worker.thread().id());
     halt.cancel();
     drop(held);
     worker.join().unwrap();

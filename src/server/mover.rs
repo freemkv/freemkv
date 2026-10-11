@@ -1999,10 +1999,17 @@ fn check_and_move(cfg: &Config) {
                             "cannot create destination directory {}: {e}",
                             absolute_for_log(&folder.to_string_lossy())
                         ),
-                        &crate::strings::get_or(
-                            "server.mover.folder_create_failed_hint",
-                            "Check that the destination share is mounted and writable: a share that dropped or was remounted since its check refuses this too. It is tried again after 30 s, then 2 min; after that it waits for Retry. Nothing was moved.",
-                        ),
+                        &match delivery {
+                            None => crate::strings::get_or(
+                                "server.mover.folder_create_failed_hint",
+                                "Check that the destination share is mounted and writable: a share that dropped or was remounted since its check refuses this too. It is tried again after 30 s, then 2 min; after that it waits for Retry. Nothing was moved.",
+                            ),
+                            // A journaled delivery remakes its folders only on Retry.
+                            Some(_) => crate::strings::get_or(
+                                "server.mover.folder_recreate_failed_hint",
+                                "Check that the destination share is mounted and writable: a share that dropped or was remounted since its check refuses this too. It waits for Retry to make the folder again. Nothing was moved.",
+                            ),
+                        },
                     );
                     // Not every tick: each pass would make and remove the other folders.
                     if delivery.is_none() {
