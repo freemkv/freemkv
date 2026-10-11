@@ -869,3 +869,36 @@ fn startup_folders_are_created_without_waiting_on_a_hung_mount() {
     let reason = out[1].1.as_ref().unwrap_err();
     assert!(reason.contains("not responding"), "{reason}");
 }
+
+#[test]
+fn boot_does_not_create_a_configured_output_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let mnt = temp.path().join("mnt");
+    std::fs::create_dir_all(&mnt).unwrap();
+    let movies = mnt.join("media/Movies");
+    let cfg = Config {
+        autorip_dir: temp.path().join("cfg").to_string_lossy().into_owned(),
+        staging_dir: temp.path().join("staging").to_string_lossy().into_owned(),
+        output_dir: movies.to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let dirs = boot_dirs(&cfg, false);
+    assert!(!dirs.contains(&cfg.output_dir), "{dirs:?}");
+    let created = ensure_dirs_bounded(dirs, std::time::Duration::from_secs(5), |p| {
+        std::fs::create_dir_all(p)
+    });
+    assert!(created.iter().all(|(_, r)| r.is_ok()), "{created:?}");
+    assert!(!mnt.join("media").exists());
+    assert!(!movies.exists());
+}
+
+#[test]
+fn boot_still_creates_the_relocated_default_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        autorip_dir: temp.path().to_string_lossy().into_owned(),
+        output_dir: temp.path().join("output").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    assert!(boot_dirs(&cfg, true).contains(&cfg.output_dir));
+}
