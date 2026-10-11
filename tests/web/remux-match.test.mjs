@@ -212,3 +212,23 @@ test('a source with no saved match leaves the TV season to the disc labels', asy
   assert.equal(post.payload.media.season, null);
   assert.equal(post.payload.expected_revision, 0);
 });
+
+test('a queue file that cannot be read is not shown as a folder to wait for', async () => {
+  const source = await readFile(new URL('../../src/server/web/assets/remux.js', import.meta.url), 'utf8');
+  const context = vm.createContext({});
+  const module = new vm.SourceTextModule(source + '\nexport { holdLines };', { context });
+  await module.link(async specifier => {
+    const names = [...source.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)]
+      .find(m => m[2] === specifier)[1].split(',').map(s => s.trim());
+    return new vm.SyntheticModule(names, function () {
+      for (const name of names) this.setExport(name, name === 'esc' ? String : name === 'plural' ? (n, w) => n + ' ' + w + 's' : () => {});
+    }, { context });
+  });
+  await module.evaluate();
+  const { holdLines } = module.namespace;
+  const [title, sub] = holdLines({ role: 'queue file', message: 'q.json cannot be read.', hint: 'Nothing runs until it can.' }, 0);
+  assert.equal(title, 'Queue held');
+  assert.equal(sub, 'q.json cannot be read. Nothing runs until it can.');
+  assert.ok(!sub.includes('folder answers'));
+  assert.equal(holdLines({ role: 'output', message: 'Gone.' }, 2)[0], 'Waiting for the output folder');
+});

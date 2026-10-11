@@ -12,6 +12,19 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+// Operator edits of the remux queue; adding jobs refuses through `queue_block`.
+const QUEUE_EDITS: &[&str] = &[
+    "/api/library/queue/remove",
+    "/api/library/queue/stop-all",
+    "/api/library/queue/clear-queued",
+    "/api/library/queue/clear",
+    "/api/library/queue/pause",
+    "/api/library/queue/resume",
+    "/api/library/staged/retry",
+    "/api/library/staged/discard",
+    "/api/library/debug",
+];
+
 fn snapshot(cfg: &Arc<RwLock<Config>>) -> Config {
     cfg.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -79,6 +92,14 @@ pub fn handle(
             &json!({"ok": true, "queued": n, "eligible": eligible}).to_string(),
         )
     };
+    // Loading the queue file replaces the queue: a change made before it loads would be lost.
+    if post
+        && QUEUE_EDITS.contains(&path.as_str())
+        && let Some(why) = lib.queue.unreadable()
+    {
+        err(request, 409, &why);
+        return None;
+    }
     match (get, post, path.as_str()) {
         (true, _, "/api/library") if query_param(&url, "download").is_some() => {
             download(request, &library_json(&lib, &c));

@@ -1701,3 +1701,33 @@ mod failures;
 
 #[path = "worker_low_tests.rs"]
 mod low;
+
+#[cfg(unix)]
+#[test]
+fn kept_files_are_adopted_once_an_unreadable_queue_file_loads() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join(super::super::queue::QUEUE_FILE);
+    std::fs::write(&file, br#"{"schema":2,"next_id":0,"jobs":[]}"#).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        return; // running as a user that ignores modes
+    }
+    let lib = Library::open(t.path(), &t.path().join("logs"));
+    let stage = t.path().join("stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    let now = crate::server::util::epoch_secs();
+    let kept = write_kept(&stage, "A.1", Path::new("/m/A/A.mkv"), &[1; 100], now);
+    let cfg = Config::default();
+    assert!(!sweep_staging_once(&lib, &cfg, Some(&stage), now));
+    assert!(lib.queue.snapshot().jobs.is_empty());
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(sweep_staging_once(&lib, &cfg, Some(&stage), now + 60));
+    let jobs = lib.queue.snapshot().jobs;
+    assert_eq!(
+        jobs.len(),
+        1,
+        "the kept file is adopted once the queue loads"
+    );
+    assert_eq!(jobs[0].staged.as_deref(), Some(kept.as_path()));
+}

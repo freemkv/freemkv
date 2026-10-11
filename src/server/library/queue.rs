@@ -1027,9 +1027,9 @@ impl Queue {
 
     /// Detach the kept file of `target`'s job so it can be deleted: a queued job leaves the
     /// queue, a failed one keeps its failure. `Err(true)` while that job runs, `Err(false)`
-    /// when there is no kept file.
+    /// when there is no kept file (or the queue file could not be loaded).
     pub fn take_staged(&self, target: &Path) -> Result<PathBuf, bool> {
-        self.mutate(|f| {
+        self.mutate_or(Err(false), |f| {
             let pos = f
                 .jobs
                 .iter()
@@ -1205,11 +1205,18 @@ impl Queue {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn mutate<T: Default>(&self, f: impl FnOnce(&mut QueueFile) -> T) -> T {
+        self.mutate_or(T::default(), f)
+    }
+
     // [`Self::mutate`] for a change that may turn out to be none: `f` says whether it changed
     // anything, and nothing is bumped or written when it did not.
-    fn mutate_if<T>(&self, f: impl FnOnce(&mut QueueFile) -> (T, bool)) -> T {
+    fn mutate_if<T: Default>(&self, f: impl FnOnce(&mut QueueFile) -> (T, bool)) -> T {
         let (out, changed) = {
             let mut g = self.lock();
+            if self.is_unreadable() {
+                return T::default();
+            }
             let (out, changed) = f(&mut g);
             if changed {
                 self.generation.fetch_add(1, Ordering::SeqCst);
@@ -1222,9 +1229,14 @@ impl Queue {
         out
     }
 
-    fn mutate<T>(&self, f: impl FnOnce(&mut QueueFile) -> T) -> T {
+    // Nothing changes while the file could not be loaded: loading it replaces the queue, so
+    // a change made meanwhile would be lost. `held` is the answer then.
+    fn mutate_or<T>(&self, held: T, f: impl FnOnce(&mut QueueFile) -> T) -> T {
         let out = {
             let mut g = self.lock();
+            if self.is_unreadable() {
+                return held;
+            }
             let out = f(&mut g);
             self.generation.fetch_add(1, Ordering::SeqCst);
             out

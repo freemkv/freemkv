@@ -24,17 +24,14 @@ pub(crate) fn shutting_down() -> bool {
 /// The worker loop: waits while a rip holds the slot or the queue is paused.
 pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     tracing::info!("library worker starting");
-    // No remux runs yet: the one moment the staging folder may be swept.
-    if let Some(dir) = health::remux_stage_dir() {
-        let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let library = super::dirs(&snapshot).library;
-        housekeep_staging(lib, &dir, &StagingLimits::of(&snapshot, &dir), &library);
-    }
+    let stage = health::remux_stage_dir();
+    let mut swept = false;
     while !shutting_down() {
         let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
         let d = super::dirs(&snapshot);
         let output = |dir: &Path| health::preflight("output", dir);
         let now = crate::server::util::epoch_secs();
+        swept = swept || sweep_staging_once(lib, &snapshot, stage.as_deref(), now);
         let Some((job, epoch)) = next_job(lib, arbiter, &d, &output, now) else {
             crate::server::sleep_unless_shutdown(Duration::from_secs(1));
             continue;
@@ -42,6 +39,19 @@ pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
         run_job(lib, &snapshot, arbiter, epoch, job);
     }
     tracing::info!("library worker stopping");
+}
+
+// Sweep the remux staging folder before the first job: no remux has run yet. It waits for a
+// queue file that could not be loaded, which would otherwise drop the kept files it adopts.
+fn sweep_staging_once(lib: &Library, cfg: &Config, stage: Option<&Path>, now: u64) -> bool {
+    if lib.hold_for_unreadable_queue(now) {
+        return false;
+    }
+    if let Some(dir) = stage {
+        let library = super::dirs(cfg).library;
+        housekeep_staging(lib, dir, &StagingLimits::of(cfg, dir), &library);
+    }
+    true
 }
 
 /// The bounded output-folder check a job must pass before it starts.

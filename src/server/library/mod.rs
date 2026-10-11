@@ -153,10 +153,12 @@ struct Live {
     job_title: String,
 }
 
-/// Why the remux queue holds its next job: a folder it needs failed its check.
+/// Why the remux queue holds its next job: a folder it needs failed its check, or the queue
+/// file could not be loaded.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Hold {
-    /// "output", "source ISO" or "remux staging".
+    /// The folder's role ("output", [`TV_ROLE`], "source ISO", "remux staging"), or
+    /// [`QUEUE_FILE_ROLE`].
     pub role: &'static str,
     pub path: PathBuf,
     pub state: health::State,
@@ -208,6 +210,8 @@ type CaptureInput = (HashMap<PathBuf, links::Link>, PathBuf, Vec<PathBuf>);
 
 /// The role of a separate TV folder among [`folder_views`].
 pub(crate) const TV_ROLE: &str = "TV output";
+/// The hold's role while the queue file could not be loaded; it is a file, not a folder.
+pub(crate) const QUEUE_FILE_ROLE: &str = "queue file";
 
 /// The folders a remux uses: where MKVs land (and TV episodes, when that folder is separate),
 /// where the ISOs are, and the local staging.
@@ -1219,7 +1223,11 @@ impl Library {
     /// new MKV would then land on the local disk under the mountpoint.
     pub fn queue_block(&self, d: &Dirs, creates: bool) -> Option<String> {
         if let Some(why) = self.queue.unreadable() {
-            return Some(format!("{why} Nothing was queued."));
+            return Some(crate::strings::fmt_or(
+                "server.library.nothing_queued",
+                "{reason} Nothing was queued.",
+                &[("reason", &why)],
+            ));
         }
         if let Some(h) = folder_gate(&folder_views(d), false) {
             return Some(format!(
@@ -1294,11 +1302,14 @@ impl Library {
             return false;
         };
         self.set_hold(Some(Hold {
-            role: "config",
+            role: QUEUE_FILE_ROLE,
             path: self.queue.path().to_path_buf(),
             state: health::State::Unhealthy,
             message: why,
-            hint: String::new(),
+            hint: crate::strings::get_or(
+                "server.library.queue_held_hint",
+                "Nothing in the remux queue runs or changes until this file can be read.",
+            ),
             since: now,
             recheck_at: None,
         }));

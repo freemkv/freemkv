@@ -139,6 +139,14 @@ async function changeMatch(row, button) {
   };
 }
 
+// The activity strip's two lines while the queue holds: a folder it waits for, or its own
+// file that could not be read (nothing starts until it can be).
+function holdLines(hold, queued) {
+  if (hold.role === 'queue file') return ['Queue held', esc(hold.message) + ' ' + esc(hold.hint)];
+  return ['Waiting for the ' + esc(hold.role) + ' folder',
+    plural(queued, 'title') + ' queued · ' + esc(hold.message) + ' Starts on its own once the folder answers.'];
+}
+
 function liveText(p) {
   if (!p) return 'starting…';
   if (p.stopping) return 'Stopping — waiting for storage to return';
@@ -416,8 +424,9 @@ export default {
         put($('#now-t', view), 'Remuxing ' + esc(live.title));
         put($('#now-s', view), esc(liveText(live)) + (queued ? ' · ' + queued + ' more queued' : ''));
       } else if (last && last.hold) {
-        put($('#now-t', view), 'Waiting for the ' + esc(last.hold.role) + ' folder');
-        put($('#now-s', view), plural(queued, 'title') + ' queued · ' + esc(last.hold.message) + ' Starts on its own once the folder answers.');
+        const [title, sub] = holdLines(last.hold, queued);
+        put($('#now-t', view), title);
+        put($('#now-s', view), sub);
       } else {
         put($('#now-t', view), 'Waiting to start');
         put($('#now-s', view), plural(queued, 'title') + ' queued · starts when no rip needs the drive');

@@ -632,7 +632,16 @@ fn the_unreadable_queue_hold_clears_once_the_file_reads() {
     let lib = Library::open(&cfg, &t.path().join("logs"));
     let now = crate::server::util::epoch_secs();
     assert!(lib.hold_for_unreadable_queue(now));
-    assert!(lib.hold().is_some());
+    // A file, not a folder to wait for, and nothing is queued over it.
+    let hold = lib.hold().unwrap();
+    assert_eq!(hold.role, QUEUE_FILE_ROLE);
+    assert!(
+        hold.hint.contains("until this file can be read"),
+        "{}",
+        hold.hint
+    );
+    let refused = lib.queue_block(&dirs(&Config::default()), false).unwrap();
+    assert!(refused.ends_with("Nothing was queued."), "{refused}");
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(!lib.hold_for_unreadable_queue(now + 120));
     assert!(lib.hold().is_none());
