@@ -5355,16 +5355,10 @@ fn hold_capture_for_review(
         "The saved ISO and plan are retained.",
     );
     let paths = (staging_path, iso, std::path::Path::new(mapfile));
-    match resume::hold_in_review(device, paths, reason, &hint) {
-        Ok(()) => {
-            if let Some(set) = keys {
-                crate::server::keysource::hold_rip_keys(iso, set.clone());
-            }
-        }
-        Err(e) => crate::server::log::syslog(&format!(
-            "Review hold for {} did not persist: {e}",
-            staging_path.display()
-        )),
+    if resume::hold_in_review(device, paths, reason, &hint).is_ok()
+        && let Some(set) = keys
+    {
+        crate::server::keysource::hold_rip_keys(iso, set.clone());
     }
 }
 
