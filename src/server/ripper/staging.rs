@@ -501,20 +501,30 @@ pub fn write_state(staging_disc_dir: &Path, st: &DiscState) {
 /// the fresh-rip hand-off gating auto-eject on a durable marker) can refuse to
 /// proceed when the write did not land.
 pub fn try_write_state(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
-    try_write_state_inner(staging_disc_dir, st, false)
+    try_write_state_inner(staging_disc_dir, st)
 }
 
-/// Like [`try_write_state`] but drops a title-identity hold instead of
-/// re-asserting it; for the operator's explicit terminal Cancel.
-pub fn try_write_state_abandoning_hold(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
-    try_write_state_inner(staging_disc_dir, st, true)
+/// The operator's terminal Cancel of a held rip: `Failed`, dropping any title-identity
+/// hold. Checked and written under the state lock; `Ok(false)` when it is no longer
+/// held (a concurrent confirmation won), leaving it untouched.
+pub fn cancel_held(dir: &Path) -> io::Result<bool> {
+    let lock = state_lock(dir);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = match read_state_checked(dir) {
+        StateRead::Valid(st) if st.state == StagingState::Review && !st.reset_in_progress => *st,
+        StateRead::Valid(_) | StateRead::Absent => return Ok(false),
+        StateRead::Unreadable(u) => return Err(io::Error::other(u.log_text())),
+    };
+    st.state = StagingState::Failed;
+    st.failure_reason = Some("cancelled by operator".to_string());
+    st.muxing = false;
+    st.title_identity_review = false;
+    apply_user_metadata(&mut st);
+    write_state_unlocked(dir, &st)?;
+    Ok(true)
 }
 
-fn try_write_state_inner(
-    staging_disc_dir: &Path,
-    st: &DiscState,
-    abandon_hold: bool,
-) -> io::Result<()> {
+fn try_write_state_inner(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
     let lock = state_lock(staging_disc_dir);
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut st = st.clone();
@@ -528,7 +538,7 @@ fn try_write_state_inner(
             st.user_metadata = saved.user_metadata;
             st.metadata_revision = saved.metadata_revision;
             st.replan_required = saved.replan_required;
-            st.title_identity_review = saved.title_identity_review && !abandon_hold;
+            st.title_identity_review = saved.title_identity_review;
             if !saved.disc_identity.is_empty() {
                 st.disc_identity = saved.disc_identity;
             }

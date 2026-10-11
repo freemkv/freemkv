@@ -567,3 +567,22 @@ fn unified_proceed_and_retitle_are_left_to_the_correction_path() {
     }
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// Cancel re-checks the hold under the state lock: a confirmation that committed after
+// Cancel's first read (Review -> Ripped for a replan) is not overwritten with Failed.
+#[test]
+fn cancel_after_a_concurrent_confirmation_leaves_the_confirmed_job() {
+    use crate::server::ripper::staging::{StagingState, cancel_held, mutate_state, read_state};
+    let tmp = scratch("cancel-race");
+    let held = tmp.join("Show S05");
+    write_review_state(&held, "tv");
+    mutate_state(&held, StagingState::Review, |s| {
+        s.state = StagingState::Ripped;
+        s.replan_required = true;
+    })
+    .unwrap();
+    assert!(!cancel_held(&held).unwrap());
+    let after = read_state(&held).unwrap();
+    assert_eq!(after.state, StagingState::Ripped);
+    assert_eq!(after.failure_reason, None);
+}
