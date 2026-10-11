@@ -1111,9 +1111,9 @@ fn muxing_marker_stamped_before_marker_read() {
         .find("let verdict = mux_dispatch_verdict(snap.as_ref());")
         .expect("muxer.rs should dispatch on the verdict");
     let end = src[start..]
-        .find("crate::server::ripper::resume::remux_from_ripped_marker(cfg_arc,")
+        .find("mux_marker(cfg_arc, &dir, &marker)")
         .map(|i| start + i)
-        .expect("muxer.rs should dispatch to remux_from_ripped_marker");
+        .expect("muxer.rs should dispatch to mux_marker");
     let region = &src[start..end];
     // The stamp is live code in the Dispatch arm, not another arm or a comment.
     let arm = &region[region
