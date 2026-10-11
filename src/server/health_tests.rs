@@ -1025,8 +1025,8 @@ fn a_round_that_sees_a_stop_does_not_heal() {
     assert!(healed.get(), "a normal round heals");
 }
 
-// One folder whose probe is still out (another caller's) does not hold up starting the
-// others: it reads as not answered, and every other folder is checked within the limit.
+// The health list: one folder whose probe is still out (another caller's) does not hold up
+// the round; it reads as not answered at once, and every other folder is checked.
 #[test]
 fn a_busy_folder_does_not_hold_up_the_rest_of_the_batch() {
     let busy = PathBuf::from("/test/batch-queue-busy");
@@ -1036,22 +1036,53 @@ fn a_busy_folder_does_not_hold_up_the_rest_of_the_batch() {
         let _ = gate.recv();
     });
     let t = Instant::now();
-    // Queued behind the busy folder, the batch would wait out its whole 5 s limit.
-    let out = bounded_each(
-        vec![(busy.clone(), 1), (free.clone(), 2)],
+    // Queued behind the busy folder, the round would wait out its whole 5 s.
+    let out = check_folders(
+        vec![("Movies", busy.clone(), false), ("TV", free.clone(), false)],
         Duration::from_secs(5),
-        |n| n,
+        Duration::from_secs(3600),
     );
     let took = t.elapsed();
     release.send(()).unwrap();
     let _ = running.wait();
-    assert_ne!(
-        out[0],
-        Bounded::Done(1),
-        "the busy folder is not probed twice"
-    );
-    assert_eq!(out[1], Bounded::Done(2), "the free folder is checked");
+    assert!(out[0].is_none(), "the busy folder is not probed twice");
+    assert!(out[1].is_some(), "the free folder is checked");
     assert!(took < Duration::from_millis(2500), "took {took:?}");
+}
+
+// Every other batch (Change match, the Library scan) waits within its limit for another
+// caller's probe of the same folder, without holding up the rest of the batch.
+#[test]
+fn a_batch_waits_within_its_limit_for_a_probe_already_out() {
+    let busy = PathBuf::from("/test/batch-wait-busy");
+    let free = PathBuf::from("/test/batch-wait-free");
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let running = begin(&busy, Duration::from_secs(30), move || {
+        let _ = gate.recv();
+    });
+    let (ran, free_ran) = std::sync::mpsc::channel::<()>();
+    let ran = Mutex::new(ran);
+    let batch = {
+        let (busy, free) = (busy.clone(), free.clone());
+        std::thread::spawn(move || {
+            bounded_each(
+                vec![(busy, 1), (free, 2)],
+                Duration::from_secs(10),
+                move |n| {
+                    if n == 2 {
+                        let _ = ran.lock().unwrap().send(());
+                    }
+                    n
+                },
+            )
+        })
+    };
+    let started_free = free_ran.recv_timeout(Duration::from_secs(5));
+    release.send(()).unwrap();
+    let out = batch.join().unwrap();
+    let _ = running.wait();
+    assert!(started_free.is_ok(), "the free folder waited on the busy one");
+    assert_eq!(out, vec![Bounded::Done(1), Bounded::Done(2)]);
 }
 
 // A preflight waits at most one hang bound in all, from the call: waiting for another

@@ -896,24 +896,29 @@ where
 }
 
 /// Run `f` on every item at once, each bounded by `limit` on its folder, so folders on one
-/// dead mount cost one timeout between them. Results keep the input order.
+/// dead mount cost one timeout between them. An item whose folder another caller is probing
+/// waits for that probe within `limit`, without holding up the rest. Results keep the input
+/// order.
 pub fn bounded_each<I, T, F>(items: Vec<(PathBuf, I)>, limit: Duration, f: F) -> Vec<Bounded<T>>
 where
     I: Send + 'static,
     T: Send + 'static,
     F: Fn(I) -> T + Send + Sync + 'static,
 {
-    bounded_each_with(items, limit, HANG_AFTER, f)
+    bounded_each_with(items, limit, HANG_AFTER, true, f)
         .into_iter()
         .map(|(b, _)| b)
         .collect()
 }
 
 // [`bounded_each`] with the hang bound given; each result with the mount its probe ran on.
+// `queue`: an item whose folder another caller is probing waits for it within `limit`, apart
+// from the rest; otherwise it reads as not answered at once (the health list).
 fn bounded_each_with<I, T, F>(
     items: Vec<(PathBuf, I)>,
     limit: Duration,
     hang_after: Duration,
+    queue: bool,
     f: F,
 ) -> Vec<(Bounded<T>, MountKey)>
 where
@@ -923,13 +928,51 @@ where
 {
     let f = Arc::new(f);
     let deadline = Instant::now() + limit;
-    let started: Vec<_> = items
-        .into_iter()
-        .map(|(key, item)| {
-            let f = f.clone();
-            begin_with(&key, Wait::NoQueue(deadline), hang_after, move || f(item))
+    let wait = if queue {
+        Wait::Until(deadline)
+    } else {
+        Wait::NoQueue(deadline)
+    };
+    let begin = |(key, item): (PathBuf, I)| {
+        let f = f.clone();
+        begin_with(&key, wait, hang_after, move || f(item))
+    };
+    let started: Vec<_> = if queue {
+        let slots: Vec<_> = items.into_iter().map(|i| Mutex::new(Some(i))).collect();
+        let take = |slot: &Mutex<Option<(PathBuf, I)>>| {
+            let item = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            item.map(begin)
+        };
+        std::thread::scope(|s| {
+            let handles: Vec<_> = slots
+                .iter()
+                .map(|slot| {
+                    std::thread::Builder::new()
+                        .name("probe-queue".into())
+                        .spawn_scoped(s, || take(slot))
+                })
+                .collect();
+            slots
+                .iter()
+                .zip(handles)
+                .map(|(slot, h)| {
+                    let begun = match h {
+                        Ok(h) => h.join().ok().flatten(),
+                        // No thread to wait on: start it here instead.
+                        Err(_) => take(slot),
+                    };
+                    begun.unwrap_or_else(|| Pending {
+                        rx: None,
+                        deadline,
+                        hung: false,
+                        mount: key_for(probe_generation(), None),
+                    })
+                })
+                .collect()
         })
-        .collect();
+    } else {
+        items.into_iter().map(begin).collect()
+    };
     started
         .into_iter()
         .map(|p| {
@@ -998,7 +1041,7 @@ fn check_folders(
         .iter()
         .map(|(role, path, w)| (path.clone(), (*role, path.clone(), *w)))
         .collect();
-    let results = bounded_each_with(items, wait, hang_after, |(role, path, w)| {
+    let results = bounded_each_with(items, wait, hang_after, false, |(role, path, w)| {
         let m = check_reporting(role, path, w);
         publish_answer(m.clone());
         m
