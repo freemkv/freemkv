@@ -1589,7 +1589,6 @@ fn episodes_disc() -> Vec<libfreemkv::DiscTitle> {
         title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
             roster: "test-menu".into(),
             title_count: 3,
-            member: index < 2,
             ordinal: (index < 2).then_some(index),
         };
     }
