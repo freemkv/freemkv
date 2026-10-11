@@ -3553,18 +3553,18 @@ fn check_configured_destinations_gives_up_on_a_hung_root() {
         format!("{base}/output"),
     );
     let cfg = cfg_with_dirs(&movies, &tv, &output);
-    let limit = std::time::Duration::from_millis(400);
+    let limit = std::time::Duration::from_secs(1);
     let started = std::time::Instant::now();
     let problems = check_configured_destinations_with(&cfg, limit, |p: &Path| {
         if p.ends_with("movies") || p.ends_with("tv") {
             // A stat that never comes back (until long after the limit).
-            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::thread::sleep(std::time::Duration::from_secs(5));
         }
         Ok(())
     });
     let took = started.elapsed();
     assert!(
-        took < std::time::Duration::from_millis(800),
+        took < std::time::Duration::from_millis(1900),
         "two hung roots must cost one timeout, took {took:?}"
     );
     let roots: Vec<&str> = problems.iter().map(|(r, _)| r.as_str()).collect();

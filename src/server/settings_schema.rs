@@ -430,7 +430,7 @@ impl Field {
             Kind::Text => Ok(Some(json!(text()?))),
             Kind::Language => {
                 let s = text()?;
-                if s.trim().is_empty() || freemkv_engine::is_language_tag(s) {
+                if crate::strings::is_presentation_language(s) {
                     Ok(Some(json!(s)))
                 } else {
                     Err(format!("{key}: '{s}' is not a language"))

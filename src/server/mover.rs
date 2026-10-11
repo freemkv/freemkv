@@ -2499,9 +2499,11 @@ fn absolute_for_log(dest: &str) -> String {
 
 type BeforePublish = std::sync::Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
 
-fn publish_rename(src: &Path, dest: &Path) -> std::io::Result<()> {
+fn publish_rename(src: &Path, dest: &Path, job: &Path) -> std::io::Result<()> {
+    #[cfg(not(test))]
+    let _ = job;
     #[cfg(test)]
-    if test_hooks::force_copy() {
+    if test_hooks::force_copy(job) {
         return Err(std::io::ErrorKind::CrossesDevices.into());
     }
     libfreemkv::io::publish::no_replace(src, dest)
@@ -2532,7 +2534,7 @@ fn move_file(
         );
         return MoveOutcome::Failed;
     }
-    match publish_rename(src, dest) {
+    match publish_rename(src, dest, job) {
         Ok(()) => {
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
@@ -2573,6 +2575,8 @@ fn move_file(
     // at 0%. Post-copy validation runs before unlink; src stays intact on failure.
     let src_owned = src.to_path_buf();
     let dest_owned = dest.to_path_buf();
+    #[cfg(test)]
+    let hook_job = job.to_path_buf();
     let written = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let written_w = std::sync::Arc::clone(&written);
     let flush_halt = libfreemkv::halt::Halt::new();
@@ -2592,7 +2596,7 @@ fn move_file(
                 &|candidate| {
                     check_candidate(&src_owned, &dest_owned, candidate)?;
                     #[cfg(test)]
-                    test_hooks::before_publish();
+                    test_hooks::before_publish(&hook_job);
                     before_publish(candidate)
                 },
                 Some(&worker_activity),
@@ -2614,7 +2618,7 @@ fn move_file(
         halt: &flush_halt,
         progress: on_progress,
         source_size: src_size,
-        stall_window: copy_stall_window(),
+        stall_window: copy_stall_window(job),
         poll_interval: copy_poll_interval(),
     }
     .wait(rx, copy_handle);
@@ -2666,7 +2670,7 @@ fn log_interrupted_delivery(dir: &str) {
 }
 
 #[cfg(not(test))]
-fn copy_stall_window() -> std::time::Duration {
+fn copy_stall_window(_job: &Path) -> std::time::Duration {
     std::time::Duration::from_secs(60)
 }
 #[cfg(not(test))]
@@ -2674,34 +2678,62 @@ fn copy_poll_interval() -> std::time::Duration {
     std::time::Duration::from_millis(250)
 }
 #[cfg(test)]
-fn copy_stall_window() -> std::time::Duration {
-    test_hooks::stall_window()
+fn copy_stall_window(job: &Path) -> std::time::Duration {
+    test_hooks::stall_window(job)
 }
 #[cfg(test)]
 fn copy_poll_interval() -> std::time::Duration {
     std::time::Duration::from_millis(5)
 }
 
-// Test seams: a short stall window and a hook that blocks inside the copy worker.
+// Test seams: a short stall window and a hook that blocks inside the copy worker,
+// scoped to jobs under one path so concurrent tests are not affected.
 #[cfg(test)]
 pub(crate) mod test_hooks {
-    use std::sync::Mutex;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    type Hook = Box<dyn Fn() + Send + Sync>;
-    static WINDOW: Mutex<Duration> = Mutex::new(Duration::from_secs(60));
-    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
-    pub fn force_copy() -> bool {
-        HOOK.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    pub type Hook = Arc<dyn Fn() + Send + Sync>;
+    type Entry = (u64, PathBuf, Duration, Hook);
+    static HOOKS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    /// Removes only the hooks its own `set` installed.
+    pub struct Reset(u64);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HOOKS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(id, ..)| *id != self.0);
+        }
     }
-    pub fn stall_window() -> Duration {
-        *WINDOW.lock().unwrap_or_else(|e| e.into_inner())
+    pub fn set(scope: &Path, window: Duration, hook: Hook) -> Reset {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        HOOKS.lock().unwrap_or_else(|e| e.into_inner()).push((
+            id,
+            scope.to_path_buf(),
+            window,
+            hook,
+        ));
+        Reset(id)
     }
-    pub fn set(window: Duration, hook: Option<Hook>) {
-        *WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = window;
-        *HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+    fn scoped(job: &Path) -> Option<(Duration, Hook)> {
+        HOOKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(_, scope, ..)| job.starts_with(scope))
+            .map(|(_, _, window, hook)| (*window, hook.clone()))
     }
-    pub fn before_publish() {
-        if let Some(hook) = HOOK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+    pub fn force_copy(job: &Path) -> bool {
+        scoped(job).is_some()
+    }
+    pub fn stall_window(job: &Path) -> Duration {
+        scoped(job).map_or(Duration::from_secs(60), |(w, _)| w)
+    }
+    pub fn before_publish(job: &Path) {
+        if let Some((_, hook)) = scoped(job) {
             hook();
         }
     }

@@ -528,11 +528,8 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                 Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
                     i += 1;
                     // Selection keeps title 0 for a tag it cannot match, so refuse it here.
-                    if !freemkv_engine::is_language_tag(v) {
-                        let tag = v.clone();
-                        return Err(render_error(&libfreemkv::Error::StreamLanguageUnknown {
-                            tag,
-                        }));
+                    if v.trim().is_empty() || !strings::is_presentation_language(v) {
+                        return Err(render_error(&strings::presentation_language_unknown(v)));
                     }
                     f.presentation_language = Some(v.clone());
                 }
