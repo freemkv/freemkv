@@ -2476,17 +2476,17 @@ fn ureq_error_kind_surfaces_os_error_detail() {
 // reaching autorip.jsonl and unauthenticated GET /api/debug.
 #[test]
 fn the_keydb_update_handler_masks_its_ureq_error() {
-    let src = crate::server::util::source_lf(include_str!("web.rs"));
+    let src = crate::server::util::source_lf(include_str!("keysource.rs"));
     // Anchored on the DEFINITION, not the name (this test mentions it
     // too). Both ends are `expect`ed — an anchor that stops matching
-    // would otherwise silently widen the slice to other handlers' logs.
+    // would otherwise silently widen the slice to other fns' logs.
     let start = src
-        .find("\nfn handle_update_keydb(request: tiny_http::Request")
-        .expect("handle_update_keydb definition present");
+        .find("\npub fn refresh_keydb(")
+        .expect("refresh_keydb definition present");
     let end = start
         + src[start..]
-            .find("\n    // Write to the service-canonical keydb path")
-            .expect("the handler's post-fetch section still starts here");
+            .find("\n    let body = web::read_capped_keydb_body")
+            .expect("the fetch section still ends here");
     let body = &src[start..end];
     assert!(
         body.contains("ureq_error_kind(&e)"),

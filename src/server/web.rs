@@ -1562,7 +1562,7 @@ pub(crate) const KEYDB_FETCH_TIMEOUT: std::time::Duration = std::time::Duration:
 
 // The /api/update-keydb fetch: guarded agent plus a request-level end-to-end ceiling, which
 // keeps this LAN-facing path at KEYDB_FETCH_TIMEOUT rather than KEYDB_TRANSFER_BUDGET.
-fn keydb_update_call(
+pub(crate) fn keydb_update_call(
     pinned: Vec<SocketAddr>,
     url: &str,
     ceiling: std::time::Duration,
@@ -3230,8 +3230,7 @@ mod dashboard_button_tests;
 #[path = "web_resume_param_tests.rs"]
 mod resume_param_tests;
 
-/// Shared cap for all three KEYDB download paths (startup, daily refresh, web
-/// handler). All paths use `read_capped_keydb_body` so overflow is detected
+/// Cap for the KEYDB download (`keysource::refresh_keydb`), read with `read_capped_keydb_body` so overflow is detected
 /// rather than silently truncating at the cap.
 pub(crate) const KEYDB_MAX_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -3308,73 +3307,8 @@ fn handle_update_keydb(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         return;
     }
 
-    // SSRF guard at fetch time (defence-in-depth on the store-time check):
-    // resolve+validate once, then pin the connection to those IPs so DNS
-    // rebinding can't redirect the fetch between validation and connect.
-    let pinned = match validate_fetch_url(&keydb_url) {
-        Ok(addrs) => addrs,
-        Err(e) => {
-            let msg = serde_json::json!({
-                "ok": false,
-                "error": format!("KEYDB URL rejected: {e}")
-            })
-            .to_string();
-            json_response(request, 400, &msg);
-            return;
-        }
-    };
-    // Cap is the shared KEYDB_MAX_BYTES (100 MiB); read_capped_keydb_body
-    // returns 413 on an oversized body rather than silently truncating.
-    let keydb_cap = KEYDB_MAX_BYTES;
-
-    // Download via ureq (supports HTTPS) then save via libfreemkv
-    let body = match keydb_update_call(pinned, &keydb_url, KEYDB_FETCH_TIMEOUT, STALL_TIMEOUT) {
-        Ok(resp) => match read_capped_keydb_body(resp.into_body().into_reader(), keydb_cap) {
-            Ok(buf) => buf,
-            Err(KeydbReadError::Io) => {
-                json_response(
-                    request,
-                    500,
-                    r#"{"ok":false,"error":"Failed to read response body."}"#,
-                );
-                return;
-            }
-            Err(KeydbReadError::TooLarge) => {
-                json_response(request, 413, &keydb_too_large_body());
-                return;
-            }
-        },
-        Err(ureq::Error::StatusCode(code)) => {
-            let msg = format!(
-                r#"{{"ok":false,"error":"Server returned HTTP {}. Check the URL in Settings."}}"#,
-                code
-            );
-            json_response(request, 502, &msg);
-            return;
-        }
-        Err(e) => {
-            // Do NOT echo the configured KEYDB origin/hostname to the client —
-            // that leaks server config. Keep detail in the log only, through
-            // `ureq_error_kind`, since `ureq::Error`'s Display isn't URL-free.
-            tracing::warn!(
-                origin = %crate::server::webhook::webhook_url_origin(&keydb_url),
-                error_kind = %ureq_error_kind(&e),
-                "keydb update: could not connect to configured KEYDB server"
-            );
-            json_response(
-                request,
-                502,
-                r#"{"ok":false,"error":"Could not connect to the configured KEYDB server. Check the URL in Settings."}"#,
-            );
-            return;
-        }
-    };
-
-    // Write to the service-canonical keydb path, NOT libfreemkv's exe-local
-    // default — otherwise "Update KEYDB" reports success while every AACS
-    // rip keeps failing because the read side looks elsewhere.
-    let saved = crate::server::keysource::save_keydb(cfg, &body);
-    match saved {
+    use crate::server::keysource::KeydbError;
+    match crate::server::keysource::refresh_keydb(cfg, &keydb_url) {
         Ok(result) => {
             let body = serde_json::json!({
                 "ok": true,
@@ -3383,23 +3317,45 @@ fn handle_update_keydb(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
             });
             json_response(request, 200, &body.to_string());
         }
-        Err(e) if e.code() == libfreemkv::error::E_KEYDB_WRITE => {
-            // A write/persist failure is an environment problem (disk full,
-            // permissions on the keys dir) — not invalid content. Surface it
-            // distinctly so the operator fixes the right thing.
-            json_response(
-                request,
-                500,
-                r#"{"ok":false,"error":"Failed to save KEYDB to disk (check space/permissions)"}"#,
-            );
+        Err(KeydbError::UrlRejected(e)) => {
+            let msg = serde_json::json!({
+                "ok": false,
+                "error": format!("KEYDB URL rejected: {e}")
+            })
+            .to_string();
+            json_response(request, 400, &msg);
         }
-        Err(_) => {
-            json_response(
-                request,
-                500,
-                r#"{"ok":false,"error":"Downloaded file is not a valid KEYDB. Check the URL."}"#,
+        Err(KeydbError::Status(code)) => {
+            let msg = format!(
+                r#"{{"ok":false,"error":"Server returned HTTP {}. Check the URL in Settings."}}"#,
+                code
             );
+            json_response(request, 502, &msg);
         }
+        // The configured origin is never echoed to the client; the log has the detail.
+        Err(KeydbError::Connect(_)) => json_response(
+            request,
+            502,
+            r#"{"ok":false,"error":"Could not connect to the configured KEYDB server. Check the URL in Settings."}"#,
+        ),
+        Err(KeydbError::Read) => json_response(
+            request,
+            500,
+            r#"{"ok":false,"error":"Failed to read response body."}"#,
+        ),
+        Err(KeydbError::TooLarge) => json_response(request, 413, &keydb_too_large_body()),
+        // A write failure is an environment problem (disk full, permissions on the keys dir),
+        // not invalid content; say which so the operator fixes the right thing.
+        Err(e) if e.is_write_failure() => json_response(
+            request,
+            500,
+            r#"{"ok":false,"error":"Failed to save KEYDB to disk (check space/permissions)"}"#,
+        ),
+        Err(_) => json_response(
+            request,
+            500,
+            r#"{"ok":false,"error":"Downloaded file is not a valid KEYDB. Check the URL."}"#,
+        ),
     }
 }
 

@@ -421,9 +421,10 @@ fn exit_now(code: i32) {
     std::process::exit(code);
 }
 
-// Fetch KEYDB from `url` through the address guard and save it. `boot` picks the
+// Fetch KEYDB from `url` (`keysource::refresh_keydb`) and log the outcome. `boot` picks the
 // first-boot download's log wording over the daily refresh's.
 fn fetch_keydb(cfg: &std::sync::RwLock<config::Config>, url: &str, boot: bool) {
+    use keysource::KeydbError;
     let (saved, save_failed, too_large, read_failed, fetch_failed) = if boot {
         (
             "KEYDB downloaded",
@@ -441,22 +442,15 @@ fn fetch_keydb(cfg: &std::sync::RwLock<config::Config>, url: &str, boot: bool) {
             "KEYDB update failed",
         )
     };
-    match web::guarded_get(url) {
-        Ok(resp) => {
-            match web::read_capped_keydb_body(resp.into_body().into_reader(), web::KEYDB_MAX_BYTES)
-            {
-                Ok(buf) => match keysource::save_keydb(cfg, &buf) {
-                    Ok(r) => log::syslog(&format!(
-                        "{saved}: {} entries -> {}",
-                        r.entries,
-                        r.path.display()
-                    )),
-                    Err(e) => log::syslog(&format!("{save_failed}: {e}")),
-                },
-                Err(web::KeydbReadError::TooLarge) => log::syslog(too_large),
-                Err(web::KeydbReadError::Io) => log::syslog(read_failed),
-            }
-        }
+    match keysource::refresh_keydb(cfg, url) {
+        Ok(r) => log::syslog(&format!(
+            "{saved}: {} entries -> {}",
+            r.entries,
+            r.path.display()
+        )),
+        Err(KeydbError::Save(e)) => log::syslog(&format!("{save_failed}: {e}")),
+        Err(KeydbError::TooLarge) => log::syslog(too_large),
+        Err(KeydbError::Read) => log::syslog(read_failed),
         Err(e) => log::syslog(&format!(
             "{fetch_failed} for {}: {e}",
             crate::server::webhook::webhook_url_origin(url)

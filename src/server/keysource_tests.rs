@@ -1019,3 +1019,26 @@ fn keydb_path_uses_explicit_config_value() {
     };
     assert_eq!(keydb_path(&cfg), PathBuf::from("/mnt/archive/keydb.cfg"));
 }
+
+#[test]
+fn refresh_keydb_reports_each_failure_by_cause() {
+    use std::io::{Read, Write};
+    let cfg = std::sync::RwLock::new(Config::default());
+    assert!(matches!(
+        refresh_keydb(&cfg, "ftp://example.com/k"),
+        Err(KeydbError::UrlRejected(_))
+    ));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf);
+        let _ = sock
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    });
+    let err = refresh_keydb(&cfg, &format!("http://127.0.0.1:{port}/k")).unwrap_err();
+    upstream.join().unwrap();
+    assert!(matches!(err, KeydbError::Status(404)), "{err:?}");
+    assert!(!err.is_write_failure());
+}
