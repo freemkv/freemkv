@@ -119,37 +119,61 @@ fn sample_fingerprint(
 /// Adopt one existing matching job in place. Multiple matches are a hold,
 /// never permission to pick arbitrarily or delete another partial capture.
 pub(super) fn locate(root: &Path, identity: &str) -> Result<String, String> {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    // The retrying listing: a cold NFS cache can list an existing job as absent.
+    let names = match super::list_staging_basenames(root) {
+        Some(names) => names,
+        None if std::fs::symlink_metadata(root)
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
             return Ok(format!("disc-{identity}"));
         }
-        Err(e) => return Err(format!("cannot inspect staging: {e}")),
+        None => {
+            return Err("cannot inspect staging: the staging folder could not be listed".into());
+        }
     };
     let mut found = None;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("cannot inspect staging entry: {e}"))?;
-        if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+    for name in names {
+        let dir = root.join(&name);
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
             continue;
         }
-        if dir_matches_identity(&entry.path(), identity) {
+        if dir_matches_identity(&dir, identity) {
             if found.is_some() {
                 return Err("more than one staging entry matches this disc; keep both and resolve the duplicate before continuing".into());
             }
-            found = Some(entry.file_name().to_string_lossy().into_owned());
+            found = Some(name);
         }
     }
     if let Some(found) = found {
         return Ok(found);
     }
     let job = format!("disc-{identity}");
-    if std::fs::symlink_metadata(root.join(&job)).is_ok() {
+    let dir = root.join(&job);
+    if std::fs::symlink_metadata(&dir).is_ok() && !own_unstamped_job(&dir, identity) {
         return Err(
             "the staging job exists but its identity cannot be verified; preserve it for review"
                 .into(),
         );
     }
     Ok(job)
+}
+
+// This disc's own job dir before its first identity write landed (another drive's
+// capture start, or a first write that failed): stamped within a short grace, or
+// holding nothing but ripper bookkeeping and no other identity. Adopted, not refused.
+fn own_unstamped_job(dir: &Path, identity: &str) -> bool {
+    for _ in 0..3 {
+        if dir_matches_identity(dir, identity) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let unclaimed = match staging::read_state_checked(dir) {
+        staging::StateRead::Absent => true,
+        staging::StateRead::Valid(st) => st.disc_identity.is_empty(),
+        staging::StateRead::Unreadable(_) => false,
+    };
+    unclaimed && staging::holds_only_ripper_bookkeeping(dir)
 }
 
 pub(super) fn path(root: &Path, job: &str) -> Result<PathBuf, String> {

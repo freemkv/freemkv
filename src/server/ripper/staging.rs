@@ -2386,7 +2386,7 @@ pub(crate) fn is_ripper_bookkeeping(name: &std::ffi::OsStr) -> bool {
 
 // Whether every entry in `dir` is a file the ripper itself writes with no
 // artifact. A listing error reads as `false`, so the caller keeps the dir.
-fn holds_only_ripper_bookkeeping(dir: &Path) -> bool {
+pub(super) fn holds_only_ripper_bookkeeping(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };

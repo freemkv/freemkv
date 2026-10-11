@@ -561,3 +561,31 @@ fn a_lookup_is_confident_only_when_it_matches_the_label_with_a_year() {
     let guess = found("Heat Wave", 1990);
     assert!(!lookup_confident("HEAT", Some(&guess)));
 }
+
+// A `disc-<identity>` dir made just before its first state write (another drive's
+// capture start, or a first write that failed) is adopted, never a permanent error.
+#[test]
+fn locate_adopts_its_own_job_dir_before_the_identity_is_written() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef01234567";
+    let dir = root.path().join(format!("disc-{id}"));
+    std::fs::create_dir(&dir).unwrap();
+    assert_eq!(locate(root.path(), id).unwrap(), format!("disc-{id}"));
+    std::fs::write(dir.join("state.json.tmp"), b"{").unwrap();
+    assert_eq!(locate(root.path(), id).unwrap(), format!("disc-{id}"));
+}
+
+#[test]
+fn locate_still_refuses_a_job_dir_holding_another_identity_or_unproved_data() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef01234567";
+    let dir = root.path().join(format!("disc-{id}"));
+    std::fs::create_dir(&dir).unwrap();
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.disc_identity = "another-disc".into();
+    staging::try_write_state(&dir, &st).unwrap();
+    assert!(locate(root.path(), id).is_err());
+    std::fs::remove_file(dir.join(staging::STATE_FILE)).unwrap();
+    std::fs::write(dir.join("Movie.iso"), b"capture").unwrap();
+    assert!(locate(root.path(), id).is_err());
+}
