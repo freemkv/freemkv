@@ -290,7 +290,7 @@ function moveHtml(state, sys, empty = true) {
   const moves = Array.isArray(state._move) ? state._move : (state._move && state._move.name ? [state._move] : []);
   const delivered = moves.filter(m => m && m.phase === 'delivered').length;
   let h = moves.filter(m => m && m.name && m.phase !== 'delivered').map(m => {
-    const labels = {queued: 'Waiting', finalizing: 'Finalizing…', cleanup_needed: 'Delivered — staging cleanup needed', blocked: 'Blocked — see delivery error'};
+    const labels = {queued: 'Waiting', finalizing: 'Finalizing…', blocked: 'Blocked — see delivery error'};
     const finishing = m.progress_pct >= 100;
     const label = labels[m.phase] || (finishing ? 'Finalizing…' : m.progress_pct + '%');
     const copying = (!m.phase || m.phase === 'copying') && !finishing;

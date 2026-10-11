@@ -31,13 +31,11 @@ test('completed bytes finalize without stale speed; delivered rows collapse', as
   assert.match(html, /1 file delivered/);
 });
 
-test('blocked and cleanup-needed transfers never display a live rate', async () => {
+test('blocked transfers never display a live rate', async () => {
   const html = await render([
     {name: 'Failed ISO', phase: 'blocked', progress_pct: 33, speed_mbs: 47},
-    {name: 'Delivered MKV', phase: 'cleanup_needed', progress_pct: 100, speed_mbs: 45},
   ]);
   assert.match(html, /Blocked/);
-  assert.match(html, /staging cleanup needed/);
   assert.doesNotMatch(html, /MB\/s/);
 });
 

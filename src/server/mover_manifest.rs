@@ -369,7 +369,7 @@ impl Manifest {
         entry.source_identity.verify(&entry.source)?;
         let owned_dir = dir.to_path_buf();
         let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let outcome = super::move_file_journaled(
+        let outcome = super::move_file(
             &entry.source,
             &entry.destination,
             progress,
@@ -379,9 +379,7 @@ impl Manifest {
         );
         let finished = matches!(
             outcome,
-            super::MoveOutcome::Moved
-                | super::MoveOutcome::MovedDirty
-                | super::MoveOutcome::Skipped
+            super::MoveOutcome::Moved | super::MoveOutcome::Skipped
         );
         let published = published.load(std::sync::atomic::Ordering::SeqCst);
         if published || finished {
