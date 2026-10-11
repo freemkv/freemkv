@@ -1884,15 +1884,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         .as_deref()
         .unwrap_or(&disc.volume_id)
         .to_string();
-    let disc_format = match disc.format {
-        libfreemkv::DiscFormat::Uhd => "uhd",
-        libfreemkv::DiscFormat::Fmts => "fmts",
-        libfreemkv::DiscFormat::BluRay => "bluray",
-        libfreemkv::DiscFormat::HdDvd => "hddvd",
-        libfreemkv::DiscFormat::Dvd => "dvd",
-        libfreemkv::DiscFormat::Unknown => "unknown",
-    }
-    .to_string();
+    let disc_format = disc.format.id().to_string();
 
     crate::server::log::device_log(
         device,
@@ -3083,15 +3075,7 @@ fn rip_disc_inner(
         .as_deref()
         .unwrap_or(&disc.volume_id)
         .to_string();
-    let disc_format = match disc.format {
-        libfreemkv::DiscFormat::Uhd => "uhd",
-        libfreemkv::DiscFormat::Fmts => "fmts",
-        libfreemkv::DiscFormat::BluRay => "bluray",
-        libfreemkv::DiscFormat::HdDvd => "hddvd",
-        libfreemkv::DiscFormat::Dvd => "dvd",
-        libfreemkv::DiscFormat::Unknown => "unknown",
-    }
-    .to_string();
+    let disc_format = disc.format.id().to_string();
     // Pass 1 reads the WHOLE DISC, so total must be capacity_bytes — using
     // titles[0].size_bytes was the v0.13.12 bug showing "0.0 GB / 0.0 GB".
     // Mux phase below re-derives its own total from the input stream.
