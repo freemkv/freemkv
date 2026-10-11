@@ -2938,6 +2938,12 @@ fn rip_disc_inner(
     let tmdb_confident =
         saved_metadata.is_some() || jobs::lookup_confident(&disc_name, session.tmdb.as_ref());
     let tmdb_owned = saved_metadata.or_else(|| session.tmdb.clone());
+    let operator_kind = overridden.then(|| {
+        tmdb_owned
+            .as_ref()
+            .map(|t| t.media_type)
+            .unwrap_or_default()
+    });
     let tmdb = &tmdb_owned;
     let tmdb_title = tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default();
     let tmdb_year = tmdb.as_ref().map(|t| t.year).unwrap_or(0);
@@ -2951,6 +2957,7 @@ fn rip_disc_inner(
         .unwrap_or_default();
     // No TMDB result routes as a movie.
     let tmdb_media_type = tmdb.as_ref().map(|t| t.media_type).unwrap_or_default();
+    let plan_label = planning_label(&disc_name, operator_kind).to_string();
     // TMDB numeric id (0 = no match). Persisted in the hand-off marker so a
     // consumer can enrich metadata by id later; the mover reads it back.
     let tmdb_id = tmdb.as_ref().map(|t| t.tmdb_id).unwrap_or(0);
@@ -2998,7 +3005,7 @@ fn rip_disc_inner(
     // Missing authored episode evidence must not turn a TV capture into one
     // movie-style output. Whole-disc ISO capture does not select mux titles.
     if let Err(error) =
-        check_capture_selection(&disc.titles, &cfg_read, tmdb_media_type, &disc_name)
+        check_capture_selection(&disc.titles, &cfg_read, tmdb_media_type, &plan_label)
     {
         let reason = selection_review_message(&error);
         crate::server::log::device_log(device, &reason);
@@ -3010,7 +3017,8 @@ fn rip_disc_inner(
     }
 
     // The main movie, picked by the engine exactly as the CLI and GUI pick it.
-    let main_idx = match capture_title_index(&disc.titles, &cfg_read, tmdb_media_type, &disc_name) {
+    let main_idx = match capture_title_index(&disc.titles, &cfg_read, tmdb_media_type, &plan_label)
+    {
         Ok(index) => index,
         Err(error) => {
             let reason = selection_review_message(&error);
@@ -3035,7 +3043,7 @@ fn rip_disc_inner(
     let mut seed_verdict = rip_seed_verdict(resume_decode_reach, banked_verdict);
     // The rip's key set, resolved once at the scan (KU §2.1). A scope that outgrew the scan's
     // (a title override made it a TV rip) tops up only the titles it lacks.
-    let key_scope = rip_key_scope(&disc, &cfg_read, tmdb_media_type, &disc_name);
+    let key_scope = rip_key_scope(&disc, &cfg_read, tmdb_media_type, &plan_label);
     // The scan's key reads: every resolve below is served what the scan already read.
     let mut key_reads = std::mem::take(&mut session.key_reads);
     // The scan's set when it covers the rip, forensic keys aside (a multipass rip asks for
@@ -3272,7 +3280,7 @@ fn rip_disc_inner(
     let mut capture_plan = capture_plan(
         &cfg_read,
         &disc.titles,
-        (tmdb_media_type, &disc_name, tmdb_id),
+        (tmdb_media_type, &plan_label, tmdb_id),
         &filename,
         episode_start,
     );
@@ -3516,7 +3524,7 @@ fn rip_disc_inner(
                 &disc.titles,
                 &cfg_read,
                 tmdb_media_type,
-                &disc_name,
+                &plan_label,
                 title.size_bytes,
             );
             let required = disk_space_required_bytes(
@@ -3558,7 +3566,7 @@ fn rip_disc_inner(
             &disc.titles,
             &cfg_read,
             tmdb_media_type,
-            &disc_name,
+            &plan_label,
             main_idx,
         );
         let staging_scope = match sweep_scope(&cfg_read, &disc, &mut session.drive, &staged) {
@@ -4053,7 +4061,7 @@ fn rip_disc_inner(
                 &disc.titles,
                 &cfg_read,
                 tmdb_media_type,
-                &disc_name,
+                &plan_label,
                 tmdb_id,
                 &filename,
                 episode_start,
@@ -5302,6 +5310,16 @@ fn fanout_episode_indices(
     disc_name: &str,
 ) -> Vec<usize> {
     crate::server::planner::episode_indices(titles, cfg, plan_kind(media_type, disc_name))
+}
+
+// The label a plan reads for `plan_kind`: an operator's Movie correction (`operator`)
+// overrides a season-marked label, so the E9086 advice to correct the match works.
+pub(super) fn planning_label(label: &str, operator: Option<MediaKind>) -> &str {
+    if operator.is_some_and(|kind| !kind.is_tv()) {
+        ""
+    } else {
+        label
+    }
 }
 
 // Whether a disc is TV for `tv_auto` planning (1.7.7): TMDB says tv, or its label

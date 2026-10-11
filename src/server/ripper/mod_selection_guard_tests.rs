@@ -185,3 +185,39 @@ fn explicit_resume_rejects_out_of_range_titles_without_movie_substitution() {
     }];
     assert!(resume::validate_resume_outputs(&titles(), &plan).is_err());
 }
+
+// A film labelled like a season ("SERIES_7") held by E9086: the operator's Movie
+// correction lifts the hold, as the hold's advice says; a TMDB Movie guess does not.
+#[test]
+fn an_operator_movie_correction_overrides_a_season_label() {
+    let cfg = Config::default();
+    let movie = crate::server::planner::MediaKind::Movie;
+    needs_review(check_capture_selection(
+        &titles(),
+        &cfg,
+        movie,
+        planning_label("SERIES_7", None),
+    ));
+    assert!(
+        check_capture_selection(
+            &titles(),
+            &cfg,
+            movie,
+            planning_label("SERIES_7", Some(movie))
+        )
+        .is_ok()
+    );
+    assert!(
+        resume::check_resume_selection(
+            &titles(),
+            &cfg,
+            movie,
+            planning_label("SERIES_7", Some(movie)),
+            false,
+            true
+        )
+        .is_ok()
+    );
+    let tv = crate::server::planner::MediaKind::Tv;
+    assert_eq!(planning_label("SERIES_7", Some(tv)), "SERIES_7");
+}

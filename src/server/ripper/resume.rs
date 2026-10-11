@@ -1160,11 +1160,17 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 .map(|s| s.disc_label.clone())
                 .unwrap_or_default()
         });
+    // An operator's Movie correction overrides a season-marked label.
+    let operator_kind = saved_state
+        .as_ref()
+        .and_then(|s| s.user_metadata.as_ref())
+        .map(|m| m.media_type);
+    let plan_label = super::planning_label(&disc_label, operator_kind).to_string();
     if let Err(error) = check_resume_selection(
         &disc.titles,
         &cfg_read,
         media_type,
-        &disc_label,
+        &plan_label,
         !plan_outputs.is_empty(),
         replan_required,
     ) {
@@ -1192,7 +1198,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             &disc.titles,
             &cfg_read,
             saved.media_type,
-            &disc_label,
+            &plan_label,
             saved.tmdb_id,
             &filename,
             saved.episode_start,
