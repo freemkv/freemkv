@@ -502,7 +502,7 @@ fn spawn_mux_watchdog(
     let wd_tmdb_year = inputs.tmdb_year;
     let wd_filename = inputs.filename.clone();
     let wd_staging_disc_dir = inputs.staging_disc_dir.clone();
-    let _ = std::thread::Builder::new().name("mux-watchdog".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("mux-watchdog".into()).spawn(move || {
         let mut was_stalled = false;
         let mut last_log_secs: u64 = 0;
         let mut clock = StallClock::new(
@@ -621,6 +621,19 @@ fn spawn_mux_watchdog(
             }
         }
     });
+    if let Err(e) = spawned {
+        report_watchdog_spawn_failure(inputs.device, &e);
+    }
+}
+
+// A mux running without its stall watchdog has no stall status or hard escalation: say so.
+fn report_watchdog_spawn_failure(device: &str, e: &std::io::Error) {
+    let msg = format!(
+        "The mux stall watchdog could not start ({e}); this mux runs without stall detection"
+    );
+    tracing::error!(device = %device, error = %e, "mux watchdog spawn failed");
+    crate::server::log::device_log(device, &msg);
+    crate::server::log::syslog(&format!("{device}: {msg}"));
 }
 
 /// One throttled progress tick, as both mux bridges render it.
