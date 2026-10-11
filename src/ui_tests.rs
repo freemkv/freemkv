@@ -345,7 +345,6 @@ fn episode_disc() -> Scanned {
         title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
             roster: "fixture:episode-menu".into(),
             title_count: titles.len(),
-            member: role == Episode,
             ordinal: (role == Episode).then(|| ti / 2 - 1),
         };
         model_titles.push(title);
@@ -3107,4 +3106,21 @@ fn two_commits_in_a_session_keep_a_bar_pick() {
     app.dispatch(Cmd::CommitSettings(Box::new(form)));
     assert_eq!(app.settings.sub_langs, "fr");
     assert_eq!(app.settings.filename_template, "{title}_b");
+}
+
+#[test]
+fn a_saved_episodes_mode_does_not_apply_to_a_newly_opened_disc() {
+    let mut app = App::new();
+    app.settings.selection = "Episodes".into();
+    app.apply_scan("/a.iso", Ok(pick_disc()), true);
+    assert_eq!(app.pick_mode, "Main film only");
+    let v = app.view().pick.unwrap();
+    assert_eq!(v.title, "Main film only");
+    assert!(v.titles.iter().any(|(m, _)| *m == "Episodes"));
+    assert_ne!(app.tree.ticked_titles(), vec![2, 4]);
+
+    app.pick_titles("Episodes");
+    assert_eq!(app.tree.ticked_titles(), vec![2, 4]);
+    app.apply_scan("/b.iso", Ok(pick_disc()), true);
+    assert_eq!(app.pick_mode, "Main film only");
 }

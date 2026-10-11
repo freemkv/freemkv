@@ -1,7 +1,7 @@
 use super::{key_summary_tests::disc, scanned_from_disc};
 use crate::ui::{LangPrefs, Tree};
 use freemkv_engine::{Selection, SelectionModel, StreamFilter};
-use libfreemkv::disc::{EpisodeEvidence, MovieSelectionBasis, NavigationSource};
+use libfreemkv::disc::EpisodeEvidence;
 use libfreemkv::{AudioChannels, AudioStream, Codec, DiscTitle, LabelPurpose, SampleRate, Stream};
 
 #[test]
@@ -89,7 +89,6 @@ fn authored(titles: &mut [DiscTitle], members: &[usize]) {
         title.selection_evidence.episodes = EpisodeEvidence::Authored {
             roster: "fixture:verified-menu".into(),
             title_count,
-            member: members.contains(&index),
             ordinal: orders.get(&index).copied(),
         };
     }
@@ -156,8 +155,6 @@ fn gui_modes_match_the_disc_model_with_language_alternates_and_authored_episodes
         title(60, "long-episode", 3900.0, "deu"),
         title(70, "unrelated-play-all", 9000.0, "jpn"),
     ];
-    disc.titles[0].selection_evidence.movie_basis =
-        MovieSelectionBasis::Navigation(NavigationSource::HdmvFirstPlay);
     authored(&mut disc.titles, &[2, 3, 4, 5]);
     let scan = scanned_from_disc(&disc, "none".into());
     let model = SelectionModel::from_disc(&disc);
