@@ -2968,7 +2968,8 @@ fn set_write_timeout_for_peer(peer: std::net::SocketAddr, timeout: std::time::Du
         .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok());
     let tv = libc::timeval {
         tv_sec: libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX),
-        tv_usec: libc::suseconds_t::try_from(timeout.subsec_micros()).unwrap_or(0),
+        // Under 1_000_000, so exact in suseconds_t (i32 on macOS, i64 on Linux).
+        tv_usec: timeout.subsec_micros() as libc::suseconds_t,
     };
     let mut set = false;
     for fd in fds.filter(|&fd| socket_peer(fd) == Some(peer)) {
