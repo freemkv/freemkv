@@ -47,7 +47,7 @@ fn presentation_language_cli_is_independent_of_audio_all() {
 // A tag selection cannot match is refused as the flag is read, not silently ripped as title 0.
 #[test]
 fn presentation_language_flag_rejects_a_tag_that_is_not_a_language() {
-    for bad in ["xx", "de,en", "all", "none", "ALL"] {
+    for bad in ["xx", "de,en", "all", "none", "ALL", "", "  ", "und"] {
         let err = parse_flags(&["--presentation-language".into(), bad.into()]).unwrap_err();
         assert!(
             err.contains(&format!("Unknown presentation language \"{bad}\""))
