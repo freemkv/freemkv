@@ -505,3 +505,20 @@ fn a_disc_whose_identity_was_not_resolved_has_no_staging_job() {
     assert_eq!(offered, None, "a title-named dir is not this disc's job");
     assert!(remux.is_none());
 }
+
+#[test]
+fn a_scan_that_read_disk_before_a_correction_published_keeps_the_correction() {
+    // Retitle passed its not-scanning check, then the scan read rev 0 from disk
+    // while the correction committed rev 1 and published it to the card.
+    let mut row = crate::server::ripper::RipState {
+        job_id: "job".into(),
+        ..Default::default()
+    };
+    row.publish_user_metadata("job", 1, selection("Cast Away"));
+    row.restore_job_metadata("job", "hash", None, 0);
+    assert_eq!(row.user_metadata, Some(selection("Cast Away")));
+    assert_eq!(row.metadata_revision, 1);
+    // A different job's scan resets it.
+    row.restore_job_metadata("other", "hash2", None, 0);
+    assert!(row.user_metadata.is_none());
+}
