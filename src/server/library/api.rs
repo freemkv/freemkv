@@ -4,7 +4,7 @@
 //! a Change match saves the identity, then queues its remux.
 //! Media scanning and muxing belong to the indexer and worker threads.
 
-use super::queue::JobState;
+use super::queue::{JobState, Untaken};
 use super::{Library, dirs, instance};
 use crate::server::config::Config;
 use crate::server::web::{json_response, percent_decode, read_json_body};
@@ -308,7 +308,7 @@ pub fn handle(
             }
             let stage = crate::server::health::remux_stage_dir();
             match discard_kept(&lib, &target, stage.as_deref(), false) {
-                Ok(()) => json_response(request, 200, r#"{"ok":true,"discarded":true}"#),
+                Ok(_) => json_response(request, 200, r#"{"ok":true,"discarded":true}"#),
                 Err((code, msg)) => err(request, code, &msg),
             }
         }
@@ -394,6 +394,15 @@ fn clear_idle_staging(root: &std::path::Path) -> (usize, usize) {
 // Delete the finished remuxes kept for Library jobs that failed or finished; one still
 // queued to be copied in is not abandoned. Returns how many went and how many could not.
 fn clear_kept_remuxes(lib: &Library, stage: &std::path::Path) -> (usize, usize) {
+    clear_kept_remuxes_with(lib, stage, |_| {})
+}
+
+// `clear_kept_remuxes`, calling `picked` with each target between the snapshot and its take.
+fn clear_kept_remuxes_with(
+    lib: &Library,
+    stage: &std::path::Path,
+    picked: impl Fn(&std::path::Path),
+) -> (usize, usize) {
     let targets: Vec<PathBuf> = lib
         .queue
         .snapshot()
@@ -404,8 +413,10 @@ fn clear_kept_remuxes(lib: &Library, stage: &std::path::Path) -> (usize, usize) 
         .collect();
     let (mut discarded, mut failed) = (0, 0);
     for target in targets {
+        picked(&target);
         match discard_kept(lib, &target, Some(stage), true) {
-            Ok(()) => discarded += 1,
+            Ok(true) => discarded += 1,
+            Ok(false) => {}
             Err((_, msg)) => {
                 failed += 1;
                 tracing::warn!(target = %target.display(), error = %msg, "kept remux was not cleared");
@@ -415,15 +426,15 @@ fn clear_kept_remuxes(lib: &Library, stage: &std::path::Path) -> (usize, usize) 
     (discarded, failed)
 }
 
-// Delete the finished file kept for `target`. Only a kept pair directly in the staging folder
-// is deleted, and never while its job is copying it in; the job forgets it first.
-// `abandoned`: only one whose job has failed or finished, checked as it is taken.
+// Delete the finished file kept for `target`: only a kept pair directly in the staging
+// folder, never while its job copies it in. `abandoned`: only one whose job failed or
+// finished, checked as it is taken; `Ok(false)` when its job waits to copy it in again.
 fn discard_kept(
     lib: &Library,
     target: &std::path::Path,
     stage: Option<&std::path::Path>,
     abandoned: bool,
-) -> Result<(), (u16, String)> {
+) -> Result<bool, (u16, String)> {
     let kept = lib
         .queue
         .snapshot()
@@ -443,14 +454,15 @@ fn discard_kept(
     }
     match lib.queue.take_staged(target, abandoned) {
         Ok(path) if path == kept => {}
-        Ok(_) | Err(false) => {
+        Err(Untaken::Waiting) => return Ok(false),
+        Ok(_) | Err(Untaken::Gone) => {
             return Err((409, "the kept file changed; reload and try again".into()));
         }
-        Err(true) => {
+        Err(Untaken::Copying) => {
             return Err((409, "it is being copied in right now; stop it first".into()));
         }
     }
-    super::deliver::discard(&kept).map_err(|e| {
+    super::deliver::discard(&kept).map(|()| true).map_err(|e| {
         tracing::warn!(path = %kept.display(), error = %e, "kept remux could not be discarded");
         (500, format!("could not delete {}: {e}", kept.display()))
     })

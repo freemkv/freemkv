@@ -333,6 +333,17 @@ impl QueueFile {
     }
 }
 
+/// Why [`Queue::take_staged`] took no kept file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Untaken {
+    /// No job keeps a file for that target, or the queue file could not be loaded.
+    Gone,
+    /// Its job is copying it in right now.
+    Copying,
+    /// Its job waits to copy it in again: kept on purpose.
+    Waiting,
+}
+
 // The final file a `.partial` becomes, or `None` for a name without that suffix.
 fn partial_target(partial: &Path) -> Option<PathBuf> {
     let name = partial.file_name()?.to_str()?;
@@ -1077,23 +1088,23 @@ impl Queue {
     }
 
     /// Detach the kept file of `target`'s job so it can be deleted: a queued job leaves the
-    /// queue, a failed one keeps its failure. `Err(true)` while that job runs, `Err(false)`
-    /// when there is no kept file (or the queue file could not be loaded), or with
-    /// `abandoned` when its job is neither failed nor finished.
-    pub fn take_staged(&self, target: &Path, abandoned: bool) -> Result<PathBuf, bool> {
-        self.mutate_or(Err(false), |f| {
+    /// queue, a failed one keeps its failure. Refused while that job runs, when there is no
+    /// kept file (or the queue file could not be loaded), or with `abandoned` when its job
+    /// is neither failed nor finished.
+    pub fn take_staged(&self, target: &Path, abandoned: bool) -> Result<PathBuf, Untaken> {
+        self.mutate_or(Err(Untaken::Gone), |f| {
             let pos = f
                 .jobs
                 .iter()
                 .rposition(|j| j.owns_target(target) && j.staged.is_some())
-                .ok_or(false)?;
+                .ok_or(Untaken::Gone)?;
             if f.jobs[pos].state == JobState::Running {
-                return Err(true);
+                return Err(Untaken::Copying);
             }
             if abandoned && !matches!(f.jobs[pos].state, JobState::Failed | JobState::Done) {
-                return Err(false);
+                return Err(Untaken::Waiting);
             }
-            let path = f.jobs[pos].staged.clone().ok_or(false)?;
+            let path = f.jobs[pos].staged.clone().ok_or(Untaken::Gone)?;
             for output in &mut f.jobs[pos].outputs {
                 if output.staged.as_ref() == Some(&path) {
                     output.staged = None;

@@ -753,7 +753,7 @@ fn stop_all_and_unqueue_keep_a_kept_file_offered() {
         q.take_staged(&a.target, false),
         Ok("/stage/a.staged.mkv".into())
     );
-    assert_eq!(q.take_staged(&a.target, false), Err(false));
+    assert_eq!(q.take_staged(&a.target, false), Err(Untaken::Gone));
     assert_eq!(q.staged_total(), (0, 0));
 }
 

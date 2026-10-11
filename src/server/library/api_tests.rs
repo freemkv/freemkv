@@ -288,14 +288,13 @@ fn clear_staging_never_takes_a_kept_remux_requeued_since_its_snapshot() {
             finished_at: 0,
         },
     );
-    // Clear staging has picked it; the operator presses Copy in now.
-    assert!(lib.queue.retry_staged_now(&target));
-    assert_eq!(
-        discard_kept(&lib, &target, Some(&stage), true)
-            .unwrap_err()
-            .0,
-        409
-    );
+    // Clear staging has picked it; the operator presses Copy in now. The file is kept on
+    // purpose, which is no failure.
+    let cleared = clear_kept_remuxes_with(&lib, &stage, |picked| {
+        assert_eq!(picked, target.as_path());
+        assert!(lib.queue.retry_staged_now(&target));
+    });
+    assert_eq!(cleared, (0, 0));
     assert!(mkv.exists());
     assert_eq!(lib.queue.snapshot().count(JobState::Queued), 1);
 }
