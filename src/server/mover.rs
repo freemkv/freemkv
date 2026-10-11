@@ -1270,6 +1270,12 @@ fn finish_filed_elsewhere(dir: &Path, display_name: &str) {
     }
 }
 
+// A plain error row for `path`, for tests outside the mover.
+#[cfg(test)]
+pub(crate) fn record_test_error(path: &str) {
+    record_error_with(path, "test failure", "test hint", |_| {});
+}
+
 // Forget in-memory mover state, as a process restart would.
 #[cfg(test)]
 pub(super) fn forget_process_state() {
