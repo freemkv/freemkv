@@ -554,21 +554,27 @@ pub struct OpenToken {
 /// Scan an image and resolve its main title's keys once (KU §2.5 "GUI open"), so the key
 /// strip reflects a real resolution; the set seeds the rip. Key bytes are never logged.
 pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
-    scan_with_keys_under(path, keys, &OpenToken::default())
+    scan_with_keys_under(path, keys, &OpenToken::default(), &|_| Vec::new())
 }
 
-/// [`scan_with_keys`] under an open's token: its Stop ends the key lookup mid-flight.
+/// The titles an open keys, chosen from its scan: the ones the GUI tree will tick, so
+/// the preflight and Start find them keyed. None chosen keys the main title.
+pub type OpenTicks<'a> = &'a dyn Fn(&Scanned) -> Vec<usize>;
+
+/// [`scan_with_keys`] under an open's token (its Stop ends the key lookup mid-flight),
+/// keying the titles `ticks` picks.
 pub fn scan_with_keys_under(
     path: &str,
     keys: &KeyConfig,
     tok: &OpenToken,
+    ticks: OpenTicks,
 ) -> Result<Scanned, String> {
     // Another source replaces the disc Open held for Start.
     HOLD.release();
     // A FOLDER is an image-level source too: "Open Folder" / drag-and-drop.
     let src = fe::ImageSource::from_path(path);
     let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
-    let main = open_titles(&disc);
+    let main = open_scope(&disc, ticks);
     let o = crate::rip_keys::ImageOpen {
         scope: libfreemkv::keys::KeyScope::Titles(main.clone()),
         seed: None,
@@ -594,7 +600,17 @@ fn stopped_open<T>(
     }
 }
 
-// The titles Open resolves keys for: the main title (MainMovie never needs review).
+// The titles an open resolves keys for: what `ticks` picks from the scan, else the main title.
+fn open_scope(disc: &libfreemkv::Disc, ticks: OpenTicks) -> Vec<usize> {
+    let picked = ticks(&scanned_from_disc(disc, String::new()));
+    if picked.is_empty() {
+        open_titles(disc)
+    } else {
+        picked
+    }
+}
+
+// The main title (MainMovie never needs review).
 pub(crate) fn open_titles(disc: &libfreemkv::Disc) -> Vec<usize> {
     fe::SelectionModel::from_titles(&disc.titles)
         .main_title(&fe::StreamFilter::All, None)
@@ -1298,18 +1314,19 @@ fn key_factory(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
 }
 
 /// Scan a live optical drive (`disc://<device>` or bare `disc://` autodetect) with no key
-/// call, then resolve the main title's keys once (KU §2.5 "GUI open"): the SAME `Scanned`
-/// shape the ISO path returns, seed set included. The drive, the scan and the set stay held
-/// for Start ([`HeldDrive`]). NEEDS HARDWARE to exercise.
+/// call, then resolve the keys of the titles `ticks` picks once (KU §2.5 "GUI open"): the
+/// SAME `Scanned` shape the ISO path returns, seed set included. The drive, the scan and the
+/// set stay held for Start ([`HeldDrive`]). NEEDS HARDWARE to exercise.
 pub fn scan_disc_with_keys(
     source: &str,
     keys: &KeyConfig,
     tok: &OpenToken,
+    ticks: OpenTicks,
 ) -> Result<Scanned, String> {
     // An earlier Open's drive first: this open may be of the same drive.
     HOLD.release();
     let (disc, mut session) = drive_scan(source, keys, tok)?;
-    let main = open_titles(&disc);
+    let main = open_scope(&disc, ticks);
     let scope = libfreemkv::keys::KeyScope::Titles(main.clone());
     let (set, trace) = crate::rip_keys::resolve_observed(
         &disc,

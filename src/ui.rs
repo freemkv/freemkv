@@ -229,6 +229,12 @@ fn open_preflight_titles(sc: &Scanned, settings: &crate::settings::Settings) -> 
     Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles()
 }
 
+// What an open keys under `settings`: the titles its tree will tick.
+fn open_ticks(settings: &crate::settings::Settings) -> impl Fn(&Scanned) -> Vec<usize> + use<> {
+    let settings = settings.clone();
+    move |sc| open_preflight_titles(sc, &settings)
+}
+
 /// An empty list means "no preference", which the engine spells `All`.
 fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
     if tags.is_empty() {
@@ -2019,29 +2025,39 @@ pub enum LogKind {
 // Scan a source by its kind. The ONE dispatch from a URL to a scan, shared
 // by the synchronous open and the launch probe's worker thread. Free-standing
 // rather than a method because the worker holds no `App`.
-fn scan_source(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn scan_source(
+    path: &str,
+    keys: &KeyConfig,
+    tok: &OpenToken,
+    ticks: OpenTicks,
+) -> Result<Scanned, String> {
     if is_container(path) {
         crate::engine::scan_stream_under(path, keys, tok)
     } else if crate::engine::is_disc_source(path) {
-        crate::engine::scan_disc_with_keys(path, keys, tok)
+        crate::engine::scan_disc_with_keys(path, keys, tok, ticks)
     } else {
-        crate::engine::scan_with_keys_under(path, keys, tok)
+        crate::engine::scan_with_keys_under(path, keys, tok, ticks)
     }
 }
 
 // The launch probe's scan: no drive at all is the same quiet failure as an empty tray.
-fn probe_source(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn probe_source(
+    path: &str,
+    keys: &KeyConfig,
+    tok: &OpenToken,
+    ticks: OpenTicks,
+) -> Result<Scanned, String> {
     if crate::engine::is_disc_source(path) && crate::engine::list_optical_drives().is_empty() {
         return Err(String::new());
     }
-    scan_source(path, keys, tok)
+    scan_source(path, keys, tok, ticks)
 }
 
-use crate::engine::OpenToken;
+use crate::engine::{OpenTicks, OpenToken};
 
-/// A source scan under its open's token, as a value so unit tests can swap in one that
-/// never touches a drive.
-type ScanFn = fn(&str, &KeyConfig, &OpenToken) -> Result<Scanned, String>;
+/// A source scan under its open's token, keying the titles `ticks` picks, as a value so
+/// unit tests can swap in one that never touches a drive.
+type ScanFn = fn(&str, &KeyConfig, &OpenToken, OpenTicks) -> Result<Scanned, String>;
 
 /// (open scan, probe scan). Unit tests get a pair that refuses `disc://` outright.
 #[cfg(not(test))]
@@ -2281,10 +2297,13 @@ struct PendingOpen {
     background: bool,
 }
 
+/// The titles a background open's preflight checked, and its verdict.
+type CheckedPreflight = (Vec<usize>, Result<Vec<String>, String>);
+
 struct OpenedSource {
     path: String,
     scanned: Result<Scanned, String>,
-    preflight: Option<Result<Vec<String>, String>>,
+    preflight: Option<CheckedPreflight>,
 }
 
 /// An explicit Open Disc, given the drives found: the log line and the URL to scan (`None` =
@@ -2858,7 +2877,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("open-source".into())
             .spawn(move || {
-                let scanned = scan(&path, &keys, &tok);
+                let scanned = scan(&path, &keys, &tok, &open_ticks(&settings));
                 // The preflight reuses Open's key set: no second key request (KU §2.5). It
                 // checks the titles the tree will tick.
                 let seed = scanned.as_ref().ok().and_then(|sc| sc.keys.as_ref());
@@ -2869,7 +2888,10 @@ impl App {
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
                     && !crate::engine::is_disc_source(&path))
-                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &ticked, seed));
+                .then(|| {
+                    let verdict = crate::engine::preflight_with_keys(&path, "/tmp", &ticked, seed);
+                    (ticked, verdict)
+                });
                 let _ = tx.send(OpenedSource {
                     path,
                     scanned,
@@ -3242,13 +3264,14 @@ impl App {
         // Everything the scan needs is copied out HERE, on the UI thread. The
         // worker gets no reference to `App`.
         let keys = KeyConfig::from_settings(&self.settings);
+        let ticks = open_ticks(&self.settings);
         let path = path.to_string();
         let scan = self.probe_scan;
         let worker = state.clone();
         let spawned = std::thread::Builder::new()
             .name("launch-probe".into())
             .spawn(move || {
-                let scanned = scan(&path, &keys, &worker.token);
+                let scanned = scan(&path, &keys, &worker.token, &ticks);
                 if let Ok(mut slot) = worker.result.lock() {
                     *slot = Some(scanned);
                 }
@@ -3265,7 +3288,8 @@ impl App {
 
     fn open_inner(&mut self, path: &str, quiet: bool) -> Vec<Effect> {
         let tok = OpenToken::default();
-        let scanned = (self.scan)(path, &KeyConfig::from_settings(&self.settings), &tok);
+        let keys = KeyConfig::from_settings(&self.settings);
+        let scanned = (self.scan)(path, &keys, &tok, &open_ticks(&self.settings));
         self.apply_scan(path, scanned, quiet)
     }
 
@@ -3286,7 +3310,7 @@ impl App {
         path: &str,
         scanned: Result<Scanned, String>,
         quiet: bool,
-        preflight: Option<Result<Vec<String>, String>>,
+        preflight: Option<CheckedPreflight>,
     ) -> Vec<Effect> {
         let container = is_container(path);
         let disc = crate::engine::is_disc_source(path);
@@ -3356,8 +3380,11 @@ impl App {
                     // the rip itself surfaces any missing-key error.
                     self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"));
                 } else {
-                    match preflight.unwrap_or_else(|| {
-                        let ticked = self.tree.ticked_titles();
+                    // A Settings commit during a background scan can change the ticks:
+                    // the worker's verdict stands only for the titles the tree ticks now.
+                    let ticked = self.tree.ticked_titles();
+                    let checked = preflight.filter(|(titles, _)| *titles == ticked);
+                    match checked.map(|(_, v)| v).unwrap_or_else(|| {
                         crate::engine::preflight_with_keys(path, "/tmp", &ticked, sc.keys.as_ref())
                     }) {
                         Ok(v) if v.is_empty() => {

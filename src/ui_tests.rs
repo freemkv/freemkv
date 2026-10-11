@@ -1015,7 +1015,10 @@ fn pending_open_keeps_ticks_and_blocks_ripping_until_result_is_applied() {
     tx.send(OpenedSource {
         path: "scanned.iso".into(),
         scanned: Ok(probe_scan()),
-        preflight: Some(Ok(vec![])),
+        preflight: Some((
+            open_preflight_titles(&probe_scan(), &app.settings),
+            Ok(vec![]),
+        )),
     })
     .unwrap();
     let fx = app.tick();
@@ -1086,21 +1089,23 @@ pub(super) fn no_drive_scan(
     path: &str,
     keys: &KeyConfig,
     tok: &OpenToken,
+    ticks: OpenTicks,
 ) -> Result<Scanned, String> {
     if crate::engine::is_disc_source(path) {
         return Err(NO_DRIVE_IN_TESTS.to_string());
     }
-    scan_source(path, keys, tok)
+    scan_source(path, keys, tok, ticks)
 }
 pub(super) fn no_drive_probe(
     path: &str,
     keys: &KeyConfig,
     tok: &OpenToken,
+    ticks: OpenTicks,
 ) -> Result<Scanned, String> {
     if crate::engine::is_disc_source(path) {
         return Err(NO_DRIVE_IN_TESTS.to_string());
     }
-    probe_source(path, keys, tok)
+    probe_source(path, keys, tok, ticks)
 }
 const NO_DRIVE_IN_TESTS: &str = "unit tests never open a drive";
 pub(super) fn no_drive_presence(_: &str) -> Option<bool> {
@@ -1175,7 +1180,12 @@ fn settle(app: &mut App) -> std::time::Duration {
 // Released by the test once its probe has progressed for four windows.
 static PROGRESSING_DONE: AtomicBool = AtomicBool::new(false);
 
-fn progressing_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn progressing_probe(
+    _: &str,
+    _: &KeyConfig,
+    tok: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     while !PROGRESSING_DONE.load(Ordering::Acquire) && !tok.halt.is_cancelled() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
@@ -1224,7 +1234,12 @@ fn probe_progressing_past_30s_is_kept() {
 }
 
 // One READ in recovery: `busy()` held for 3 windows with no CDB completing.
-fn recovering_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn recovering_probe(
+    _: &str,
+    _: &KeyConfig,
+    tok: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     let _read = tok.progress.busy();
     std::thread::sleep(T29 * 3);
     match tok.halt.is_cancelled() {
@@ -1245,7 +1260,7 @@ fn probe_not_cancelled_during_long_recovery_read() {
 }
 
 static FROZEN_SAW_STOP: AtomicBool = AtomicBool::new(false);
-fn frozen_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn frozen_probe(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     let stopped = stopped_within(tok, std::time::Duration::from_secs(3));
     FROZEN_SAW_STOP.store(stopped, Ordering::SeqCst);
     Err(String::new())
@@ -1274,14 +1289,14 @@ fn probe_frozen_30s_is_cancelled_and_releases() {
 }
 
 static HOLD_RELEASED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-fn holding_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn holding_probe(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     stopped_within(tok, std::time::Duration::from_secs(3));
     std::thread::sleep(std::time::Duration::from_millis(50));
     *HOLD_RELEASED.lock().unwrap() = Some(std::time::Instant::now());
     Err("stopped".to_string())
 }
 static OTHER_OPENED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-fn other_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn other_open(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     *OTHER_OPENED.lock().unwrap() = Some(std::time::Instant::now());
     Ok(probe_scan())
 }
@@ -1316,7 +1331,7 @@ fn open_during_probe_cancels_probe_then_opens() {
 }
 
 static IDLE_SAW_STOP: AtomicBool = AtomicBool::new(false);
-fn idle_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn idle_probe(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     if stopped_within(tok, T29 * 4) {
         IDLE_SAW_STOP.store(true, Ordering::SeqCst);
         return Err("stopped".to_string());
@@ -1325,7 +1340,7 @@ fn idle_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String
 }
 
 static FT15D_RESCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-fn counted_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn counted_open(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     FT15D_RESCANS.fetch_add(1, Ordering::SeqCst);
     Ok(probe_scan())
 }
@@ -1364,7 +1379,7 @@ fn adopted_probe_is_never_cancelled_by_t29() {
 }
 
 static FT14_HELD: Mutex<Vec<OpenToken>> = Mutex::new(Vec::new());
-fn held_open(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+fn held_open(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     FT14_HELD.lock().unwrap().push(tok.clone());
     stopped_within(tok, std::time::Duration::from_secs(3));
     Err("stopped".to_string())
@@ -1425,7 +1440,7 @@ fn a_probe_that_never_answers_is_abandoned_instead_of_ticking_forever() {
 }
 
 static FRESH_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-fn fresh_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn fresh_open(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     FRESH_OPENS.fetch_add(1, Ordering::SeqCst);
     Ok(probe_scan())
 }
@@ -1474,7 +1489,12 @@ fn tick_until_settled(app: &mut App) {
 }
 
 static ADOPT_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-fn busy_drive_adopt(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn busy_drive_adopt(
+    _: &str,
+    _: &KeyConfig,
+    _: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     ADOPT_SCANS.fetch_add(1, Ordering::SeqCst);
     Err("drive busy".to_string())
 }
@@ -1504,7 +1524,12 @@ fn a_prompted_open_of_the_probed_drive_adopts_the_probe() {
 }
 
 static ADOPT_ASYNC_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-fn busy_drive_adopt_async(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn busy_drive_adopt_async(
+    _: &str,
+    _: &KeyConfig,
+    _: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     ADOPT_ASYNC_SCANS.fetch_add(1, Ordering::SeqCst);
     Err("drive busy".to_string())
 }
@@ -1523,7 +1548,7 @@ fn a_background_open_of_the_probed_drive_adopts_the_probe() {
 }
 
 /// Adopted, the probe's failure is the answer to a question the user asked.
-fn drive_busy(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn drive_busy(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     Err("drive busy".to_string())
 }
 
@@ -1555,7 +1580,12 @@ fn an_adopted_probe_failure_is_reported() {
 }
 
 static QUEUED_SCANS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-fn record_queued(path: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+fn record_queued(
+    path: &str,
+    _: &KeyConfig,
+    _: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
     QUEUED_SCANS.lock().unwrap().push(path.to_string());
     Ok(probe_scan())
 }
@@ -3164,4 +3194,45 @@ fn a_saved_episodes_mode_does_not_apply_to_a_newly_opened_disc() {
     assert_eq!(app.tree.ticked_titles(), vec![2, 4]);
     app.apply_scan("/b.iso", Ok(pick_disc()), true);
     assert_eq!(app.pick_mode, "Main film only");
+}
+
+// Default selection "All titles": Open keys every title the tree ticks, so its preflight
+// does not refuse a source the rip decrypts (encrypted-no-key for title 2).
+#[test]
+fn open_preflight_is_keyed_for_every_ticked_title() {
+    use crate::ku_fixtures::*;
+    let fx = bd_image(&[Some(K1), Some(K1)], 1);
+    let dir = TempDir::new("open-all-titles");
+    let iso = fx.write(dir.path(), "disc.iso").display().to_string();
+    let mut app = App::new();
+    app.settings.selection = "All titles".into();
+    app.settings.min_title_secs = "0".into();
+    let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+    crate::rip_keys::with_sources(f, || app.open(&iso));
+    assert_eq!(app.tree.ticked_titles(), vec![0, 1]);
+    let log: Vec<&str> = app.log.iter().map(|l| l.text.as_str()).collect();
+    assert!(
+        logged(&app, &crate::strings::get("gui.log.ready_rip")),
+        "{log:?}"
+    );
+}
+
+// A Settings commit while the background scan ran changes the ticks: the worker's verdict
+// was for other titles, so apply_opened checks the titles the tree ticks now.
+#[test]
+fn a_stale_background_preflight_is_rechecked_for_the_current_ticks() {
+    let mut app = App::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.opening = Some(rx);
+    tx.send(OpenedSource {
+        path: "/nonexistent/scanned.iso".into(),
+        scanned: Ok(probe_scan()),
+        preflight: Some((vec![7, 8], Ok(vec![]))),
+    })
+    .unwrap();
+    app.tick();
+    assert!(
+        !logged(&app, &crate::strings::get("gui.log.ready_rip")),
+        "a verdict for titles 8 and 9 is not one for the ticked title"
+    );
 }
