@@ -5465,7 +5465,9 @@ fn capture_title_index(
 }
 
 fn selection_review_message(error: &crate::server::planner::PlanError) -> String {
-    format!("Title selection needs review before muxing: {error}. No fallback title was selected.")
+    let reason = error.to_string();
+    let reason = reason.trim_end_matches('.');
+    format!("Title selection needs review before muxing: {reason}. No fallback title was selected.")
 }
 
 // Episode titles a TV disc fans out to under `tv_auto`; empty = one movie-style output.
