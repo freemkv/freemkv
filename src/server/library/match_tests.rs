@@ -345,3 +345,31 @@ fn the_match_dialog_does_not_offer_a_match_saved_for_an_earlier_disc() {
     let saved = lib.match_view(&cfg, &sources[0]).unwrap().0.unwrap();
     assert!(!lib.match_is_current(&sources[0], &saved));
 }
+
+#[test]
+fn a_change_match_queued_from_a_row_with_an_mkv_shows_there_and_can_be_unqueued() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    let mkv = index::new_mkv_target(&d.library, "Castaway");
+    std::fs::create_dir_all(mkv.parent().unwrap()).unwrap();
+    std::fs::write(&mkv, b"old remux").unwrap();
+    lib.rescan(&d);
+    let row = |lib: &Library| {
+        lib.listing(&d)
+            .rows
+            .into_iter()
+            .find(|r| r.mkv.as_ref() == Some(&mkv))
+            .unwrap()
+    };
+    assert_eq!(row(&lib).iso.as_ref(), Some(&sources[0]));
+    let (_, queued) = lib
+        .confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .unwrap();
+    assert_eq!(queued, 1);
+    let shown = row(&lib)
+        .job
+        .expect("the queued Change match shows on the row");
+    assert!(shown.retire && shown.state == queue::JobState::Queued);
+    assert_eq!(lib.remove_queued(&d, &mkv), 1);
+    assert!(lib.queue.snapshot().jobs.is_empty());
+}
