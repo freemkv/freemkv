@@ -3,6 +3,12 @@ use super::*;
 thread_local! {
     /// Every `spawn_worker` on this thread fails, as when the process is out of threads.
     pub(super) static SPAWN_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// What Quit printed on standard error on this thread.
+    static QUIT_NOTICES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(super) fn quit_notice(line: &str) {
+    QUIT_NOTICES.with(|n| n.borrow_mut().push(line.to_string()));
 }
 
 // Tick until every Settings write and key-service check in flight has answered.
@@ -3522,7 +3528,8 @@ fn quit_writes_the_queued_latest_settings_after_a_slow_write() {
     );
 }
 
-// A write still out when Quit gives up on it is reported as not saved, not dropped silently.
+// A write still out when Quit gives up on it is reported as not saved, not dropped silently:
+// the window and its log close at once, so it is printed on standard error too.
 #[test]
 fn quit_reports_a_write_it_could_not_wait_for() {
     let mut app = picking(pick_disc());
@@ -3545,6 +3552,22 @@ fn quit_reports_a_write_it_could_not_wait_for() {
         "{:?}",
         app.log.iter().map(|l| &l.text).collect::<Vec<_>>()
     );
+    let printed = QUIT_NOTICES.with(|n| n.take());
+    assert!(
+        printed.iter().any(|l| l.starts_with(unsaved.trim_end())),
+        "{printed:?}"
+    );
+}
+
+// A Quit whose writes all landed prints nothing.
+#[test]
+fn quit_prints_nothing_when_the_settings_were_saved() {
+    let mut app = picking(pick_disc());
+    app.save_fn = |_| Ok(());
+    app.pick_audio(Some("deu"));
+    assert_eq!(app.dispatch(Cmd::Quit), vec![Effect::Quit]);
+    assert!(!app.settings_unsaved);
+    assert_eq!(QUIT_NOTICES.with(|n| n.take()), Vec::<String>::new());
 }
 
 // A writer that died (panicked) does not take the queued latest settings with it.

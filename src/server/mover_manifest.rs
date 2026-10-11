@@ -237,15 +237,16 @@ impl Manifest {
         Ok(())
     }
 
-    /// Every destination frozen by the journal of another staging dir under `root`, in
-    /// both its planned and its canonical form. A listing or journal that cannot be read
-    /// is an error: it may hold a name, so nothing new may be frozen until it can be read.
+    /// Every destination frozen by the journal of another rip job under `root`, in both
+    /// its planned and its canonical form. A listing, or a rip job's journal, that cannot
+    /// be read is an error: it may hold a name, so nothing new may be frozen until it can
+    /// be read. Folders that are no rip job (`lost+found`, NAS system folders) hold none.
     pub fn reserved_elsewhere(root: &Path, except: &Path) -> io::Result<Vec<PathBuf>> {
         let mut reserved = Vec::new();
         for entry in std::fs::read_dir(root)? {
             let entry = entry?;
             let dir = entry.path();
-            if dir == except || !entry.file_type()?.is_dir() {
+            if dir == except || !entry.file_type()?.is_dir() || !is_rip_job(&dir) {
                 continue;
             }
             let journal = match Self::load(&dir) {
@@ -632,6 +633,23 @@ fn sync_parent(path: &Path) -> io::Result<()> {
         path.parent()
             .ok_or_else(|| io::Error::other("delivery target has no parent"))?,
     )
+}
+
+// A job the ripper allocated (`disc-`, `unverified-`), or a legacy title folder holding a
+// rip state, hand-off marker or journal. Hidden and NAS system folders never are.
+fn is_rip_job(dir: &Path) -> bool {
+    use crate::server::ripper::staging::{DONE_MARKER, STATE_FILE, UNVERIFIED_JOB_PREFIX};
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if name.starts_with(['.', '@', '#']) {
+        return false;
+    }
+    name.starts_with("disc-")
+        || name.starts_with(UNVERIFIED_JOB_PREFIX)
+        || [STATE_FILE, DONE_MARKER, FILE]
+            .iter()
+            .any(|f| std::fs::symlink_metadata(dir.join(f)).is_ok())
 }
 
 #[cfg(test)]

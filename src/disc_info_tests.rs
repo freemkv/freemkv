@@ -13,6 +13,7 @@ fn unlocker_display_reports_only_the_successful_match() {
 // The `Unlocker:` line is catalog text like every other line of the report, "none" too.
 #[test]
 fn the_unlocker_line_comes_from_the_catalog() {
+    strings::set_locale("en");
     assert_eq!(super::unlocker_line(&[("LD", true)]), "Unlocker: LD");
     assert_eq!(super::unlocker_line(&[("LD", false)]), "Unlocker: none");
     // The keys it asks for are the catalog's, so a locale translates the line.
