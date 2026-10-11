@@ -551,26 +551,54 @@ impl Queue {
         reuse_saved_plans: bool,
         retire: bool,
     ) -> usize {
-        let mut n = 0;
         let now = crate::server::util::epoch_secs();
+        // Indexed once, so a bulk add is linear in the queue rather than in queue x items:
+        // each target's jobs in queue order, and the sources a job holds.
+        let mut by_target: std::collections::HashMap<PathBuf, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut held: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for (i, j) in f.jobs.iter().enumerate() {
+            for target in std::iter::once(&j.target).chain(j.outputs.iter().map(|o| &o.target)) {
+                let at = by_target.entry(target.clone()).or_default();
+                if at.last() != Some(&i) {
+                    at.push(i);
+                }
+            }
+            if j.holds_source() {
+                held.insert(j.iso.clone());
+            }
+        }
+        let existing = f.jobs.len();
+        let mut replaced: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut added = Vec::new();
         for item in items {
-            if !reuse_saved_plans
-                && f.jobs.iter().any(|j| {
-                    j.iso == item.iso
-                        && (matches!(j.state, JobState::Queued | JobState::Running)
-                            || j.staged.is_some()
-                            || j.outputs.iter().any(|o| o.staged.is_some()))
-                })
-            {
+            if !reuse_saved_plans && held.contains(&item.iso) {
                 continue;
             }
-            let kept = f
-                .latest_for(&item.target)
-                .is_some_and(|j| j.staged.is_some());
-            if kept || f.active_for(&item.target).is_some() {
+            let job_at = |i: usize| {
+                if i < existing {
+                    &f.jobs[i]
+                } else {
+                    &added[i - existing]
+                }
+            };
+            // Entries an earlier item of this batch replaces are gone already.
+            let owners: Vec<usize> = by_target
+                .get(&item.target)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&i| i >= existing || !replaced.contains(&f.jobs[i].target))
+                .collect();
+            let kept = owners.last().is_some_and(|&i| job_at(i).staged.is_some());
+            let active = owners
+                .iter()
+                .any(|&i| matches!(job_at(i).state, JobState::Queued | JobState::Running));
+            if kept || active {
                 continue;
             }
-            let prior = f.jobs.iter().rev().find_map(|j| {
+            let prior = owners.iter().rev().find_map(|&i| {
+                let j = job_at(i);
                 if !reuse_saved_plans || j.iso != item.iso {
                     return None;
                 }
@@ -592,9 +620,9 @@ impl Queue {
                 Some((p, o)) => (Some(p), o),
                 None => (None, Vec::new()),
             };
-            f.jobs.retain(|j| j.target != item.target);
+            replaced.insert(item.target.clone());
             f.next_id += 1;
-            f.jobs.push(Job {
+            let job = Job {
                 id: f.next_id,
                 title: item.title,
                 iso: item.iso,
@@ -616,9 +644,18 @@ impl Queue {
                 staged: None,
                 staged_bytes: None,
                 staged_attempts: None,
-            });
-            n += 1;
+            };
+            by_target
+                .entry(job.target.clone())
+                .or_default()
+                .push(existing + added.len());
+            held.insert(job.iso.clone());
+            added.push(job);
         }
+        // A new job replaces the finished entries that named its target.
+        let n = added.len();
+        f.jobs.retain(|j| !replaced.contains(&j.target));
+        f.jobs.extend(added);
         n
     }
 
@@ -658,7 +695,7 @@ impl Queue {
     /// [`Self::set_plan_targets`] with targets derived from `job.target` (tests).
     #[cfg(test)]
     pub fn set_plan(&self, id: u64, plan: RemuxPlan) -> bool {
-        self.set_plan_targets(id, plan, None)
+        self.set_plan_targets(id, plan, None).unwrap_or(false)
     }
 
     /// Attach the immutable plan produced for a claimed job before its first output, so
@@ -669,7 +706,7 @@ impl Queue {
         id: u64,
         plan: RemuxPlan,
         targets: Option<Vec<PathBuf>>,
-    ) -> bool {
+    ) -> std::io::Result<bool> {
         self.mutate_durable(|f| {
             let Some(job) = f.jobs.iter_mut().find(|j| j.id == id) else {
                 return false;
@@ -708,10 +745,6 @@ impl Queue {
             job.plan = Some(plan);
             true
         })
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "remux plan was not durably saved");
-            false
-        })
     }
 
     /// Durably record the files job `id` may overwrite; kept for every later run of it.
@@ -734,36 +767,43 @@ impl Queue {
     }
 
     pub fn begin_output(&self, id: u64, output_id: &str) -> bool {
-        self.mutate(|f| {
+        self.mutate_if(|f| {
             let Some(output) = f
                 .jobs
                 .iter_mut()
                 .find(|j| j.id == id)
                 .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
             else {
-                return false;
+                return (false, false);
             };
             if output.state == OutputState::Done {
-                return false;
+                return (false, false);
             }
+            let changed = output.state != OutputState::Running;
             output.state = OutputState::Running;
-            true
+            (true, changed)
         })
     }
 
     pub fn finish_output(&self, id: u64, output_id: &str, state: OutputState) {
-        self.mutate(|f| {
-            if let Some(output) = f
+        self.mutate_if(|f| {
+            let Some(output) = f
                 .jobs
                 .iter_mut()
                 .find(|j| j.id == id)
                 .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
-            {
-                output.state = state;
-                if state == OutputState::Done {
-                    output.landing = None;
-                }
-            }
+            else {
+                return ((), false);
+            };
+            let landing = if state == OutputState::Done {
+                None
+            } else {
+                output.landing
+            };
+            let changed = output.state != state || output.landing != landing;
+            output.state = state;
+            output.landing = landing;
+            ((), changed)
         });
     }
 
@@ -787,15 +827,18 @@ impl Queue {
     }
 
     pub fn set_output_staged(&self, id: u64, output_id: &str, staged: Option<PathBuf>) {
-        self.mutate(|f| {
-            if let Some(output) = f
+        self.mutate_if(|f| {
+            let Some(output) = f
                 .jobs
                 .iter_mut()
                 .find(|j| j.id == id)
                 .and_then(|j| j.outputs.iter_mut().find(|o| o.id == output_id))
-            {
-                output.staged = staged;
-            }
+                .filter(|o| o.staged != staged)
+            else {
+                return ((), false);
+            };
+            output.staged = staged;
+            ((), true)
         });
     }
 
@@ -883,10 +926,13 @@ impl Queue {
 
     /// Record the finished file job `id` keeps on local staging (`None`: it has none).
     pub fn set_staged(&self, id: u64, staged: Option<StagedFile>) {
-        self.mutate(|f| {
-            if let Some(j) = f.jobs.iter_mut().find(|j| j.id == id) {
-                j.set_staged(staged);
-            }
+        self.mutate_if(|f| {
+            let Some(j) = f.jobs.iter_mut().find(|j| j.id == id) else {
+                return ((), false);
+            };
+            let before = j.clone();
+            j.set_staged(staged);
+            ((), *j != before)
         });
     }
 
@@ -968,15 +1014,12 @@ impl Queue {
             }
             let mut added = 0;
             for (item, staged, failure) in kept {
-                if let Some(j) = f.jobs.iter_mut().rev().find(|j| {
-                    j.iso == item.iso && j.outputs.iter().any(|o| o.target == item.target)
+                if let Some((j, at)) = f.jobs.iter_mut().rev().find_map(|j| {
+                    let at = j.outputs.iter().position(|o| o.target == item.target)?;
+                    (j.iso == item.iso).then_some((j, at))
                 }) {
                     if j.state != JobState::Running {
-                        let output = j
-                            .outputs
-                            .iter_mut()
-                            .find(|o| o.target == item.target)
-                            .unwrap();
+                        let output = &mut j.outputs[at];
                         output.staged = Some(staged.path.clone());
                         output.state = OutputState::Pending;
                         j.state = JobState::Queued;
@@ -1093,6 +1136,23 @@ impl Queue {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, QueueFile> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // [`Self::mutate`] for a change that may turn out to be none: `f` says whether it changed
+    // anything, and nothing is bumped or written when it did not.
+    fn mutate_if<T>(&self, f: impl FnOnce(&mut QueueFile) -> (T, bool)) -> T {
+        let (out, changed) = {
+            let mut g = self.lock();
+            let (out, changed) = f(&mut g);
+            if changed {
+                self.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            (out, changed)
+        };
+        if changed {
+            self.persist_now();
+        }
+        out
     }
 
     fn mutate<T>(&self, f: impl FnOnce(&mut QueueFile) -> T) -> T {

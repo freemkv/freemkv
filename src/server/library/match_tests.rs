@@ -116,10 +116,10 @@ fn a_busy_source_refuses_the_match_and_leaves_it_unchanged() {
 }
 
 #[test]
-fn a_match_whose_remux_cannot_be_queued_stays_saved_and_reports_none_queued() {
+fn another_isos_job_at_the_same_title_does_not_block_a_correction() {
     let (_t, cfg, lib, sources) = corrected_library(&["Show Disc 1"]);
     let d = dirs(&cfg);
-    // Another ISO's job already holds this source's destination.
+    // Another ISO's job holds the default destination of this title.
     lib.queue.add(vec![NewJob {
         title: "Other".into(),
         iso: d.isos.as_ref().unwrap().join("elsewhere.iso"),
@@ -129,9 +129,9 @@ fn a_match_whose_remux_cannot_be_queued_stays_saved_and_reports_none_queued() {
     let (saved, queued) = lib
         .confirm_match_and_queue(&cfg, &sources[0], 0, show())
         .unwrap();
-    assert_eq!(queued, 0);
+    assert_eq!(queued, 1);
     assert_eq!(lib.source_match(&sources[0]).unwrap(), Some(saved));
-    assert_eq!(lib.queue.snapshot().jobs.len(), 1);
+    assert_eq!(lib.queue.snapshot().jobs.len(), 2);
 }
 
 #[test]
@@ -232,4 +232,40 @@ fn remux_of_an_iso_with_a_saved_match_replans_but_never_retires() {
     assert!(job.get("retire").is_none(), "{job}");
     assert!(job.get("replacement").is_none(), "{job}");
     assert!(job.get("plan").is_none(), "planned afresh at claim: {job}");
+}
+
+#[test]
+fn two_isos_with_one_name_in_different_folders_each_get_their_own_correction() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        output_dir: temp.path().join("media").to_string_lossy().into_owned(),
+        movie_dir: "movies".into(),
+        library_iso_dir: temp.path().join("isos").to_string_lossy().into_owned(),
+        library_iso_subfolders: true,
+        ..Default::default()
+    };
+    let d = dirs(&cfg);
+    std::fs::create_dir_all(&d.library).unwrap();
+    std::fs::write(d.library.join(".keep"), b"x").unwrap();
+    let sources: Vec<PathBuf> = ["Season 1", "Season 2"]
+        .iter()
+        .map(|folder| {
+            let source = d.isos.as_ref().unwrap().join(folder).join("Disc 1.iso");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(&source, folder.as_bytes()).unwrap();
+            source
+        })
+        .collect();
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    let lib = Library::open(&temp.path().join("config"), &temp.path().join("logs"));
+    lib.rescan(&d);
+    for source in &sources {
+        let (_, queued) = lib
+            .confirm_match_and_queue(&cfg, source, 0, show())
+            .unwrap();
+        assert_eq!(queued, 1, "{}", source.display());
+    }
+    let jobs = lib.queue.snapshot().jobs;
+    assert_eq!(jobs.len(), 2);
+    assert_ne!(jobs[0].target, jobs[1].target);
 }

@@ -342,7 +342,11 @@ fn persist_plan(
     plan: crate::server::planner::RemuxPlan,
     targets: Option<Vec<std::path::PathBuf>>,
 ) -> std::io::Result<()> {
-    if !lib.queue.set_plan_targets(job.id, plan, targets) {
+    if !lib
+        .queue
+        .set_plan_targets(job.id, plan, targets)
+        .map_err(|e| plan_not_saved(lib, &e))?
+    {
         return Err(std::io::Error::other(
             "job changed while freezing title selection",
         ));
@@ -355,6 +359,17 @@ fn persist_plan(
         .find(|j| j.id == job.id)
         .ok_or_else(|| std::io::Error::other("job disappeared while freezing title selection"))?;
     Ok(())
+}
+
+// The queue could not record a plan: name its file, and keep the kind for the storage retry.
+fn plan_not_saved(lib: &Library, e: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        e.kind(),
+        format!(
+            "the remux plan could not be saved to {} in the config folder: {e}",
+            lib.queue.path().display()
+        ),
+    )
 }
 
 fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
@@ -429,7 +444,11 @@ fn attach_corrected_plan(
         &job.title,
     );
     let (plan, targets) = corrected_plan(cfg, &disc.titles, media)?;
-    if !lib.queue.set_plan_targets(job.id, plan, Some(targets)) {
+    if !lib
+        .queue
+        .set_plan_targets(job.id, plan, Some(targets))
+        .map_err(|e| plan_not_saved(lib, &e))?
+    {
         return Err(std::io::Error::other(
             "job changed while preparing corrected match",
         ));
@@ -562,6 +581,13 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     if let Some(plan) = &job.plan {
         return remux_planned(job, plan, cfg, sink);
     }
+    // Planning freezes a plan for every job before it gets here; only a kept file found at
+    // startup arrives without one, and only its copy into the library is left to do.
+    let Some(kept) = &job.staged else {
+        return Ending::Failed(std::io::Error::other(
+            "this remux has no title plan; nothing was written",
+        ));
+    };
     if let Err(why) = safe_to_create(&super::dirs(cfg), &job.target) {
         return Ending::Failed(std::io::Error::other(why));
     }
@@ -571,29 +597,9 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     {
         return Ending::Failed(e);
     }
-    let request = freemkv_engine::RemuxJob {
-        iso: freemkv_engine::ImageSource::from_path(&job.iso),
-        title: None,
-        streams: freemkv_engine::StreamChoice::default(),
-        target: job.target.clone(),
-        replace: job.replace,
-    };
-    let keys = crate::server::keysource::key_params(cfg);
-    let result = if let Some(kept) = &job.staged {
-        // Only the copy, its sync and verify, and the replacement run again.
-        resume_kept(kept, &job.target, sink)
-    } else if let Some(dir) = health::remux_stage_dir() {
-        deliver::remux_via_stage(&request, &keys, sink, &dir, job.id).map(|r| r.writing_app)
-    } else {
-        freemkv_engine::remux_iso(&request, &keys, sink).map(|r| r.writing_app)
-    };
-    match result {
+    match resume_kept(kept, &job.target, sink) {
         Ok(writing_app) => Ending::Done { writing_app },
-        Err(_) if sink.lib.cancelled(job.id) => Ending::Stopped(JobNote::Cancelled),
-        Err(_) if sink.preempted() => Ending::Stopped(JobNote::Preempted),
-        Err(_) if shutting_down() => Ending::Stopped(JobNote::Interrupted),
-        Err(_) if sink.lib.stall_cancel.load(Ordering::SeqCst) => Ending::Stopped(JobNote::Stalled),
-        Err(e) => Ending::Failed(e),
+        Err(e) => cancelled_ending(sink).unwrap_or(Ending::Failed(e)),
     }
 }
 
@@ -1459,11 +1465,20 @@ pub(crate) fn kept_text(k: &StagedFile, changed: bool) -> String {
 
 // E9084 on a kept file: the library file is not the one the remux set out to replace.
 fn target_changed_message(text: &str, job: &Job) -> String {
-    format!(
-        "{}. The library file {} changed after this remux began, or the finished MKV was \
-         already copied in, so it was not touched.",
-        text.trim_end_matches('.'),
-        job.target.display()
+    // The output whose kept file was being copied in, else the one that failed.
+    let changed = job
+        .outputs
+        .iter()
+        .find(|o| o.staged.is_some() && o.staged == job.staged)
+        .or_else(|| job.outputs.iter().find(|o| o.state == OutputState::Failed))
+        .map_or(&job.target, |o| &o.target);
+    crate::strings::fmt_or(
+        "server.library.target_changed",
+        "{error}. The library file {path} changed after this remux began, or the finished MKV was already copied in, so it was not touched.",
+        &[
+            ("error", text.trim_end_matches('.')),
+            ("path", &changed.display().to_string()),
+        ],
     )
 }
 

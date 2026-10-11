@@ -311,8 +311,10 @@ pub struct Library {
     // The job "Stop all" cancelled (0 = none); the worker's sink polls it.
     cancel_job: AtomicU64,
     index: RwLock<Arc<Snapshot>>,
-    // Counts `note_landed` edits, so a scan that began before one is not swapped in over it.
+    // Counts `note_landed` edits; a scan that began before one folds it in (`landings`).
     landed: AtomicU64,
+    // The latest landings by that count, for scans that began before them.
+    landings: Mutex<VecDeque<(u64, PathBuf, FileSig)>>,
     index_generation: AtomicU64,
     // The indexer sleeps on this; `wake` sets it to rescan now.
     wake: (Mutex<bool>, Condvar),
@@ -468,6 +470,7 @@ impl Library {
             cancel_job: AtomicU64::new(0),
             index: RwLock::new(Arc::new(Snapshot::default())),
             landed: AtomicU64::new(0),
+            landings: Mutex::new(VecDeque::new()),
             index_generation: AtomicU64::new(0),
             wake: (Mutex::new(false), Condvar::new()),
             busy: AtomicBool::new(false),
@@ -639,11 +642,13 @@ impl Library {
             store.save_for(source, expected_revision, media, disc)
         })?;
         self.touch_index();
-        // Keyed by the source, so same-title discs never share one queue identity.
+        // Keyed by the source path, so two ISOs of one title never share a queue identity;
+        // a planned job writes only its plan's outputs, never this path.
+        let key = format!("{iso_title} [{:012x}]", index::path_hash(source) >> 16);
         let job = NewJob {
             title: saved.media.title.clone(),
             iso: source.to_path_buf(),
-            target: index::new_mkv_target(&d.library, &iso_title),
+            target: index::new_mkv_target(&d.library, &key),
             replace: false,
         };
         let queued = self.queue.add_fresh(vec![job], true);
@@ -713,18 +718,18 @@ impl Library {
         self.commit_scan(scan, landed_at);
     }
 
-    // Swap `scan` in unless a remux landed since `landed_at`: the scan may predate its file.
-    fn commit_scan(&self, scan: Snapshot, landed_at: u64) {
+    // Swap `scan` in, with every remux that landed since `landed_at` folded into it: the scan
+    // may predate those files.
+    fn commit_scan(&self, mut scan: Snapshot, landed_at: u64) {
         {
             let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
-            if self.landed.load(Ordering::SeqCst) == landed_at {
-                *guard = Arc::new(scan);
-                drop(guard);
-                self.touch_index();
-                return;
+            let landings = self.landings.lock().unwrap_or_else(|e| e.into_inner());
+            for (_, target, sig) in landings.iter().filter(|(seq, _, _)| *seq > landed_at) {
+                fold_landed(&mut scan, target, *sig);
             }
+            *guard = Arc::new(scan);
         }
-        self.wake_indexer();
+        self.touch_index();
     }
 
     fn scan(&self, d: &Dirs) -> Snapshot {
@@ -986,27 +991,17 @@ impl Library {
             return;
         };
         self.probes.record_at(target, sig, writing_app);
-        // Edited under the write lock; a scan that began earlier is dropped (see `commit_scan`).
+        // Edited under the write lock; a scan that began earlier folds it in (see `commit_scan`).
         {
             let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
-            self.landed.fetch_add(1, Ordering::SeqCst);
+            let seq = self.landed.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut landings = self.landings.lock().unwrap_or_else(|e| e.into_inner());
+            if landings.len() == LANDINGS_KEPT {
+                landings.pop_front();
+            }
+            landings.push_back((seq, target.to_path_buf(), sig));
             let mut next = (**guard).clone();
-            next.sigs.insert(target.to_path_buf(), sig);
-            for row in next.rows.iter_mut() {
-                if row.target.as_deref() == Some(target) && row.kind == RowKind::IsoOnly {
-                    row.kind = RowKind::Remux;
-                    row.mkv = Some(target.to_path_buf());
-                }
-            }
-            if !next.mkvs.iter().any(|m| m.path == target)
-                && let Some(dirs) = &next.dirs
-            {
-                let title = index::mkv_title(&dirs.library, target);
-                next.mkvs.push(index::MkvFile {
-                    path: target.to_path_buf(),
-                    title,
-                });
-            }
+            fold_landed(&mut next, target, sig);
             *guard = Arc::new(next);
         }
         self.audits.enqueue([target.to_path_buf()]);
@@ -1268,9 +1263,8 @@ impl Library {
         id != 0 && self.cancel_job.load(Ordering::SeqCst) == id
     }
 
-    /// Delete unowned movie partials and known output partials, including TV
-    /// destinations outside the movie root.
-    /// Returns how many went.
+    /// Delete unowned movie partials, known output partials, and remux partials in the TV
+    /// folder's show and season folders. Returns how many went.
     pub fn sweep_partials(&self, d: &Dirs) -> usize {
         let mut candidates: HashSet<PathBuf> = self
             .queue
@@ -1281,20 +1275,10 @@ impl Library {
             .chain(links::load(&self.config_dir).into_keys())
             .map(|p| queue::partial_path(&p))
             .collect();
-        let titles = std::fs::read_dir(&d.library).into_iter().flatten();
-        for dir in titles.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-            let Ok(files) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for f in files.flatten().map(|e| e.path()) {
-                let partial = f
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.to_ascii_lowercase().ends_with(".mkv.partial"));
-                if partial {
-                    candidates.insert(f);
-                }
-            }
+        // `<library>/<title>/` holds a movie; `<tv>/<show>/<season>/` an episode.
+        candidates.extend(partials_under(&d.library, 1));
+        if let Some(tv) = &d.tv {
+            candidates.extend(partials_under(tv, 2));
         }
         candidates
             .into_iter()
@@ -1454,6 +1438,65 @@ impl Library {
             }
         }
         self.touch_live();
+    }
+}
+
+/// How many folders a partial sweep looks into at most.
+const SWEEP_FOLDERS: usize = 10_000;
+
+// The `.mkv.partial` files in the folders `depth` levels below `root` (not in `root`
+// itself), looking into at most SWEEP_FOLDERS folders.
+fn partials_under(root: &Path, depth: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut level = vec![root.to_path_buf()];
+    let mut visited = 0;
+    for at in 0..=depth {
+        let mut next = Vec::new();
+        for dir in level {
+            if visited == SWEEP_FOLDERS {
+                return found;
+            }
+            visited += 1;
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for path in entries.flatten().map(|e| e.path()) {
+                let partial = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.to_ascii_lowercase().ends_with(".mkv.partial"));
+                if at == depth && partial {
+                    found.push(path);
+                } else if at < depth && path.is_dir() {
+                    next.push(path);
+                }
+            }
+        }
+        level = next;
+    }
+    found
+}
+
+/// How many landings are remembered for scans that began before them.
+const LANDINGS_KEPT: usize = 1024;
+
+// A remux's new file at `target`, as a snapshot shows it before any scan has listed it.
+fn fold_landed(next: &mut Snapshot, target: &Path, sig: FileSig) {
+    next.sigs.insert(target.to_path_buf(), sig);
+    for row in next.rows.iter_mut() {
+        if row.target.as_deref() == Some(target) && row.kind == RowKind::IsoOnly {
+            row.kind = RowKind::Remux;
+            row.mkv = Some(target.to_path_buf());
+        }
+    }
+    if !next.mkvs.iter().any(|m| m.path == target)
+        && let Some(dirs) = &next.dirs
+    {
+        let title = index::mkv_title(&dirs.library, target);
+        next.mkvs.push(index::MkvFile {
+            path: target.to_path_buf(),
+            title,
+        });
     }
 }
 

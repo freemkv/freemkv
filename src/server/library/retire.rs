@@ -81,11 +81,26 @@ pub(super) fn run(
         if let Err(e) = lock.delete() {
             tracing::warn!(path = %old.path.display(), error = %e, "retire lock could not be removed");
         }
-        if !removed? {
+        if removed? {
+            remove_emptied_folders(&old.path, root);
+        } else {
             kept.push(old.path.clone());
         }
     }
     Ok(kept)
+}
+
+// The title folder (and a show folder above a season folder) a removed file leaves empty;
+// never `root`, and never a folder with anything left in it (remove_dir refuses those).
+fn remove_emptied_folders(removed: &Path, root: &Path) {
+    for dir in removed.ancestors().skip(1).take(2) {
+        if dir == root || !dir.starts_with(root) || std::fs::remove_dir(dir).is_err() {
+            return;
+        }
+        if let Some(parent) = dir.parent() {
+            libfreemkv::io::fsync::dir(parent);
+        }
+    }
 }
 
 fn outside(path: &Path) -> io::Error {

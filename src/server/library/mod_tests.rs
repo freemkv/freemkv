@@ -559,3 +559,22 @@ fn recorded_targets_are_checked_a_bounded_number_of_folders_at_a_time() {
     let most = MOST_IN_STAT.load(Ordering::SeqCst);
     assert!(most <= TARGET_PROBES, "{most} folders checked at once");
 }
+
+#[test]
+fn tv_folder_partials_no_job_owns_are_swept() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let mut d = dirs_in(t.path());
+    let tv = t.path().join("tv");
+    d.tv = Some(tv.clone());
+    let season = tv.join("Show (2001)/Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    let orphan = season.join("Show S01E04.mkv.partial");
+    std::fs::write(&orphan, b"half an episode").unwrap();
+    std::fs::write(season.join("Show S01E03.mkv"), b"whole").unwrap();
+    std::fs::create_dir_all(&d.library).unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    assert_eq!(lib.sweep_partials(&d), 1);
+    assert!(!orphan.exists());
+    assert!(season.join("Show S01E03.mkv").exists());
+}

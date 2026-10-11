@@ -477,8 +477,11 @@ fn refuse_existing(target: &Path, replace: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Move `partial` onto `target`. Without `replace`, a hard link lands it only if the target is
-/// still absent. Unsupported filesystems fail closed, never using an overwriting rename.
+/// Move `partial` onto `target`. Without `replace`, libfreemkv's no-replace publish lands it
+/// only if the target is still absent: an atomic no-replace rename where the filesystem has
+/// one, else a hard link, else an exclusive claim of the target followed by a rename. On a
+/// filesystem with neither (macOS smbfs, some FUSE mounts) that last step leaves a short window
+/// in which a file another client creates at the target can be overwritten or removed.
 pub(crate) fn land(partial: &Path, target: &Path, replace: bool) -> io::Result<()> {
     if replace {
         return std::fs::rename(partial, target);
@@ -963,14 +966,7 @@ pub(crate) fn deliver_finished(
 
 // The kept pair for `target` in `stage`: the target's stem and a hash of its whole path.
 fn kept_paths(stage: &Path, target: &Path) -> (PathBuf, PathBuf) {
-    // FNV-1a: stable across builds, and only a name.
-    let hash = target
-        .as_os_str()
-        .as_encoded_bytes()
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
+    let hash = super::index::path_hash(target);
     let stem = target.file_stem().unwrap_or_default().to_string_lossy();
     let stem: String = stem
         .chars()

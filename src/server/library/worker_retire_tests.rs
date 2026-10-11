@@ -340,3 +340,57 @@ fn a_target_this_job_already_landed_is_done_not_reported_as_foreign() {
         "nothing was captured to retire"
     );
 }
+
+#[test]
+fn a_correction_that_kept_old_files_does_not_advise_running_it_again() {
+    let c = Correction::new(2);
+    let ending = c.run(|request, _, ordinal| {
+        if ordinal == 0 {
+            std::fs::write(&c.old[1], b"the user edited this episode").unwrap();
+        }
+        std::fs::write(&request.target, movie())?;
+        Ok(Some(current_stamp()))
+    });
+    let lines = Lines(Mutex::new(Vec::new()));
+    finish(&c.lib, &c.job, ending, Duration::ZERO, &lines);
+    let failure = c.lib.queue.snapshot().jobs[0].failure.clone().unwrap();
+    assert!(
+        failure.message.contains("delete them yourself"),
+        "{}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains("Change match again"),
+        "{}",
+        failure.message
+    );
+    let said = lines.0.lock().unwrap().join("\n");
+    assert!(!said.contains("Change match again"), "{said}");
+}
+
+#[test]
+fn retire_removes_the_old_files_folder_once_it_is_empty_and_never_one_that_is_not() {
+    let c = Correction::new(1);
+    let stray = c.dirs.library.join("Old/notes.txt");
+    let ending = c.run(|request, _, _| {
+        std::fs::create_dir_all(request.target.parent().unwrap()).unwrap();
+        std::fs::write(&request.target, movie())?;
+        Ok(Some(current_stamp()))
+    });
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert!(
+        !c.dirs.library.join("Old").exists(),
+        "the emptied folder went"
+    );
+    // A folder with anything else in it stays.
+    let c = Correction::new(1);
+    std::fs::write(c.dirs.library.join("Old/notes.txt"), b"mine").unwrap();
+    let ending = c.run(|request, _, _| {
+        std::fs::create_dir_all(request.target.parent().unwrap()).unwrap();
+        std::fs::write(&request.target, movie())?;
+        Ok(Some(current_stamp()))
+    });
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert!(c.dirs.library.join("Old/notes.txt").exists());
+    let _ = stray;
+}

@@ -466,13 +466,14 @@ fn a_remux_needing_the_disc_says_insert_it_and_is_not_retried() {
     let old_mkv = std::fs::read(&mkv_path).unwrap();
     lib.index_now(&dirs);
     lib.enqueue(&dirs, |_| true);
-    let job = lib.queue.claim_next().expect("the stale MKV is queued");
+    let mut job = lib.queue.claim_next().expect("the stale MKV is queued");
     assert_eq!(job.iso, iso);
     let cfg = Config {
         keydb_path: Some(keydb.to_string_lossy().into_owned()),
         library_dir: dirs.library.to_string_lossy().into_owned(),
         ..Config::default()
     };
+    maybe_attach_tv_plan(&lib, &cfg, &mut job).unwrap();
     let arbiter = Arbiter::new();
     let ending = remux(&job, &cfg, &test_sink(&lib, &arbiter));
     let lines = Lines(Mutex::new(Vec::new()));
@@ -1697,3 +1698,6 @@ mod mounts;
 
 #[path = "worker_failure_tests.rs"]
 mod failures;
+
+#[path = "worker_low_tests.rs"]
+mod low;
