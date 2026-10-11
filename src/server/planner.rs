@@ -1,14 +1,12 @@
 //! Immutable source-to-output planning shared by autorip and Library remux.
 //!
-//! Planners decide *what* a source produces.  Executors only consume the
+//! The planner decides *what* a source produces.  Executors only consume the
 //! resulting plan and must never redo TMDB lookup or episode assignment.
 
 use crate::server::config::Config;
 use libfreemkv::DiscTitle;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-
-pub const PLAN_VERSION: u32 = 1;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,8 +38,6 @@ pub struct PlannedOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemuxPlan {
-    pub version: u32,
-    pub source_iso: PathBuf,
     pub media: MediaMetadata,
     pub outputs: Vec<PlannedOutput>,
 }
@@ -82,111 +78,46 @@ impl std::fmt::Display for PlanError {
     }
 }
 
-pub trait Planner {
-    fn plan(
-        &self,
-        source_iso: &Path,
-        titles: &[DiscTitle],
-        media: &MediaMetadata,
-        movie_filename: &Path,
-    ) -> Result<RemuxPlan, PlanError>;
-}
-
-#[derive(Default)]
-pub struct MoviePlanner {
-    pub preferences: freemkv_engine::SelectionPreferences,
-}
-
-impl MoviePlanner {
-    pub fn from_config(cfg: &Config) -> Self {
-        Self {
-            preferences: selection_preferences(cfg),
-        }
+/// What `media` produces from `titles`: one output per episode when `cfg.tv_auto`
+/// finds a TV episode set, else the main title as `movie_filename`'s leaf.
+pub fn plan(
+    cfg: &Config,
+    titles: &[DiscTitle],
+    media: &MediaMetadata,
+    movie_filename: &Path,
+) -> Result<RemuxPlan, PlanError> {
+    check_episode_selection(titles, cfg, media.kind)?;
+    let indices = episode_indices(titles, cfg, media.kind);
+    // A TV movie or a single detected feature remains one output.
+    if indices.len() <= 1 {
+        let title_index = main_title(cfg, titles)?;
+        return Ok(single_plan(media, title_index, leaf(movie_filename)));
     }
-
-    pub(crate) fn title_index(&self, titles: &[DiscTitle]) -> Result<usize, PlanError> {
-        let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
-            &freemkv_engine::Selection::MainMovie,
-            &freemkv_engine::StreamFilter::All,
-            &self.preferences,
-        );
-        if let Some(reason) = report.review_reason {
-            return Err(PlanError::SelectionNeedsReview(reason.key().into()));
-        }
-        report.indices.first().copied().ok_or(PlanError::NoTitles)
-    }
+    let season = media.season.unwrap_or(1);
+    // The disc number is the caller's (from the ISO labels), never the show title.
+    let start =
+        confirmed_episode_start(media.disc.unwrap_or(1), indices.len(), media.episode_start)?;
+    // Validate numbering before the blocking TMDB fetch.
+    let episodes = crate::server::tmdb::season_episodes(media.tmdb_id, season, &cfg.tmdb_api_key);
+    let outputs =
+        episode_outputs_from_start(titles, &indices, season, start, &episodes, movie_filename);
+    validate_outputs(outputs).map(|outputs| RemuxPlan {
+        media: media.clone(),
+        outputs,
+    })
 }
 
-impl Planner for MoviePlanner {
-    fn plan(
-        &self,
-        source_iso: &Path,
-        titles: &[DiscTitle],
-        media: &MediaMetadata,
-        movie_filename: &Path,
-    ) -> Result<RemuxPlan, PlanError> {
-        let title_index = self.title_index(titles)?;
-        let filename = leaf(movie_filename);
-        Ok(single_plan(source_iso, media, title_index, filename))
+/// The main feature under `cfg`'s presentation language; a review reason holds it.
+pub(crate) fn main_title(cfg: &Config, titles: &[DiscTitle]) -> Result<usize, PlanError> {
+    let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
+        &freemkv_engine::Selection::MainMovie,
+        &freemkv_engine::StreamFilter::All,
+        &selection_preferences(cfg),
+    );
+    if let Some(reason) = report.review_reason {
+        return Err(PlanError::SelectionNeedsReview(reason.key().into()));
     }
-}
-
-pub struct TvPlanner<'a> {
-    pub cfg: &'a Config,
-}
-
-impl Planner for TvPlanner<'_> {
-    fn plan(
-        &self,
-        source_iso: &Path,
-        titles: &[DiscTitle],
-        media: &MediaMetadata,
-        movie_filename: &Path,
-    ) -> Result<RemuxPlan, PlanError> {
-        let label = if media.season.is_some() {
-            format!("{} Season {}", media.title, media.season.unwrap_or(1))
-        } else {
-            media.title.clone()
-        };
-        check_episode_selection(titles, self.cfg, media.kind)?;
-        let indices = episode_indices(titles, self.cfg, media.kind);
-        // A TV movie or a single detected feature remains one output.
-        if indices.len() <= 1 {
-            return MoviePlanner {
-                preferences: selection_preferences(self.cfg),
-            }
-            .plan(source_iso, titles, media, movie_filename);
-        }
-        let season = media
-            .season
-            .or_else(|| crate::server::tmdb::season_from_label(&label))
-            .unwrap_or(1);
-        // The disc number is the caller's (from the ISO labels); the show
-        // title says nothing about which disc this is.
-        let disc_number = media.disc.unwrap_or(1);
-        let start = confirmed_episode_start(disc_number, indices.len(), media.episode_start)?;
-        // Validate numbering before the blocking TMDB fetch.
-        let episodes =
-            crate::server::tmdb::season_episodes(media.tmdb_id, season, &self.cfg.tmdb_api_key);
-        let outputs =
-            episode_outputs_from_start(titles, &indices, season, start, &episodes, movie_filename);
-        validate_outputs(outputs).map(|outputs| RemuxPlan {
-            version: PLAN_VERSION,
-            source_iso: source_iso.to_path_buf(),
-            media: media.clone(),
-            outputs,
-        })
-    }
-}
-
-pub fn planner_for<'a>(cfg: &'a Config, media: &MediaMetadata) -> Box<dyn Planner + 'a> {
-    if media.kind == Some(MediaKind::Tv) {
-        Box::new(TvPlanner { cfg })
-    } else {
-        Box::new(MoviePlanner {
-            preferences: selection_preferences(cfg),
-        })
-    }
+    report.indices.first().copied().ok_or(PlanError::NoTitles)
 }
 
 /// Automatic fan-out is a TV-only policy shared by capture and remux.
@@ -309,15 +240,8 @@ fn episode_outputs_from_start(
         .collect()
 }
 
-fn single_plan(
-    source_iso: &Path,
-    media: &MediaMetadata,
-    title_index: usize,
-    filename: String,
-) -> RemuxPlan {
+fn single_plan(media: &MediaMetadata, title_index: usize, filename: String) -> RemuxPlan {
     RemuxPlan {
-        version: PLAN_VERSION,
-        source_iso: source_iso.to_path_buf(),
         media: media.clone(),
         outputs: vec![PlannedOutput {
             id: format!("title-{title_index}"),
@@ -416,12 +340,7 @@ mod tests {
             kind: Some(MediaKind::Tv),
             ..Default::default()
         };
-        let result = TvPlanner { cfg: &cfg }.plan(
-            Path::new("disc.iso"),
-            &titles,
-            &media,
-            Path::new("show.mkv"),
-        );
+        let result = plan(&cfg, &titles, &media, Path::new("show.mkv"));
         assert!(matches!(result, Err(PlanError::SelectionNeedsReview(_))));
     }
 
@@ -433,16 +352,8 @@ mod tests {
             kind: Some(MediaKind::Movie),
             ..Default::default()
         };
-        let plan = MoviePlanner::default()
-            .plan(
-                Path::new("disc.iso"),
-                &titles,
-                &media,
-                Path::new("Film.mkv"),
-            )
-            .unwrap();
+        let plan = plan(&Config::default(), &titles, &media, Path::new("Film.mkv")).unwrap();
         assert_eq!(plan.outputs.len(), 1);
-        assert_eq!(plan.source_iso, Path::new("disc.iso"));
         assert_eq!(plan.outputs[0].title_index, 0);
         assert_eq!(plan.outputs[0].filename, "Film.mkv");
     }
@@ -469,12 +380,7 @@ mod tests {
                 (crate::selection_test_fixtures::variant_titles(), variant),
                 (crate::selection_test_fixtures::separate_titles(), separate),
             ] {
-                let plan = planner_for(&cfg, &media).plan(
-                    Path::new("disc.iso"),
-                    &titles,
-                    &media,
-                    Path::new("movie.mkv"),
-                );
+                let plan = plan(&cfg, &titles, &media, Path::new("movie.mkv"));
                 let index = plan.map(|plan| plan.outputs[0].title_index);
                 assert_eq!(index.ok(), Some(expected), "{language:?}");
             }
@@ -488,8 +394,8 @@ mod tests {
                 &freemkv_engine::Selection::MainMovie,
                 &freemkv_engine::StreamFilter::All,
             );
-            let planned = MoviePlanner::default().plan(
-                Path::new("disc.iso"),
+            let planned = plan(
+                &Config::default(),
                 &titles,
                 &MediaMetadata::default(),
                 Path::new("film.mkv"),
@@ -521,14 +427,7 @@ mod tests {
             season: Some(2),
             ..Default::default()
         };
-        let plan = planner_for(&cfg, &media)
-            .plan(
-                Path::new("disc.iso"),
-                &titles,
-                &media,
-                Path::new("Show.mkv"),
-            )
-            .unwrap();
+        let plan = plan(&cfg, &titles, &media, Path::new("Show.mkv")).unwrap();
         assert_eq!(
             plan.outputs
                 .iter()
@@ -581,14 +480,7 @@ mod tests {
             tmdb_id: 44264,
             ..Default::default()
         };
-        let plan = TvPlanner { cfg: &cfg }
-            .plan(
-                Path::new("disc.iso"),
-                &titles,
-                &media,
-                Path::new("Endeavour.mkv"),
-            )
-            .unwrap();
+        let plan = plan(&cfg, &titles, &media, Path::new("Endeavour.mkv")).unwrap();
         assert_eq!(plan.outputs.len(), 3);
         assert_eq!(plan.outputs[0].title_index, 1);
         assert_eq!(plan.outputs[0].episode, Some(1));
@@ -611,14 +503,7 @@ mod tests {
             tv_auto: false,
             ..Config::default()
         };
-        let plan = TvPlanner { cfg: &cfg }
-            .plan(
-                Path::new("disc.iso"),
-                &titles,
-                &media,
-                Path::new("Show.mkv"),
-            )
-            .unwrap();
+        let plan = plan(&cfg, &titles, &media, Path::new("Show.mkv")).unwrap();
         assert_eq!(plan.outputs.len(), 1);
         assert_eq!(plan.outputs[0].filename, "Show.mkv");
     }
@@ -641,14 +526,7 @@ mod tests {
                     ordinal: (index < members).then_some(index),
                 };
             }
-            let plan = TvPlanner { cfg: &cfg }
-                .plan(
-                    Path::new("disc.iso"),
-                    &titles,
-                    &media,
-                    Path::new("Show.mkv"),
-                )
-                .unwrap();
+            let plan = plan(&cfg, &titles, &media, Path::new("Show.mkv")).unwrap();
             assert_eq!(plan.outputs.len(), 1);
             assert_eq!(plan.outputs[0].filename, "Show.mkv");
             assert_eq!(plan.outputs[0].episode, None);
@@ -680,14 +558,13 @@ mod tests {
             season: Some(1),
             ..Default::default()
         };
-        let plan = TvPlanner { cfg: &cfg }
-            .plan(
-                Path::new("disc.iso"),
-                &authored_two_episode_disc(),
-                &media,
-                Path::new("Show.mkv"),
-            )
-            .unwrap();
+        let plan = plan(
+            &cfg,
+            &authored_two_episode_disc(),
+            &media,
+            Path::new("Show.mkv"),
+        )
+        .unwrap();
         assert_eq!(plan.outputs[0].episode, Some(1));
     }
 

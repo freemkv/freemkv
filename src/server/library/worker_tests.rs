@@ -27,7 +27,7 @@ fn presentation_preference_unplanned_movie_cannot_skip_source_planning() {
 
 #[test]
 fn presentation_preference_single_output_is_frozen_in_queue() {
-    use crate::server::planner::{MediaMetadata, MoviePlanner};
+    use crate::server::planner::MediaMetadata;
     let t = tempfile::tempdir().unwrap();
     let lib = Library::open(t.path(), &t.path().join("logs"));
     lib.queue.add(vec![NewJob {
@@ -41,14 +41,13 @@ fn presentation_preference_single_output_is_frozen_in_queue() {
         presentation_language: "de".into(),
         ..Default::default()
     };
-    let plan = MoviePlanner::from_config(&cfg)
-        .plan(
-            &job.iso,
-            &crate::selection_test_fixtures::variant_titles(),
-            &MediaMetadata::default(),
-            &job.target,
-        )
-        .unwrap();
+    let plan = crate::server::planner::plan(
+        &cfg,
+        &crate::selection_test_fixtures::variant_titles(),
+        &MediaMetadata::default(),
+        &job.target,
+    )
+    .unwrap();
     persist_auto_plan(&lib, &cfg, &mut job, plan).unwrap();
     assert_eq!(
         job.plan
@@ -202,8 +201,6 @@ fn corrected_frozen_plan_rejects_a_replaced_iso_before_execution() {
     assert!(lib.queue.set_plan(
         claimed.id,
         crate::server::planner::RemuxPlan {
-            version: crate::server::planner::PLAN_VERSION,
-            source_iso: iso.clone(),
             media,
             outputs: vec![crate::server::planner::PlannedOutput {
                 id: "movie".into(),

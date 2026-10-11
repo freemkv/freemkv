@@ -327,8 +327,6 @@ fn corrected_source_replans_without_reusing_prior_episode_selection() {
     q.add(vec![job(t.path(), "old")]);
     let first = q.claim_next().unwrap();
     let plan = crate::server::planner::RemuxPlan {
-        version: crate::server::planner::PLAN_VERSION,
-        source_iso: first.iso.clone(),
         media: Default::default(),
         outputs: vec![crate::server::planner::PlannedOutput {
             id: "episode".into(),
@@ -485,8 +483,6 @@ fn a_claimed_job_persists_its_frozen_plan_once() {
     q.add(vec![job(t.path(), "show")]);
     let claimed = q.claim_next().unwrap();
     let plan = crate::server::planner::RemuxPlan {
-        version: crate::server::planner::PLAN_VERSION,
-        source_iso: claimed.iso.clone(),
         media: crate::server::planner::MediaMetadata {
             title: "Show".into(),
             kind: Some(crate::server::planner::MediaKind::Tv),
@@ -528,8 +524,6 @@ fn frozen_plan_write_failure_leaves_job_unplanned() {
     std::fs::rename(&q.path, q.path.with_extension("saved")).unwrap();
     std::fs::create_dir(&q.path).unwrap();
     let plan = crate::server::planner::RemuxPlan {
-        version: crate::server::planner::PLAN_VERSION,
-        source_iso: claimed.iso,
         media: Default::default(),
         outputs: vec![crate::server::planner::PlannedOutput {
             id: "movie".into(),
@@ -1017,8 +1011,6 @@ fn forgetting_a_jobs_kept_file_forgets_it_on_its_output_too() {
     q.add(vec![job(t.path(), "show")]);
     let claimed = q.claim_next().unwrap();
     let plan = crate::server::planner::RemuxPlan {
-        version: crate::server::planner::PLAN_VERSION,
-        source_iso: claimed.iso.clone(),
         media: crate::server::planner::MediaMetadata::default(),
         outputs: vec![crate::server::planner::PlannedOutput {
             id: "feature".into(),

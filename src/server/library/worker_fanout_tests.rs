@@ -1,10 +1,10 @@
 use super::*;
 use crate::server::library::queue;
-use crate::server::planner::{MediaMetadata, PLAN_VERSION, PlannedOutput, RemuxPlan};
+use crate::server::planner::{MediaMetadata, PlannedOutput, RemuxPlan};
 
 #[test]
 fn presentation_preference_frozen_movie_and_single_tv_execute_audio_all_after_preference_change() {
-    use crate::server::planner::{MediaKind, planner_for};
+    use crate::server::planner::MediaKind;
     for kind in [MediaKind::Movie, MediaKind::Tv] {
         let (_t, lib, dirs) = library_with(&["B"]);
         lib.queue.add(vec![NewJob {
@@ -19,15 +19,8 @@ fn presentation_preference_frozen_movie_and_single_tv_execute_audio_all_after_pr
             tv_auto: false,
             ..config(&dirs)
         };
-        let plan = planner_for(
+        let plan = crate::server::planner::plan(
             &cfg,
-            &MediaMetadata {
-                kind: Some(kind),
-                ..Default::default()
-            },
-        )
-        .plan(
-            &job.iso,
             &crate::selection_test_fixtures::variant_titles(),
             &MediaMetadata {
                 kind: Some(kind),
@@ -89,8 +82,6 @@ fn planned(lib: &Library, dirs: &Dirs) -> Job {
     }]);
     let job = lib.queue.claim_next().unwrap();
     let plan = RemuxPlan {
-        version: PLAN_VERSION,
-        source_iso: job.iso.clone(),
         media: MediaMetadata::default(),
         outputs: (0..2)
             .map(|n| PlannedOutput {
@@ -118,8 +109,8 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
     let (t, lib, dirs) = library_with(&["B"]);
     let original = planned(&lib, &dirs);
     let mut plan = original.plan.unwrap();
-    plan.source_iso = dirs.isos.as_ref().unwrap().join("Show.iso");
-    std::fs::write(&plan.source_iso, b"source image").unwrap();
+    let source_iso = dirs.isos.as_ref().unwrap().join("Show.iso");
+    std::fs::write(&source_iso, b"source image").unwrap();
     lib.queue.drop_job(original.id);
     plan.media = MediaMetadata {
         title: "Show".into(),
@@ -147,7 +138,7 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
     std::fs::create_dir_all(&root).unwrap();
     lib.queue.add(vec![NewJob {
         title: "Show".into(),
-        iso: plan.source_iso.clone(),
+        iso: source_iso.clone(),
         target: original.target.clone(),
         replace: false,
     }]);

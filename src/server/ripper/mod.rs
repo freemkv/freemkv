@@ -5453,7 +5453,7 @@ fn capture_title_index(
     if let Some(index) = fanout_episode_indices(titles, cfg, media_type, disc_name).first() {
         return Ok(*index);
     }
-    crate::server::planner::MoviePlanner::from_config(cfg).title_index(titles)
+    crate::server::planner::main_title(cfg, titles)
 }
 
 fn selection_review_message(error: &crate::server::planner::PlanError) -> String {
@@ -5580,8 +5580,7 @@ fn plan_mux_outputs(
 ) -> Result<Vec<staging::Output>, crate::server::planner::PlanError> {
     let indices = fanout_episode_indices(titles, cfg, media_type, disc_name);
     if indices.is_empty() {
-        let title_index =
-            crate::server::planner::MoviePlanner::from_config(cfg).title_index(titles)?;
+        let title_index = crate::server::planner::main_title(cfg, titles)?;
         return Ok(vec![staging::Output {
             filename: movie_filename.to_string(),
             title_index,

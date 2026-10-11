@@ -26,9 +26,7 @@ fn execute(
         .clone()
         .ok_or_else(|| io::Error::other("missing replacement journal"))?;
     let targets = job.output_targets();
-    if plan.version != crate::server::planner::PLAN_VERSION
-        || plan.source_iso != job.iso
-        || plan.outputs.is_empty()
+    if plan.outputs.is_empty()
         || plan.outputs.len() != targets.len()
         || plan.outputs.len() != job.outputs.len()
         || plan

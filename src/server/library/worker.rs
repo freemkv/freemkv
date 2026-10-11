@@ -8,7 +8,6 @@ use super::queue::{Failure, Job, JobNote, JobResult, NewJob, OutputState, Staged
 use super::{Dirs, Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use crate::server::health::{self, Fault, Problem};
-use crate::server::planner::Planner;
 use freemkv_engine::{Event, Level, Progress, Sink};
 use std::io::Write as _;
 use std::path::Path;
@@ -209,8 +208,12 @@ fn attach_from_lookup(
         kind: Some(crate::server::planner::MediaKind::Tv),
         episode_start: None,
     };
-    let planner = crate::server::planner::TvPlanner { cfg };
-    let plan = tv_plan_result(planner.plan(&job.iso, &disc.titles, &media, &job.target))?;
+    let plan = tv_plan_result(crate::server::planner::plan(
+        cfg,
+        &disc.titles,
+        &media,
+        &job.target,
+    ))?;
     persist_auto_plan(lib, cfg, job, plan)
 }
 
@@ -244,8 +247,8 @@ fn persist_auto_plan(
 fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
-    let plan = crate::server::planner::MoviePlanner::from_config(cfg).plan(
-        &job.iso,
+    let plan = crate::server::planner::plan(
+        cfg,
         &disc.titles,
         &crate::server::planner::MediaMetadata::default(),
         &job.target,
@@ -292,7 +295,7 @@ fn attach_corrected_plan(
     job: &mut Job,
     media: &crate::server::planner::MediaMetadata,
 ) -> std::io::Result<()> {
-    use crate::server::planner::{MediaKind, MoviePlanner, TvPlanner};
+    use crate::server::planner::MediaKind;
     let Some(kind) = media.kind else {
         return Err(std::io::Error::other("saved match has no media type"));
     };
@@ -322,17 +325,10 @@ fn attach_corrected_plan(
         "feature.mkv",
         media.season,
     ));
-    let plan = match kind {
-        MediaKind::Movie => {
-            MoviePlanner::from_config(cfg).plan(&job.iso, &disc.titles, media, &target)
-        }
-        MediaKind::Tv => {
-            let mut explicit = cfg.clone();
-            explicit.tv_auto = true;
-            TvPlanner { cfg: &explicit }.plan(&job.iso, &disc.titles, media, &target)
-        }
-    }
-    .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
+    let mut explicit = cfg.clone();
+    explicit.tv_auto = kind == MediaKind::Tv;
+    let plan = crate::server::planner::plan(&explicit, &disc.titles, media, &target)
+        .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
     let targets = tv_destinations(cfg, &plan)
         .map(|(_, paths)| paths)
         .unwrap_or_else(|| vec![target]);
@@ -587,17 +583,6 @@ fn remux_planned_with(
         usize,
     ) -> std::io::Result<Option<String>>,
 ) -> Ending {
-    if plan.version != crate::server::planner::PLAN_VERSION {
-        return Ending::Failed(std::io::Error::other(format!(
-            "unsupported remux plan version {}",
-            plan.version
-        )));
-    }
-    if plan.source_iso != job.iso {
-        return Ending::Failed(std::io::Error::other(
-            "remux plan source ISO does not match queued job",
-        ));
-    }
     if plan.outputs.is_empty()
         || plan.outputs.iter().any(|o| {
             let p = Path::new(&o.filename);
