@@ -123,3 +123,23 @@ test('the Remux row pill is short; the reason stays in its tooltip', async () =>
   assert.match(pill, /title="E9073 timed out while copying"/);
   assert.match(f.stagedPill({ ...job, failure: null }, 100), /title="Finished locally/);
 });
+
+test('a folder still being checked is a notice, not an alert', async () => {
+  const f = await load();
+  const slow = {
+    role: 'output', path: '/mnt/nas',
+    message: 'The output folder has not answered for 7s — still checking.',
+    hint: 'Nothing to do yet.',
+    health: { state: 'checking', since: 9 },
+  };
+  assert.deepEqual(f.unhealthy([slow, fine]), []);
+  const html = f.folderBanner([slow, fine], null, true);
+  assert.match(html, /class="banner warn" role="status"/);
+  assert.ok(!html.includes('role="alert"'), html);
+  assert.match(html, /still checking/);
+  const both = f.folderBanner([slow, stale], null, true);
+  assert.equal((both.match(/role="alert"/g) || []).length, 1);
+  assert.equal((both.match(/role="status"/g) || []).length, 1);
+  const held = f.folderBanner([fine], { state: 'checking', role: 'output', path: '/n', message: 'slow', since: 1 }, true);
+  assert.match(held, /banner warn/);
+});

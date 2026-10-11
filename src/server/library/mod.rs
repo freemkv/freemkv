@@ -211,14 +211,21 @@ pub fn folder_views(d: &Dirs) -> Vec<FolderView> {
     out.into_iter()
         .map(|(role, path)| {
             let health = health::status_for(&path);
-            let fault = health
-                .as_ref()
-                .filter(|m| m.state != health::State::Ok)
-                .map(|m| m.fault.unwrap_or(health::Fault::Other));
+            // A folder whose check is still out is not usable yet, but has not failed.
+            let (message, hint) = match health.as_ref() {
+                Some(m) if m.state == health::State::Checking => {
+                    (Some(health::checking_message(role)), m.hint.clone())
+                }
+                Some(m) if m.state != health::State::Ok => {
+                    let f = m.fault.unwrap_or(health::Fault::Other);
+                    (Some(f.message(role)), Some(f.hint().to_string()))
+                }
+                _ => (None, None),
+            };
             FolderView {
                 role,
-                message: fault.map(|f| f.message(role)),
-                hint: fault.map(|f| f.hint().to_string()),
+                message,
+                hint,
                 health,
                 path,
             }

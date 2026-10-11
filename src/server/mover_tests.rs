@@ -1527,16 +1527,8 @@ fn a_hung_destination_holds_the_move_without_blocking_the_mover() {
     let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
     mkv.extend_from_slice(&[0xAAu8; 1024]);
     std::fs::write(disc_dir.join("Held Up.mkv"), &mkv).unwrap();
-    // A probe of the movie folder that the "kernel" never returns from.
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let hung = crate::server::health::bounded(
-        &movie_dir,
-        std::time::Duration::from_millis(50),
-        move || {
-            let _ = rx.recv();
-        },
-    );
-    assert_eq!(hung, crate::server::health::Bounded::TimedOut);
+    // A probe of the movie folder that the "kernel" has not returned from for the hang bound.
+    let hung = crate::server::health::tests::hung_probe(&movie_dir);
     let started = std::time::Instant::now();
     check_and_move(&cfg);
     assert!(
@@ -1562,7 +1554,7 @@ fn a_hung_destination_holds_the_move_without_blocking_the_mover() {
     assert!(err.reason.contains("not responding"), "{err:?}");
     assert!(err.hint.contains("Remount the share"), "{err:?}");
     // The share answers again: the next tick moves it.
-    drop(tx);
+    drop(hung);
     let t = std::time::Instant::now();
     while crate::server::health::preflight("output", &movie_dir).is_err() {
         assert!(t.elapsed() < std::time::Duration::from_secs(5));
@@ -3569,8 +3561,9 @@ fn check_configured_destinations_gives_up_on_a_hung_root() {
     );
     let roots: Vec<&str> = problems.iter().map(|(r, _)| r.as_str()).collect();
     assert_eq!(roots, [movies.as_str(), tv.as_str()], "{problems:?}");
+    // A wait shorter than the hang bound says so: not answered yet, not "not responding".
     for (_, reason) in &problems {
-        assert!(reason.contains("not responding"), "{reason}");
+        assert!(reason.contains("has not answered yet"), "{reason}");
     }
 }
 
@@ -3590,7 +3583,8 @@ fn validate_destination_root_gives_up_on_a_hung_root() {
         "{:?}",
         started.elapsed()
     );
-    assert!(err.contains("not responding"), "{err}");
+    assert!(err.contains("has not answered yet"), "{err}");
+    assert!(!err.contains("stale network mount"), "{err}");
 }
 
 // The real check still runs through the bounded path: a broken root keeps its own reason.
@@ -3715,4 +3709,81 @@ fn a_running_attempt_marks_its_row_retrying_until_it_fails_again() {
     super::record_error_with(path, "copy to destination failed", "", |_| {});
     assert!(!super::MOVE_ERRORS.lock().unwrap()[path].retrying);
     super::clear_move_error(path);
+}
+
+// Live 2026-10-11: a NAS spinning its disks up answered the health check after its 5 s wait,
+// and the mover was refused ("an earlier check of this folder never came back") for minutes.
+// A slow answer is an answer: the move goes ahead.
+#[test]
+fn a_root_whose_health_check_answered_late_still_takes_the_move() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path().to_path_buf();
+    let slow = crate::server::health::begin(&r, std::time::Duration::from_millis(50), || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    });
+    assert_eq!(slow.wait(), crate::server::health::Bounded::TimedOut);
+    let started = std::time::Instant::now();
+    assert_eq!(validate_destination_root(r.to_str().unwrap()), Ok(()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+// One bounded write test per destination root per move attempt: on a NAS taking seconds per
+// call, a second probe doubled the wait before every delivery.
+#[test]
+fn a_move_write_tests_its_root_once() {
+    let _g = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let disc_dir = staging.join("Probed Once");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Probed Once")).unwrap();
+    let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
+    mkv.extend_from_slice(&[0xAAu8; 1024]);
+    std::fs::write(disc_dir.join("Probed Once.mkv"), &mkv).unwrap();
+    let probes = test_hooks::count_preflights(&movie_dir);
+    check_and_move(&cfg);
+    assert!(
+        movie_dir
+            .join("Probed Once (2024)/Probed Once (2024).mkv")
+            .exists(),
+        "moved"
+    );
+    assert_eq!(probes.count(), 1);
+}
+
+// A delivery whose folder check the server's stop cut short is neither blocked nor logged:
+// the check said nothing about the folder.
+#[test]
+fn a_stop_during_the_folder_check_records_nothing() {
+    let _g = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let disc_dir = staging.join("Stopped");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Stopped")).unwrap();
+    std::fs::write(disc_dir.join("Stopped.mkv"), [0x1A, 0x45, 0xDF, 0xA3]).unwrap();
+    crate::server::health::tests::STOPPING.with(|s| s.set(true));
+    check_and_move(&cfg);
+    crate::server::health::tests::STOPPING.with(|s| s.set(false));
+    assert!(disc_dir.join("Stopped.mkv").exists(), "kept in staging");
+    assert!(
+        MOVE_ERRORS
+            .lock()
+            .unwrap()
+            .get(&*disc_dir.to_string_lossy())
+            .is_none(),
+        "no error row for a stop"
+    );
 }

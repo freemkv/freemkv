@@ -1247,6 +1247,11 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                 std::collections::HashSet::new();
 
             for path in &drive_paths {
+                // A stop is noticed between drives, not after a whole tick of them: the
+                // stop deadline is already counting.
+                if crate::server::SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
                 let device = device_key(path);
 
                 // Don't probe drives a worker still holds. `rip_thread_running`

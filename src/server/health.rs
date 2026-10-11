@@ -1,12 +1,17 @@
 //! Folder health for the System, Library and Remux pages, checked off the request path.
 //!
 //! A thread re-checks every configured folder each [`INTERVAL_SECS`]; each
-//! check runs on its own short-lived thread and is given [`CHECK_TIMEOUT`],
-//! so a hung NFS mount reads as "not responding" instead of hanging anything.
-//! [`preflight`] is the same bounded probe plus a create-and-delete write, run
-//! before a remux or a move starts. A folder never has more than one probe in
-//! flight: a probe the kernel never returns from is abandoned, not repeated.
-//! `GET /api/system` and the Library only read the cached result.
+//! check runs on its own short-lived thread, so a hung NFS mount never hangs
+//! anything else. [`preflight`] is the same bounded probe plus a
+//! create-and-delete write, run before a remux or a move starts. A folder never
+//! has more than one probe in flight: a probe the kernel never returns from is
+//! abandoned, not repeated. `GET /api/system` and the Library only read the
+//! cached result.
+//!
+//! One verdict per folder, whoever asked: only an answer (published by the probe
+//! itself, however late it comes) or a probe out for [`HANG_AFTER`] sets it. A
+//! caller that stops waiting sooner decides nothing for anyone else, so a share
+//! spinning its disks up (seconds per stat) reads slow, never down.
 
 use crate::server::config::Config;
 use std::path::{Path, PathBuf};
@@ -15,9 +20,15 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 pub const INTERVAL_SECS: u64 = 30;
+/// How long the health thread (and a settings save) waits for a check before moving on; a
+/// check still running then is left to publish its answer when it comes.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a preflight may take before the folder counts as not responding.
-pub const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A probe out this long without an answer means the folder hangs: it is "not responding",
+/// and further probes of it are refused at once until that probe returns. A NAS waking its
+/// disks answers well inside it.
+pub const HANG_AFTER: Duration = Duration::from_secs(60);
+/// How long a preflight waits for its answer: until the folder counts as hung.
+pub const PREFLIGHT_TIMEOUT: Duration = HANG_AFTER;
 
 /// How a folder answered its last check.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
@@ -27,8 +38,18 @@ pub enum State {
     Ok,
     /// It answered with an error.
     Unhealthy,
-    /// It did not answer within the time limit.
+    /// A check has been out for the hang bound without an answer.
     Unresponsive,
+    /// A check has been out longer than [`CHECK_TIMEOUT`] but not yet the hang bound: not
+    /// usable yet (work waits), not failed either.
+    Checking,
+}
+
+impl State {
+    /// It answered with an error or hangs: the folder has failed, not merely slow.
+    pub fn failed(self) -> bool {
+        matches!(self, State::Unhealthy | State::Unresponsive)
+    }
 }
 
 /// Why a folder cannot be used, by cause.
@@ -197,12 +218,24 @@ pub struct Mount {
     /// The latest problem, kept after the folder recovers.
     pub last_error: Option<String>,
     pub last_error_at: Option<u64>,
+    // When this result's evidence was seen, in publish order: an older result never
+    // replaces a newer one, whichever is published last.
+    #[serde(skip)]
+    observed: u64,
+}
+
+// Orders the evidence behind published results.
+static OBSERVED: AtomicU64 = AtomicU64::new(1);
+
+fn observed_now() -> u64 {
+    OBSERVED.fetch_add(1, Ordering::SeqCst)
 }
 
 impl Mount {
     fn blank(role: &'static str, path: &Path) -> Self {
         let now = crate::server::util::epoch_secs();
         Mount {
+            observed: observed_now(),
             role,
             path: path.to_path_buf(),
             ok: false,
@@ -242,6 +275,34 @@ impl Mount {
         self.last_ok = Some(self.checked_at);
         self
     }
+
+    // A check out longer than the health thread waits, not yet hung. No latency (it is not
+    // known yet) and no age in the words: the row is published once per round, so a number
+    // would freeze; `since` says how long it has read this way.
+    fn checking(role: &'static str, path: &Path) -> Self {
+        let mut m = Mount::blank(role, path);
+        m.state = State::Checking;
+        m.problem = Some("checking — no answer yet".into());
+        m.message = Some(checking_message(role));
+        m.hint = Some(CHECKING_HINT.into());
+        m
+    }
+
+    // Ranked as evidence seen at `seq` (the start of the probe it is about).
+    fn ranked_at(mut self, seq: u64) -> Self {
+        self.observed = seq;
+        self
+    }
+}
+
+const CHECKING_HINT: &str = "Nothing to do yet: work for this folder waits until it answers (a NAS may be waking its disks).";
+
+/// The sentence for a folder whose check is out without an answer yet.
+pub fn checking_message(role: &str) -> String {
+    format!(
+        "The {} folder has not answered yet — still checking.",
+        role.to_lowercase()
+    )
 }
 
 static LAST: Mutex<Vec<Mount>> = Mutex::new(Vec::new());
@@ -268,9 +329,9 @@ pub fn status_for(path: &Path) -> Option<Mount> {
         .cloned()
 }
 
-/// Whether the health monitor already reports `path` unusable, and so already logged it.
+/// Whether the health monitor already reports `path` failed, and so already logged it.
 pub fn already_reported(path: &Path) -> bool {
-    status_for(path).is_some_and(|m| !m.ok)
+    status_for(path).is_some_and(|m| m.state.failed())
 }
 
 /// The remux engine's local staging folder, when one is set.
@@ -450,47 +511,196 @@ pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
     m.passed()
 }
 
+// `m` as seen now: its evidence is the answer that just came in.
+fn answered(mut m: Mount) -> Mount {
+    m.observed = observed_now();
+    m
+}
+
 /// How a bounded probe ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Bounded<T> {
     Done(T),
-    /// It is still running after the limit; its thread is left to finish on its own.
+    /// No answer within the caller's limit (its probe, or the earlier one it waited for, is
+    /// left to finish on its own). Slow, not yet hung.
     TimedOut,
-    /// An earlier probe of the same folder never came back, so none was started.
+    /// An earlier probe of the same folder has been out for the hang bound, so none was
+    /// started.
     Busy,
 }
 
-// Folders whose probe has not come back, with when that probe's own limit ran out. A hung
+// Which mount a probe ran against: the kernel's id of the mount holding the path, or where
+// there is none, health's own remount generation. A probe stuck on a mount that has since been
+// replaced does not hold up the new one; one stuck on any other mount still does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MountKey {
+    generation: u64,
+    mount: Option<u64>,
+}
+
+fn mount_key(path: &Path) -> MountKey {
+    key_for(probe_generation(), mount_id(path))
+}
+
+// The generation counts only without a kernel mount id: health's remount of its own share
+// changes that share's id, and must not re-key every other folder (each would get a second
+// probe thread stuck beside the first).
+fn key_for(generation: u64, mount: Option<u64>) -> MountKey {
+    MountKey {
+        generation: if mount.is_none() { generation } else { 0 },
+        mount,
+    }
+}
+
+// The kernel's id of the mount holding `path`, read from the mount table (never the mount).
+// `path` is compared as written: a configured folder that is a symlink into another mount
+// resolves to the mount holding the link, not its target (its probe then follows the link).
+#[cfg(target_os = "linux")]
+fn mount_id(path: &Path) -> Option<u64> {
+    mount_id_in(&std::fs::read_to_string("/proc/self/mountinfo").ok()?, path)
+}
+
+// The id (first field) of the `mountinfo` line whose mount point (fifth) holds `path`.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn mount_id_in(mountinfo: &str, path: &Path) -> Option<u64> {
+    mountinfo
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let id = f.next()?.parse::<u64>().ok()?;
+            let mp = crate::server::daemon::unescape_mount_path(f.nth(3)?);
+            Some((id, PathBuf::from(mp)))
+        })
+        .filter(|(_, mp)| path.starts_with(mp))
+        .max_by_key(|(_, mp)| mp.components().count())
+        .map(|(id, _)| id)
+}
+
+#[cfg(target_os = "macos")]
+fn mount_id(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: a null buffer asks only for the count.
+    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if n <= 0 {
+        return None;
+    }
+    let cap = n as usize + 8;
+    let mut buf: Vec<libc::statfs> = Vec::with_capacity(cap);
+    let bytes = (cap * std::mem::size_of::<libc::statfs>()) as libc::c_int;
+    // SAFETY: `buf` has room for `cap` entries; MNT_NOWAIT never asks a mount to answer.
+    let got = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+    if got < 0 {
+        return None;
+    }
+    // SAFETY: getfsstat filled `got` entries.
+    unsafe { buf.set_len(got as usize) };
+    buf.iter()
+        .map(|s| {
+            // SAFETY: f_mntonname is NUL-terminated by the kernel.
+            let name = unsafe { std::ffi::CStr::from_ptr(s.f_mntonname.as_ptr()) };
+            // SAFETY: fsid_t is two i32s; read as one u64 (it is unique per mount).
+            let fsid = unsafe {
+                std::ptr::read_unaligned((&s.f_fsid as *const libc::fsid_t).cast::<u64>())
+            };
+            (
+                fsid,
+                PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes())),
+            )
+        })
+        .filter(|(_, mp)| path.starts_with(mp))
+        .max_by_key(|(_, mp)| mp.components().count())
+        .map(|(id, _)| id)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn mount_id(_: &Path) -> Option<u64> {
+    None
+}
+
+// One probe that has not come back: its folder, the mount it ran against, and when it
+// started (`None`: earlier than anything a caller can measure, so hung for any bound). A hung
 // mount keeps one thread blocked; it never gets a second one.
+struct Probe {
+    id: u64,
+    path: PathBuf,
+    mount: MountKey,
+    started: Option<Instant>,
+    // Evidence order when it started: a verdict drawn from this probe being out ranks below
+    // the probe's own answer, whenever either is published.
+    seq: u64,
+}
+
+impl Probe {
+    fn age(&self) -> Duration {
+        self.started.map_or(Duration::MAX, |t| t.elapsed())
+    }
+}
+
 struct InFlight {
-    folders: Mutex<Vec<(PathBuf, Instant)>>,
+    probes: Mutex<Vec<Probe>>,
     done: Condvar,
 }
 
 static IN_FLIGHT: InFlight = InFlight {
-    folders: Mutex::new(Vec::new()),
+    probes: Mutex::new(Vec::new()),
     done: Condvar::new(),
 };
+static NEXT_PROBE: AtomicU64 = AtomicU64::new(0);
 
-fn release(key: &Path) {
+fn release(id: u64) {
     IN_FLIGHT
-        .folders
+        .probes
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|(p, _)| p != key);
+        .retain(|p| p.id != id);
     IN_FLIGHT.done.notify_all();
 }
+
+// How long the probe of `path` on `mount` has been out, and its start's evidence order.
+fn in_flight_for(path: &Path, mount: MountKey) -> Option<(Duration, u64)> {
+    IN_FLIGHT
+        .probes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|p| p.path == path && p.mount == mount)
+        .map(|p| (p.age(), p.seq))
+}
+
+// The probe of `path` on `mount` in flight for at least `hang_after`.
+fn hung_for(path: &Path, mount: MountKey, hang_after: Duration) -> Option<(Duration, u64)> {
+    in_flight_for(path, mount).filter(|(age, _)| *age >= hang_after)
+}
+
+// Whether the server is stopping: a waiting caller gives up at once. Tests drive their own
+// thread's flag instead of the process-wide one other tests share.
+fn stopping() -> bool {
+    #[cfg(test)]
+    {
+        tests::STOPPING.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        crate::server::SHUTDOWN.load(Ordering::Relaxed)
+    }
+}
+
+// The longest a wait sleeps before it looks at `stopping` again.
+const STOP_POLL: Duration = Duration::from_millis(200);
 
 /// A started probe: wait for it with [`Pending::wait`].
 pub struct Pending<T> {
     rx: Option<std::sync::mpsc::Receiver<T>>,
     deadline: Instant,
+    // Refused because an earlier probe hangs (else: the wait for it ran out first).
+    hung: bool,
+    mount: MountKey,
 }
 
 /// Begin `probe` for the folder `key` on its own thread. A probe of `key` already running is
-/// waited for within `limit`; one past its own limit means the folder hangs, and the answer is
-/// `Busy` at once. A probe that outlives its caller is left running: it may touch only its own
-/// probe artifacts.
+/// waited for within `limit` (then this one starts); one out for [`HANG_AFTER`] means the
+/// folder hangs, and the answer is `Busy` at once. A probe that outlives its caller is left
+/// running: it may touch only its own probe artifacts.
 pub fn begin<T, F>(key: &Path, limit: Duration, probe: F) -> Pending<T>
 where
     T: Send + 'static,
@@ -505,57 +715,143 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let busy = Pending { rx: None, deadline };
-    {
-        let mut held = IN_FLIGHT.folders.lock().unwrap_or_else(|e| e.into_inner());
-        while let Some(late_at) = held.iter().find(|(p, _)| p == key).map(|(_, t)| *t) {
-            let now = Instant::now();
-            if now >= deadline || now >= late_at {
-                return busy;
+    begin_with(key, Wait::Until(deadline), HANG_AFTER, probe)
+}
+
+// How long a caller waits for an answer.
+#[derive(Clone, Copy)]
+enum Wait {
+    Until(Instant),
+    // Until an answer or the hang verdict, whichever comes first.
+    UntilHung,
+}
+
+// [`begin_until`] with the wait and the hang bound given.
+fn begin_with<T, F>(key: &Path, wait: Wait, hang_after: Duration, probe: F) -> Pending<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    begin_keyed(key, mount_key(key), wait, hang_after, probe)
+}
+
+// [`begin_with`] on the mount given: the seam the tests use.
+fn begin_keyed<T, F>(
+    key: &Path,
+    mount: MountKey,
+    wait: Wait,
+    hang_after: Duration,
+    probe: F,
+) -> Pending<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let far = Instant::now() + Duration::from_secs(365 * 24 * 3600);
+    let deadline = match wait {
+        Wait::Until(t) => t,
+        Wait::UntilHung => far,
+    };
+    let refused = |hung| Pending {
+        rx: None,
+        deadline,
+        hung,
+        mount,
+    };
+    let id = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+    let started = {
+        let mut held = IN_FLIGHT.probes.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(age) = held
+            .iter()
+            .find(|p| p.path == key && p.mount == mount)
+            .map(Probe::age)
+        {
+            if age >= hang_after {
+                return refused(true);
             }
+            let now = Instant::now();
+            if now >= deadline || stopping() {
+                return refused(false);
+            }
+            let slice = (hang_after - age).min(deadline - now).min(STOP_POLL);
+            #[cfg(test)]
+            tests::waiting(key);
             held = IN_FLIGHT
                 .done
-                .wait_timeout(held, deadline.min(late_at) - now)
+                .wait_timeout(held, slice)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
-        held.push((key.to_path_buf(), deadline));
-    }
+        // Nothing is started for a server that is stopping.
+        if stopping() {
+            return refused(false);
+        }
+        let started = Instant::now();
+        held.push(Probe {
+            id,
+            path: key.to_path_buf(),
+            mount,
+            started: Some(started),
+            seq: observed_now(),
+        });
+        started
+    };
     let (tx, rx) = std::sync::mpsc::channel();
-    let owned = key.to_path_buf();
     let spawned = std::thread::Builder::new()
         .name("folder-probe".into())
         .spawn(move || {
-            struct Release(PathBuf);
+            struct Release(u64);
             impl Drop for Release {
                 fn drop(&mut self) {
-                    release(&self.0);
+                    release(self.0);
                 }
             }
-            let guard = Release(owned);
+            let guard = Release(id);
             let out = probe();
-            drop(guard);
+            // Answer before leaving the in-flight list, so a caller that finds the probe gone
+            // also finds its answer.
             let _ = tx.send(out);
+            drop(guard);
         });
     if spawned.is_err() {
-        release(key);
-        return busy;
+        release(id);
+        return refused(false);
     }
     Pending {
         rx: Some(rx),
-        deadline,
+        // Our own probe is waited for until it hangs, counted from when it started.
+        deadline: match wait {
+            Wait::Until(t) => t,
+            Wait::UntilHung => started + hang_after,
+        },
+        hung: false,
+        mount,
     }
 }
 
 impl<T> Pending<T> {
-    /// The probe's answer, or `TimedOut` once its limit has run out; `Busy` if none started.
+    /// The probe's answer, or `TimedOut` once its limit has run out (or the server stops);
+    /// `Busy` if an earlier probe hangs.
     pub fn wait(self) -> Bounded<T> {
         let Some(rx) = self.rx else {
-            return Bounded::Busy;
+            return if self.hung {
+                Bounded::Busy
+            } else {
+                Bounded::TimedOut
+            };
         };
-        match rx.recv_timeout(self.deadline.saturating_duration_since(Instant::now())) {
-            Ok(v) => Bounded::Done(v),
-            Err(_) => Bounded::TimedOut,
+        loop {
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left.min(STOP_POLL)) {
+                Ok(v) => return Bounded::Done(v),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Bounded::TimedOut,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if left <= STOP_POLL || stopping() {
+                        // An answer that landed with the deadline still counts.
+                        return rx.try_recv().map_or(Bounded::TimedOut, Bounded::Done);
+                    }
+                }
+            }
         }
     }
 }
@@ -577,16 +873,40 @@ where
     T: Send + 'static,
     F: Fn(I) -> T + Send + Sync + 'static,
 {
+    bounded_each_with(items, limit, HANG_AFTER, f)
+        .into_iter()
+        .map(|(b, _)| b)
+        .collect()
+}
+
+// [`bounded_each`] with the hang bound given; each result with the mount its probe ran on.
+fn bounded_each_with<I, T, F>(
+    items: Vec<(PathBuf, I)>,
+    limit: Duration,
+    hang_after: Duration,
+    f: F,
+) -> Vec<(Bounded<T>, MountKey)>
+where
+    I: Send + 'static,
+    T: Send + 'static,
+    F: Fn(I) -> T + Send + Sync + 'static,
+{
     let f = Arc::new(f);
     let deadline = Instant::now() + limit;
     let started: Vec<_> = items
         .into_iter()
         .map(|(key, item)| {
             let f = f.clone();
-            begin_until(&key, deadline, move || f(item))
+            begin_with(&key, Wait::Until(deadline), hang_after, move || f(item))
         })
         .collect();
-    started.into_iter().map(Pending::wait).collect()
+    started
+        .into_iter()
+        .map(|p| {
+            let mount = p.mount;
+            (p.wait(), mount)
+        })
+        .collect()
 }
 
 // Keep stale-handle evidence even when its probe finishes after the caller timed out.
@@ -630,27 +950,42 @@ fn report_fault(generation: u64, path: &Path, fault: Option<Fault>) {
 // `check` for one folder, reporting a stale handle even when the caller gave up on it.
 fn check_reporting(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
     let generation = probe_generation();
-    let result = check(role, &path, want_write);
+    let result = answered(check(role, &path, want_write));
     report_fault(generation, &path, result.fault);
     tracing::debug!(role, path = %path.display(), fault = ?result.fault, "folder probe completed");
     result
 }
 
-// Check every folder at once, each abandoned after CHECK_TIMEOUT; results keep the input order.
-fn check_folders(folders: Vec<(&'static str, PathBuf, bool)>) -> Vec<Mount> {
+// Check every folder at once, waiting up to `wait` between them; results keep the input
+// order. A probe out longer than `wait` reads "checking", one out for `hang_after` "not
+// responding"; `None` for a probe out less than `wait` (one started by someone else just now).
+// Either way the probe publishes its answer when it comes.
+fn check_folders(
+    folders: Vec<(&'static str, PathBuf, bool)>,
+    wait: Duration,
+    hang_after: Duration,
+) -> Vec<Option<Mount>> {
     let items = folders
         .iter()
         .map(|(role, path, w)| (path.clone(), (*role, path.clone(), *w)))
         .collect();
-    let results = bounded_each(items, CHECK_TIMEOUT, |(role, path, w)| {
-        check_reporting(role, path, w)
+    let results = bounded_each_with(items, wait, hang_after, |(role, path, w)| {
+        let m = check_reporting(role, path, w);
+        publish_answer(m.clone());
+        m
     });
     folders
         .iter()
         .zip(results)
-        .map(|((role, path, _), r)| match r {
-            Bounded::Done(m) => m,
-            Bounded::TimedOut | Bounded::Busy => not_responding(role, path, CHECK_TIMEOUT),
+        .map(|((role, path, _), (r, mount))| match r {
+            Bounded::Done(m) => Some(m),
+            Bounded::TimedOut | Bounded::Busy => match in_flight_for(path, mount) {
+                Some((age, seq)) if age >= hang_after => {
+                    Some(not_responding(role, path, age).ranked_at(seq))
+                }
+                Some((age, seq)) if age >= wait => Some(Mount::checking(role, path).ranked_at(seq)),
+                _ => None,
+            },
         })
         .collect()
 }
@@ -659,15 +994,27 @@ fn not_responding(role: &'static str, path: &Path, after: Duration) -> Mount {
     Mount::blank(role, path).failed(
         Fault::Unresponsive,
         format!(
-            "not responding after {}s (a stale network mount?)",
-            after.as_secs()
+            "not responding: {} (a hung network mount?)",
+            no_answer_for(after)
         ),
     )
 }
 
-// Carry a folder's history (since, last good, last error) from its previous check.
+fn no_answer_for(after: Duration) -> String {
+    format!("no answer for {}s", after.as_secs())
+}
+
+// Carry a folder's history (since, last good, last error) from its previous check, and its last
+// capacity figures while it is not failed and the new result has none (a preflight, a check
+// still running).
 fn merge(prev: Option<&Mount>, mut next: Mount) -> Mount {
     let Some(prev) = prev else { return next };
+    if !next.state.failed() && next.total_bytes.is_none() {
+        next.free_bytes = prev.free_bytes;
+        next.total_bytes = prev.total_bytes;
+        // A usable row never inherits "not writable" (a passed preflight just wrote there).
+        next.writable = next.writable.or(prev.writable.filter(|w| *w || !next.ok));
+    }
     if prev.state == next.state {
         next.since = prev.since;
     }
@@ -704,8 +1051,50 @@ fn unusable_line(role: &str, m: &Mount) -> String {
     line
 }
 
+// One row of a full publish: a new result, or the folder's current row kept as it is (its
+// check is still running).
+enum Slot {
+    New(Box<Mount>),
+    Keep(PathBuf),
+}
+
+// The folders the health thread watches, by role: a late answer for one of them is published
+// even before its first row exists.
+static WATCHED: Mutex<Vec<(&'static str, PathBuf)>> = Mutex::new(Vec::new());
+
+// Publish a probe's answer, whenever it comes, for a folder the health list shows or watches.
+fn publish_answer(mut m: Mount) {
+    let watched = WATCHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(_, p)| *p == m.path)
+        .map(|(role, _)| *role);
+    let shown = LAST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|x| x.path == m.path);
+    if let Some(role) = watched {
+        m.role = role;
+    }
+    if watched.is_some() || shown {
+        publish(vec![m], false);
+    }
+}
+
 // Publish `results` (every folder) or one result (a preflight), keeping each folder's history.
 fn publish(results: Vec<Mount>, replace_all: bool) {
+    publish_slots(
+        results
+            .into_iter()
+            .map(|m| Slot::New(Box::new(m)))
+            .collect(),
+        replace_all,
+    );
+}
+
+fn publish_slots(results: Vec<Slot>, replace_all: bool) {
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     let shape = |v: &[Mount]| -> Vec<(PathBuf, State, Option<String>)> {
         v.iter()
@@ -714,24 +1103,40 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
     };
     let before = shape(&last);
     let mut lines = Vec::new();
-    let merged: Vec<Mount> = results
-        .into_iter()
-        .map(|m| {
-            let previous = last.iter().find(|p| p.path == m.path);
-            let role = previous.map_or(m.role, |p| p.role);
-            if !m.ok && role != READ_ONLY_ROLE && previous.is_none_or(|p| p.ok) {
-                lines.push(unusable_line(role, &m));
+    let mut merged: Vec<Mount> = Vec::new();
+    for slot in results {
+        let m = match slot {
+            Slot::New(m) => *m,
+            // Unchanged, so neither logged nor merged again.
+            Slot::Keep(path) => {
+                merged.extend(last.iter().find(|p| p.path == path).cloned());
+                continue;
             }
-            if previous.is_none_or(|p| p.fault != m.fault || p.state != m.state) {
-                if m.ok {
-                    tracing::info!(role = m.role, path = %m.path.display(), latency_ms = ?m.latency_ms, "folder healthy");
-                } else {
-                    tracing::warn!(role = m.role, path = %m.path.display(), fault = ?m.fault, detail = ?m.problem, "folder unavailable");
-                }
+        };
+        let previous = last.iter().find(|p| p.path == m.path);
+        // Evidence older than the row's (a hang verdict reached just before the late answer
+        // that is already shown) never replaces it, whichever was published last.
+        if let Some(newer) = previous.filter(|p| p.observed > m.observed) {
+            merged.push(newer.clone());
+            continue;
+        }
+        let role = previous.map_or(m.role, |p| p.role);
+        if m.state.failed() && role != READ_ONLY_ROLE && previous.is_none_or(|p| !p.state.failed())
+        {
+            lines.push(unusable_line(role, &m));
+        }
+        if previous.is_none_or(|p| p.fault != m.fault || p.state != m.state) {
+            if m.ok {
+                tracing::info!(role = m.role, path = %m.path.display(), latency_ms = ?m.latency_ms, "folder healthy");
+            } else if m.state == State::Checking {
+                // A NAS waking its disks flips this often: not a warning.
+                tracing::info!(role = m.role, path = %m.path.display(), "folder slow to answer; still checking");
+            } else {
+                tracing::warn!(role = m.role, path = %m.path.display(), fault = ?m.fault, detail = ?m.problem, "folder unavailable");
             }
-            merge(previous, m)
-        })
-        .collect();
+        }
+        merged.push(merge(previous, m));
+    }
     if replace_all {
         *last = merged;
     } else {
@@ -756,10 +1161,19 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
     }
 }
 
-/// Check every folder once and publish the result.
+/// Check every folder once and publish the result. A folder that has not answered within
+/// [`CHECK_TIMEOUT`] reads "checking" until its check answers or hangs.
 pub fn refresh(cfg: &Config) {
-    let mounts = check_folders(folders(cfg));
-    publish(mounts, true);
+    let folders = folders(cfg);
+    *WATCHED.lock().unwrap_or_else(|e| e.into_inner()) =
+        folders.iter().map(|(r, p, _)| (*r, p.clone())).collect();
+    let outcomes = check_folders(folders.clone(), CHECK_TIMEOUT, HANG_AFTER);
+    let slots = folders
+        .into_iter()
+        .zip(outcomes)
+        .map(|((_, path, _), m)| m.map_or(Slot::Keep(path), |m| Slot::New(Box::new(m))))
+        .collect();
+    publish_slots(slots, true);
 }
 
 /// Why a folder failed its preflight, in words the UI shows as they are.
@@ -842,8 +1256,9 @@ fn probe_write_with(
 }
 
 /// Before a remux or a move starts: `dir` must answer a stat and a create-and-delete
-/// within [`PREFLIGHT_TIMEOUT`]. Never blocks longer than that, whatever the mount does.
-/// The answer is published as the folder's state.
+/// within [`PREFLIGHT_TIMEOUT`] (a slow share is waited for; one whose probe is out for
+/// [`HANG_AFTER`] is refused, at once once that is known). Never blocks longer than that,
+/// whatever the mount does. The answer is published as the folder's state.
 pub fn preflight(role: &'static str, dir: &Path) -> Result<(), Problem> {
     preflight_with(role, dir, PREFLIGHT_TIMEOUT, probe_write)
 }
@@ -858,8 +1273,32 @@ pub fn preflight_with<F>(
 where
     F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
 {
-    let started = preflight_begin(role, dir, Instant::now() + limit, probe);
-    preflight_finish(role, dir, limit, started)
+    preflight_hanging_after(role, dir, limit, HANG_AFTER, probe)
+}
+
+// [`preflight_with`] with the hang bound given: the seam the tests use.
+fn preflight_hanging_after<F>(
+    role: &'static str,
+    dir: &Path,
+    limit: Duration,
+    hang_after: Duration,
+    probe: F,
+) -> Result<(), Problem>
+where
+    F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
+{
+    let started = preflight_begin(role, dir, wait_for(limit, hang_after), hang_after, probe);
+    preflight_finish(role, dir, limit, hang_after, started)
+}
+
+// A limit that reaches the hang bound waits for the answer or the hang verdict, counted from
+// when the probe actually started (not from this call); a shorter one waits that long.
+fn wait_for(limit: Duration, hang_after: Duration) -> Wait {
+    if limit >= hang_after {
+        Wait::UntilHung
+    } else {
+        Wait::Until(Instant::now() + limit)
+    }
 }
 
 /// [`preflight_with`] for several folders at once, so folders on one dead mount cost one
@@ -873,82 +1312,100 @@ pub fn preflight_each<F>(
 where
     F: Fn(&Path) -> std::io::Result<()> + Copy + Send + 'static,
 {
-    let deadline = Instant::now() + limit;
+    let wait = wait_for(limit, HANG_AFTER);
     let started: Vec<_> = dirs
         .iter()
-        .map(|d| preflight_begin(role, d, deadline, probe))
+        .map(|d| preflight_begin(role, d, wait, HANG_AFTER, probe))
         .collect();
     dirs.iter()
         .zip(started)
-        .map(|(d, s)| preflight_finish(role, d, limit, s))
+        .map(|(d, s)| preflight_finish(role, d, limit, HANG_AFTER, s))
         .collect()
 }
 
-// A preflight under way: refused up front, or its probe running.
-type Started = (Instant, Result<Pending<std::io::Result<()>>, Problem>);
+/// In the detail of a preflight that stopped waiting before the folder answered or hung.
+pub const STILL_CHECKING: &str = "still checking";
 
-fn preflight_begin<F>(role: &'static str, dir: &Path, deadline: Instant, probe: F) -> Started
+// The detail of a preflight cut short because the server is stopping.
+const STOPPED: &str = "the server is stopping; still checking";
+
+impl Problem {
+    /// The preflight was cut short by the server stopping: it says nothing about the folder.
+    pub fn stopped(&self) -> bool {
+        self.detail == STOPPED
+    }
+}
+
+// A preflight under way: refused up front, or its probe running.
+type Started = Result<Pending<std::io::Result<()>>, Problem>;
+
+// The probe publishes its own answer, however late: the folder's verdict is the answer, not
+// whether this caller was still waiting for it.
+fn preflight_begin<F>(
+    role: &'static str,
+    dir: &Path,
+    wait: Wait,
+    hang_after: Duration,
+    probe: F,
+) -> Started
 where
     F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
 {
-    let started = Instant::now();
     if share_unmounted(dir) {
-        let p = Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into());
-        return (started, Err(p));
+        return Err(Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into()));
     }
     let owned = dir.to_path_buf();
     let generation = probe_generation();
-    let pending = begin_until(dir, deadline, move || {
+    Ok(begin_with(dir, wait, hang_after, move || {
+        let started = Instant::now();
         let result = probe(&owned);
         report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
+        publish_answer(match &result {
+            Ok(()) => {
+                let mut m = Mount::blank(role, &owned).passed();
+                m.latency_ms = Some(started.elapsed().as_millis() as u64);
+                m
+            }
+            Err(e) => Problem::new(role, &owned, Fault::of(e), e.to_string()).mount(),
+        });
         result
-    });
-    (started, Ok(pending))
+    }))
 }
 
 fn preflight_finish(
     role: &'static str,
     dir: &Path,
     limit: Duration,
-    (started, begun): Started,
+    hang_after: Duration,
+    begun: Started,
 ) -> Result<(), Problem> {
-    let result = match begun {
-        Err(p) => Err(p),
-        Ok(pending) => match pending.wait() {
-            Bounded::Done(Ok(())) => Ok(()),
-            Bounded::Done(Err(e)) => Err(Problem::new(role, dir, Fault::of(&e), e.to_string())),
-            Bounded::TimedOut => Err(Problem::new(
-                role,
-                dir,
-                Fault::Unresponsive,
-                format!("no answer within {}s", limit.as_secs().max(1)),
-            )),
-            Bounded::Busy => Err(Problem::new(
-                role,
-                dir,
-                Fault::Unresponsive,
-                "an earlier check of this folder never came back".into(),
-            )),
-        },
-    };
-    let mount = match &result {
-        Ok(()) => {
-            let mut m = Mount::blank(role, dir).passed();
-            m.latency_ms = Some(started.elapsed().as_millis() as u64);
-            m
+    let unresponsive = |detail: String| Problem::new(role, dir, Fault::Unresponsive, detail);
+    let pending = match begun {
+        Ok(pending) => pending,
+        Err(p) => {
+            publish_answer(p.mount());
+            return Err(p);
         }
-        Err(p) => p.mount(),
     };
-    // Only a folder the health list already watches is updated; a preflight never adds rows.
-    if LAST
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .any(|m| m.path == dir)
-    {
-        publish(vec![mount], false);
+    let mount = pending.mount;
+    match pending.wait() {
+        // Already published by the probe.
+        Bounded::Done(Ok(())) => Ok(()),
+        Bounded::Done(Err(e)) => Err(Problem::new(role, dir, Fault::of(&e), e.to_string())),
+        // A probe out for the hang bound is the verdict; a shorter wait is only this caller's.
+        Bounded::TimedOut | Bounded::Busy => match hung_for(dir, mount, hang_after) {
+            Some((age, seq)) => {
+                let p = unresponsive(no_answer_for(age));
+                publish_answer(p.mount().ranked_at(seq));
+                Err(p)
+            }
+            None if stopping() => Err(unresponsive(STOPPED.into())),
+            None => Err(unresponsive(format!(
+                "no answer within {}s yet ({STILL_CHECKING})",
+                limit.as_secs().max(1)
+            ))),
+        },
     }
-    result
 }
 
 /// The least time between two remounts of the network share.

@@ -8,17 +8,37 @@ use super::{
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 // Stop bounds: the rip threads, then every other service together, then the web thread.
+// Every step is a cancel whose work resumes on the next start (markers are cleared first), so
+// a bound only has to let the cancel land: a rip gets one drive recovery read (60 s) so its
+// ISO is not cut mid-write; the services (cancelling since the stop request) share that
+// budget and get 30 s more.
 const RIP_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
-const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
-const WEB_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const WEB_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+// Each of the two in-progress marker sweeps (staging may sit on a share that stopped answering).
+const MARKER_CLEAR_TIMEOUT: Duration = Duration::from_secs(3);
 // EX_TEMPFAIL: the service manager (launchd KeepAlive) starts the daemon again.
 const RESTART_EXIT_CODE: i32 = 75;
-// Slack past the drain bounds before a stalled reboot tail (a hung log disk) is cut short.
-const RELAUNCH_SLACK: Duration = Duration::from_secs(30);
+// Slack past the drain bounds for the stop's own tail (log writes, the relaunch).
+const RELAUNCH_SLACK: Duration = Duration::from_secs(15);
+// Hard bound on any stop, counted from the stop request: past it the process exits, whatever
+// is still running (a thread blocked in the kernel on a dead share is never joined). 116 s.
+// The service managers we ship give a stop longer than this plus STOP_LOG_GRACE (pinned by
+// a test), so this deadline, not their SIGKILL, governs.
+const STOP_DEADLINE: Duration = Duration::from_secs(
+    RIP_DRAIN_TIMEOUT.as_secs()
+        + SERVICE_DRAIN_TIMEOUT.as_secs()
+        + WEB_JOIN_TIMEOUT.as_secs()
+        + 2 * MARKER_CLEAR_TIMEOUT.as_secs()
+        + RELAUNCH_SLACK.as_secs(),
+);
+// How long the deadline's last log line may take before the exit goes ahead without it.
+const STOP_LOG_GRACE: Duration = Duration::from_secs(3);
 // Cadence of the KEYDB refresh and log prune threads, in one-second SHUTDOWN polls.
 const DAILY: Duration = Duration::from_secs(24 * 3600);
 
@@ -77,6 +97,23 @@ pub fn run(argv: Vec<String>) {
             libc::SIGINT,
             handle_signal as *const () as libc::sighandler_t,
         );
+    }
+    // Armed before anything that can block: from the first stop request (signal, quit, reboot)
+    // the process is gone within STOP_DEADLINE, whatever thread is stuck where.
+    let progress = Arc::new(StopProgress::default());
+    progress.start("startup and drive polling");
+    if let Err(e) = spawn_stop_deadline(
+        STOP_DEADLINE,
+        || SHUTDOWN.load(Ordering::Acquire),
+        progress.clone(),
+        stop_exit_code,
+        |line| {
+            log::syslog(&line);
+            observe::flush_before_exit();
+        },
+        exit_now,
+    ) {
+        eprintln!("freemkv server: could not start the stop deadline: {e}");
     }
     if bootstrap {
         // Errors are logged but non-fatal. Container-init is Linux-only;
@@ -243,10 +280,6 @@ pub fn run(argv: Vec<String>) {
     ripper::drive_poll_loop(&cfg);
 
     SHUTDOWN.store(true, Ordering::Release);
-    let bound = RIP_DRAIN_TIMEOUT + SERVICE_DRAIN_TIMEOUT + WEB_JOIN_TIMEOUT + RELAUNCH_SLACK;
-    if let Err(e) = spawn_relaunch_deadline(bound, exit_now) {
-        tracing::warn!(error = %e, "could not start the relaunch deadline");
-    }
     let workers = vec![
         ("mover", Some(mover_handle)),
         ("muxer", Some(muxer_handle)),
@@ -260,6 +293,7 @@ pub fn run(argv: Vec<String>) {
         .unwrap_or_else(|e| e.into_inner())
         .staging_dir
         .clone();
+    progress.finish("startup and drive polling");
     stop_services(
         Path::new(&staging),
         ripper::join_all_rip_threads,
@@ -270,6 +304,7 @@ pub fn run(argv: Vec<String>) {
             services: SERVICE_DRAIN_TIMEOUT,
             web: WEB_JOIN_TIMEOUT,
         },
+        &progress,
     );
     if relaunch_requested() {
         relaunch(&relaunch_info);
@@ -284,33 +319,125 @@ struct Bounds {
 
 // Graceful stop, bounded; whether everything finished. Markers are cleared first so a
 // SIGKILL mid-drain leaves resumable dirs, and again for a rip a late request started.
+// Nothing here waits without a bound: a component that does not stop in time is left
+// running (never joined) and named in `progress` and the closing log line.
 fn stop_services(
     staging: &Path,
     join_rips: impl FnOnce(Duration) -> bool,
     workers: Vec<(&'static str, Option<JoinHandle<()>>)>,
     web: Option<JoinHandle<()>>,
     bounds: &Bounds,
+    progress: &StopProgress,
 ) -> bool {
-    ripper::staging::clear_inprogress_markers(staging);
-    let mut done = join_rips(bounds.rips);
-    let deadline = Instant::now() + bounds.services;
+    let clear_markers = |progress: &StopProgress| {
+        let staging = staging.to_path_buf();
+        run_bounded(
+            "staging markers",
+            MARKER_CLEAR_TIMEOUT,
+            progress,
+            move || ripper::staging::clear_inprogress_markers(&staging),
+        )
+    };
+    let mut done = clear_markers(progress);
+    // Rips and services share one budget from here (the marker sweep has its own): time the
+    // rips leave goes to the services.
+    let services_deadline = Instant::now() + bounds.rips + bounds.services;
+    progress.start("rip threads");
+    for (name, _) in &workers {
+        progress.start(name);
+    }
+    progress.start("web");
+    progress.start("http handlers");
+    if join_rips(bounds.rips) {
+        progress.finish("rip threads");
+    } else {
+        done = false;
+    }
     for (name, handle) in workers {
-        done &= join_bounded(
-            handle,
-            name,
-            deadline.saturating_duration_since(Instant::now()),
-        );
+        let left = services_deadline.saturating_duration_since(Instant::now());
+        done &= progress.finish_if(name, join_bounded(handle, name, left));
     }
     let web_deadline = Instant::now() + bounds.web;
-    done &= join_bounded(web, "web", bounds.web);
-    done &= web::wait_idle(web_deadline.saturating_duration_since(Instant::now()));
-    ripper::staging::clear_inprogress_markers(staging);
-    log::syslog(if done {
-        "autorip stopped"
+    done &= progress.finish_if("web", join_bounded(web, "web", bounds.web));
+    let left = web_deadline.saturating_duration_since(Instant::now());
+    done &= progress.finish_if("http handlers", web::wait_idle(left));
+    done &= clear_markers(progress);
+    if done {
+        log::syslog("autorip stopped");
     } else {
-        "autorip stopped before every service drained; unfinished work is interrupted"
-    });
+        log::syslog(&format!(
+            "autorip stopped before every service drained (not stopped: {}); unfinished work is interrupted",
+            progress.pending()
+        ));
+    }
     done
+}
+
+/// What the stop sequence is still waiting on, named for the log.
+#[derive(Default)]
+struct StopProgress(Mutex<Vec<&'static str>>);
+
+impl StopProgress {
+    fn start(&self, name: &'static str) {
+        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !pending.contains(&name) {
+            pending.push(name);
+        }
+    }
+
+    fn finish(&self, name: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|n| *n != name);
+    }
+
+    // `finish` when `stopped`; passes `stopped` through.
+    fn finish_if(&self, name: &str, stopped: bool) -> bool {
+        if stopped {
+            self.finish(name);
+        }
+        stopped
+    }
+
+    // Never blocks: the deadline reads this while the stop sequence may be anywhere.
+    fn pending(&self) -> String {
+        match self.0.try_lock() {
+            Ok(p) if p.is_empty() => "nothing (the exit itself stalled)".into(),
+            Ok(p) => p.join(", "),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().join(", "),
+            Err(std::sync::TryLockError::WouldBlock) => "unknown".into(),
+        }
+    }
+}
+
+// Run `f` on its own thread and wait up to `timeout`; one still running then (blocked in the
+// kernel on a dead share, say) is left behind, never joined, and stays named in `progress`.
+fn run_bounded(
+    name: &'static str,
+    timeout: Duration,
+    progress: &StopProgress,
+    f: impl FnOnce() + Send + 'static,
+) -> bool {
+    progress.start(name);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name(format!("stop-{name}").replace(' ', "-"))
+        .spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+    if spawned.is_err() {
+        return false;
+    }
+    let ok = rx.recv_timeout(timeout).is_ok();
+    if !ok {
+        tracing::warn!(
+            step = name,
+            "did not finish within timeout; stopping without it"
+        );
+    }
+    progress.finish_if(name, ok)
 }
 
 // A reboot was requested and no stop signal has overridden it.
@@ -388,19 +515,53 @@ fn relaunch(relaunch: &Relaunch) -> ! {
     std::process::exit(relaunch_with(relaunch, exec_in_place))
 }
 
-// Backstop for the reboot tail itself (log writes can hang on a dead /config): past
-// `after`, a still-pending relaunch exits 75 through `exit` regardless.
-fn spawn_relaunch_deadline(
+// The exit code of a stop: 75 for a reboot nothing vetoed (the service manager starts us
+// again), else 0, as a plain stop that drained.
+fn stop_exit_code() -> i32 {
+    if relaunch_requested() {
+        RESTART_EXIT_CODE
+    } else {
+        0
+    }
+}
+
+// The hard stop deadline. Once `stopping()` holds, it waits `after`, logs what the stop is
+// still waiting on (`log`, given at most STOP_LOG_GRACE), then calls `exit(code())`. Nothing
+// is joined: a thread blocked in the kernel on a dead share cannot be, and must not hold the
+// exit. (The kernel may still keep the process from finishing its exit until that syscall
+// returns; neither _exit nor SIGKILL can do better.)
+fn spawn_stop_deadline(
     after: Duration,
+    stopping: impl Fn() -> bool + Send + 'static,
+    progress: Arc<StopProgress>,
+    code: impl FnOnce() -> i32 + Send + 'static,
+    log: impl FnOnce(String) + Send + 'static,
     exit: impl FnOnce(i32) + Send + 'static,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
-        .name("relaunch-deadline".into())
+        .name("stop-deadline".into())
         .spawn(move || {
-            std::thread::sleep(after);
-            if relaunch_requested() {
-                exit(RESTART_EXIT_CODE);
+            while !stopping() {
+                std::thread::sleep(Duration::from_millis(100));
             }
+            std::thread::sleep(after);
+            let code = code();
+            let line = format!(
+                "autorip stop: not finished {}s after the stop request; still not stopped: {}; exiting now (code {code})",
+                after.as_secs(),
+                progress.pending()
+            );
+            let (tx, rx) = std::sync::mpsc::channel();
+            let logger = std::thread::Builder::new()
+                .name("stop-deadline-log".into())
+                .spawn(move || {
+                    log(line);
+                    let _ = tx.send(());
+                });
+            if logger.is_ok() {
+                let _ = rx.recv_timeout(STOP_LOG_GRACE);
+            }
+            exit(code);
         })
 }
 
@@ -935,7 +1096,7 @@ pub(crate) fn listed_in(table: &str, path: &str) -> bool {
 }
 
 // The kernel writes space, tab, newline and backslash in a mount path as \ooo octal.
-fn unescape_mount_path(s: &str) -> String {
+pub(crate) fn unescape_mount_path(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

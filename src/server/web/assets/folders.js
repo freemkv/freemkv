@@ -4,24 +4,32 @@
 
 import { esc, ago, when, bytes } from './ui.js';
 
-/** The Library's folders (output, source ISO, remux staging) whose last check failed. */
+/** The Library's folders (output, source ISO, remux staging) whose last check failed. A
+    folder still being checked (slow, not failed) is not among them. */
 export function unhealthy(folders) {
-  return (folders || []).filter(f => f.health && f.health.state && f.health.state !== 'ok');
+  return (folders || []).filter(f => f.health && f.health.state && f.health.state !== 'ok' && f.health.state !== 'checking');
 }
 
-function bannerOne(message, path, since, hint, waits) {
-  return '<div class="banner bad" role="alert">⚠ <span><b>' + esc(message) + '</b> '
+/** The Library's folders whose check is still out: slow to answer, work for them waits. */
+export function checking(folders) {
+  return (folders || []).filter(f => f.health && f.health.state === 'checking');
+}
+
+// A failed folder is an alert; a slow one a notice, as on the System page.
+function bannerOne(message, path, since, hint, waits, slow) {
+  return '<div class="banner ' + (slow ? 'warn" role="status">' : 'bad" role="alert">⚠ ') + '<span><b>' + esc(message) + '</b> '
     + '<span class="mono">' + esc(path) + '</span>' + (since ? ' · since ' + esc(ago(since)) : '') + '. '
     + esc(hint || 'Remount the share on the host.') + (waits ? ' Remuxes wait in the queue and start on their own.' : '')
     + '</span></div>';
 }
 
-/** One banner per unhealthy folder, or the queue's hold when a preflight found the problem
-    before the next check did; '' when every folder answers. */
+/** One banner per failed folder, then one per folder still being checked, or the queue's hold
+    when a preflight found the problem before the next check did; '' when every folder answers. */
 export function folderBanner(folders, hold, waits) {
-  const bad = unhealthy(folders);
-  if (bad.length) return bad.map(f => bannerOne(f.message || 'The ' + f.role + ' folder cannot be used.', f.path, f.health.since, f.hint, waits)).join('');
-  return hold ? bannerOne(hold.message, hold.path, hold.since, hold.hint, waits) : '';
+  const bad = unhealthy(folders).map(f => bannerOne(f.message || 'The ' + f.role + ' folder cannot be used.', f.path, f.health.since, f.hint, waits, false));
+  const slow = checking(folders).map(f => bannerOne(f.message || 'The ' + f.role + ' folder has not answered yet — still checking.', f.path, f.health.since, f.hint, waits, true));
+  if (bad.length || slow.length) return bad.concat(slow).join('');
+  return hold ? bannerOne(hold.message, hold.path, hold.since, hold.hint, waits, hold.state === 'checking') : '';
 }
 
 const NOTE = {

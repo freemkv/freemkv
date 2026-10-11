@@ -1346,19 +1346,25 @@ fn check_and_move(cfg: &Config) {
 
         // Nothing below touches a destination root before it passes a bounded write test:
         // a stale or hung share holds the move (output kept in staging) and never blocks here.
+        // Each root is tested once per attempt.
+        let mut root_checks = RootChecks::default();
         let unavailable = if let Some(saved) = &delivery {
             saved
                 .roots
                 .iter()
-                .find_map(|root| crate::server::health::preflight("output", Path::new(root)).err())
+                .find_map(|root| root_checks.check(Path::new(root)).err())
                 .or_else(|| {
                     (attempt != Attempt::Recreate)
                         .then(|| missing_folder(&planned_moves))
                         .flatten()
                 })
         } else {
-            unreachable_root(cfg, &tmdb_result, &planned_moves)
+            unreachable_root(cfg, &tmdb_result, &planned_moves, &mut root_checks)
         };
+        // A check the server's stop cut short says nothing about the folder: no row, no log.
+        if root_checks.stopped {
+            continue;
+        }
         if let Some(p) = unavailable {
             record_error_at_stage(
                 &dir_str,
@@ -1480,10 +1486,13 @@ fn check_and_move(cfg: &Config) {
             dest_roots = saved.roots.clone();
         }
         let blocked_root = dest_roots.iter().find_map(|r| {
-            validate_destination_root(r)
+            validate_root_checked(r, &mut root_checks)
                 .err()
                 .map(|reason| (r.clone(), reason))
         });
+        if root_checks.stopped {
+            continue;
+        }
         if let Some((dest_root, reason)) = blocked_root {
             // Health already logged an unusable root; the error row still updates.
             let logged = crate::server::health::already_reported(Path::new(&dest_root));
@@ -2342,26 +2351,72 @@ fn destination_root_for(cfg: &Config, tmdb: &Option<tmdb::TmdbResult>, filename:
 // Fail-loud destination-root validation, so the caller preserves output in staging on failure.
 // A relative or empty root is refused without touching a disk; the rest is health's bounded
 // preflight (the root must already exist as a writable folder; it is never created).
+#[cfg(test)]
 fn validate_destination_root(root: &str) -> Result<(), String> {
-    validate_destination_root_with(
-        root,
-        crate::server::health::PREFLIGHT_TIMEOUT,
-        crate::server::health::probe_write,
-    )
+    validate_root_checked(root, &mut RootChecks::default())
 }
 
-// `validate_destination_root` with the limit and the probe given (the tests inject a slow one).
-fn validate_destination_root_with<F>(
+// `validate_destination_root` reusing a write test `checks` already ran for `root`.
+fn validate_root_checked(root: &str, checks: &mut RootChecks) -> Result<(), String> {
+    root_shape(root)?;
+    checks
+        .check(Path::new(root))
+        .map_err(|p| root_reason(root, &p))
+}
+
+// The bounded write test of each destination root, run at most once per move attempt.
+struct RootChecks {
+    // A check was cut short by the server stopping.
+    stopped: bool,
+    limit: std::time::Duration,
+    probe: fn(&Path) -> std::io::Result<()>,
+    done: Vec<(
+        std::path::PathBuf,
+        Result<(), crate::server::health::Problem>,
+    )>,
+}
+
+impl Default for RootChecks {
+    fn default() -> Self {
+        Self::with(
+            crate::server::health::PREFLIGHT_TIMEOUT,
+            crate::server::health::probe_write,
+        )
+    }
+}
+
+impl RootChecks {
+    // The limit and the probe given (the tests inject a slow one).
+    fn with(limit: std::time::Duration, probe: fn(&Path) -> std::io::Result<()>) -> Self {
+        RootChecks {
+            stopped: false,
+            limit,
+            probe,
+            done: Vec::new(),
+        }
+    }
+
+    fn check(&mut self, root: &Path) -> Result<(), crate::server::health::Problem> {
+        if let Some((_, done)) = self.done.iter().find(|(p, _)| p == root) {
+            return done.clone();
+        }
+        #[cfg(test)]
+        test_hooks::preflighted(root);
+        let result = crate::server::health::preflight_with("output", root, self.limit, self.probe);
+        self.stopped |= result.as_ref().is_err_and(|p| p.stopped());
+        self.done.push((root.to_path_buf(), result.clone()));
+        result
+    }
+}
+
+// `validate_destination_root` with the limit and the probe given.
+#[cfg(test)]
+fn validate_destination_root_with(
     root: &str,
     limit: std::time::Duration,
-    probe: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
-{
-    root_shape(root)?;
-    crate::server::health::preflight_with("output", Path::new(root), limit, probe)
-        .map_err(|p| root_reason(root, &p))
+    probe: fn(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    validate_root_checked(root, &mut RootChecks::with(limit, probe))
 }
 
 // What needs no I/O: an empty root would write cwd-relative, and a relative root resolves
@@ -2391,6 +2446,12 @@ fn root_reason(root: &str, p: &crate::server::health::Problem) -> String {
         ),
         _ if p.detail == NOT_A_FOLDER => {
             format!("destination root '{root}' exists but is not a directory")
+        }
+        Fault::Unresponsive if p.detail.contains(crate::server::health::STILL_CHECKING) => {
+            format!(
+                "destination root '{root}' has not answered yet: {} (a NAS may be waking its disks)",
+                p.detail
+            )
         }
         Fault::Unresponsive => format!(
             "destination root '{root}' is not responding: {} (a stale network mount?)",
@@ -2451,10 +2512,11 @@ fn unreachable_root(
     cfg: &Config,
     tmdb: &Option<tmdb::TmdbResult>,
     planned: &[(std::path::PathBuf, String)],
+    checks: &mut RootChecks,
 ) -> Option<crate::server::health::Problem> {
-    use crate::server::health::{self, Fault};
+    use crate::server::health::Fault;
     planned_roots(cfg, tmdb, planned).iter().find_map(|r| {
-        health::preflight("output", Path::new(r)).err().filter(|p| {
+        checks.check(Path::new(r)).err().filter(|p| {
             matches!(
                 p.fault,
                 Fault::Stale | Fault::Io | Fault::Unresponsive | Fault::Unmounted
@@ -2790,6 +2852,40 @@ pub(crate) mod test_hooks {
     pub fn before_publish(job: &Path) {
         if let Some((_, hook)) = scoped(job) {
             hook();
+        }
+    }
+    type Counter = (u64, PathBuf, Arc<AtomicU64>);
+    static PREFLIGHTS: Mutex<Vec<Counter>> = Mutex::new(Vec::new());
+    /// Counts the write tests of roots under its scope until dropped.
+    pub struct Preflights(u64, Arc<AtomicU64>);
+    impl Preflights {
+        pub fn count(&self) -> u64 {
+            self.1.load(Ordering::SeqCst)
+        }
+    }
+    impl Drop for Preflights {
+        fn drop(&mut self) {
+            PREFLIGHTS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(id, ..)| *id != self.0);
+        }
+    }
+    pub fn count_preflights(scope: &Path) -> Preflights {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let n = Arc::new(AtomicU64::new(0));
+        PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).push((
+            id,
+            scope.to_path_buf(),
+            n.clone(),
+        ));
+        Preflights(id, n)
+    }
+    pub fn preflighted(root: &Path) {
+        for (_, scope, n) in PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            if root.starts_with(scope) {
+                n.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 }
