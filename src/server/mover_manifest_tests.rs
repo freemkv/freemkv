@@ -1308,3 +1308,23 @@ fn another_jobs_stall_hook_does_not_touch_this_delivery() {
     );
     assert!(manifest_b.entries[0].destination.exists());
 }
+
+#[test]
+fn dropping_one_tests_hooks_leaves_another_tests_hooks_in_place() {
+    use std::time::Duration;
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let hook: super::super::test_hooks::Hook = std::sync::Arc::new(|| {});
+    let ha = super::super::test_hooks::set(a.path(), Duration::from_millis(40), hook.clone());
+    let hb = super::super::test_hooks::set(b.path(), Duration::from_millis(50), hook);
+    drop(hb);
+    assert_eq!(
+        super::super::test_hooks::stall_window(&a.path().join("job")),
+        Duration::from_millis(40)
+    );
+    assert_eq!(
+        super::super::test_hooks::stall_window(&b.path().join("job")),
+        Duration::from_secs(60)
+    );
+    drop(ha);
+}

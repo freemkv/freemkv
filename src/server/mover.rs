@@ -2618,26 +2618,40 @@ fn copy_poll_interval() -> std::time::Duration {
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     pub type Hook = Arc<dyn Fn() + Send + Sync>;
-    static HOOKS: Mutex<Option<(PathBuf, Duration, Hook)>> = Mutex::new(None);
-    pub struct Reset;
+    type Entry = (u64, PathBuf, Duration, Hook);
+    static HOOKS: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    /// Removes only the hooks its own `set` installed.
+    pub struct Reset(u64);
     impl Drop for Reset {
         fn drop(&mut self) {
-            *HOOKS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            HOOKS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(id, ..)| *id != self.0);
         }
     }
     pub fn set(scope: &Path, window: Duration, hook: Hook) -> Reset {
-        *HOOKS.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((scope.to_path_buf(), window, hook));
-        Reset
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        HOOKS.lock().unwrap_or_else(|e| e.into_inner()).push((
+            id,
+            scope.to_path_buf(),
+            window,
+            hook,
+        ));
+        Reset(id)
     }
     fn scoped(job: &Path) -> Option<(Duration, Hook)> {
-        match HOOKS.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            Some((scope, window, hook)) if job.starts_with(scope) => Some((*window, hook.clone())),
-            _ => None,
-        }
+        HOOKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(_, scope, ..)| job.starts_with(scope))
+            .map(|(_, _, window, hook)| (*window, hook.clone()))
     }
     pub fn force_copy(job: &Path) -> bool {
         scoped(job).is_some()
