@@ -2832,7 +2832,6 @@ fn no_titles_error(titles: &[libfreemkv::DiscTitle]) -> Option<String> {
     })
 }
 
-// The main title (0-based): title 0, or a cut of it in the wanted language. Never a review.
 /// How an automatic selection picks the main title: the parsed `-a` audio languages and
 /// `--presentation-language`, which can choose a language cut of the first title.
 struct MainPick {
@@ -2854,6 +2853,7 @@ impl MainPick {
     }
 }
 
+// The main title (0-based): title 0, or a cut of it in the wanted language. Never a review.
 fn main_title(
     titles: &[libfreemkv::DiscTitle],
     audio: &freemkv_engine::StreamFilter,

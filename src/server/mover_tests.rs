@@ -2156,6 +2156,21 @@ fn copy_counting_sees_a_shutdown_raised_mid_copy() {
 
 /// Repo-local, gitignored scratch dir (never /tmp). Each call makes a
 /// unique subdir so parallel test threads don't collide.
+// Puts each path's mode back when dropped, a failed assertion included: a read-only
+// folder left in target/test-scratch blocks removing it.
+#[cfg(unix)]
+struct RestoreModes(Vec<(std::path::PathBuf, u32)>);
+
+#[cfg(unix)]
+impl Drop for RestoreModes {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        for (path, mode) in &self.0 {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(*mode));
+        }
+    }
+}
+
 fn scratch_dir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -2514,6 +2529,7 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
     // src unreadable → the copy fails at `File::open(src)`, before any temp
     // exists. src's DIRECTORY unwritable → `rename(2)` fails first (it must
     // unlink the source name), so we reach the copy branch at all.
+    let restore = RestoreModes(vec![(src_dir.clone(), 0o755), (src.clone(), 0o644)]);
     std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o000)).unwrap();
     std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -2538,8 +2554,7 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
         o
     };
 
-    std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(restore);
     if readable_anyway {
         eprintln!(
             "SKIP move_file_copy_failure_with_no_dest_records_no_partial_error: \
@@ -2575,6 +2590,7 @@ fn move_file_copy_failure_keeps_pre_existing_dest() {
     write_minimal_mkv(&dest, b"the complete library copy from an earlier tick");
     let good_bytes = std::fs::read(&dest).unwrap();
 
+    let restore = RestoreModes(vec![(src_dir.clone(), 0o755), (src.clone(), 0o644)]);
     std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o000)).unwrap();
     std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -2600,8 +2616,7 @@ fn move_file_copy_failure_keeps_pre_existing_dest() {
         o
     };
 
-    std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(restore);
     if readable_anyway {
         eprintln!(
             "SKIP move_file_copy_failure_keeps_pre_existing_dest: \
@@ -2636,6 +2651,7 @@ fn move_file_copy_failure_removes_this_attempts_dest() {
     write_minimal_mkv(&src, b"staging source bytes that cannot be read");
     assert!(!dest.exists(), "dest must not pre-date the attempt");
 
+    let restore = RestoreModes(vec![(src_dir.clone(), 0o755), (src.clone(), 0o644)]);
     std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o000)).unwrap();
     std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -2663,8 +2679,7 @@ fn move_file_copy_failure_removes_this_attempts_dest() {
         o
     };
 
-    std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(restore);
     if readable_anyway {
         eprintln!(
             "SKIP move_file_copy_failure_removes_this_attempts_dest: \
@@ -3490,7 +3505,10 @@ fn check_and_move_card_carries_the_create_dir_error() {
     let recorded = error_snapshot(&dir_str);
     clear_error(&dir_str);
 
-    let reason = recorded.expect("a card must be recorded").reason;
+    let recorded = recorded.expect("a card must be recorded");
+    // The failure may be a share that dropped or was remounted, not only permissions.
+    assert!(recorded.hint.contains("mounted"), "{}", recorded.hint);
+    let reason = recorded.reason;
     let without_cause = format!(
         "cannot create destination directory {}",
         movie_dir.join("Blocked (2024)").display()
@@ -3500,6 +3518,96 @@ fn check_and_move_card_carries_the_create_dir_error() {
         "the card must carry the OS error, got: {reason}"
     );
     assert!(disc_dir.join("Blocked.mkv").exists(), "staging preserved");
+}
+
+// Another rip's delivery journal that cannot be read may hold the name this rip would take:
+// nothing is frozen until it can be read (fail closed), and the row says why.
+#[test]
+fn an_unreadable_journal_elsewhere_blocks_freezing_a_new_plan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let other = staging.join("Other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join(super::manifest::FILE), b"{ not a journal").unwrap();
+    // A stray file beside the rips is no journal and blocks nothing.
+    std::fs::write(staging.join("notes.txt"), b"x").unwrap();
+    let disc_dir = staging.join("Fresh");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Fresh")).unwrap();
+    write_minimal_mkv(&disc_dir.join("Fresh.mkv"), &[0xAA; 1024]);
+    let dir_str = disc_dir.to_string_lossy().to_string();
+    let other_str = other.to_string_lossy().to_string();
+    let _g = errors_guard();
+    clear_error(&dir_str);
+    check_and_move(&cfg);
+    let recorded = error_snapshot(&dir_str);
+    clear_error(&dir_str);
+    clear_error(&other_str);
+    let recorded = recorded.expect("a row says why it waits");
+    assert!(recorded.reason.contains("reserved"), "{recorded:?}");
+    assert!(disc_dir.join("Fresh.mkv").exists(), "nothing was moved");
+    assert!(
+        super::manifest::Manifest::load(&disc_dir)
+            .unwrap()
+            .is_none(),
+        "no plan was frozen"
+    );
+}
+
+// A delivery plan that cannot be saved (staging full or read-only) is not retried every
+// tick, making and removing the title folders on the share each time: it backs off.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_delivery_plan_backs_off() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let disc_dir = staging.join("Unsaved");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Unsaved")).unwrap();
+    write_minimal_mkv(&disc_dir.join("Unsaved.mkv"), &[0xAA; 1024]);
+    let restore = RestoreModes(vec![(disc_dir.clone(), 0o755)]);
+    std::fs::set_permissions(&disc_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::File::create(disc_dir.join("root-check")).is_ok() {
+        eprintln!("SKIP an_unsaved_delivery_plan_backs_off: running as root");
+        return;
+    }
+    let dir_str = disc_dir.to_string_lossy().to_string();
+    let _g = errors_guard();
+    clear_error(&dir_str);
+    check_and_move(&cfg);
+    let first = error_snapshot(&dir_str);
+    check_and_move(&cfg);
+    let second = error_snapshot(&dir_str);
+    clear_error(&dir_str);
+    drop(restore);
+    let first = first.expect("a row");
+    assert!(
+        first.reason.starts_with("cannot persist delivery plan"),
+        "{first:?}"
+    );
+    let due = first.retry_after.expect("not held after one failure");
+    assert!(
+        due > std::time::Instant::now() + std::time::Duration::from_secs(20),
+        "retried on the next tick: {first:?}"
+    );
+    assert_eq!(
+        second.expect("a row").attempts,
+        first.attempts,
+        "not tried again"
+    );
+    assert!(
+        !movie_dir.join("Unsaved (2024)").exists(),
+        "its folder is not left behind"
+    );
 }
 
 // A copy that fails post-copy validation must not leave its broken file at

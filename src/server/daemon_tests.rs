@@ -945,9 +945,15 @@ fn the_deadline_decides_its_exit_code_when_it_expires() {
     let flag = reboot.clone();
     let progress = Arc::new(StopProgress::default());
     let (tx, exited) = std::sync::mpsc::channel();
+    // Told when the deadline is armed (the stop is seen), so the reboot below is asked for
+    // during the drain however the threads are scheduled; the drain is long beside that.
+    let (armed_tx, armed) = std::sync::mpsc::channel();
     spawn_stop_deadline(
-        Duration::from_millis(300),
-        || true,
+        Duration::from_secs(1),
+        move || {
+            let _ = armed_tx.send(());
+            true
+        },
         progress,
         move || {
             if flag.load(Ordering::Acquire) {
@@ -962,7 +968,7 @@ fn the_deadline_decides_its_exit_code_when_it_expires() {
         },
     )
     .unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    armed.recv_timeout(Duration::from_secs(5)).unwrap();
     reboot.store(true, Ordering::Release);
     let code = exited.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(code, RESTART_EXIT_CODE);

@@ -737,6 +737,46 @@ fn a_stall_is_counted_in_the_journal_when_it_is_declared() {
     assert!(left.retry_after.is_some() && !left.retry_held, "{left:?}");
 }
 
+// A stalled worker that returns long after its stall gets the full backoff from its return:
+// the share that just came back is not hit with a new full copy on the next tick.
+#[test]
+fn a_stall_backoff_runs_from_the_workers_return() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (_cfg, job, _dest) = journaled(tmp.path(), "LongStall");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    record_error_with(&key, "copy stalled", "wait", |_| {});
+    {
+        let mut errors = MOVE_ERRORS.lock().unwrap();
+        let r = errors.get_mut(&key).unwrap();
+        r.attempts = 1;
+        r.retry_after = None;
+        r.retry_held = true;
+        // Committed at the stall, ten minutes before the worker returned.
+        let stall = std::time::Instant::now() - Duration::from_secs(600);
+        r.stall_resume = Some(Some(stall + Duration::from_secs(30)));
+    }
+    finish_stall(&key);
+    let left = row(&key);
+    let journal = super::manifest::Manifest::load(&job)
+        .unwrap()
+        .unwrap()
+        .retry()
+        .cloned();
+    clear_error(&key);
+    let left = left.expect("a row");
+    let due = left.retry_after.expect("not held");
+    assert!(
+        due >= std::time::Instant::now() + Duration::from_secs(20),
+        "due at once: {left:?}"
+    );
+    assert_eq!(left.attempts, 1, "not counted twice");
+    let journal = journal.expect("the backoff is persisted");
+    assert_eq!(journal.attempts, 1);
+    assert!(journal.not_before.unwrap() > std::time::SystemTime::now());
+}
+
 // A failed copy is retried after 30 s, then 2 min, then held for Retry: its hint says so
 // instead of promising a retry on the next tick.
 #[test]

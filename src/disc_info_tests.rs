@@ -13,20 +13,17 @@ fn unlocker_display_reports_only_the_successful_match() {
 // The `Unlocker:` line is catalog text like every other line of the report, "none" too.
 #[test]
 fn the_unlocker_line_comes_from_the_catalog() {
-    let line = super::unlocker_line(&[("LD", true)]);
-    assert_eq!(
-        line,
-        strings::fmt_or("disc.unlocker", "Unlocker: {name}", &[("name", "LD")])
-    );
-    let none = strings::get_or("disc.unlocker_none", "none");
-    assert_eq!(
-        super::unlocker_line(&[("LD", false)]),
-        strings::fmt_or("disc.unlocker", "Unlocker: {name}", &[("name", &none)])
-    );
+    assert_eq!(super::unlocker_line(&[("LD", true)]), "Unlocker: LD");
+    assert_eq!(super::unlocker_line(&[("LD", false)]), "Unlocker: none");
+    // The keys it asks for are the catalog's, so a locale translates the line.
+    for key in ["disc.unlocker", "disc.unlocker_none"] {
+        assert_ne!(strings::get(key), key, "{key} is not in the catalog");
+    }
     let src = include_str!("disc_info.rs");
     assert!(
-        !src.contains("\"Unlocker: {matched}\""),
-        "hard-coded English"
+        src.contains("fmt_or(\"disc.unlocker\", \"Unlocker: {name}\"")
+            && src.contains("get_or(\"disc.unlocker_none\", \"none\")"),
+        "the line is not built from those keys"
     );
 }
 

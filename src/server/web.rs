@@ -2628,6 +2628,8 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
     // in-flight work uses the old pool, the next rip picks up the new size.
     config::apply_decrypt_threads(snapshot.decrypt_threads);
 
+    config::create_new_staging_root(&current, &snapshot);
+
     // Warn early if a configured directory is missing/unwritable. The health monitor owns
     // the syslog line for the failure, so this only traces; the save still succeeds.
     for (root, reason) in crate::server::mover::check_configured_destinations(&snapshot) {
@@ -2828,8 +2830,9 @@ fn launchctl_print(_: &str) -> Launchctl {
     Launchctl::Unavailable
 }
 
-// Whether launchd starts the job again after the exit-75 shutdown: the loaded job's
-// keepalive property and plist when launchctl lists it, else the installed `plist`.
+// Whether launchd starts the job again after the exit-75 shutdown. A listed job: its
+// "keepalive" property (unconditional), or its loaded plist's KeepAlive (a conditional one is
+// not listed as a property). Else the installed `plist`.
 #[cfg(target_os = "macos")]
 fn launchd_restarts(job: &Launchctl, plist: &std::path::Path) -> bool {
     match job {
@@ -2843,7 +2846,7 @@ fn launchd_restarts(job: &Launchctl, plist: &std::path::Path) -> bool {
             };
             let kept = field("properties = ")
                 .is_some_and(|p| p.split('|').any(|f| f.trim() == "keepalive"));
-            kept && field("path = ").is_some_and(|p| plist_keeps_alive(std::path::Path::new(p)))
+            kept || field("path = ").is_some_and(|p| plist_keeps_alive(std::path::Path::new(p)))
         }
     }
 }
