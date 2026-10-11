@@ -497,6 +497,20 @@ pub fn write_state(staging_disc_dir: &Path, st: &DiscState) {
 /// the fresh-rip hand-off gating auto-eject on a durable marker) can refuse to
 /// proceed when the write did not land.
 pub fn try_write_state(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
+    try_write_state_inner(staging_disc_dir, st, false)
+}
+
+/// Like [`try_write_state`] but drops a title-identity hold instead of
+/// re-asserting it; for the operator's explicit terminal Cancel.
+pub fn try_write_state_abandoning_hold(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
+    try_write_state_inner(staging_disc_dir, st, true)
+}
+
+fn try_write_state_inner(
+    staging_disc_dir: &Path,
+    st: &DiscState,
+    abandon_hold: bool,
+) -> io::Result<()> {
     let lock = state_lock(staging_disc_dir);
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut st = st.clone();
@@ -510,7 +524,7 @@ pub fn try_write_state(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()
             st.user_metadata = saved.user_metadata;
             st.metadata_revision = saved.metadata_revision;
             st.replan_required = saved.replan_required;
-            st.title_identity_review = saved.title_identity_review;
+            st.title_identity_review = saved.title_identity_review && !abandon_hold;
             if !saved.disc_identity.is_empty() {
                 st.disc_identity = saved.disc_identity;
             }

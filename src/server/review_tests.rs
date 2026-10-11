@@ -660,3 +660,26 @@ fn retitle_preserves_non_movie_media_type() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn cancel_abandons_title_identity_hold() {
+    use crate::server::ripper::staging::{StagingState, mutate_state_if_present, read_state};
+    let tmp = std::env::temp_dir().join(format!(
+        "autorip-review-identity-cancel-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let held = tmp.join("Disc");
+    write_review_state(&held, "movie");
+    mutate_state_if_present(&held, |s| s.title_identity_review = true);
+    assert!(read_state(&held).unwrap().title_identity_review);
+
+    resolve(tmp.to_str().unwrap(), "Disc", Resolve::Cancel).unwrap();
+
+    let after = read_state(&held).unwrap();
+    assert_eq!(after.state, StagingState::Failed);
+    assert!(!after.title_identity_review, "cancel must abandon the hold");
+    assert!(list_held(tmp.to_str().unwrap()).is_empty());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
