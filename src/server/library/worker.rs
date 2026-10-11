@@ -636,18 +636,32 @@ fn remux_planned(
         if let Some(kept) = kept {
             resume_kept(kept, &request.target, sink)
         } else if let Some(dir) = &stage {
-            deliver::remux_via_stage(
-                request,
-                &keys,
-                sink,
-                dir,
-                job.id.saturating_mul(1000).saturating_add(ordinal as u64),
-            )
-            .map(|r| r.writing_app)
+            execute_staged(request, sink, dir, ordinal, |staged, capture| {
+                freemkv_engine::remux_iso(staged, &keys, capture)
+            })
         } else {
             freemkv_engine::remux_iso(request, &keys, sink).map(|r| r.writing_app)
         }
     })
+}
+
+// One output through the remux staging folder, numbered by job and output.
+fn execute_staged(
+    request: &freemkv_engine::RemuxJob,
+    sink: &JobSink<'_>,
+    dir: &Path,
+    ordinal: usize,
+    engine: impl FnOnce(
+        &freemkv_engine::RemuxJob,
+        &dyn Sink,
+    ) -> std::io::Result<freemkv_engine::RemuxReport>,
+) -> std::io::Result<Option<String>> {
+    let id = sink
+        .job_id
+        .saturating_mul(1000)
+        .saturating_add(ordinal as u64);
+    let unsaved = || sink.landing_unsaved();
+    deliver::remux_via_stage(request, sink, dir, id, &unsaved, engine).map(|r| r.writing_app)
 }
 
 fn cancelled_ending(sink: &JobSink<'_>) -> Option<Ending> {
@@ -879,7 +893,8 @@ fn remux_planned_with(
                     ),
                 ));
             }
-            Err(_) if let Some(why) = sink.landing_unsaved() => {
+            Err(e) if let Some(why) = sink.landing_unsaved() => {
+                keep_staged(sink, job.id, &output.id, &e);
                 sink.lib
                     .queue
                     .finish_output(job.id, &output.id, OutputState::Failed);
@@ -890,27 +905,21 @@ fn remux_planned_with(
                 )));
             }
             Err(e) => {
-                if let Some(kept) = deliver::kept_of(&e) {
-                    sink.lib
-                        .queue
-                        .set_output_staged(job.id, &output.id, Some(kept.path.clone()));
-                    sink.lib
-                        .queue
-                        .set_staged(job.id, still_kept(Some(&kept.path)));
-                }
+                keep_staged(sink, job.id, &output.id, &e);
                 sink.lib
                     .queue
                     .finish_output(job.id, &output.id, OutputState::Failed);
                 return cancelled_ending(sink).unwrap_or(Ending::Failed(e));
             }
         };
+        // The link carries the landing recorded before the rename, not a later look.
+        let landed = sink.landed_stamp();
         sink.lib.note_landed(&target, writing_app.clone());
         sink.lib.queue.set_output_staged(job.id, &output.id, None);
         sink.lib.queue.set_staged(job.id, None);
         sink.lib
             .queue
             .finish_output(job.id, &output.id, OutputState::Done);
-        let landed = crate::server::util::Stamp::read(&target).ok();
         if let Err(e) =
             super::links::record_output(&sink.lib.config_dir, &target, &job.iso, landed, episode)
         {
@@ -941,6 +950,15 @@ fn remux_planned_with(
         }
     }
     Ending::Done { writing_app }
+}
+
+// Record the file a failed output's delivery kept, so a Retry only copies it in.
+fn keep_staged(sink: &JobSink<'_>, job_id: u64, output_id: &str, e: &std::io::Error) {
+    if let Some(kept) = deliver::kept_of(e) {
+        let queue = &sink.lib.queue;
+        queue.set_output_staged(job_id, output_id, Some(kept.path.clone()));
+        queue.set_staged(job_id, still_kept(Some(&kept.path)));
+    }
 }
 
 // A landed output whose link could not be saved: the file is there, and the config folder is not.
@@ -1859,6 +1877,8 @@ struct Landing {
     refused: bool,
     /// Why the landing could not be recorded durably; it must not land then.
     unsaved: Option<String>,
+    /// The new file's stamp as recorded durably just before the rename.
+    recorded: Option<crate::server::util::Stamp>,
 }
 
 impl JobSink<'_> {
@@ -1875,7 +1895,14 @@ impl JobSink<'_> {
             replaces,
             refused: false,
             unsaved: None,
+            recorded: None,
         });
+    }
+
+    // The stamp the landing about to happen, or just done, was recorded with.
+    fn landed_stamp(&self) -> Option<crate::server::util::Stamp> {
+        let landing = self.landing.lock().unwrap_or_else(|e| e.into_inner());
+        landing.as_ref().and_then(|l| l.recorded)
     }
 
     // Why the landing about to happen could not be recorded, if it could not.
@@ -1915,8 +1942,12 @@ impl JobSink<'_> {
             self.lib
                 .queue
                 .set_output_landing(self.job_id, &landing.output_id, stamp)
+                .map(|()| stamp)
         });
-        landing.unsaved = recorded.err().map(|e| e.to_string());
+        match recorded {
+            Ok(stamp) => landing.recorded = Some(stamp),
+            Err(e) => landing.unsaved = Some(e.to_string()),
+        }
     }
     fn preempted(&self) -> bool {
         self.arbiter.rip_active() || self.arbiter.rip_started_since(self.epoch)

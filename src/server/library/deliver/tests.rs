@@ -237,7 +237,7 @@ fn run(
         verified: &s.probe,
         target_before: TargetStamp::of(&s.target),
     };
-    deliver_finished(&f, sink, halt, io)
+    deliver_finished(&f, sink, halt, io, &|| None)
 }
 
 fn lock_of(target: &Path) -> PathBuf {
@@ -800,7 +800,7 @@ fn a_replace_whose_start_state_was_unreadable_is_refused_and_untouched() {
         verified: &s.probe,
         target_before: TargetStamp::Unknown,
     };
-    let e = deliver_finished(&f, &Events::default(), &Halt::new(), &OsIo).unwrap_err();
+    let e = deliver_finished(&f, &Events::default(), &Halt::new(), &OsIo, &|| None).unwrap_err();
     assert_eq!(
         libfreemkv::error_code(&e),
         Some(libfreemkv::error::E_REMUX_TARGET_EXISTS),
