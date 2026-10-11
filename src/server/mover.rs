@@ -2046,23 +2046,22 @@ fn check_and_move(cfg: &Config) {
                 continue;
             }
         };
-        // Remember the entire frozen output set, including earlier passes.
-        if let Err(error) = crate::server::library::links::record_delivery(
-            &cfg.autorip_dir,
-            planned_moves.iter().map(|(_, d)| d.as_str()),
-        ) {
-            record_error(
-                &dir_str,
-                &format!("files delivered, but source linkage could not be saved: {error}"),
-                "The delivered files and staging metadata are retained. Repair library-links.json or its folder permissions, then choose Retry.",
-            );
-            schedule_move_retry(&dir_str);
-            continue;
-        }
-
-        // Once per delivery, after linkage and before the teardown gates; the journal
-        // remembers it, so a delivery whose files moved on an earlier tick still fires.
+        // Remember the entire frozen output set, including earlier passes. Linkage and the
+        // webhook happen once per delivery: `announced` records both, so a re-pass whose
+        // teardown failed earlier neither rewrites the links nor wakes the indexer again.
         if !delivered.announced() {
+            if let Err(error) = crate::server::library::links::record_delivery(
+                &cfg.autorip_dir,
+                planned_moves.iter().map(|(_, d)| d.as_str()),
+            ) {
+                record_error(
+                    &dir_str,
+                    &format!("files delivered, but source linkage could not be saved: {error}"),
+                    "The delivered files and staging metadata are retained. Repair library-links.json or its folder permissions, then choose Retry.",
+                );
+                schedule_move_retry(&dir_str);
+                continue;
+            }
             crate::server::webhook::send_move(
                 cfg,
                 &display_name,
@@ -2077,10 +2076,14 @@ fn check_and_move(cfg: &Config) {
         // listing error drops an entry the destructive remove_dir_all teardown would then
         // silently delete. Treat like a failed copy: leave the dir and retry next tick.
         if !listing_complete {
-            crate::server::log::syslog(&format!(
-                "Staging teardown skipped — directory could not be fully listed: {}",
-                dir.display()
-            ));
+            teardown_blocked(
+                &dir_str,
+                &format!(
+                    "staging teardown skipped: the directory could not be fully listed: {}",
+                    dir.display()
+                ),
+                "The files are delivered; staging is kept until it can be listed in full. Check the staging mount; the teardown retries after a backoff, then waits for Retry.",
+            );
             continue;
         }
 
@@ -2098,10 +2101,10 @@ fn check_and_move(cfg: &Config) {
             clear_error(&dir_str);
             crate::server::log::syslog(&format!("Move complete: {}", display_name));
         } else if let Some(e) = cleanup_err {
-            record_error(
+            teardown_blocked(
                 &dir_str,
                 &format!("staging cleanup failed: {}", e),
-                "Inspect changed or unplanned staging artifacts and retry; they are not automatically deleted.",
+                "The files are delivered. Inspect changed or unplanned staging artifacts; they are not automatically deleted. The teardown retries after a backoff, then waits for Retry.",
             );
         }
 
@@ -2114,6 +2117,13 @@ fn check_and_move(cfg: &Config) {
     }
     // Same unbounded-growth prune for the stranded-dir one-time-warn dedup set.
     prune_stranded_warned(&seen_dirs);
+}
+
+// A delivered dir whose staging teardown cannot run: shown, and retried on the delivery's
+// backoff (then held), never re-run every tick.
+fn teardown_blocked(dir: &str, reason: &str, hint: &str) {
+    record_error(dir, reason, hint);
+    schedule_move_retry(dir);
 }
 
 // The move webhook's `output_path`: the media file, not the ISO archive, and the

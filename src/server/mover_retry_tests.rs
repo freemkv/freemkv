@@ -110,6 +110,16 @@ fn a_destination_row_is_pruned_with_its_staging_dir() {
 
 // A journaled delivery of one MKV in `tmp`: (config, staging job dir, planned destination).
 fn journaled(tmp: &Path, title: &str) -> (Config, std::path::PathBuf, std::path::PathBuf) {
+    let (cfg, job, mut dests) = journaled_files(tmp, title, &["mkv"]);
+    (cfg, job, dests.remove(0))
+}
+
+// A journaled delivery of `title.<ext>` for each of `exts`, straight into the output root.
+fn journaled_files(
+    tmp: &Path,
+    title: &str,
+    exts: &[&str],
+) -> (Config, std::path::PathBuf, Vec<std::path::PathBuf>) {
     let staging = tmp.join("staging");
     let job = staging.join(title);
     let output = tmp.join("output");
@@ -118,26 +128,33 @@ fn journaled(tmp: &Path, title: &str) -> (Config, std::path::PathBuf, std::path:
     }
     let marker = serde_json::json!({"title": title, "year": 2024, "media_type": "movie"});
     std::fs::write(job.join(".done"), marker.to_string()).unwrap();
-    let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
-    mkv.extend_from_slice(&[0x5Au8; 2048]);
-    let src = job.join(format!("{title}.mkv"));
-    std::fs::write(&src, &mkv).unwrap();
-    let dest = output.join(format!("{title}.mkv"));
+    let mut moves = Vec::new();
+    let mut dests = Vec::new();
+    for ext in exts {
+        let mut bytes = vec![0x1A, 0x45, 0xDF, 0xA3];
+        bytes.extend_from_slice(&[0x5Au8; 2048]);
+        let src = job.join(format!("{title}.{ext}"));
+        std::fs::write(&src, &bytes).unwrap();
+        let dest = output.join(format!("{title}.{ext}"));
+        moves.push((src, dest.to_string_lossy().into_owned()));
+        dests.push(dest);
+    }
     super::manifest::Manifest::create(
         &job,
         marker,
         Vec::new(),
         vec![output.to_string_lossy().into_owned()],
-        &[(src, dest.to_string_lossy().into_owned())],
+        &moves,
     )
     .unwrap();
     let cfg = Config {
         staging_dir: staging.to_string_lossy().into_owned(),
         output_dir: output.to_string_lossy().into_owned(),
         autorip_dir: tmp.join("config").to_string_lossy().into_owned(),
+        keep_iso: true,
         ..Config::default()
     };
-    (cfg, job, dest)
+    (cfg, job, dests)
 }
 
 #[cfg(unix)]
@@ -293,5 +310,67 @@ fn a_destination_frozen_by_another_delivery_is_taken() {
     assert!(
         frozen.with_file_name("Twin_2.mkv").exists(),
         "disc 2 filed beside it: {second_row:?}"
+    );
+}
+
+#[cfg(unix)]
+fn inode(path: &Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
+}
+
+// Delivered, but the staging teardown fails (a file appeared after the freeze). The row
+// backs off like a failed copy instead of re-running the whole post-copy stage every tick,
+// and a re-pass over the delivered files rewrites neither the journal nor the links.
+#[cfg(unix)]
+#[test]
+fn a_failed_teardown_backs_off_and_its_re_pass_writes_nothing() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dests) = journaled_files(tmp.path(), "Tidy", &["mkv", "iso"]);
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    std::fs::write(job.join("late arrival.txt"), b"not planned").unwrap();
+    check_and_move(&cfg);
+    let first = row(&key);
+    let links = tmp
+        .path()
+        .join("config")
+        .join(crate::server::library::links::LINKS_FILE);
+    let journal = job.join(super::manifest::FILE);
+    let (links_before, journal_before) = (inode(&links), inode(&journal));
+    let delivered = super::manifest::Manifest::deliver(&job, 0, &|_, _, _, _| {});
+    let journal_after_deliver = inode(&journal);
+    if let Some(r) = MOVE_ERRORS.lock().unwrap().get_mut(&key) {
+        r.retry_after = Some(std::time::Instant::now());
+    }
+    check_and_move(&cfg);
+    let links_after = inode(&links);
+    clear_error(&key);
+    assert!(dests.iter().all(|d| d.exists()), "fixture: delivered");
+    let first = first.expect("the teardown failure is shown");
+    assert!(first.reason.contains("staging cleanup failed"), "{first:?}");
+    assert_eq!(first.attempts, 1, "it backs off: {first:?}");
+    assert!(
+        first
+            .retry_after
+            .is_some_and(|t| t > std::time::Instant::now()),
+        "not due again at once: {first:?}"
+    );
+    assert!(
+        matches!(delivered, Ok(MoveOutcome::Skipped)),
+        "{delivered:?}"
+    );
+    assert_eq!(journal_before, journal_after_deliver, "journal rewritten");
+    assert_eq!(links_before, links_after, "links rewritten");
+}
+
+// The incomplete-listing teardown skip goes through the same backoff as a failed teardown.
+#[test]
+fn the_incomplete_listing_skip_backs_off_too() {
+    let src = crate::server::util::source_lf(include_str!("mover.rs"));
+    let skip = src.find("if !listing_complete {\n            teardown_blocked(");
+    assert!(
+        skip.is_some(),
+        "the listing skip must record a backed-off row"
     );
 }

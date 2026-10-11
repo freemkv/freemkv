@@ -308,9 +308,12 @@ impl Manifest {
                     return Ok(super::MoveOutcome::Collision);
                 }
                 entry.prepared()?.verify(&entry.destination)?;
-                if !entry.completed {
-                    adoptable(&entry)?;
+                // Already recorded as delivered: nothing to adopt, sync or save again.
+                if entry.completed {
+                    super::clear_stale_dest_error(&entry.destination);
+                    return Ok(super::MoveOutcome::Skipped);
                 }
+                adoptable(&entry)?;
                 sync_parent(&entry.destination)?;
                 manifest.entries[index].completed = true;
                 manifest.save()?;
