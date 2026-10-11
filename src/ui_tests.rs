@@ -753,48 +753,21 @@ fn both_log_panes_keep_the_newest_line_in_view() {
     );
 }
 
-// Neither shell's worker-message drain may bail out on a poisoned inbox: an early return
-// there also skips clearing the "busy" flag and stopping the drain timer, hanging the
-// process.
+// The keydb worker lives in the core: no shell keeps its own inbox and drain
+// timer, the copies that drifted (and wedged on a poisoned lock) before.
 #[test]
-fn neither_shell_drain_gives_up_on_a_poisoned_inbox() {
-    // CRLF-normalized: Windows CI checks the tree out with CRLF.
+fn no_shell_keeps_a_worker_inbox_of_its_own() {
     let shells = [
-        ("mac.rs", include_str!("mac.rs").replace("\r\n", "\n")),
-        (
-            "windows.rs",
-            include_str!("windows.rs").replace("\r\n", "\n"),
-        ),
+        ("mac.rs", include_str!("mac.rs")),
+        ("windows.rs", include_str!("windows.rs")),
+        ("linux.rs", include_str!("linux.rs")),
+        ("linux/prefs.rs", include_str!("linux/prefs.rs")),
     ];
-    // Whitespace-collapsed so rustfmt cannot hide a regression by breaking
-    // the expression across lines.
     let needle = concat!("inbox", ".lock()");
-    for (name, raw) in &shells {
-        let src: String = raw.split_whitespace().collect();
-        // EVERY inbox lock, not just the drain's: the keydb worker's `push` has
-        // the same `if let Ok(..)` shape, and dropping that message wedges the
-        // UI the same way — button never re-enables, timer never stops.
-        let mut found = 0usize;
-        let mut at = 0usize;
-        while let Some(i) = src[at..].find(needle) {
-            let pos = at + i;
-            let tail = &src[pos + needle.len()..];
-            let head = &tail[..tail.len().min(80)];
-            assert!(
-                head.starts_with(".unwrap_or_else(") && head.contains("into_inner"),
-                "{name}: an inbox lock does not recover from poison. That \
-                     strands the keydb busy flag and leaves the drain timer \
-                     firing forever, discarding the very messages that explain \
-                     the panic. Near: {head}"
-            );
-            found += 1;
-            at = pos + needle.len();
-        }
+    for (name, src) in shells {
         assert!(
-            found >= 2,
-            "{name}: expected both the keydb worker's push and the drain's \
-                 take, found {found} — the needle stopped matching and this pin \
-                 is now vacuous"
+            !src.contains(needle),
+            "{name} grew its own worker inbox again"
         );
     }
 }
@@ -2859,4 +2832,249 @@ fn subtitle_mode_round_trips_through_lang_prefs() {
         };
         assert_eq!(LangPrefs::from_settings(&s).subtitle_mode(), mode);
     }
+}
+
+// ── shell policy owned by the core: quit, Settings commit, keydb, key service ──
+
+#[test]
+fn a_quit_asks_exactly_once_and_only_while_a_rip_runs() {
+    assert!(!needs_rip_confirmation(false, false));
+    assert!(!needs_rip_confirmation(false, true));
+    assert!(needs_rip_confirmation(true, false));
+    // Already chose "Stop & Quit": the close that follows must not ask again.
+    assert!(!needs_rip_confirmation(true, true));
+}
+
+#[test]
+fn stop_and_quit_latches_cancels_and_lets_the_close_through() {
+    let mut app = App::new();
+    assert_eq!(app.dispatch(Cmd::QuitRequested), vec![Effect::Quit]);
+    let st = Arc::new(RunState::default());
+    // Already down, so the bounded wait answers at once.
+    st.finished.store(true, Ordering::SeqCst);
+    app.run = Some(st.clone());
+    assert_eq!(app.dispatch(Cmd::QuitRequested), vec![Effect::ConfirmQuit]);
+    // "Keep ripping" changes nothing: the next close asks again.
+    assert_eq!(app.dispatch(Cmd::QuitRequested), vec![Effect::ConfirmQuit]);
+    app.confirm_quit();
+    assert!(
+        st.cancel.load(Ordering::SeqCst),
+        "Stop & Quit never stopped the rip"
+    );
+    // `running()` stays true until the worker is collected; the latch answers.
+    assert!(app.running());
+    assert_eq!(app.dispatch(Cmd::QuitRequested), vec![Effect::Quit]);
+}
+
+#[test]
+fn a_failed_keydb_update_is_a_notice_and_never_shows_the_panic_payload() {
+    let ok = keydb_update_line(Ok(Ok("keydb updated — 3 entries".into())));
+    assert_eq!(ok, (LogKind::Result, "keydb updated — 3 entries".into()));
+    let err = keydb_update_line(Ok(Err("keydb download failed: 404".into())));
+    assert_eq!(err, (LogKind::Notice, "keydb download failed: 404".into()));
+    let owned: std::thread::Result<Result<String, String>> =
+        Err(Box::new(format!("KEY {}", "0123abcd")));
+    let (kind, msg) = keydb_update_line(owned);
+    assert_eq!(kind, LogKind::Notice);
+    assert!(!msg.contains("0123abcd"), "panic payload leaked: {msg}");
+}
+
+// The form the shell fills from Settings, edited, then committed.
+fn opened_form(app: &mut App) -> Settings {
+    let fx = app.dispatch(Cmd::Settings);
+    let [Effect::ShowSettings(st)] = fx.as_slice() else {
+        panic!("Settings answered {fx:?}");
+    };
+    assert_eq!(**st, *app.settings_form());
+    (**st).clone()
+}
+
+#[test]
+fn an_unchanged_settings_commit_writes_and_says_nothing() {
+    let mut app = App::new();
+    let form = opened_form(&mut app);
+    let lines = app.log.len();
+    assert!(app.dispatch(Cmd::CommitSettings(Box::new(form))).is_empty());
+    assert_eq!(app.log.len(), lines);
+}
+
+#[test]
+fn a_settings_commit_saves_and_follows_only_a_new_default_folder() {
+    let mut app = App::new();
+    app.output_dir = "/one-off".into();
+    let mut form = opened_form(&mut app);
+    form.filename_template = "{title}".into();
+    let fx = app.dispatch(Cmd::CommitSettings(Box::new(form.clone())));
+    assert_eq!(fx, vec![Effect::Redraw]);
+    assert_eq!(app.settings.filename_template, "{title}");
+    assert_eq!(
+        app.output_dir, "/one-off",
+        "an edit elsewhere re-pointed the folder"
+    );
+    let saved = crate::strings::get_or("gui.log.settings_saved", "Settings saved");
+    assert_eq!(app.log.last().map(|l| l.text.clone()), Some(saved));
+
+    form.dest_dir = "  ".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form.clone())));
+    assert_eq!(
+        app.output_dir, "/one-off",
+        "a cleared default moved the folder"
+    );
+
+    form.dest_dir = "/Volumes/Media/Rips".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    assert_eq!(app.output_dir, "/Volumes/Media/Rips");
+    assert_eq!(app.settings.dest_dir, "/Volumes/Media/Rips");
+}
+
+#[test]
+fn a_settings_commit_keeps_the_pick_bar_choices_made_while_the_form_was_open() {
+    let mut app = picking(pick_disc());
+    let mut form = opened_form(&mut app);
+    app.pick_audio(Some("deu"));
+    app.pick_subtitles(SubPick::None);
+    form.dest_dir = "/elsewhere".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    assert_eq!(app.settings.dest_dir, "/elsewhere");
+    assert_eq!(app.settings.audio_langs, "deu");
+    assert_eq!(app.settings.subtitle_mode, "none");
+    assert_eq!(app.pick_prefs.audio, vec!["deu".to_string()]);
+}
+
+#[test]
+fn the_key_service_check_logs_its_verdict_for_every_shell() {
+    let mut app = App::new();
+    assert_eq!(
+        app.dispatch(Cmd::TestKeyserver(" ".into())),
+        vec![Effect::Redraw]
+    );
+    assert_eq!(app.log.last().map(|l| l.kind), Some(LogKind::Result));
+    // A rejection is a Notice in every shell (Linux once logged it as a Result).
+    app.dispatch(Cmd::TestKeyserver("not a url".into()));
+    assert_eq!(app.log.last().map(|l| l.kind), Some(LogKind::Notice));
+}
+
+// Tick until the keydb worker has answered.
+fn collect_keydb(app: &mut App) -> Vec<Effect> {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let fx = app.tick();
+        if app.keydb.is_none() {
+            return fx;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "keydb worker never answered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_keydb_update_reports_through_the_view_one_at_a_time() {
+    static GATE: Mutex<()> = Mutex::new(());
+    fn fetch(url: &str, path: &str) -> Result<String, String> {
+        let _g = GATE.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(format!("keydb updated from {url} into {path}"))
+    }
+    let mut app = App::new();
+    app.keydb_fn = fetch;
+    app.settings.keydb_path = "/k/keydb.cfg".into();
+    let held = GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = app.dispatch(Cmd::UpdateKeydb {
+        url: "https://keys.example/keydb.zip".into(),
+        path: String::new(),
+    });
+    assert_eq!(fx, vec![Effect::Redraw, Effect::StartTicking]);
+    let v = app.view();
+    assert!(v.keydb_busy && v.keydb_note.is_some());
+    // A second click while one runs is refused in place, without a second worker.
+    let busy = crate::strings::get_or(
+        "gui.set.keydb_busy",
+        "A keydb update is already running — please wait.",
+    );
+    app.dispatch(Cmd::UpdateKeydb {
+        url: "https://other".into(),
+        path: String::new(),
+    });
+    assert_eq!(app.view().keydb_note, Some(busy));
+    // Mid-update the tick keeps running, so the answer is collected.
+    assert!(!app.tick().contains(&Effect::StopTicking));
+    drop(held);
+    collect_keydb(&mut app);
+    let done = "keydb updated from https://keys.example/keydb.zip into /k/keydb.cfg";
+    let v = app.view();
+    assert!(!v.keydb_busy);
+    assert_eq!(v.keydb_note.as_deref(), Some(done));
+    assert_eq!(
+        app.log.last().map(|l| (l.kind, l.text.clone())),
+        Some((LogKind::Result, done.to_string()))
+    );
+    // A fresh Settings window shows the keydb's own status again.
+    opened_form(&mut app);
+    assert_eq!(app.view().keydb_note, None);
+}
+
+#[test]
+fn a_failed_or_panicking_keydb_update_still_answers_as_a_notice() {
+    fn refuse(_: &str, _: &str) -> Result<String, String> {
+        Err("keydb download failed: 404".into())
+    }
+    fn boom(_: &str, _: &str) -> Result<String, String> {
+        std::panic::panic_any("zip entry out of range")
+    }
+    for (fetch, want) in [
+        (
+            refuse as fn(&str, &str) -> Result<String, String>,
+            "keydb download failed: 404",
+        ),
+        (boom, ""),
+    ] {
+        let mut app = App::new();
+        app.keydb_fn = fetch;
+        app.dispatch(Cmd::UpdateKeydb {
+            url: "https://keys.example/keydb.zip".into(),
+            path: "/k/keydb.cfg".into(),
+        });
+        collect_keydb(&mut app);
+        let last = app.log.last().cloned();
+        assert_eq!(last.as_ref().map(|l| l.kind), Some(LogKind::Notice));
+        assert!(
+            !app.view().keydb_busy,
+            "Update stays disabled after a failure"
+        );
+        if !want.is_empty() {
+            assert_eq!(app.view().keydb_note.as_deref(), Some(want));
+        }
+    }
+}
+
+#[test]
+fn a_keydb_update_with_no_url_says_so_and_starts_nothing() {
+    let mut app = App::new();
+    app.settings.keydb_url = String::new();
+    let fx = app.dispatch(Cmd::UpdateKeydb {
+        url: String::new(),
+        path: String::new(),
+    });
+    assert_eq!(fx, vec![Effect::Redraw]);
+    assert!(app.keydb.is_none());
+    assert!(app.view().keydb_note.is_some() && !app.view().keydb_busy);
+}
+
+#[test]
+fn a_failed_settings_save_is_reported_as_a_notice() {
+    fn refuse(_: &Settings) -> Result<(), String> {
+        Err("disk full".into())
+    }
+    let mut app = App::new();
+    app.save_fn = refuse;
+    let mut form = opened_form(&mut app);
+    form.filename_template = "{title}".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    let last = app.log.last().cloned();
+    assert_eq!(last.as_ref().map(|l| l.kind), Some(LogKind::Notice));
+    assert!(last.is_some_and(|l| l.text.contains("disk full")));
+    // Applied all the same: the failed write must not undo the edit.
+    assert_eq!(app.settings.filename_template, "{title}");
 }

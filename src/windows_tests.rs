@@ -374,10 +374,7 @@ fn the_row_signature_notices_a_different_set_of_rows() {
 fn the_language_switch_re_texts_the_cached_about_box_source_inspection_only() {
     let src = include_str!("windows.rs");
     // Concatenated so these needles cannot match this test's own text.
-    let call = format!(
-        "{}{}",
-        "self.about.relocal", "ize(&self.settings.borrow());"
-    );
+    let call = format!("{}{}", "self.about.relocal", "ize(&st);");
     assert!(
         src.contains(&call),
         "Shell::relocalize no longer re-texts the About box — it is built \
@@ -698,40 +695,27 @@ fn set_timer_failure_is_reported_source_inspection_only() {
     );
 }
 
-// One settings-save policy, not two. STOPGAP, NOT COVERAGE (same caveat as
-// the timer test above): source inspection only, fails if the language-switch
-// handler stops routing through the shared save helper the OK button uses.
+// One settings-save policy, in the core. STOPGAP, NOT COVERAGE (same caveat
+// as the timer test above): source inspection only. Every commit, the language
+// switch's included, goes to `Cmd::CommitSettings`, which saves and reports.
 #[test]
 fn language_switch_reports_a_failed_save_source_inspection_only() {
     let src = own_source();
-    // `.settings.borrow().save` `(…)` should appear in exactly ONE place:
-    // the shared helper. A second occurrence means a call site re-inlined
-    // its own Ok/Err match — the "one policy implemented twice" bug, again.
-    let direct_save = format!("{}{}", ".settings.borrow().save", "()");
-    let occurrences = src.matches(&direct_save).count();
-    assert_eq!(
-        occurrences, 1,
-        "the direct settings-save call appears {occurrences} times \
-             outside this test — it must appear exactly once, inside \
-             save_settings_reporting_error, or the language-switch path (or \
-             some future path) has silently grown its own copy again"
-    );
-    let helper = format!("{}{}", "fn save_settings_reporting", "_error");
+    let prod = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+    let save = format!("{}{}", "settings.save", "()");
     assert!(
-        src.contains(&helper),
-        "the shared save_settings_reporting_error helper is gone"
-    );
-    let language_call = format!(
-        "{}{}",
-        "me.read_form(&mut sh.settings.borrow_mut());\n                save_settings_reporting",
-        "_error(&sh);"
+        !prod.contains(&save),
+        "windows.rs saves Settings itself again — the core's save-and-report is bypassed"
     );
     assert!(
-        src.contains(&language_call),
-        "the language combo's cbn_sel_change handler no longer calls \
-             save_settings_reporting_error right after committing the form \
-             — a failed save on the language-switch path would go \
-             unreported again"
+        prod.contains("sh.act(Cmd::CommitSettings(Box::new(edited)));"),
+        "Prefs::commit no longer hands the form to the core"
+    );
+    let language_call = format!("{}{}", "me.commit(&sh, lay::FormCommit::", "Enter);");
+    assert!(
+        prod.contains(&language_call),
+        "the language combo no longer commits through Prefs::commit — its save \
+             would go unreported again"
     );
 }
 

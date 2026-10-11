@@ -1070,7 +1070,7 @@ pub fn log_menu_label(log_hidden: bool) -> String {
 /// shell just dispatches; the exceptions carry no user-facing text (they
 /// live on the focused control's responder chain / edit-control message
 /// map) so they never round-trip through the model.
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum MenuAction {
     /// Fire this [`Cmd`] on the shared [`App`].
     Cmd(Cmd),
@@ -1336,13 +1336,19 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
 
 /// Commands that must be unavailable while a rip is in flight. Cancel is
 /// deliberately absent — it must always be reachable.
-pub fn blocked_while_running(cmd: Cmd) -> bool {
+pub fn blocked_while_running(cmd: &Cmd) -> bool {
     !matches!(
         cmd,
         Cmd::Cancel
             | Cmd::About
             | Cmd::Docs
             | Cmd::Quit
+            | Cmd::QuitRequested
+            // A Settings window already open when a rip starts keeps working: its
+            // commits, keydb update and key-service check touch nothing the rip holds.
+            | Cmd::CommitSettings(_)
+            | Cmd::UpdateKeydb { .. }
+            | Cmd::TestKeyserver(_)
             // Showing/clearing the log is VIEW state that touches nothing the rip
             // reads, so blocking it bought no safety — it just disabled the log
             // during the one time (mid-rip) someone actually wants to watch it.
@@ -1351,11 +1357,10 @@ pub fn blocked_while_running(cmd: Cmd) -> bool {
     )
 }
 
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum Cmd {
     /// The user picked an output format. Carries a `&'static str` borrowed
-    /// from [`output_formats`], so an unrecognized title cannot enter the
-    /// model — and `Cmd` stays `Copy`.
+    /// from [`output_formats`], so an unrecognized title cannot enter the model.
     SetFormat(&'static str),
     Open,
     Close,
@@ -1373,6 +1378,40 @@ pub enum Cmd {
     Docs,
     CheckUpdates,
     Quit,
+    /// The platform asks whether the app may close (window close, ⌘Q, logout):
+    /// [`Effect::ConfirmQuit`] mid-rip until answered, else [`Effect::Quit`].
+    QuitRequested,
+    /// The Settings form read back onto [`App::settings_form`]; saved if it changed.
+    CommitSettings(Box<Settings>),
+    /// Settings ▸ Keys "Update keydb", with the form's live values (empty = stored).
+    UpdateKeydb {
+        url: String,
+        path: String,
+    },
+    /// Settings ▸ Keys "Test", with the form's live key-service URL.
+    TestKeyserver(String),
+}
+
+/// Whether closing must first ask about the rip in flight. The latch keeps it
+/// to ONE question per departure: window-close and quit share the path.
+pub fn needs_rip_confirmation(running: bool, already_confirmed: bool) -> bool {
+    running && !already_confirmed
+}
+
+/// A keydb worker's outcome as a log line: a failure is a Notice, never the
+/// success style, and a panic's payload (it can quote keydb bytes) is dropped.
+pub fn keydb_update_line(r: std::thread::Result<Result<String, String>>) -> (LogKind, String) {
+    match r {
+        Ok(Ok(m)) => (LogKind::Result, m),
+        Ok(Err(m)) => (LogKind::Notice, m),
+        Err(_) => (
+            LogKind::Notice,
+            crate::strings::get_or(
+                "gui.log.keydb_worker_failed",
+                "keydb update failed — internal error",
+            ),
+        ),
+    }
 }
 
 // ── the Information block on the progress page ────────────────────────────
@@ -1914,8 +1953,11 @@ pub enum Effect {
     Reveal(String),
     /// Open a URL in the default browser.
     OpenUrl(String),
-    /// Present the settings window.
-    ShowSettings,
+    /// Present the settings window, its form filled from these settings.
+    ShowSettings(Box<Settings>),
+    /// Ask "a rip is in progress — Stop & Quit?". "Stop & Quit" calls
+    /// [`App::confirm_quit`] and closes again; anything else keeps ripping.
+    ConfirmQuit,
     /// Present the about window.
     ShowAbout,
     /// Redraw: state changed.
@@ -1989,6 +2031,13 @@ const SCANNERS: (ScanFn, ScanFn) = (tests::no_drive_scan, tests::no_drive_probe)
 const PRESENCE: fn(&str) -> Option<bool> = crate::engine::disc_present;
 #[cfg(test)]
 const PRESENCE: fn(&str) -> Option<bool> = tests::no_drive_presence;
+
+/// Writes Settings to disk. Unit tests write nothing: they share one settings file.
+const SAVE_SETTINGS: fn(&Settings) -> Result<(), String> = if cfg!(test) {
+    |_| Ok(())
+} else {
+    Settings::save
+};
 
 /// How often the idle disc watch asks whether the open disc is still in its drive.
 const PRESENCE_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -2106,6 +2155,18 @@ pub struct App {
     update_check: Option<std::sync::mpsc::Receiver<String>>,
     /// The network check the worker runs — a seam so tests never reach GitHub.
     update_fn: fn(&str) -> String,
+    /// What the shell last filled the Settings form from: a commit merges against it.
+    settings_form: Settings,
+    /// An "Update keydb" in flight: its worker's log line, collected on the tick.
+    keydb: Option<std::sync::mpsc::Receiver<(LogKind, String)>>,
+    /// The keydb download the worker runs — a seam so tests never reach the network.
+    keydb_fn: fn(&str, &str) -> Result<String, String>,
+    /// Settings ▸ Keys note: the keydb update's progress or verdict.
+    keydb_note: Option<String>,
+    /// The operator chose "Stop & Quit": the close that follows is not asked again.
+    quit_confirmed: bool,
+    /// The Settings write — a seam so tests never touch the shared settings file.
+    save_fn: fn(&Settings) -> Result<(), String>,
     /// Highest unreadable-sector count already announced, so the notice is
     /// not repeated on every 100 ms tick.
     reported_bad: u64,
@@ -2260,6 +2321,7 @@ impl App {
         let format = settings.container.clone();
         let mut app = App {
             tree: Tree::default(),
+            settings_form: settings.clone(),
             settings,
             page: Page::Empty,
             log: Arc::default(),
@@ -2305,6 +2367,11 @@ impl App {
             presence_fn: PRESENCE,
             update_check: None,
             update_fn: crate::settings::check_for_update,
+            keydb: None,
+            keydb_fn: crate::settings::update_keydb,
+            keydb_note: None,
+            quit_confirmed: false,
+            save_fn: SAVE_SETTINGS,
             reported_bad: 0,
         };
         app.say(
@@ -2408,7 +2475,7 @@ impl App {
 
     /// The single entry point for every user action, on every platform.
     pub fn dispatch(&mut self, cmd: Cmd) -> Vec<Effect> {
-        if blocked_while_running(cmd)
+        if blocked_while_running(&cmd)
             && (self.running() || self.ejecting.is_some() || (self.opening() && cmd != Cmd::Close))
         {
             return vec![];
@@ -2458,7 +2525,20 @@ impl App {
                 self.log_hidden = !self.log_hidden;
                 vec![Effect::Redraw]
             }
-            Cmd::Settings => vec![Effect::ShowSettings],
+            Cmd::Settings => {
+                self.settings_form = self.settings.clone();
+                // A fresh form shows the keydb's own status unless an update is running.
+                if self.keydb.is_none() {
+                    self.keydb_note = None;
+                }
+                vec![Effect::ShowSettings(Box::new(self.settings_form.clone()))]
+            }
+            Cmd::CommitSettings(edited) => self.commit_form(*edited),
+            Cmd::UpdateKeydb { url, path } => self.update_keydb(url, path),
+            Cmd::TestKeyserver(url) => {
+                self.test_keyserver(&url);
+                vec![Effect::Redraw]
+            }
             Cmd::About => vec![Effect::ShowAbout],
             Cmd::Docs => vec![Effect::OpenUrl("https://freemkv.org/docs".into())],
             Cmd::CheckUpdates => {
@@ -2497,7 +2577,141 @@ impl App {
                 self.stop_opens();
                 vec![Effect::Quit]
             }
+            Cmd::QuitRequested => {
+                if needs_rip_confirmation(self.running(), self.quit_confirmed) {
+                    return vec![Effect::ConfirmQuit];
+                }
+                self.stop_opens();
+                vec![Effect::Quit]
+            }
         }
+    }
+
+    /// The operator answered [`Effect::ConfirmQuit`] with "Stop & Quit": latch it,
+    /// cancel the rip, and wait (bounded by `QUIT_GRACE`) for the worker to put
+    /// its output down before the shell lets the process go.
+    pub fn confirm_quit(&mut self) {
+        self.quit_confirmed = true;
+        let _ = self.dispatch(Cmd::Cancel);
+        if let Some(run) = self.run.clone() {
+            crate::engine::await_worker_exit(&run, crate::engine::QUIT_GRACE);
+        }
+    }
+
+    /// What the shell fills the Settings form from and reads it back onto.
+    pub fn settings_form(&self) -> &Settings {
+        &self.settings_form
+    }
+
+    // Apply a committed form: unchanged is silent; otherwise merge (see
+    // `commit_settings`), follow a new default folder, save and report.
+    fn commit_form(&mut self, edited: Settings) -> Vec<Effect> {
+        let before = self.settings_form.clone();
+        if edited == before {
+            return Vec::new();
+        }
+        let dest = edited.dest_dir.clone();
+        let new_dest = dest != before.dest_dir && !dest.trim().is_empty();
+        self.settings_form = self.commit_settings(&before, edited);
+        // A one-off folder pick survives an edit elsewhere in the form.
+        if new_dest {
+            self.output_dir = dest;
+        }
+        match (self.save_fn)(&self.settings) {
+            Ok(()) => self.say(
+                LogKind::Result,
+                &crate::strings::get_or("gui.log.settings_saved", "Settings saved"),
+            ),
+            Err(e) => self.say(
+                LogKind::Notice,
+                &crate::strings::fmt_or(
+                    "gui.log.settings_save_error",
+                    "Could not save settings: {e}",
+                    &[("e", &e)],
+                ),
+            ),
+        }
+        vec![Effect::Redraw]
+    }
+
+    // Check a key-service URL by the rule the key layer uses, so the form
+    // cannot accept a URL the engine would later reject.
+    fn test_keyserver(&mut self, url: &str) {
+        use crate::strings::{fmt_or, get_or};
+        let (kind, msg) = if url.trim().is_empty() {
+            (
+                LogKind::Result,
+                get_or("gui.log.no_keyserver", "No key service URL set."),
+            )
+        } else {
+            match freemkv_keysources::validate_keyserver_url(url) {
+                Ok(_) => (
+                    LogKind::Result,
+                    fmt_or(
+                        "gui.log.keyserver_valid",
+                        "Key service URL is valid: {url}",
+                        &[("url", url)],
+                    ),
+                ),
+                Err(e) => (
+                    LogKind::Notice,
+                    fmt_or(
+                        "gui.log.keyserver_rejected",
+                        "Key service URL rejected: {e}",
+                        &[("e", &e.to_string())],
+                    ),
+                ),
+            }
+        };
+        self.say(kind, &msg);
+    }
+
+    // Download the keydb off the UI thread, one at a time; the tick reports it.
+    fn update_keydb(&mut self, mut url: String, mut path: String) -> Vec<Effect> {
+        use crate::strings::get_or;
+        if self.keydb.is_some() {
+            self.keydb_note = Some(get_or(
+                "gui.set.keydb_busy",
+                "A keydb update is already running — please wait.",
+            ));
+            return vec![Effect::Redraw];
+        }
+        if url.is_empty() {
+            url = self.settings.keydb_url.clone();
+        }
+        if path.is_empty() {
+            path = self.settings.keydb_path.clone();
+        }
+        if url.trim().is_empty() {
+            self.keydb_note = Some(get_or(
+                "gui.set.keydb_no_url",
+                "No keydb update URL set — add one above, then click Update.",
+            ));
+            return vec![Effect::Redraw];
+        }
+        self.say(
+            LogKind::Result,
+            &get_or("gui.log.fetching_keydb", "Fetching keydb …"),
+        );
+        let fetch = self.keydb_fn;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("keydb-update".into())
+            .spawn(move || {
+                let r =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(&url, &path)));
+                let _ = tx.send(keydb_update_line(r));
+            });
+        if let Err(e) = spawned {
+            self.say(LogKind::Notice, &e.to_string());
+            return vec![Effect::Redraw];
+        }
+        self.keydb_note = Some(get_or(
+            "gui.set.keydb_updating",
+            "Updating keydb… downloading, please wait.",
+        ));
+        self.keydb = Some(rx);
+        vec![Effect::Redraw, Effect::StartTicking]
     }
 
     /// The drive URL to open. An explicit request (`announce_missing`) enumerates drives and
@@ -2703,6 +2917,21 @@ impl App {
         vec![Effect::Redraw]
     }
 
+    // Log a finished keydb update and show it in the Settings note.
+    fn poll_keydb(&mut self) -> Vec<Effect> {
+        let (kind, msg) = match self.keydb.as_ref().map(|rx| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(line)) => line,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                keydb_update_line(Err(Box::new(())))
+            }
+        };
+        self.keydb = None;
+        self.say(kind, &msg);
+        self.keydb_note = Some(msg);
+        vec![Effect::Redraw]
+    }
+
     // Apply a finished eject: the tree now describes a disc that is gone.
     fn poll_eject(&mut self) -> Vec<Effect> {
         let verdict = match self.ejecting.as_ref().map(|(_, rx)| rx.try_recv()) {
@@ -2894,7 +3123,7 @@ impl App {
             return fx;
         }
         record(&mut self.settings, &self.pick_prefs);
-        if let Err(e) = self.settings.save() {
+        if let Err(e) = (self.save_fn)(&self.settings) {
             self.say(
                 LogKind::Notice,
                 &crate::strings::fmt_or(
@@ -3380,6 +3609,7 @@ impl App {
         let mut probe_fx = self.poll_probe();
         probe_fx.extend(self.poll_eject());
         probe_fx.extend(self.poll_update());
+        probe_fx.extend(self.poll_keydb());
         probe_fx.extend(self.poll_presence());
         if let Some(rx) = &self.opening {
             match rx.try_recv() {
@@ -3414,6 +3644,7 @@ impl App {
                 && !self.opening()
                 && self.ejecting.is_none()
                 && self.update_check.is_none()
+                && self.keydb.is_none()
             {
                 // An idle disc keeps the tick for its watch, without a redraw per tick.
                 if self.presence.is_none() && !self.watching_disc() {
@@ -3467,7 +3698,7 @@ impl App {
             // The rip may have ejected its disc: the watch asks on the next tick.
             self.presence_at = None;
             let mut fx = vec![Effect::Redraw];
-            if self.update_check.is_none() && !self.watching_disc() {
+            if self.update_check.is_none() && self.keydb.is_none() && !self.watching_disc() {
                 fx.push(Effect::StopTicking);
             }
             if self.settings.notify_when_rip_finished {
@@ -3652,6 +3883,8 @@ impl App {
             eject_visible: eject_action(&self.source) == EjectAction::Eject
                 && !self.running()
                 && self.ejecting.is_none(),
+            keydb_note: self.keydb_note.clone(),
+            keydb_busy: self.keydb.is_some(),
         }
     }
 
@@ -4152,6 +4385,11 @@ pub struct View {
     /// Heading for the result page — never "Finished" after a cancel.
     pub result_heading: String,
     pub eject_visible: bool,
+    /// The Settings ▸ Keys note while it reports an update; `None` shows the
+    /// keydb's status.
+    pub keydb_note: Option<String>,
+    /// A keydb update is in flight: its button is disabled.
+    pub keydb_busy: bool,
 }
 
 #[cfg(test)]

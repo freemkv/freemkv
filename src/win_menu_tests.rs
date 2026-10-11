@@ -13,7 +13,7 @@ fn hinted(menus: &[WinMenu]) -> Vec<(MenuAction, Accel)> {
                 action,
                 accel: Some(a),
                 ..
-            } => Some((*action, *a)),
+            } => Some((action.clone(), *a)),
             _ => None,
         })
         .collect()
@@ -29,7 +29,7 @@ fn every_shortcut_the_menu_shows_is_in_the_accelerator_table() {
         }
         let key = win_key(&a).unwrap_or_else(|| panic!("{a:?} has no virtual key"));
         assert!(
-            table.contains(&(action, key)),
+            table.contains(&(action.clone(), key)),
             "menu shows {} for {action:?} but the accelerator table has no such key",
             accel_suffix(&a)
         );

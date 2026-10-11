@@ -12,7 +12,6 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 use winsafe::{self as w, co, gui, msg, prelude::*};
 
@@ -27,8 +26,6 @@ use crate::win_layout as lay;
 /// Poll interval for a running job, in milliseconds. Matches the macOS timer.
 const TICK_MS: u32 = 200;
 const TIMER_TICK: usize = 1;
-/// Drain interval for worker-thread messages (the keydb update).
-const TIMER_DRAIN: usize = 2;
 /// One-shot: the launch probe for a disc already in the drive. See
 /// `Shell::open_disc` and the `wm_create` handler.
 const TIMER_LAUNCH_PROBE: usize = 4;
@@ -631,7 +628,6 @@ struct Shell {
     wnd: gui::WindowMain,
     /// The single source of truth. The shell holds no state of its own.
     app: Rc<RefCell<App>>,
-    settings: Rc<RefCell<crate::settings::Settings>>,
 
     // empty page
     lbl_empty_head: gui::Label,
@@ -692,15 +688,12 @@ struct Shell {
     /// Recent rip-finished toasts, kept so each one's click handler outlives
     /// `perform` while it can still be clicked in the Action Center.
     toasts: Rc<RefCell<Vec<windows::UI::Notifications::ToastNotification>>>,
-    /// Worker threads push user-visible lines here, with the log style they
-    /// earn; a main-thread timer drains it. Win32 windows are owned by the
-    /// thread that created them, so nothing else may touch a control.
-    inbox: Arc<Mutex<Vec<(LogKind, String)>>>,
 }
 
 impl Shell {
     fn new() -> Self {
-        let settings = crate::settings::Settings::load();
+        let app = App::new();
+        let settings = app.settings.clone();
         let menus = win_menus();
 
         // No window exists yet, so only the system DPI is available. Sizes below
@@ -1056,8 +1049,7 @@ impl Shell {
 
         Self {
             wnd,
-            app: Rc::new(RefCell::new(App::new())),
-            settings: Rc::new(RefCell::new(settings)),
+            app: Rc::new(RefCell::new(app)),
             lbl_empty_head,
             lbl_empty_sub,
             btn_open_disc,
@@ -1096,7 +1088,6 @@ impl Shell {
             about,
             memo: Rc::new(RefCell::new(Memo::default())),
             toasts: Rc::new(RefCell::new(Vec::new())),
-            inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -1588,7 +1579,7 @@ impl Shell {
     /// language: `WS_EX_LAYOUTRTL` flips each window's coordinates, so the
     /// columns, the expanders and the tick boxes all read from the right.
     fn apply_tree_direction(&self) {
-        let lang = self.settings.borrow().language.clone();
+        let lang = self.app.borrow().settings.language.clone();
         let rtl = crate::app_entry::resolved_locale(&lang, system_locale_code)
             .is_some_and(|t| lay::is_rtl_locale(&t));
         let flag = co::WS_EX::LAYOUTRTL.raw() as isize;
@@ -1710,11 +1701,11 @@ impl Shell {
         r
     }
 
-    // Ask before quitting mid-rip; `true` means go ahead. Shared by the window's X and File >
-    // Exit, which used to disagree  — one question, one place, not a copy beside each call
-    // site.
-    fn confirm_quit_mid_rip(&self) -> bool {
-        if !self.app.borrow().running() {
+    // Whether the app may close now; the core decides whether to ask. Shared by
+    // the window's X and File > Exit — one question, one place.
+    fn may_quit(&self) -> bool {
+        let fx = { self.app.borrow_mut() }.dispatch(Cmd::QuitRequested);
+        if !fx.contains(&Effect::ConfirmQuit) {
             return true;
         }
         let answer = self.wnd.hwnd().MessageBox(
@@ -1726,17 +1717,12 @@ impl Shell {
             "freemkv",
             co::MB::YESNO | co::MB::ICONWARNING,
         );
-        answer.map(|a| a == co::DLGID::YES).unwrap_or(false)
-    }
-
-    // Signal the worker to stop, then WAIT (bounded by `QUIT_GRACE`) for it to put its output
-    // down, so the partial file is closed/finalised rather than left mid-write.
-    fn cancel_and_drain(&self) {
-        self.act(Cmd::Cancel);
-        let run = self.app.borrow().run.clone();
-        if let Some(run) = run {
-            crate::engine::await_worker_exit(&run, crate::engine::QUIT_GRACE);
+        if answer.map(|a| a != co::DLGID::YES).unwrap_or(true) {
+            return false;
         }
+        // The core latches, cancels, and waits (bounded) for the worker to put its output down.
+        self.app_mut(|a| a.confirm_quit());
+        true
     }
 
     /// The shell's entire job: hand the command to the core, perform the
@@ -1750,6 +1736,8 @@ impl Shell {
     /// writes to controls, and it computes nothing.
     fn render(&self) {
         let v = self.app.borrow().view();
+        self.prefs
+            .paint_keydb(v.keydb_note.as_deref(), v.keydb_busy);
         let _ = self
             .lbl_empty_head
             .hwnd()
@@ -2013,7 +2001,9 @@ impl Shell {
         }
         self.memo.borrow_mut().menu_running = Some(running);
         for &id in MENU_CMD_IDS {
-            let blocked = cmd_for(id).map(crate::ui::blocked_while_running) == Some(true);
+            let blocked = cmd_for(id)
+                .as_ref()
+                .is_some_and(crate::ui::blocked_while_running);
             // EnableMenuItem searches submenus by command id.
             let _ = bar.EnableMenuItem(w::IdPos::Id(id), !(running && blocked));
         }
@@ -2290,25 +2280,21 @@ impl Shell {
                         });
                     }
                 }
-                Effect::ShowSettings => {
-                    // The App owns the live settings (bar picks land there).
-                    let live = self.app.borrow().settings.clone();
-                    *self.settings.borrow_mut() = live;
-                    self.prefs.show(&self.settings.borrow());
+                Effect::ShowSettings(st) => self.prefs.show(&st),
+                Effect::ShowAbout => {
+                    let st = self.app.borrow().settings.clone();
+                    self.about.show(&st);
                 }
-                Effect::ShowAbout => self.about.show(&self.settings.borrow()),
                 Effect::StartTicking => {
                     Self::report_timer_failure(&self.wnd, TIMER_TICK, TICK_MS);
                 }
                 Effect::StopTicking => {
                     let _ = self.wnd.hwnd().KillTimer(TIMER_TICK);
                 }
-                // File > Exit must not be a second, unguarded quit path: it used
-                // to go straight to PostQuitMessage, skipping confirmation, the
-                // Cancel signal, and the drain that WM_CLOSE (the window's X) did.
-                Effect::Quit => {
-                    if self.confirm_quit_mid_rip() {
-                        self.cancel_and_drain();
+                // File > Exit must not be a second, unguarded quit path: it asks
+                // the same question as WM_CLOSE (the window's X).
+                Effect::Quit | Effect::ConfirmQuit => {
+                    if self.may_quit() {
                         w::PostQuitMessage(0);
                     }
                 }
@@ -2355,10 +2341,6 @@ impl Shell {
                 co::MB::ICONERROR,
             );
         }
-    }
-
-    fn start_drain(&self) {
-        Self::report_timer_failure(&self.wnd, TIMER_DRAIN, TICK_MS);
     }
 }
 
@@ -2565,27 +2547,19 @@ impl Shell {
         let me = self.clone();
         self.wnd.on().wm_close(move || {
             // Same decision as File > Exit, asked in one place.
-            if !me.confirm_quit_mid_rip() {
+            if !me.may_quit() {
                 return Ok(()); // keep ripping
-            }
-            if me.app.borrow().running() {
-                me.cancel_and_drain();
             }
             me.wnd.hwnd().DestroyWindow()?;
             Ok(())
         });
 
-        // The rip poller and the worker-message drain.
+        // The poller: a rip, and the core's background work.
         let me = self.clone();
         self.wnd.on().wm_timer(TIMER_TICK, move || {
             // Not `app_mut`: `perform` always ends in the one render a tick needs.
             let fx = me.app.borrow_mut().tick();
             me.perform(fx);
-            Ok(())
-        });
-        let me = self.clone();
-        self.wnd.on().wm_timer(TIMER_DRAIN, move || {
-            me.drain();
             Ok(())
         });
 
@@ -2823,32 +2797,6 @@ impl Shell {
             }
         });
         self.perform(fx);
-    }
-
-    /// Drain worker-thread messages onto the log and into the Settings note.
-    fn drain(&self) {
-        // RECOVER a poisoned inbox rather than returning (see macOS `onDrain:`):
-        // returning stranded `set_keydb_updating(false)` and skipped KillTimer,
-        // leaving a 5 Hz timer running for the process's life on a dead lock.
-        let msgs: Vec<(LogKind, String)> = self
-            .inbox
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .collect();
-        if msgs.is_empty() {
-            return;
-        }
-        for (kind, m) in &msgs {
-            self.app_mut(|a| a.say(*kind, m));
-        }
-        // Surface the keydb outcome in the Settings note so the user sees the
-        // result in place, not only in the (possibly hidden) log.
-        if let Some((_, last)) = msgs.last() {
-            self.prefs.set_keydb_note(last);
-        }
-        self.prefs.set_keydb_updating(false);
-        let _ = self.wnd.hwnd().KillTimer(TIMER_DRAIN);
     }
 }
 
@@ -3570,30 +3518,14 @@ impl Prefs {
         }
     }
 
-    /// Commit the form (`lay::form_commit`): into the stored settings, into the
-    /// running `App` so it applies at once, and to disk. The live output folder
-    /// follows only when the DEFAULT destination changed, so a one-off folder
-    /// pick in the main window survives.
+    /// Commit the form (`lay::form_commit`) to the core, which applies it at
+    /// once and saves only what changed.
     fn commit(&self, sh: &Shell, why: lay::FormCommit) {
-        let before = serde_json::to_value(&*sh.settings.borrow()).ok();
-        let mut edited = sh.settings.borrow().clone();
-        self.read_form(&mut edited);
-        let changed = serde_json::to_value(&edited).ok() != before;
-        let plan = lay::form_commit(why, self.wnd.hwnd().IsWindowVisible(), changed);
+        let plan = lay::form_commit(why, self.wnd.hwnd().IsWindowVisible());
         if plan.save {
-            let old_dest = sh.settings.borrow().dest_dir.clone();
-            let new_dest = edited.dest_dir.clone();
-            let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
-            let before = sh.settings.borrow().clone();
-            let merged = sh.app_mut(|a| {
-                let merged = a.commit_settings(&before, edited);
-                if dest_changed {
-                    a.output_dir = new_dest;
-                }
-                merged
-            });
-            *sh.settings.borrow_mut() = merged;
-            save_settings_reporting_error(sh);
+            let mut edited = sh.app.borrow().settings_form().clone();
+            self.read_form(&mut edited);
+            sh.act(Cmd::CommitSettings(Box::new(edited)));
         }
         if plan.close {
             self.hide();
@@ -3634,14 +3566,15 @@ impl Prefs {
         }
     }
 
-    fn set_keydb_note(&self, text: &str) {
-        let _ = self.lbl_keydb.hwnd().SetWindowText(text);
-    }
-
-    /// Disable the update button while a download is in flight so a second click
-    /// cannot spawn a concurrent download.
-    fn set_keydb_updating(&self, updating: bool) {
-        self.btn_keydb.hwnd().EnableWindow(!updating);
+    // Keys tab from the view: the update's note (else the status `populate`
+    // wrote) and the button, disabled while one runs.
+    fn paint_keydb(&self, note: Option<&str>, busy: bool) {
+        if let Some(text) = note
+            && self.lbl_keydb.hwnd().GetWindowText().ok().as_deref() != Some(text)
+        {
+            let _ = self.lbl_keydb.hwnd().SetWindowText(text);
+        }
+        self.btn_keydb.hwnd().EnableWindow(!busy);
     }
 }
 
@@ -3848,25 +3781,6 @@ impl About {
     }
 }
 
-// Save `Settings` to disk and tell the operator whether it worked. The ONE call site for this
-// policy.
-fn save_settings_reporting_error(sh: &Shell) {
-    match sh.settings.borrow().save() {
-        Ok(()) => sh.app_mut(|a| {
-            a.say(
-                LogKind::Result,
-                &crate::strings::get("gui.log.settings_saved"),
-            )
-        }),
-        Err(e) => sh.app_mut(|a| {
-            a.say(
-                LogKind::Notice,
-                &crate::strings::fmt("gui.log.settings_save_error", &[("e", &e)]),
-            )
-        }),
-    }
-}
-
 impl Prefs {
     fn events(&self, shell: &Shell) {
         // OK: commit the form, persist it, and push into the running App so
@@ -3942,95 +3856,20 @@ impl Prefs {
             Ok(())
         });
 
-        // Validated by the same rule the key layer uses, so the UI cannot accept
-        // a URL the engine would later reject.
+        // The key-service check and the keydb update take the LIVE field values,
+        // not the saved ones, so they work before OK is pressed.
         let me = self.clone();
         let sh = shell.clone();
         self.btn_test.on().bn_clicked(move || {
-            let url = me.field_value("keyserver_url");
-            if url.trim().is_empty() {
-                sh.app_mut(|a| {
-                    a.say(
-                        LogKind::Result,
-                        &crate::strings::get("gui.log.no_keyserver"),
-                    )
-                });
-                return Ok(());
-            }
-            match freemkv_keysources::validate_keyserver_url(&url) {
-                Ok(_) => sh.app_mut(|a| {
-                    a.say(
-                        LogKind::Result,
-                        &crate::strings::fmt("gui.log.keyserver_valid", &[("url", &url)]),
-                    )
-                }),
-                Err(e) => sh.app_mut(|a| {
-                    a.say(
-                        LogKind::Notice,
-                        &crate::strings::fmt(
-                            "gui.log.keyserver_rejected",
-                            &[("e", &e.to_string())],
-                        ),
-                    )
-                }),
-            }
+            sh.act(Cmd::TestKeyserver(me.field_value("keyserver_url")));
             Ok(())
         });
-
-        // Update keydb: reads the LIVE field values, not the last-saved ones, so
-        // Update works before OK is pressed.
         let me = self.clone();
         let sh = shell.clone();
         self.btn_keydb.on().bn_clicked(move || {
-            let mut url = me.field_value("keydb_url");
-            let mut path = me.field_value("keydb_path");
-            if url.is_empty() {
-                url = sh.settings.borrow().keydb_url.clone();
-            }
-            if path.is_empty() {
-                path = sh.settings.borrow().keydb_path.clone();
-            }
-            if url.trim().is_empty() {
-                // Nothing to fetch — say so in place rather than silently
-                // spawning a thread that errors into the (maybe-hidden) log.
-                me.set_keydb_note(&crate::strings::get("gui.set.keydb_no_url"));
-                return Ok(());
-            }
-            sh.app_mut(|a| {
-                a.say(
-                    LogKind::Result,
-                    &crate::strings::get("gui.log.fetching_keydb"),
-                )
-            });
-            // Immediate in-Settings feedback: the download is ~20 MB and takes a
-            // few seconds; the drain updates this note to the result when done.
-            me.set_keydb_note(&crate::strings::get("gui.set.keydb_updating"));
-            me.set_keydb_updating(true);
-            let inbox = sh.inbox.clone();
-            std::thread::spawn(move || {
-                // A panic in `update_keydb` must NOT strand the drain: catch it so
-                // a terminal message is pushed either way. Dropping it leaves Update
-                // disabled and TIMER_DRAIN firing forever (`drain()` stops on batch).
-                let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match crate::settings::update_keydb(&url, &path) {
-                        Ok(m) => (LogKind::Result, m),
-                        // A failure is a Notice, never logged in the success style.
-                        Err(e) => (LogKind::Notice, e),
-                    }
-                }))
-                .unwrap_or_else(|_| {
-                    (
-                        LogKind::Notice,
-                        crate::strings::get_or(
-                            "gui.log.keydb_worker_failed",
-                            "keydb update failed — internal error",
-                        ),
-                    )
-                });
-                // RECOVER rather than skip the push (see macOS's identical worker).
-                inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
-            });
-            sh.start_drain();
+            let url = me.field_value("keydb_url");
+            let path = me.field_value("keydb_path");
+            sh.act(Cmd::UpdateKeydb { url, path });
             Ok(())
         });
 
@@ -4056,9 +3895,8 @@ impl Prefs {
             let combo = combo.clone();
             #[allow(clippy::redundant_clone)]
             combo.on().cbn_sel_change(move || {
-                me.read_form(&mut sh.settings.borrow_mut());
-                save_settings_reporting_error(&sh);
-                let code = sh.settings.borrow().language.clone();
+                me.commit(&sh, lay::FormCommit::Enter);
+                let code = sh.app.borrow().settings.language.clone();
                 crate::strings::set_locale(crate::ui::locale_code(&code));
                 sh.relocalize();
                 Ok(())
@@ -4184,10 +4022,12 @@ impl Shell {
         self.memo.borrow_mut().free_line = None;
         // The rebuilt menu bar starts all-enabled.
         self.memo.borrow_mut().menu_running = None;
-        self.prefs.relocalize(&self.settings.borrow());
+        let form = self.app.borrow().settings_form().clone();
+        self.prefs.relocalize(&form);
         // The About box too: it is built once and cached, so nothing else ever
         // re-texts it.
-        self.about.relocalize(&self.settings.borrow());
+        let st = self.app.borrow().settings.clone();
+        self.about.relocalize(&st);
         self.render();
     }
 }
@@ -4868,25 +4708,26 @@ impl Shell {
         // 6 ── the guard rule comes from the core
         check(
             "blocked-while-running",
-            crate::ui::blocked_while_running(Cmd::Run)
-                && !crate::ui::blocked_while_running(Cmd::Cancel),
+            crate::ui::blocked_while_running(&Cmd::Run)
+                && !crate::ui::blocked_while_running(&Cmd::Cancel),
             "Cancel always reachable, Run is not",
         );
 
         // 7 ── settings persist, and the window has every tab
         check(
             "settings-load",
-            !crate::settings::Settings::load().dest_dir.is_empty(),
+            !self.app.borrow().settings.dest_dir.is_empty(),
             "destination restored from disk",
         );
-        self.prefs.show(&self.settings.borrow());
+        let st = self.app.borrow().settings.clone();
+        self.prefs.show(&st);
         pump(250);
         let _ = snapshot(
             self.prefs.wnd.hwnd(),
             &format!("{shot_dir}/10-settings.bmp"),
         );
         self.prefs.hide();
-        self.about.show(&self.settings.borrow());
+        self.about.show(&st);
         pump(250);
         let _ = snapshot(self.about.wnd.hwnd(), &format!("{shot_dir}/11-about.bmp"));
         self.about.hide();
@@ -4990,7 +4831,7 @@ impl Shell {
             crate::engine::preflight(iso, shot_dir, &[]).is_ok(),
             "answers without executing",
         );
-        let ks = crate::settings::Settings::load().keydb_status();
+        let ks = self.app.borrow().settings.keydb_status();
         check(
             "keydb-status",
             ks.contains("keydb found") || ks.contains("no keydb"),
@@ -5191,8 +5032,9 @@ impl Shell {
 
         // FMKV_WIN=prefs|about captures a secondary window instead.
         if let Ok(which) = dev_env("FMKV_WIN") {
+            let st = self.app.borrow().settings.clone();
             let hwnd = if which == "prefs" {
-                self.prefs.show(&self.settings.borrow());
+                self.prefs.show(&st);
                 if let Ok(tab) = dev_env("FMKV_TAB")
                     && let Ok(i) = tab.parse::<u32>()
                 {
@@ -5200,7 +5042,7 @@ impl Shell {
                 }
                 unsafe { self.prefs.wnd.hwnd().raw_copy() }
             } else {
-                self.about.show(&self.settings.borrow());
+                self.about.show(&st);
                 unsafe { self.about.wnd.hwnd().raw_copy() }
             };
             pump(600);
@@ -5338,9 +5180,11 @@ impl Shell {
             }
             Err(e) => g.check("capture-main-window", false, e.to_string()),
         }
-        let rtl =
-            crate::app_entry::resolved_locale(&self.settings.borrow().language, system_locale_code)
-                .is_some_and(|t| lay::is_rtl_locale(&t));
+        let rtl = crate::app_entry::resolved_locale(
+            &self.app.borrow().settings.language,
+            system_locale_code,
+        )
+        .is_some_and(|t| lay::is_rtl_locale(&t));
         let mirrored = self.tree.hwnd().GetWindowLongPtr(co::GWLP::EXSTYLE)
             & co::WS_EX::LAYOUTRTL.raw() as isize
             != 0;
@@ -5357,8 +5201,9 @@ impl Shell {
         );
 
         // ── Settings: a long path and every dropdown's choice read whole ──
-        self.settings.borrow_mut().dest_dir = crate::gui_gate::LONG_DEST.into();
-        self.prefs.show(&self.settings.borrow());
+        let mut st = self.app.borrow().settings.clone();
+        st.dest_dir = crate::gui_gate::LONG_DEST.into();
+        self.prefs.show(&st);
         pump(600);
         if let Some((_, f)) = self.prefs.fields.iter().find(|(k, _)| *k == "dest_dir") {
             let mut rc = w::RECT::default();

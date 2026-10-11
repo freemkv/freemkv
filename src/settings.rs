@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct Settings {
     // Output
@@ -67,6 +67,13 @@ pub struct Settings {
     /// no keys, so an ordinary settings file gains nothing.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+// Field-free on purpose: `keyserver_token` is a secret and must never reach a log line.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings").finish_non_exhaustive()
+    }
 }
 
 impl Default for Settings {
