@@ -394,3 +394,21 @@ fn retire_removes_the_old_files_folder_once_it_is_empty_and_never_one_that_is_no
     assert!(c.dirs.library.join("Old/notes.txt").exists());
     let _ = stray;
 }
+
+#[test]
+fn a_retire_asks_for_a_scan_after_the_one_that_listed_the_old_files() {
+    let c = Correction::new(1);
+    c.lib.rescan(&c.dirs);
+    let _ = c.lib.take_wake();
+    let ending = c.run(|request, _, _| {
+        std::fs::create_dir_all(request.target.parent().unwrap()).unwrap();
+        std::fs::write(&request.target, movie())?;
+        Ok(Some(current_stamp()))
+    });
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert!(c.old.iter().all(|p| !p.exists()));
+    assert!(
+        c.lib.take_wake(),
+        "a scan that ran across the retire is not the last word"
+    );
+}

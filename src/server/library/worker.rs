@@ -988,7 +988,10 @@ fn remux_planned_with(
             sink,
             stopping: &|| cancelled_ending(sink).is_some(),
         };
-        match super::retire::run(&retire, &owned, &targets) {
+        let retired = super::retire::run(&retire, &owned, &targets);
+        // A scan that listed the removed files may commit after this; one more follows it.
+        sink.lib.wake_indexer();
+        match retired {
             Ok(kept) if kept.is_empty() => {}
             Ok(kept) => {
                 let message = super::retire::kept_message(targets.len(), &kept);

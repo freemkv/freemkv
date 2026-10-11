@@ -811,7 +811,8 @@ impl Library {
 
     /// Scan the folders and swap in a new snapshot. Filesystem work only; no
     /// lock is held across it. Only a NotFound drops a file a scan missed. A remux
-    /// that lands mid-scan discards it and asks for another.
+    /// that lands mid-scan is folded in; a Change match's retire wakes the indexer for
+    /// another scan.
     pub fn rescan(&self, d: &Dirs) {
         let landed_at = self.landed.load(Ordering::SeqCst);
         let scan = self.scan(d);
