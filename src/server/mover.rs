@@ -211,8 +211,9 @@ fn hold_for_operator(path: &str) {
     persist_retry(path);
 }
 
-// Operator Retry requests not yet applied to a delivery journal's retry state.
-static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
+// Operator Retry requests not yet applied to a delivery journal's retry state. The flag
+// records that the retried row was the missing-folder wait.
+static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(Default::default);
 
 // Mirror a staging dir's budget or hold into its delivery journal, if it has one,
@@ -240,26 +241,39 @@ fn persist_retry(path: &str) {
     }
 }
 
+// Whether a journaled dir may attempt delivery now, and whether the operator asked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    Wait,
+    Due,
+    Requested,
+    // A Retry of the missing-folder wait itself: the operator accepts recreating it.
+    Recreate,
+}
+
 // Rebuild a missing error row from the journal, or apply a pending operator Retry.
-// Returns whether this dir may attempt delivery now.
-fn restore_retry(path: &str, saved: &manifest::Manifest) -> bool {
+fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
     let requested = RETRY_REQUESTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(path);
-    if requested {
+    if let Some(folder_wait) = requested {
         if let Err(error) = manifest::Manifest::record_retry(Path::new(path), None) {
             record_error(
                 path,
                 &format!("cannot clear the delivery retry state: {error}"),
                 "Repair the staging storage, then choose Retry; nothing was copied.",
             );
-            return false;
+            return Attempt::Wait;
         }
-        return true;
+        return if folder_wait {
+            Attempt::Recreate
+        } else {
+            Attempt::Requested
+        };
     }
     let Some(state) = saved.retry() else {
-        return true;
+        return Attempt::Due;
     };
     let now = std::time::Instant::now();
     MOVE_ERRORS
@@ -286,7 +300,11 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> bool {
                 retry_after,
             }
         });
-    move_retry_ready(path, now)
+    if move_retry_ready(path, now) {
+        Attempt::Due
+    } else {
+        Attempt::Wait
+    }
 }
 
 fn record_error(path: &str, reason: &str, hint: &str) {
@@ -377,7 +395,7 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
     RETRY_REQUESTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|key| Path::new(key).parent() != Some(root) || seen.contains(key));
+        .retain(|key, _| Path::new(key).parent() != Some(root) || seen.contains(key));
 }
 
 /// Operator-initiated Retry: clear this error and its retry budget. The next
@@ -385,11 +403,9 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
 pub fn clear_move_error(path: &str) {
     let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
     if errors.get(path).is_none_or(|e| !e.worker_active) {
-        errors.remove(path);
-        RETRY_REQUESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(path.to_string());
+        let folder_wait = errors.remove(path).is_some_and(|e| e.waiting_for_folder);
+        let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+        *requests.entry(path.to_string()).or_insert(false) |= folder_wait;
     }
 }
 
@@ -401,7 +417,7 @@ pub fn clear_all_move_errors() {
         .unwrap_or_else(|e| e.into_inner())
         .retain(|path, e| {
             if !e.worker_active {
-                requests.insert(path.clone());
+                *requests.entry(path.clone()).or_insert(false) |= e.waiting_for_folder;
             }
             e.worker_active
         });
@@ -621,8 +637,8 @@ fn copy_counting_with_halt(
             total += n as u64;
             written.store(total, Ordering::Relaxed);
         }
-        // Journal rebinds compare size and this explicit time; a deferred SMB
-        // close would otherwise stamp publication time. Best effort: see rebind.
+        // The journal's Stamp is size plus this explicit time; a deferred SMB close
+        // would otherwise restamp it. Best effort: a mismatch only holds the delivery.
         stage("pinning destination modification time");
         if let Err(error) = reader
             .metadata()
@@ -1095,9 +1111,11 @@ fn check_and_move(cfg: &Config) {
                 continue;
             }
         };
-        if let Some(saved) = &delivery
-            && !restore_retry(&dir.to_string_lossy(), saved)
-        {
+        let attempt = match &delivery {
+            Some(saved) => restore_retry(&dir.to_string_lossy(), saved),
+            None => Attempt::Due,
+        };
+        if attempt == Attempt::Wait {
             continue;
         }
 
@@ -1303,6 +1321,11 @@ fn check_and_move(cfg: &Config) {
                 .roots
                 .iter()
                 .find_map(|root| crate::server::health::preflight("output", Path::new(root)).err())
+                .or_else(|| {
+                    (attempt != Attempt::Recreate)
+                        .then(|| missing_folder(&planned_moves))
+                        .flatten()
+                })
         } else {
             unreachable_root(cfg, &tmdb_result, &planned_moves)
         };
@@ -1437,11 +1460,11 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
 
-        // Create destination directories. The ROOT is confirmed present +
-        // writable above, so this only materializes the per-title subdir
-        // UNDER that real root — never the root (and thus mount) itself.
+        // Create destination directories under the root confirmed above. A journaled
+        // delivery's folders existed at freeze: only an operator Retry recreates them.
         let mut dest_ok = true;
-        for (_, dest) in &planned_moves {
+        let create_folders = delivery.is_none() || attempt == Attempt::Recreate;
+        for (_, dest) in planned_moves.iter().filter(|_| create_folders) {
             if let Some(parent) = Path::new(dest).parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
@@ -1739,7 +1762,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 &format!("delivery held: {reason}"),
-                "The library file does not match what this delivery prepared or published, and it is never removed automatically. Inspect it, remove it if it is broken or not this rip, then choose Retry. Staged sources are retained.",
+                "The library file does not match what this delivery prepared, and it is never removed automatically. Inspect it, remove it if it is broken or not this rip, then choose Retry. Staged sources are retained.",
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2253,6 +2276,28 @@ fn planned_roots(
     roots
 }
 
+// The first destination folder of a journaled plan that is gone: it existed at freeze, so
+// its share may have fallen off its mount point. Recreating it is the operator's call.
+fn missing_folder(
+    planned: &[(std::path::PathBuf, String)],
+) -> Option<crate::server::health::Problem> {
+    use crate::server::health::{Fault, Problem};
+    planned.iter().find_map(|(_, dest)| {
+        let folder = Path::new(dest).parent()?;
+        match std::fs::symlink_metadata(folder) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut problem = Problem::new("output", folder, Fault::Missing, e.to_string());
+                problem.hint = format!(
+                    "{} If the folder was removed on purpose, choose Retry to recreate it.",
+                    problem.hint
+                );
+                Some(problem)
+            }
+            _ => None,
+        }
+    })
+}
+
 // The first destination root of `planned` that is stale, unmounted, failing or not answering.
 // A root that is missing, read-only or refused is left to `validate_destination_root`'s messages.
 fn unreachable_root(
@@ -2383,8 +2428,6 @@ fn absolute_for_log(dest: &str) -> String {
 }
 
 type BeforePublish = std::sync::Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
-// Set once our own no_replace returned Ok, whatever outcome is reported later.
-type Published = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 fn move_file(
     src: &Path,
@@ -2392,10 +2435,10 @@ fn move_file(
     on_progress: &dyn Fn(u8, f64, f64, f64),
     before_publish: BeforePublish,
     job: &Path,
-    published: Published,
 ) -> MoveOutcome {
     // Journal recovery alone may adopt an existing destination. Never infer
-    // transaction ownership from its size, structure, or the source's absence.
+    // transaction ownership from its size or structure; only a journaled prepared
+    // stamp (plus matching head/tail while the source remains) is adopted.
     match std::fs::symlink_metadata(dest) {
         Ok(_) => return MoveOutcome::Collision,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -2413,7 +2456,6 @@ fn move_file(
     }
     match libfreemkv::io::publish::no_replace(src, dest) {
         Ok(()) => {
-            published.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
@@ -2473,10 +2515,6 @@ fn move_file(
             },
             Some(&worker_activity),
         );
-        // Copy returns Ok only after publication, even if the monitor stalled.
-        if result.is_ok() {
-            published.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
         let _ = tx.send(result);
     }) {
         Ok(handle) => handle,

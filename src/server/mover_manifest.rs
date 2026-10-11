@@ -1,87 +1,28 @@
 //! Durable ownership evidence for a whole capture delivery, not just this tick's files.
 //!
-//! Automatic recovery requires stable filesystem identities (device/inode on
-//! Unix, volume/file index on Windows). Some SMB remounts change those IDs:
-//! that is an explicit operator hold, not permission to adopt equal bytes.
-//! The one rebind: the call whose own publication succeeded under the target
-//! lock records `published` after checking size and the pinned mtime (smbfs
-//! ids follow names). Nothing found later is rebound by size, hash or name.
+//! A file is ours while it keeps the size and pinned mtime this journal recorded
+//! (`util::Stamp`). No file is known by device/inode: SMB renumbers devices on remount
+//! and derives inodes from names. Adopting a destination found after a crash also
+//! needs its first and last 64 KiB to match the staged source, while that exists.
+//! Every destination folder must still resolve to the path recorded at freeze, so a
+//! folder swapped for a link (into staging, say) never passes for the destination.
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::server::util::Stamp;
+
 pub(super) const FILE: &str = crate::server::ripper::staging::DELIVERY_JOURNAL;
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Identity {
-    file_id: (u64, u64),
-    size: u64,
-    modified: std::time::SystemTime,
-}
-
-// Tests register directories whose files get smbfs-like name-derived ids.
-#[cfg(test)]
-pub(super) static NAME_DERIVED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
-
-fn file_id(path: &Path) -> io::Result<(u64, u64)> {
-    let id = libfreemkv::io::artifact_lock::file_identity(path)?;
-    #[cfg(test)]
-    if NAME_DERIVED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .any(|root| path.starts_with(root))
-    {
-        use std::hash::{Hash, Hasher};
-        let mut name = std::collections::hash_map::DefaultHasher::new();
-        path.hash(&mut name);
-        return Ok((id.0, name.finish()));
-    }
-    Ok(id)
-}
-
-impl Identity {
-    fn read(path: &Path) -> io::Result<Self> {
-        if !std::fs::symlink_metadata(path)?.is_file() {
-            return Err(io::Error::other("delivery requires a regular file"));
-        }
-        let file_id = file_id(path)?;
-        let metadata = std::fs::File::open(path)?.metadata()?;
-        if self::file_id(path)? != file_id {
-            return Err(io::Error::other(
-                "delivery file changed while reading identity",
-            ));
-        }
-        Ok(Self {
-            file_id,
-            size: metadata.len(),
-            modified: metadata.modified()?,
-        })
-    }
-
-    fn verify(&self, path: &Path) -> io::Result<()> {
-        if &Self::read(path)? != self {
-            return Err(io::Error::other(format!(
-                "delivery file identity changed: {}",
-                path.display()
-            )));
-        }
-        Ok(())
-    }
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     source: PathBuf,
     destination: PathBuf,
-    destination_parent_id: (u64, u64),
-    source_identity: Identity,
-    prepared: Option<Identity>,
-    #[serde(default)]
-    published: Option<Identity>,
+    source_identity: Stamp,
+    prepared: Option<Stamp>,
     completed: bool,
     // The destination as planned from settings; links and logs use this form.
     #[serde(default)]
@@ -89,11 +30,8 @@ struct Entry {
 }
 
 impl Entry {
-    // The publication this journal proved last: rebound, else as prepared.
-    fn owned(&self) -> io::Result<&Identity> {
-        self.published
-            .as_ref()
-            .or(self.prepared.as_ref())
+    fn prepared(&self) -> io::Result<Stamp> {
+        self.prepared
             .ok_or_else(|| io::Error::other("delivery identity missing"))
     }
 }
@@ -101,14 +39,13 @@ impl Entry {
 #[derive(Clone, Serialize, Deserialize)]
 struct Cleanup {
     path: PathBuf,
-    identity: Identity,
+    identity: Stamp,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Manifest {
     version: u32,
     directory: PathBuf,
-    directory_id: (u64, u64),
     pub marker: serde_json::Value,
     pub outputs: Vec<crate::server::ripper::staging::Output>,
     pub roots: Vec<String>,
@@ -147,7 +84,6 @@ impl Manifest {
         let directory = dir.canonicalize()?;
         if manifest.version != 1
             || manifest.directory != directory
-            || manifest.directory_id != libfreemkv::io::artifact_lock::file_identity(&directory)?
             || manifest.entries.is_empty()
             || manifest.entries.iter().any(|e| {
                 e.source.parent() != Some(directory.as_path())
@@ -177,7 +113,6 @@ impl Manifest {
         moves: &[(PathBuf, String)],
     ) -> io::Result<Self> {
         let directory = dir.canonicalize()?;
-        let directory_id = libfreemkv::io::artifact_lock::file_identity(&directory)?;
         let roots = roots
             .into_iter()
             .map(|root| {
@@ -189,7 +124,7 @@ impl Manifest {
         let mut entries = Vec::new();
         for (source, destination) in moves {
             let destination_planned = destination;
-            let source_identity = Identity::read(source)?;
+            let source_identity = Stamp::read(source)?;
             let source = source.canonicalize()?;
             let target = Path::new(destination);
             let parent = target
@@ -201,7 +136,6 @@ impl Manifest {
                     .file_name()
                     .ok_or_else(|| io::Error::other("delivery target has no filename"))?,
             );
-            let destination_parent_id = libfreemkv::io::artifact_lock::file_identity(&parent)?;
             match std::fs::symlink_metadata(&destination) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
@@ -223,10 +157,8 @@ impl Manifest {
             entries.push(Entry {
                 source,
                 destination,
-                destination_parent_id,
                 source_identity,
                 prepared: None,
-                published: None,
                 completed: false,
                 planned: Some(destination_planned.clone()),
             });
@@ -238,14 +170,13 @@ impl Manifest {
                 return Err(io::Error::other("delivery manifest already exists"));
             }
             cleanup.push(Cleanup {
-                identity: Identity::read(&path)?,
+                identity: Stamp::read(&path)?,
                 path,
             });
         }
         let manifest = Self {
             version: 1,
             directory,
-            directory_id,
             marker,
             outputs,
             roots,
@@ -313,14 +244,14 @@ impl Manifest {
             .entries
             .get_mut(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?;
-        verify_parent(&entry.destination, entry.destination_parent_id)?;
+        verify_parent(&entry.destination)?;
         entry.source_identity.verify(&entry.source)?;
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(candidate)?;
         libfreemkv::io::durable_sync_file(&file, None, |_, _| {})?;
-        let identity = Identity::read(candidate)?;
+        let identity = Stamp::read(candidate)?;
         if identity.size != entry.source_identity.size {
             return Err(io::Error::other("delivery candidate size changed"));
         }
@@ -340,12 +271,14 @@ impl Manifest {
             .get(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?
             .clone();
-        verify_parent(&entry.destination, entry.destination_parent_id)?;
+        verify_parent(&entry.destination)?;
         super::sweep_temporaries(&entry.destination)?;
-        // Never infer ownership from pathname, size, sampled content, or valid media.
+        // Ours only as prepared: its recorded size and pinned time, and on adoption its
+        // head and tail; never a pathname, a valid-looking media file, or size alone.
         match std::fs::symlink_metadata(&entry.destination) {
             Ok(found) => {
-                if entry.published.is_none() && found.is_file() && found.len() == 0 {
+                if found.is_file() && found.len() == 0 && entry.prepared.is_none_or(|p| p.size != 0)
+                {
                     return Err(io::Error::other(format!(
                         "zero-length file at destination, likely an interrupted publication; \
                          inspect and remove it, then Retry: {}",
@@ -356,7 +289,10 @@ impl Manifest {
                 if entry.prepared.is_none() {
                     return Ok(super::MoveOutcome::Collision);
                 }
-                entry.owned()?.verify(&entry.destination)?;
+                entry.prepared()?.verify(&entry.destination)?;
+                if !entry.completed {
+                    adoptable(&entry)?;
+                }
                 sync_parent(&entry.destination)?;
                 manifest.entries[index].completed = true;
                 manifest.save()?;
@@ -368,62 +304,43 @@ impl Manifest {
         }
         entry.source_identity.verify(&entry.source)?;
         let owned_dir = dir.to_path_buf();
-        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let outcome = super::move_file(
             &entry.source,
             &entry.destination,
             progress,
             Arc::new(move |candidate| Self::prepare(&owned_dir, index, candidate)),
             dir,
-            published.clone(),
         );
-        let finished = matches!(
+        // A publication reported as stalled is adopted by a later call instead.
+        if matches!(
             outcome,
             super::MoveOutcome::Moved | super::MoveOutcome::Skipped
-        );
-        let published = published.load(std::sync::atomic::Ordering::SeqCst);
-        if published || finished {
-            Self::settle(dir, index, published, finished)?;
+        ) {
+            Self::settle(dir, index)?;
         }
         Ok(outcome)
     }
 
-    // `published`: our no_replace returned Ok in this call, under the target
-    // lock, even if a later step failed. Only then may a changed id rebind.
-    fn settle(dir: &Path, index: usize, published: bool, finished: bool) -> io::Result<()> {
+    fn settle(dir: &Path, index: usize) -> io::Result<()> {
         let mut manifest =
             Self::load(dir)?.ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
         let entry = manifest
             .entries
             .get_mut(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?;
-        let prepared = entry
-            .prepared
-            .as_ref()
-            .ok_or_else(|| io::Error::other("publication did not journal its identity"))?;
-        if published {
-            let current = Identity::read(&entry.destination)?;
-            if current.size != prepared.size || current.modified != prepared.modified {
-                return Err(io::Error::other(format!(
-                    "published file differs from its prepared size or time: {}",
-                    entry.destination.display()
-                )));
-            }
-            entry.published = Some(current);
-        } else {
-            prepared.verify(&entry.destination)?;
-        }
-        entry.completed |= finished;
+        verify_parent(&entry.destination)?;
+        entry.prepared()?.verify(&entry.destination)?;
+        entry.completed = true;
         manifest.save()
     }
 
     pub fn verify_delivered(&self) -> io::Result<()> {
         for entry in &self.entries {
-            verify_parent(&entry.destination, entry.destination_parent_id)?;
+            verify_parent(&entry.destination)?;
             if !entry.completed {
                 return Err(io::Error::other("delivery plan is incomplete"));
             }
-            entry.owned()?.verify(&entry.destination)?;
+            entry.prepared()?.verify(&entry.destination)?;
             sync_parent(&entry.destination)?;
         }
         Ok(())
@@ -444,7 +361,7 @@ impl Manifest {
         let started = std::time::Instant::now();
         let mut targets = Vec::new();
         for entry in &self.entries {
-            verify_parent(&entry.destination, entry.destination_parent_id)?;
+            verify_parent(&entry.destination)?;
             targets.push(entry.destination.clone());
         }
         targets.sort();
@@ -498,9 +415,6 @@ impl Manifest {
 
     // `removed` runs after the planned files are gone (tests add a late arrival there).
     fn cleanup_with(&self, removed: &dyn Fn()) -> io::Result<()> {
-        if libfreemkv::io::artifact_lock::file_identity(&self.directory)? != self.directory_id {
-            return Err(io::Error::other("staging directory identity changed"));
-        }
         self.verify_delivered()?;
         // Refuse newly introduced or changed files. Retain the journal until
         // last so a crash halfway through cleanup still retries linkage/cleanup.
@@ -526,8 +440,21 @@ impl Manifest {
         }
         for entry in self.cleanup.iter().filter(|e| !is_bookkeeping(&e.path)) {
             if let Some(delivered) = self.entries.iter().find(|e| e.source == entry.path) {
-                verify_parent(&delivered.destination, delivered.destination_parent_id)?;
-                delivered.owned()?.verify(&delivered.destination)?;
+                verify_parent(&delivered.destination)?;
+                delivered.prepared()?.verify(&delivered.destination)?;
+                // A source still present is deleted only if the destination really is its copy.
+                match std::fs::symlink_metadata(&entry.path) {
+                    Ok(_) => {
+                        if !same_head_and_tail(&entry.path, &delivered.destination)? {
+                            return Err(io::Error::other(format!(
+                                "destination content differs from the staged source: {}",
+                                delivered.destination.display()
+                            )));
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
             }
             match entry.identity.verify(&entry.path) {
                 Ok(()) => std::fs::remove_file(&entry.path)?,
@@ -564,16 +491,53 @@ impl Manifest {
     }
 }
 
-fn verify_parent(path: &Path, expected_id: (u64, u64)) -> io::Result<()> {
+// The destination's folder still resolves to itself (it was canonical at freeze).
+fn verify_parent(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("delivery target has no parent"))?;
-    if parent.canonicalize()? != parent
-        || libfreemkv::io::artifact_lock::file_identity(parent)? != expected_id
-    {
-        return Err(io::Error::other("delivery target parent changed"));
+    if parent.canonicalize()? != parent {
+        return Err(io::Error::other(format!(
+            "destination folder no longer resolves to itself: {}",
+            parent.display()
+        )));
     }
     Ok(())
+}
+
+// A destination with the prepared stamp found after a crash. A same-size file
+// stamped before it was filled is not ours: its head and tail must match the
+// source. A source already gone was renamed into place by our own publication.
+fn adoptable(entry: &Entry) -> io::Result<()> {
+    match std::fs::symlink_metadata(&entry.source) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+        Ok(_) => {}
+    }
+    if !same_head_and_tail(&entry.source, &entry.destination)? {
+        return Err(io::Error::other(format!(
+            "destination content differs from the staged source: {}",
+            entry.destination.display()
+        )));
+    }
+    Ok(())
+}
+
+// Compare the first and last 64 KiB of two files of equal length.
+fn same_head_and_tail(a: &Path, b: &Path) -> io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: u64 = 64 * 1024;
+    let windows = |path: &Path| -> io::Result<(Vec<u8>, Vec<u8>)> {
+        let mut file = std::fs::File::open(path)?;
+        let n = WINDOW.min(file.metadata()?.len());
+        let mut head = vec![0; n as usize];
+        file.read_exact(&mut head)?;
+        let mut tail = vec![0; n as usize];
+        file.seek(SeekFrom::End(-(n as i64)))?;
+        file.read_exact(&mut tail)?;
+        Ok((head, tail))
+    };
+    Ok(windows(a)? == windows(b)?)
 }
 
 fn sync_parent(path: &Path) -> io::Result<()> {
