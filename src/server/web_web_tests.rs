@@ -278,7 +278,7 @@ fn build_queue_views_mutually_exclusive() {
             tmdb_year: 2024,
             tmdb_poster: String::new(),
             tmdb_overview: String::new(),
-            tmdb_media_type: "movie".into(),
+            tmdb_media_type: crate::server::planner::MediaKind::Movie,
             max_retries: 5,
             abort_on_lost_secs: 0,
             rip_elapsed_secs: 0.0,
@@ -405,7 +405,7 @@ fn ripped_marker_for(display_name: &str, origin: &str) -> crate::server::muxer::
         tmdb_year: 2024,
         tmdb_poster: String::new(),
         tmdb_overview: String::new(),
-        tmdb_media_type: "movie".into(),
+        tmdb_media_type: crate::server::planner::MediaKind::Movie,
         max_retries: 5,
         abort_on_lost_secs: 0,
         rip_elapsed_secs: 0.0,
@@ -2598,16 +2598,16 @@ fn percent_decode_handles_trailing_encoded_byte() {
 // re-broadcast; the router only ever acts on "tv" vs everything else.
 #[test]
 fn media_type_is_reduced_to_the_routers_vocabulary() {
-    assert_eq!(normalize_media_type("tv"), "tv");
-    assert_eq!(normalize_media_type("movie"), "movie");
+    assert_eq!(crate::server::planner::MediaKind::parse("tv"), "tv");
+    assert_eq!(crate::server::planner::MediaKind::parse("movie"), "movie");
     // Case/whitespace noise still resolves to the real values.
-    assert_eq!(normalize_media_type(" TV "), "tv");
+    assert_eq!(crate::server::planner::MediaKind::parse(" TV "), "tv");
     // Anything else routes as a movie today, so it is stored as one
     // instead of being persisted verbatim.
-    assert_eq!(normalize_media_type("anime"), "movie");
-    assert_eq!(normalize_media_type(""), "movie");
+    assert_eq!(crate::server::planner::MediaKind::parse("anime"), "movie");
+    assert_eq!(crate::server::planner::MediaKind::parse(""), "movie");
     assert_eq!(
-        normalize_media_type(&"A".repeat(10_000)),
+        crate::server::planner::MediaKind::parse(&"A".repeat(10_000)),
         "movie",
         "an unbounded caller-supplied string must never reach STATE, the \
              .done marker, or the dashboard broadcast"
@@ -3972,7 +3972,7 @@ mod http {
                     status: "ripping".into(),
                     disc_present: true,
                     job_id: "job".into(),
-                    tmdb_media_type: current_type.into(),
+                    tmdb_media_type: Some(current_type.into()),
                     ..Default::default()
                 },
             );
@@ -4052,7 +4052,7 @@ mod http {
                 disc_present: true,
                 job_id: "job".into(),
                 disc_identity: "verified-disc".into(),
-                tmdb_media_type: "tv".to_string(),
+                tmdb_media_type: Some(crate::server::planner::MediaKind::Tv),
                 ..Default::default()
             },
         );
@@ -4097,7 +4097,7 @@ mod http {
                 tmdb_title: "Film A".to_string(),
                 tmdb_poster: "https://image.tmdb.org/t/p/w185/a.jpg".to_string(),
                 tmdb_overview: "About A".to_string(),
-                tmdb_media_type: "movie".to_string(),
+                tmdb_media_type: Some(crate::server::planner::MediaKind::Movie),
                 ..Default::default()
             },
         );
@@ -4115,7 +4115,10 @@ mod http {
             assert_eq!(rs.tmdb_title, "Show B");
             assert_eq!(rs.tmdb_poster, "", "A's poster must not stay on B's card");
             assert_eq!(rs.tmdb_overview, "");
-            assert_eq!(rs.tmdb_media_type, "tv");
+            assert_eq!(
+                rs.tmdb_media_type,
+                Some(crate::server::planner::MediaKind::Tv)
+            );
         }
         // A second override omitting media_type keeps the first one's tv.
         let (code, _) = roundtrip(
@@ -4192,7 +4195,7 @@ mod http {
                 disc_present: true,
                 job_id: "job".into(),
                 disc_identity: "verified-disc".into(),
-                tmdb_media_type: "movie".to_string(),
+                tmdb_media_type: Some(crate::server::planner::MediaKind::Movie),
                 ..Default::default()
             },
         );

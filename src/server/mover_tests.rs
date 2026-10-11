@@ -400,7 +400,7 @@ fn tmdb_movie(title: &str, year: u16) -> tmdb::TmdbResult {
         year,
         poster_url: String::new(),
         overview: String::new(),
-        media_type: "movie".into(),
+        media_type: crate::server::planner::MediaKind::Movie,
         tmdb_id: 0,
     }
 }
@@ -411,7 +411,7 @@ fn tmdb_tv(title: &str, year: u16) -> tmdb::TmdbResult {
         year,
         poster_url: String::new(),
         overview: String::new(),
-        media_type: "tv".into(),
+        media_type: crate::server::planner::MediaKind::Tv,
         tmdb_id: 0,
     }
 }
@@ -644,7 +644,7 @@ fn build_destination_empty_media_type_files_as_movie() {
         year: 0,
         poster_url: String::new(),
         overview: String::new(),
-        media_type: String::new(),
+        media_type: crate::server::planner::MediaKind::Movie,
         tmdb_id: 0,
     });
     let dest = build_destination(&cfg, &tmdb, "Drive (2011) - 4K Ultra HD.mkv", None);
@@ -707,7 +707,7 @@ fn build_destination_relative_tv_dir_joins_under_output_dir() {
         year: 2022,
         poster_url: String::new(),
         overview: String::new(),
-        media_type: "tv".into(),
+        media_type: crate::server::planner::MediaKind::Tv,
         tmdb_id: 0,
     });
     let dest = build_destination(&cfg, &tmdb, "sev_s01e01.mkv", None);
@@ -908,7 +908,7 @@ fn build_destination_tv_uses_season_1_layout() {
         year: 2022,
         poster_url: String::new(),
         overview: String::new(),
-        media_type: "tv".into(),
+        media_type: crate::server::planner::MediaKind::Tv,
         tmdb_id: 0,
     });
     let dest = build_destination(&cfg, &tmdb, "sev_s01e01.mkv", None);
@@ -964,7 +964,7 @@ fn destination_root_and_build_destination_agree_including_empty_dirs() {
         for media_type in ["movie", "tv", ""] {
             let cfg = cfg_with_dirs(movie_dir, tv_dir, "/mnt/out");
             let mut r = tmdb_movie("Some Title", 2024);
-            r.media_type = media_type.to_string();
+            r.media_type = media_type.into();
             let root = destination_root(&cfg, &Some(r.clone()));
             let dest = build_destination(&cfg, &Some(r), "Disc.mkv", None);
             assert!(
@@ -1821,7 +1821,7 @@ fn check_and_move_files_only_outputs_for_a_tv_dir() {
     st.title = "Endeavour".to_string();
     st.disc_name = "Endeavour".to_string();
     st.year = 2012;
-    st.media_type = "tv".to_string();
+    st.media_type = "tv".into();
     st.tmdb_id = 12345;
     st.season = Some(5);
     st.outputs = vec![
@@ -1896,7 +1896,7 @@ fn check_and_move_keeps_iso_for_a_tv_dir_with_keep_iso() {
     st.title = "Endeavour".to_string();
     st.disc_name = "Endeavour".to_string();
     st.year = 2012;
-    st.media_type = "tv".to_string();
+    st.media_type = "tv".into();
     st.tmdb_id = 12345;
     st.season = Some(5);
     st.outputs = vec![ep_output("Endeavour_S05E01.mkv", Some(1), "Muse")];
@@ -3386,7 +3386,7 @@ fn destination_root_matches_build_destination_root() {
         year: 2024,
         poster_url: String::new(),
         overview: String::new(),
-        media_type: "tv".into(),
+        media_type: crate::server::planner::MediaKind::Tv,
         tmdb_id: 0,
     };
     assert_eq!(destination_root(&cfg, &Some(tv)), "/mnt/tv");

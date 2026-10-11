@@ -297,7 +297,7 @@ fn sample_marker() -> RippedMarker {
         tmdb_year: 2024,
         tmdb_poster: "https://image.tmdb.org/poster.jpg".into(),
         tmdb_overview: "Synopsis".into(),
-        tmdb_media_type: "tv".into(),
+        tmdb_media_type: crate::server::planner::MediaKind::Tv,
         max_retries: 5,
         abort_on_lost_secs: 30,
         rip_elapsed_secs: 1234.0,
@@ -372,7 +372,10 @@ fn marker_without_media_type_defaults_empty() {
             "origin_device": "sg0"
         }"#;
     let marker: RippedMarker = serde_json::from_str(json).unwrap();
-    assert_eq!(marker.tmdb_media_type, "");
+    assert_eq!(
+        marker.tmdb_media_type,
+        crate::server::planner::MediaKind::Movie
+    );
 }
 
 #[test]
@@ -1435,4 +1438,25 @@ fn a_leased_ripped_job_is_skipped_not_waited_on() {
         state.state,
         crate::server::ripper::staging::StagingState::Ripped
     );
+}
+
+#[test]
+fn ripped_marker_media_type_reads_old_values() {
+    use crate::server::planner::MediaKind;
+    let mut v = serde_json::to_value(sample_marker()).unwrap();
+    for (raw, want) in [
+        (Some("tv"), MediaKind::Tv),
+        (Some("movie"), MediaKind::Movie),
+        (Some(""), MediaKind::Movie),
+        (None, MediaKind::Movie),
+    ] {
+        match raw {
+            Some(r) => v["tmdb_media_type"] = serde_json::json!(r),
+            None => {
+                v.as_object_mut().unwrap().remove("tmdb_media_type");
+            }
+        }
+        let m: RippedMarker = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(m.tmdb_media_type, want, "{raw:?}");
+    }
 }

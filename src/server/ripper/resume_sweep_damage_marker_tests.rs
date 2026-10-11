@@ -14,7 +14,7 @@ fn ripped_marker_sweep_fields_round_trip() {
         tmdb_year: 2024,
         tmdb_poster: String::new(),
         tmdb_overview: String::new(),
-        tmdb_media_type: String::new(),
+        tmdb_media_type: crate::server::planner::MediaKind::Movie,
         max_retries: 3,
         abort_on_lost_secs: 0,
         rip_elapsed_secs: 0.0,
@@ -107,7 +107,7 @@ fn ripped_marker_title_confident_round_trips() {
         tmdb_year: 2024,
         tmdb_poster: String::new(),
         tmdb_overview: String::new(),
-        tmdb_media_type: String::new(),
+        tmdb_media_type: crate::server::planner::MediaKind::Movie,
         max_retries: 3,
         abort_on_lost_secs: 0,
         rip_elapsed_secs: 0.0,
@@ -165,24 +165,6 @@ fn resolve_done_codecs_prefers_post_mux_then_snapshot() {
     assert_eq!(
         super::resolve_done_codecs(Some("HEVC".into()), "AVC".into()),
         "HEVC"
-    );
-}
-
-// Regression: resume .done/.review markers omitted media_type, so
-// the mover filed TV-show resumes under the movie library. Now
-// resolve_media_type mirrors the mover's own default.
-#[test]
-fn resolve_media_type_defaults_empty_to_movie() {
-    assert_eq!(
-        super::resolve_media_type("tv"),
-        "tv",
-        "a carried TV media_type must survive into the marker, not collapse to movie"
-    );
-    assert_eq!(super::resolve_media_type("movie"), "movie");
-    assert_eq!(
-        super::resolve_media_type(""),
-        "movie",
-        "empty (cold resume) must resolve to the mover's own default"
     );
 }
 

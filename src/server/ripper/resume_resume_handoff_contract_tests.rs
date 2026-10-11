@@ -55,7 +55,7 @@ fn resume_success_with_lingering_ripped_is_still_move_only() {
             tmdb_year: 2024,
             tmdb_poster: String::new(),
             tmdb_overview: String::new(),
-            tmdb_media_type: "movie".into(),
+            tmdb_media_type: crate::server::planner::MediaKind::Movie,
             max_retries: 5,
             abort_on_lost_secs: 0,
             rip_elapsed_secs: 0.0,

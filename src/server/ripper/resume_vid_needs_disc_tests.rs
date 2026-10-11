@@ -167,7 +167,7 @@ fn resume_ripped(
         tmdb_year: 0,
         tmdb_poster: String::new(),
         tmdb_overview: String::new(),
-        tmdb_media_type: String::new(),
+        tmdb_media_type: crate::server::planner::MediaKind::Movie,
         max_retries: 1,
         abort_on_lost_secs: 0,
         rip_elapsed_secs: 0.0,
@@ -247,7 +247,7 @@ fn legacy_identity_review_confirmation_replans_saved_iso_without_disc() {
             state.user_metadata = Some(staging::UserMetadata {
                 title: "KU_Disc".into(),
                 year: 0,
-                media_type: "movie".into(),
+                media_type: crate::server::planner::MediaKind::Movie,
                 tmdb_id: 0,
                 episode_start: None,
                 poster_url: String::new(),
@@ -287,7 +287,7 @@ fn legacy_identity_review_confirmation_replans_saved_iso_without_disc() {
         staging::UserMetadata {
             title: "KU_Disc".into(),
             year: 0,
-            media_type: "movie".into(),
+            media_type: crate::server::planner::MediaKind::Movie,
             tmdb_id: 0,
             episode_start: None,
             poster_url: String::new(),
@@ -458,7 +458,7 @@ fn a_replanned_movie_output_is_named_from_its_title() {
             state.user_metadata = Some(staging::UserMetadata {
                 title: "Cast Away".into(),
                 year: 2000,
-                media_type: "movie".into(),
+                media_type: crate::server::planner::MediaKind::Movie,
                 tmdb_id: 0,
                 episode_start: None,
                 poster_url: String::new(),
@@ -488,7 +488,7 @@ fn a_replan_drops_the_superseded_outputs() {
             state.user_metadata = Some(staging::UserMetadata {
                 title: "Cast Away".into(),
                 year: 2000,
-                media_type: "movie".into(),
+                media_type: crate::server::planner::MediaKind::Movie,
                 tmdb_id: 0,
                 episode_start: None,
                 poster_url: String::new(),
@@ -512,7 +512,7 @@ fn a_replan_with_an_unreadable_map_is_not_held_for_the_disc() {
             state.user_metadata = Some(staging::UserMetadata {
                 title: "Cast Away".into(),
                 year: 2000,
-                media_type: "movie".into(),
+                media_type: crate::server::planner::MediaKind::Movie,
                 tmdb_id: 0,
                 episode_start: None,
                 poster_url: String::new(),

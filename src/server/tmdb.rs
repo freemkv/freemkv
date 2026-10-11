@@ -1,10 +1,13 @@
+use crate::server::planner::MediaKind;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TmdbResult {
     pub title: String,
     pub year: u16,
     pub poster_url: String,
     pub overview: String,
-    pub media_type: String, // "movie" or "tv"
+    #[serde(default, deserialize_with = "crate::server::planner::lenient")]
+    pub media_type: MediaKind,
     /// TMDB numeric id for this match (0 = unknown). Carried so a consumer —
     /// autorip's own metadata enrichment, or kdb resolving a volume id via
     /// [`lookup`] — can fetch anything else it wants straight from TMDB by id,
@@ -140,49 +143,31 @@ fn warn_bad_key_throttled() {
 /// ([`is_confident_match`]) never disagree on what was searched. Queries the cleaned label,
 /// then on no confident match peels junk-shaped trailing tokens one at a time and re-queries
 /// (`query_variants`). Returns the first confident match (exact title + year) across the
-/// variants, else the best non-exact guess.
-pub fn lookup(label: &str, api_key: &str) -> Option<TmdbResult> {
-    if api_key.is_empty() {
-        return None;
-    }
-    lookup_with(label, |variant| fetch_multi(variant, api_key))
-}
-
-/// TMDB could not be asked (network, HTTP or response failure), as opposed to "no match".
-#[derive(Debug)]
-pub struct LookupFailed;
-
-/// [`lookup`], but a failed query without a confident answer is an error, not "no match".
-pub fn lookup_checked(label: &str, api_key: &str) -> Result<Option<TmdbResult>, LookupFailed> {
+/// variants, else the best non-exact guess. A failed query with no confident match is an
+/// error, not "no match".
+pub fn lookup(label: &str, api_key: &str) -> Result<Option<TmdbResult>, LookupFailed> {
     if api_key.is_empty() {
         return Ok(None);
     }
-    lookup_with_checked(label, |variant| fetch_multi(variant, api_key))
+    lookup_using(label, |variant| fetch_multi(variant, api_key))
 }
 
-fn lookup_with(
-    label: &str,
-    fetch: impl Fn(&str) -> Option<serde_json::Value>,
-) -> Option<TmdbResult> {
-    lookup_variants(label, fetch).0
+/// TMDB could not be asked (network, HTTP or response failure), as opposed to "no match".
+/// Carries the best non-confident guess the queries that did answer found.
+#[derive(Debug)]
+pub struct LookupFailed(pub Option<TmdbResult>);
+
+/// The lookup's answer for a caller that must not wait on TMDB: a failed query still
+/// yields the best guess found.
+pub fn best_effort(found: Result<Option<TmdbResult>, LookupFailed>) -> Option<TmdbResult> {
+    found.unwrap_or_else(|failed| failed.0)
 }
 
-fn lookup_with_checked(
+// `lookup`'s variant loop over any `search/multi` source.
+fn lookup_using(
     label: &str,
     fetch: impl Fn(&str) -> Option<serde_json::Value>,
 ) -> Result<Option<TmdbResult>, LookupFailed> {
-    match lookup_variants(label, fetch) {
-        (Some(best), _) if is_confident_match(label, &best.title, best.year) => Ok(Some(best)),
-        (_, true) => Err(LookupFailed),
-        (found, false) => Ok(found),
-    }
-}
-
-// `lookup`'s variant loop over any `search/multi` source; true when a query failed.
-fn lookup_variants(
-    label: &str,
-    fetch: impl Fn(&str) -> Option<serde_json::Value>,
-) -> (Option<TmdbResult>, bool) {
     // A separator-only label yields no query variants; short-circuit rather
     // than firing `query=&...` (TMDB answers HTTP 422). A season marker
     // ("… Season 5") means TV — bias the pick so it can't be outranked.
@@ -203,14 +188,18 @@ fn lookup_variants(
         if let Some(best) = pick_best(&variant, results, prefer_tv) {
             // Confident = exact normalized title match on THIS variant + a year.
             if best.year > 0 && norm(&best.title) == norm(&variant) {
-                return (Some(best), failed);
+                return Ok(Some(best));
             }
             if fallback.is_none() {
                 fallback = Some(best);
             }
         }
     }
-    (fallback, failed)
+    match fallback {
+        Some(best) if is_confident_match(label, &best.title, best.year) => Ok(Some(best)),
+        found if failed => Err(LookupFailed(found)),
+        found => Ok(found),
+    }
 }
 
 /// Normalize a title for comparison: lowercase, every run of non-alphanumerics
@@ -295,7 +284,7 @@ fn pick_best(query: &str, results: &[serde_json::Value], prefer_tv: bool) -> Opt
         (
             exact,
             cand.year > 0,
-            prefer_tv && cand.media_type == "tv",
+            prefer_tv && cand.media_type.is_tv(),
             pop,
         )
     };
@@ -338,15 +327,16 @@ fn parse_result(v: &serde_json::Value) -> Option<(TmdbResult, f64)> {
     if media_type != "movie" && media_type != "tv" {
         return None;
     }
+    let kind = MediaKind::parse(media_type);
     let title = v
-        .get(if media_type == "tv" { "name" } else { "title" })?
+        .get(if kind.is_tv() { "name" } else { "title" })?
         .as_str()?
         .to_string();
     if title.is_empty() {
         return None;
     }
     let date = v
-        .get(if media_type == "tv" {
+        .get(if kind.is_tv() {
             "first_air_date"
         } else {
             "release_date"
@@ -370,7 +360,7 @@ fn parse_result(v: &serde_json::Value) -> Option<(TmdbResult, f64)> {
             year,
             poster_url: poster,
             overview,
-            media_type: media_type.to_string(),
+            media_type: kind,
             tmdb_id,
         },
         v["popularity"].as_f64().unwrap_or(0.0),

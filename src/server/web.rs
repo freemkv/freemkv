@@ -1,4 +1,5 @@
 use crate::server::config::{self, Config, WebhookEntry};
+use crate::server::planner::MediaKind;
 use crate::server::ripper;
 use once_cell::sync::Lazy;
 use std::io::Read as _;
@@ -574,29 +575,24 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
     // (Manual Rename does): defaulting to "movie" would flip a TV disc and
     // collapse all its episodes into one file. Fall back only when unknown.
     let media_type = match v["media_type"].as_str().filter(|s| !s.is_empty()) {
-        Some(mt) => normalize_media_type(mt),
+        Some(mt) => MediaKind::parse(mt),
         None => {
             // Recover a poisoned lock (`into_inner`) like every other STATE
             // consumer here — abandoning would fall through to the "movie"
             // default this arm exists to avoid.
-            let current = ripper::STATE
+            ripper::STATE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(device)
-                .map(|rs| rs.tmdb_media_type.clone())
-                .unwrap_or_default();
-            normalize_media_type(if current.is_empty() {
-                "movie"
-            } else {
-                &current
-            })
+                .and_then(|rs| rs.tmdb_media_type)
+                .unwrap_or_default()
         }
     };
     // The picker posts back the chosen result's TMDB id (0 if the operator
     // typed a free-form title with no pick); carry it so the override matches
     // what a `lookup` match would have provided.
     let tmdb_id = v["tmdb_id"].as_u64().unwrap_or(0);
-    let episode_start = match capture_episode_start(&v["episode_start"], &media_type) {
+    let episode_start = match capture_episode_start(&v["episode_start"], media_type) {
         Ok(start) => start,
         Err(error) => {
             return json_response(
@@ -614,7 +610,7 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
         ripper::staging::UserMetadata {
             title: title.clone(),
             year,
-            media_type: media_type.clone(),
+            media_type,
             episode_start,
             tmdb_id,
             poster_url: poster.clone(),
@@ -641,7 +637,7 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
                 year,
                 poster_url: poster.clone(),
                 overview: overview.clone(),
-                media_type: media_type.clone(),
+                media_type,
                 episode_start,
                 tmdb_id,
             },
@@ -662,9 +658,9 @@ fn metadata_error_status(e: &std::io::Error) -> u16 {
 
 fn capture_episode_start(
     value: &serde_json::Value,
-    media_type: &str,
+    media_type: MediaKind,
 ) -> Result<Option<u16>, &'static str> {
-    if media_type != "tv" || value.is_null() {
+    if !media_type.is_tv() || value.is_null() {
         return Ok(None);
     }
     value
@@ -714,13 +710,13 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
             let media_type = v["media_type"]
                 .as_str()
                 .filter(|s| !s.is_empty())
-                .map(normalize_media_type)
-                .unwrap_or_else(|| normalize_media_type(&saved.media_type));
+                .map(MediaKind::parse)
+                .unwrap_or(saved.media_type);
             let start_value = v
                 .get("episode_start")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!(saved.episode_start));
-            let episode_start = match capture_episode_start(&start_value, &media_type) {
+            let episode_start = match capture_episode_start(&start_value, media_type) {
                 Ok(start) => start,
                 Err(error) => {
                     return json_response(
@@ -1154,16 +1150,6 @@ fn device_path(device: &str) -> String {
         format!(r"\\.\{device}")
     } else {
         format!("/dev/{device}")
-    }
-}
-
-// media_type on a title override is the one field handle_title_override left
-// unclamped/unallow-listed; the router only acts on "tv" vs everything else
-// (and TMDB only ever yields these two), so allow-listing is the honest bound.
-fn normalize_media_type(raw: &str) -> String {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "tv" => "tv".to_string(),
-        _ => "movie".to_string(),
     }
 }
 

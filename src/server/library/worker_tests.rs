@@ -1554,7 +1554,7 @@ fn a_tmdb_outage_fails_planning_instead_of_freezing_a_movie_plan() {
         library_dir: dirs.library.to_string_lossy().into_owned(),
         ..Config::default()
     };
-    let failed = Err(crate::server::tmdb::LookupFailed);
+    let failed = Err(crate::server::tmdb::LookupFailed(None));
     assert!(attach_from_lookup(&lib, &cfg, &mut job, failed).is_err());
     assert!(job.plan.is_none());
     assert!(

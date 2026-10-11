@@ -1,4 +1,5 @@
-use super::{file_id, same_file};
+use super::same_file;
+use libfreemkv::io::artifact_lock::file_identity as file_id;
 
 struct Tmp(std::path::PathBuf);
 impl Tmp {
@@ -95,8 +96,12 @@ fn a_destination_that_does_not_exist_yet_is_never_the_source() {
 fn a_directory_has_a_readable_identity() {
     let t = Tmp::new("dir_identity");
     assert!(
-        file_id(&t.0).is_some(),
+        file_id(&t.0).is_ok(),
         "a directory must yield a filesystem identity"
     );
-    assert_eq!(file_id(&t.0), file_id(&t.0), "and a stable one");
+    assert_eq!(
+        file_id(&t.0).unwrap(),
+        file_id(&t.0).unwrap(),
+        "and a stable one"
+    );
 }

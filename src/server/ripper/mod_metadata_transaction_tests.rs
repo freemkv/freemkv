@@ -72,7 +72,7 @@ fn review_correction_atomically_releases_current_metadata() {
 #[test]
 fn review_unknown_type_movie_correction_does_not_require_missing_iso() {
     let mut state = review_state();
-    state.media_type.clear();
+    state.media_type = Default::default();
     let (result, saved, _, _) = retitle_fixture(
         "review_atomic_unknown_movie",
         &state,

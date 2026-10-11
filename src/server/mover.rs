@@ -1,4 +1,5 @@
 use crate::server::config::Config;
+use crate::server::planner::MediaKind;
 use crate::server::tmdb;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -1235,7 +1236,7 @@ fn check_and_move(cfg: &Config) {
                 year: marker["year"].as_u64().unwrap_or(0).min(9999) as u16,
                 poster_url: marker["poster_url"].as_str().unwrap_or("").to_string(),
                 overview: marker["overview"].as_str().unwrap_or("").to_string(),
-                media_type: marker["media_type"].as_str().unwrap_or("movie").to_string(),
+                media_type: MediaKind::parse(marker["media_type"].as_str().unwrap_or("")),
                 tmdb_id: marker["tmdb_id"].as_u64().unwrap_or(0),
             })
         } else {
@@ -1946,16 +1947,6 @@ where
     (files, complete)
 }
 
-// The media type used to ROUTE a planned move, coalescing an empty media_type to the "movie"
-// default, matching how an absent one already defaults.
-fn routing_media_type(result: &tmdb::TmdbResult) -> &str {
-    if result.media_type.is_empty() {
-        "movie"
-    } else {
-        result.media_type.as_str()
-    }
-}
-
 // Render disc variant `n` onto a destination path by suffixing its file
 // STEM: `.../Title (2024).mkv` at variant 3 -> `.../Title (2024)_3.mkv`.
 // Variant 1 returns the path unchanged (first/only disc keeps its name).
@@ -2043,7 +2034,7 @@ pub(crate) fn tv_episode_leaf(
     season: Option<u16>,
 ) -> Option<String> {
     let result = tmdb.as_ref()?;
-    if routing_media_type(result) != "tv" {
+    if !result.media_type.is_tv() {
         return None;
     }
     let out = outputs.iter().find(|o| o.filename == filename)?;
@@ -2103,8 +2094,8 @@ pub(crate) fn build_destination(
         .unwrap_or("mkv");
     if let Some(result) = tmdb {
         let safe_title = crate::server::util::sanitize_path_display(&result.title);
-        match routing_media_type(result) {
-            "movie" if !cfg.movie_dir.is_empty() => {
+        match result.media_type {
+            MediaKind::Movie if !cfg.movie_dir.is_empty() => {
                 let year_str = if result.year > 0 {
                     format!(" ({})", result.year)
                 } else {
@@ -2121,7 +2112,7 @@ pub(crate) fn build_destination(
                 let name = format!("{safe_title}{year_str}.{src_ext}");
                 join_path(&dir, &name)
             }
-            "tv" if !cfg.tv_dir.is_empty() => {
+            MediaKind::Tv if !cfg.tv_dir.is_empty() => {
                 // Same join fix as the movie branch: `tv_dir` resolved under
                 // `output_dir` (relative joins, absolute wins).
                 let root = resolve_media_root(&cfg.output_dir, &cfg.tv_dir);
@@ -2189,11 +2180,11 @@ fn resolve_media_root(output_dir: &str, sub: &str) -> String {
 // subdir tree.
 pub(crate) fn destination_root(cfg: &Config, tmdb: &Option<tmdb::TmdbResult>) -> String {
     if let Some(result) = tmdb {
-        match routing_media_type(result) {
-            "movie" if !cfg.movie_dir.is_empty() => {
+        match result.media_type {
+            MediaKind::Movie if !cfg.movie_dir.is_empty() => {
                 return resolve_media_root(&cfg.output_dir, &cfg.movie_dir);
             }
-            "tv" if !cfg.tv_dir.is_empty() => {
+            MediaKind::Tv if !cfg.tv_dir.is_empty() => {
                 return resolve_media_root(&cfg.output_dir, &cfg.tv_dir);
             }
             _ => {}

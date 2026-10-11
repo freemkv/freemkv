@@ -7,6 +7,7 @@
 //! Everything keys off marker files on disk, so held rips survive a restart and
 //! never block the drive (the rip is already complete and staged).
 
+use crate::server::planner::MediaKind;
 use std::path::{Path, PathBuf};
 
 /// One rip awaiting operator review.
@@ -18,7 +19,7 @@ pub struct HeldRip {
     pub title: String,
     /// Year the ripper resolved (0 = none — a common reason it's held).
     pub year: u16,
-    pub media_type: String,
+    pub media_type: MediaKind,
     pub episode_start: Option<u16>,
     /// The ripped media file inside the dir (for display).
     pub file: String,
@@ -115,7 +116,7 @@ pub fn list_held(staging_root: &str) -> Vec<HeldRip> {
                 .to_string(),
             title,
             year,
-            media_type: m["media_type"].as_str().unwrap_or("movie").to_string(),
+            media_type: MediaKind::parse(m["media_type"].as_str().unwrap_or("")),
             episode_start: m["episode_start"]
                 .as_u64()
                 .and_then(|n| u16::try_from(n).ok()),
@@ -208,7 +209,7 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
             m["title"] = serde_json::json!(title);
             m["year"] = serde_json::json!(year);
             if m.get("media_type").and_then(|v| v.as_str()).is_none() {
-                m["media_type"] = serde_json::json!("movie");
+                m["media_type"] = serde_json::json!(MediaKind::Movie);
             }
             let serialized = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
             crate::server::ripper::staging::write_handoff_marker(
