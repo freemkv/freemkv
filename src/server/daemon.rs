@@ -188,7 +188,7 @@ pub fn run(argv: Vec<String>) {
     // Library remux worker (plus its auditor). It yields the mux slot to any
     // rip and is joined on shutdown so a cancelled remux cleans its partial.
     let library_handle = crate::server::library::start(&cfg);
-    crate::server::health::start(&cfg);
+    let health_handle = crate::server::health::start(&cfg);
 
     // Start web server thread
     let web_handle = std::thread::spawn({
@@ -264,6 +264,7 @@ pub fn run(argv: Vec<String>) {
         ("mover", Some(mover_handle)),
         ("muxer", Some(muxer_handle)),
         ("library", library_handle),
+        ("health", health_handle),
         ("keydb", Some(keydb_handle)),
         ("log-prune", Some(log_prune_handle)),
     ];
@@ -313,7 +314,9 @@ fn stop_services(
             deadline.saturating_duration_since(Instant::now()),
         );
     }
+    let web_deadline = Instant::now() + bounds.web;
     done &= join_bounded(web, "web", bounds.web);
+    done &= web::wait_idle(web_deadline.saturating_duration_since(Instant::now()));
     ripper::staging::clear_inprogress_markers(staging);
     log::syslog(if done {
         "autorip stopped"

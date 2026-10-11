@@ -66,6 +66,22 @@ fn open_sse_handler_drains_promptly_on_shutdown() {
     assert!(SSE_STREAMS.lock().unwrap().is_empty());
 }
 
+// Shutdown waits for in-flight handlers, but only up to its bound.
+#[test]
+fn wait_for_zero_waits_for_held_handlers_within_its_bound() {
+    use std::time::Duration;
+    static HANDLERS: AtomicUsize = AtomicUsize::new(0);
+    assert!(wait_for_zero(&HANDLERS, Duration::ZERO));
+    let guard = ConnGuard::try_acquire(&HANDLERS, 1).unwrap();
+    assert!(!wait_for_zero(&HANDLERS, Duration::from_millis(50)));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        drop(guard);
+    });
+    assert!(wait_for_zero(&HANDLERS, Duration::from_secs(5)));
+    release.join().unwrap();
+}
+
 // tiny_http's accept thread exits after reporting an accept error, so the port
 // is dead for good: like a failed bind, that must stop the daemon visibly
 // (container restart policy) rather than leave workers running with no UI.

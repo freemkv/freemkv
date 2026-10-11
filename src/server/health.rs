@@ -871,10 +871,10 @@ fn heal(cfg: &Config) {
     refresh(cfg);
 }
 
-/// Start the health thread.
-pub fn start(cfg: &Arc<RwLock<Config>>) {
+/// Start the health thread; `None` if it could not be spawned.
+pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
     let cfg = cfg.clone();
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("health".into())
         .spawn(move || {
             while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
@@ -889,7 +889,8 @@ pub fn start(cfg: &Arc<RwLock<Config>>) {
                     std::thread::sleep(Duration::from_millis(500));
                 }
             }
-        });
+        })
+        .ok()
 }
 
 #[cfg(test)]

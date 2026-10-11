@@ -1685,6 +1685,24 @@ impl Drop for ConnGuard {
     }
 }
 
+/// Wait up to `timeout` for every in-flight HTTP handler (a settings save, the
+/// reboot response itself) to finish; whether they all did.
+pub(crate) fn wait_idle(timeout: std::time::Duration) -> bool {
+    wait_for_zero(&INFLIGHT_HANDLERS, timeout)
+}
+
+fn wait_for_zero(counter: &AtomicUsize, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while counter.load(Ordering::SeqCst) != 0 {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!("HTTP handlers still running at shutdown; stopping without them");
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    true
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 #[path = "web_web_tests.rs"]
