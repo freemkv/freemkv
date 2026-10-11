@@ -1344,16 +1344,20 @@ fn probe_write_with(
         .create_new(true)
         .open(&probe)?;
     // Writability is proven; a marker left behind is a warning, never a failed folder. It is
-    // swept by the next write test of this folder that cleans up after itself.
+    // swept by the next write test of this folder that cleans up after itself, or once stale.
     match remove(&probe) {
-        Ok(()) => schedule_sweep(dir),
+        Ok(()) => schedule_sweep(dir, true),
         Err(e) => {
             tracing::warn!(probe = %probe.display(), error = %e, "writability probe left behind");
-            PROBE_SWEEP
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .leftovers
-                .push(probe);
+            let mut sweep = PROBE_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
+            if !sweep.leftovers.contains(&probe) {
+                sweep.leftovers.push(probe);
+            }
+            // Past the cap the oldest go: the stale sweep still finds them.
+            let over = sweep.leftovers.len().saturating_sub(MAX_LEFTOVERS);
+            sweep.leftovers.drain(..over);
+            drop(sweep);
+            schedule_sweep(dir, false);
         }
     }
     Ok(())
@@ -1375,14 +1379,18 @@ static PROBE_SWEEP: std::sync::LazyLock<Mutex<ProbeSweep>> =
 // time between two sweeps of one folder that left nothing of ours behind.
 const STALE_PROBE: Duration = Duration::from_secs(3600);
 
+// Our markers whose removal failed that are remembered; older ones wait for the stale sweep.
+const MAX_LEFTOVERS: usize = 256;
+
 // Sweep `dir` on its own thread, after the write test has answered: listing a large folder on
-// a slow share must not count against the probe. At most one at a time per folder.
-fn schedule_sweep(dir: &Path) {
+// a slow share must not count against the probe. At most one at a time per folder; `removed`:
+// our own marker went, so our leftovers there may go too (else only stale ones, when due).
+fn schedule_sweep(dir: &Path, removed: bool) {
     let leftovers: Vec<PathBuf> = {
         let mut sweep = PROBE_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
         let (ours, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut sweep.leftovers)
             .into_iter()
-            .partition(|p| p.parent() == Some(dir));
+            .partition(|p| removed && p.parent() == Some(dir));
         let due = sweep
             .last
             .get(dir)

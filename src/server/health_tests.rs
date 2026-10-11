@@ -1161,6 +1161,9 @@ fn leftover_probe_files_are_swept_by_a_later_preflight() {
         })
         .collect();
     assert_eq!(ours.len(), 1, "fixture: a marker left behind");
+    eventually("the failed write test's sweep is done", || {
+        !PROBE_SWEEP.lock().unwrap().running.contains(dir)
+    });
     probe_write(dir).unwrap();
     eventually("a stale marker is swept", || !stale.exists());
     eventually("our own leftover is swept", || !ours[0].exists());
@@ -1169,6 +1172,39 @@ fn leftover_probe_files_are_swept_by_a_later_preflight() {
         "a recent marker may be another server's live probe"
     );
     assert!(foreign.exists() && folder.exists(), "only our marker files");
+}
+
+// A folder where our marker can never be removed (create allowed, delete denied) is still
+// swept of stale markers, at the usual rate, and what we remember of ours stays bounded.
+#[test]
+fn markers_that_cannot_be_removed_are_still_swept_and_bounded() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path();
+    let stale = dir.join(".freemkv-probe-123-456");
+    std::fs::write(&stale, b"").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 3600))
+        .unwrap();
+    let denied = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    probe_write_with(dir, denied).unwrap();
+    eventually("a stale marker is swept", || !stale.exists());
+    for _ in 0..MAX_LEFTOVERS + 10 {
+        probe_write_with(dir, denied).unwrap();
+    }
+    let sweep = PROBE_SWEEP.lock().unwrap();
+    let ours = sweep
+        .leftovers
+        .iter()
+        .filter(|p| p.parent() == Some(dir))
+        .count();
+    assert!(ours <= MAX_LEFTOVERS, "{ours} remembered");
+    assert!(
+        sweep.last.contains_key(dir),
+        "swept once, then rate-limited"
+    );
 }
 
 // The mover's preflight of a watched root is published under that folder's own name, not
