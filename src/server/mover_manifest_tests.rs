@@ -1155,6 +1155,37 @@ fn a_missing_title_folder_in_a_journaled_delivery_waits_instead_of_recreating_it
     assert!(manifest.entries[0].destination.exists());
 }
 
+// A Retry that cannot make a journaled delivery's folder again says it waits for Retry,
+// not that it is tried again on the unjournaled schedule, which does not apply to it.
+#[test]
+fn a_failed_recreate_of_a_journaled_folder_says_it_waits_for_retry() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::strings::set_locale("en");
+    let (_temp, dir, cfg, title, manifest) = titled_fixture();
+    let key = dir.to_string_lossy().into_owned();
+    std::fs::remove_dir(&title).unwrap();
+    super::super::check_and_move(&cfg);
+    // A file where the folder goes: the operator's Retry cannot make it.
+    std::fs::write(&title, b"x").unwrap();
+    super::super::clear_move_error(&key);
+    super::super::check_and_move(&cfg);
+    let row = super::super::MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .remove(&key)
+        .unwrap();
+    assert!(
+        row.reason
+            .starts_with("cannot create destination directory"),
+        "{row:?}"
+    );
+    assert!(!row.hint.contains("30 s"), "{}", row.hint);
+    assert!(row.hint.contains("Retry"), "{}", row.hint);
+    assert!(manifest.entries[0].source.exists());
+}
+
 #[test]
 fn retry_all_on_another_error_does_not_recreate_a_missing_title_folder() {
     let _guard = super::super::TEST_STATE_LOCK
