@@ -1548,13 +1548,6 @@ pub(crate) fn webhook_agent() -> ureq::Agent {
     ureq::Agent::new_with_config(config)
 }
 
-// SSRF-guarded HTTP GET: the single entry point for fetching an operator- supplied URL, instead
-// of ureq::get directly (which bypasses the guard). `pub` for the lib facade re-export; only
-// bin/tests call it.
-pub fn guarded_get(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
-    guarded_get_within(url, KEYDB_TRANSFER_BUDGET)
-}
-
 // End-to-end ceiling on the unauthenticated /api KEYDB update; tighter than
 // KEYDB_TRANSFER_BUDGET because this path holds an in-flight handler slot and the update flag
 // that 429s everyone else.
@@ -1579,26 +1572,6 @@ pub(crate) fn keydb_update_call(
 // How long a KEYDB body may take IN TOTAL once headers are in — sized to a real single-digit-MB
 // keydb export, not to KEYDB_MAX_BYTES's defensive 100 MiB DoS cap.
 pub(crate) const KEYDB_TRANSFER_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// [`guarded_get`] with an explicit total-transfer budget.
-pub(crate) fn guarded_get_within(
-    url: &str,
-    budget: std::time::Duration,
-) -> Result<ureq::http::Response<ureq::Body>, String> {
-    let pinned = validate_fetch_url(url)?;
-    guarded_agent_with_timeouts(
-        pinned,
-        std::time::Duration::from_secs(5),
-        budget,
-        STALL_TIMEOUT,
-    )
-    .get(url)
-    .call()
-    // Do NOT embed `e` directly: ureq 2's Display carried the request URL,
-    // leaking a token-bearing keydb_url to the system log. ureq 3 is
-    // URL-free here, but `BadUri` still prints it — keep masking.
-    .map_err(|e| format!("fetch failed: {}", ureq_error_kind(&e)))
-}
 
 // ── Connection caps: run() spawns one OS thread per connection and /events holds its thread
 // until disconnect, so without a cap a LAN client can pin N threads and exhaust the container.

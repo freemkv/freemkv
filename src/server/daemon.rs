@@ -211,7 +211,7 @@ pub fn run(argv: Vec<String>) {
                     continue;
                 }
                 tracing::info!(url_origin = %crate::server::webhook::webhook_url_origin(&url), "keydb: starting daily update");
-                // SSRF-guarded fetch (see web::guarded_get) — the daily
+                // SSRF-guarded fetch (see keysource::refresh_keydb) — the daily
                 // refresh must not bypass the address allow-list that the
                 // settings save and manual update already enforce.
                 fetch_keydb(&cfg2, &url, false);
