@@ -69,6 +69,8 @@ async function changeMatch(row, button) {
   const current = await act(button, () => api('GET', '/api/library/match?source=' + encodeURIComponent(row.iso)), 'Load match');
   if (!current) return;
   let saved = current.saved;
+  // A match saved for an earlier disc at this path only supplies the revision to save over.
+  const shown = current.stale ? null : saved;
   const linked = current.linked || [];
   const m = modal({ title: 'Change movie or TV match', wide: true,
     body: '<p class="small muted">Choose the correct TMDB entry and remux this ISO. The ISO is kept. New files are written first; only after every new file is in place are the old files made from this ISO removed, and only if they have not changed since the remux started.</p>'
@@ -76,12 +78,12 @@ async function changeMatch(row, button) {
       + (current.unchecked ? '<p class="small muted">Couldn\'t check the share, so this list is from the saved links and may include files that are already gone.</p>' : '')
       + (linked.length ? '<p>Made from this ISO (replaced or removed):</p><ul>' + linked.map(path => '<li class="mono small">' + esc(path) + '</li>').join('') + '</ul>' : '<p>No existing MKVs are recorded as made from this ISO.</p>')
       + '<p>Other MKVs are never changed or removed. If one already has a new file\'s name, the remux stops before writing anything and shows it as Failed.</p>'
-      + '<div class="hook"><input class="txt" data-query aria-label="Search TMDB" value="' + esc(saved?.media.title || row.title) + '"><button class="btn btn-secondary" data-search>Search TMDB</button></div>'
+      + '<div class="hook"><input class="txt" data-query aria-label="Search TMDB" value="' + esc(shown?.media.title || row.title) + '"><button class="btn btn-secondary" data-search>Search TMDB</button></div>'
       + '<label>Show <select data-kind><option value="">Movies and TV</option><option value="movie">Movies</option><option value="tv">TV</option></select></label>'
       + '<div data-results class="stack"></div>'
-      + '<div class="hook"><label>TV season (optional) <input type="number" min="1" max="65535" data-season value="' + esc(saved?.media.season ?? '') + '"></label>'
-      + '<label>Disc number (optional) <input type="number" min="1" max="65535" data-disc value="' + esc(saved?.media.disc ?? '') + '"></label>'
-      + '<label>TV First episode (optional) <input type="number" min="1" max="65535" step="1" data-episode-start value="' + esc(saved?.media.episode_start ?? '') + '"></label></div>',
+      + '<div class="hook"><label>TV season (optional) <input type="number" min="1" max="65535" data-season value="' + esc(shown?.media.season ?? '') + '"></label>'
+      + '<label>Disc number (optional) <input type="number" min="1" max="65535" data-disc value="' + esc(shown?.media.disc ?? '') + '"></label>'
+      + '<label>TV First episode (optional) <input type="number" min="1" max="65535" step="1" data-episode-start value="' + esc(shown?.media.episode_start ?? '') + '"></label></div>',
   });
   let found = [], closed = false, searchRevision = 0;
   m.onClose(() => { closed = true; });

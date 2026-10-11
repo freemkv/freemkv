@@ -240,6 +240,12 @@ fn iso_stamp_within(
     }
 }
 
+fn current_for(snap: &Snapshot, source: &Path, saved: &matches::SavedMatch) -> bool {
+    snap.iso_stamps
+        .get(source)
+        .is_none_or(|now| saved.is_for(*now))
+}
+
 // How long a saved-matches file that could not be read waits before it is read again.
 const MATCHES_RETRY_SECS: u64 = 60;
 
@@ -596,6 +602,12 @@ impl Library {
         self.match_store()
             .map(|store| store.get(source))
             .map_err(|e| e.to_string())
+    }
+
+    /// Whether `saved` was confirmed for the disc the last scan found at `source`; one saved
+    /// for an earlier disc filed at that path is not this disc's.
+    pub(crate) fn match_is_current(&self, source: &Path, saved: &matches::SavedMatch) -> bool {
+        current_for(&self.snapshot(), source, saved)
     }
 
     // The saved match as already loaded: no disk access, for the listing.
@@ -1233,7 +1245,7 @@ impl Library {
                 // A match confirmed for an earlier disc filed at this path is not this row's.
                 let source_match = r.iso.as_deref().and_then(|iso| {
                     self.loaded_match(iso)
-                        .filter(|m| snap.iso_stamps.get(iso).is_none_or(|now| m.is_for(*now)))
+                        .filter(|m| current_for(&snap, iso, m))
                 });
                 let title = source_match
                     .as_ref()

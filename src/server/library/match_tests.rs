@@ -321,3 +321,27 @@ fn a_change_match_job_shows_on_its_iso_only_row_and_unqueues_from_it() {
     assert_eq!(lib.remove_queued(&d, row.target.as_ref().unwrap()), 1);
     assert!(lib.queue.snapshot().jobs.is_empty());
 }
+
+#[test]
+fn the_match_dialog_does_not_offer_a_match_saved_for_an_earlier_disc() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Show"]);
+    lib.match_store()
+        .unwrap()
+        .save(&sources[0], 0, show())
+        .unwrap();
+    lib.rescan(&dirs(&cfg));
+    let saved = lib.match_view(&cfg, &sources[0]).unwrap().0.unwrap();
+    assert!(lib.match_is_current(&sources[0], &saved));
+    // Another disc is filed at the same path; the listing no longer shows the old match.
+    std::fs::write(&sources[0], b"a different disc").unwrap();
+    lib.rescan(&dirs(&cfg));
+    let listed = lib.listing(&dirs(&cfg));
+    let row = listed
+        .rows
+        .iter()
+        .find(|r| r.iso.as_ref() == Some(&sources[0]));
+    assert!(row.unwrap().source_match.is_none());
+    // The dialog still gets its revision to save over, flagged as not this disc's.
+    let saved = lib.match_view(&cfg, &sources[0]).unwrap().0.unwrap();
+    assert!(!lib.match_is_current(&sources[0], &saved));
+}

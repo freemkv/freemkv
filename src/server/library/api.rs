@@ -120,7 +120,8 @@ pub fn handle(
                     Ok((saved, linked, checked)) => json_response(
                         request,
                         200,
-                        &json!({"source": source, "saved": saved, "linked": linked, "unchecked": !checked}).to_string(),
+                        &json!({"source": source, "saved": saved, "linked": linked, "unchecked": !checked,
+                            "stale": saved.as_ref().is_some_and(|m| !lib.match_is_current(&source, m))}).to_string(),
                     ),
                     Err(error) => err(request, 409, &error.to_string()),
                 }
