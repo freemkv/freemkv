@@ -272,8 +272,8 @@ function errorRows(list, kind) {
     + '<span class="actions"><button class="btn btn-ghost btn-sm" data-refresh>Refresh</button><button class="btn btn-ghost btn-sm" data-clearall="' + kind + '">' + (kind === 'move' ? 'Retry all' : 'Clear all') + '</button></span></div>'
     + list.map(e => '<div class="pipe-row pipe-err"><span class="dot dot-bad"></span><div class="grow"><div class="name mono">' + esc(e.path) + '</div>'
       + '<div class="sub">' + esc(e.reason || '') + '</div>' + (e.hint ? '<div class="sub">' + esc(e.hint) + '</div>' : '') + '</div>'
-      + (kind === 'move' ? '<span class="sub">' + (e.worker_active ? 'Waiting for filesystem — retry unavailable.' : e.retry_held ? 'Automatic retries stopped.' : 'Waiting before retry.') + '</span>' : '')
-      + '<button class="btn btn-ghost btn-sm"' + (e.worker_active ? ' disabled' : '') + ' data-clear="' + kind + '" data-path="' + esc(e.path) + '">' + (kind === 'move' ? 'Retry' : 'Clear') + '</button></div>').join('');
+      + (kind === 'move' ? '<span class="sub">' + (e.worker_active ? 'Waiting for filesystem — retry unavailable.' : e.retrying ? 'Retrying now.' : e.retry_held ? 'Automatic retries stopped.' : 'Waiting before retry.') + '</span>' : '')
+      + '<button class="btn btn-ghost btn-sm"' + (e.worker_active || e.retrying ? ' disabled' : '') + ' data-clear="' + kind + '" data-path="' + esc(e.path) + '">' + (kind === 'move' ? 'Retry' : 'Clear') + '</button></div>').join('');
 }
 
 function muxHtml(state, sys, empty = true) {

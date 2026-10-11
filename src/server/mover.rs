@@ -134,6 +134,8 @@ pub struct MoverError {
     pub retry_held: bool,
     pub waiting_for_folder: bool,
     pub worker_active: bool,
+    /// An attempt for this row is running now, so the row reports the last failure only.
+    pub retrying: bool,
     // The destination root this row is waiting on, so its recovery can clear every waiter.
     #[serde(skip)]
     waiting_root: Option<std::path::PathBuf>,
@@ -148,6 +150,16 @@ fn retry_deadline(attempts: u32, now: std::time::Instant) -> Option<std::time::I
         1 => Some(now + std::time::Duration::from_secs(30)),
         2 => Some(now + std::time::Duration::from_secs(120)),
         _ => None,
+    }
+}
+
+fn mark_retrying(path: &str) {
+    if let Some(error) = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(path)
+    {
+        error.retrying = true;
     }
 }
 
@@ -276,6 +288,7 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
                 waiting_for_folder: false,
                 waiting_root: None,
                 worker_active: false,
+                retrying: false,
                 copy_stalled: false,
                 retry_after,
             }
@@ -322,6 +335,7 @@ fn record_error_at_stage(
                 waiting_for_folder: waiting_root.is_some(),
                 waiting_root: waiting_root.map(Path::to_path_buf),
                 worker_active: false,
+                retrying: false,
                 copy_stalled: false,
                 retry_after,
             },
@@ -1079,6 +1093,7 @@ fn check_and_move(cfg: &Config) {
         let Ok(_job_owner) = job_lease.try_lock() else {
             continue;
         };
+        mark_retrying(&dir.to_string_lossy());
 
         let delivery = match manifest::Manifest::load(&dir) {
             Ok(delivery) => delivery,

@@ -423,6 +423,9 @@ impl Manifest {
             if path.file_name().is_some_and(|name| name == FILE) {
                 continue;
             }
+            if is_bookkeeping(&path) {
+                continue;
+            }
             let saved = self
                 .cleanup
                 .iter()
@@ -435,7 +438,7 @@ impl Manifest {
                 })?;
             saved.identity.verify(&path)?;
         }
-        for entry in &self.cleanup {
+        for entry in self.cleanup.iter().filter(|e| !is_bookkeeping(&e.path)) {
             if let Some(delivered) = self.entries.iter().find(|e| e.source == entry.path) {
                 verify_parent(&delivered.destination)?;
                 delivered.prepared()?.verify(&delivered.destination)?;
@@ -444,6 +447,17 @@ impl Manifest {
                 Ok(()) => std::fs::remove_file(&entry.path)?,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
+            }
+        }
+        // The ripper rewrites its own bookkeeping (state, markers) at any restart; it holds
+        // no delivered bytes, so it is removed by name rather than by frozen identity.
+        for entry in std::fs::read_dir(&self.directory)? {
+            let path = entry?.path();
+            if is_bookkeeping(&path) {
+                match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
             }
         }
         removed();
@@ -523,3 +537,8 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 #[path = "mover_manifest_tests.rs"]
 mod tests;
+
+fn is_bookkeeping(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(crate::server::ripper::staging::is_ripper_bookkeeping)
+}
