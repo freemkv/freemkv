@@ -321,6 +321,7 @@ fn episode_disc() -> Scanned {
         title.playlist_id = ti as u16;
         title.duration_secs = 2600.0;
         title.clips.push(libfreemkv::Clip {
+            marks_on_pes_clock: true,
             clip_id: format!("presentation-{}", ti / 2),
             in_time: 0,
             out_time: 2600 * 45_000,

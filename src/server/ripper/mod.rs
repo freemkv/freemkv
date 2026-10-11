@@ -3575,7 +3575,6 @@ fn rip_disc_inner(
             halt: halt.clone(),
             user_halt: user_halt.clone(),
             delay_secs: transport_recovery_delay_secs,
-            resume: resume_sweep,
             attempt: 0,
             gave_up: false,
             halted: false,
@@ -3595,10 +3594,16 @@ fn rip_disc_inner(
                 disc: &disc,
                 host: &mut host,
             }),
+            // The server's recovery policy (autorip 1.7.7): bridge crashes re-sweep, a failed
+            // patch pass keeps what was read, a wedged pass counts like any other.
             passes: Some(freemkv_engine::MultipassOpts {
                 max_passes: u32::from(cfg_read.max_retries),
                 abort_on_lost_secs: cfg_read.abort_on_lost_secs,
                 is_iso_output: output_is_iso_image(&cfg_read.output_format),
+                max_sweep_attempts: passes::MAX_PASS1_ATTEMPTS,
+                resume_sweep: Some(resume_sweep),
+                on_patch_failure: freemkv_engine::OnPatchFailure::Finish,
+                after_wedge: freemkv_engine::AfterWedge::Continue,
             }),
             // The staged scope (None: the whole disc); its mapfile records it.
             scope: staging_scope.as_deref(),

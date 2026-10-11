@@ -102,6 +102,7 @@ fn a_scoped_staging_image_resumes_and_muxes() {
             max_passes: 1,
             abort_on_lost_secs: 0,
             is_iso_output: false,
+            ..Default::default()
         }),
         scope: Some(&scope),
         locked: true,

@@ -558,13 +558,7 @@ fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
 /// Whether `info` reads `url` as a stream container and lists its streams (G10): every
 /// stream container, mp4:// and mpg:// included.
 fn info_lists_streams(url: &libfreemkv::StreamUrl) -> bool {
-    matches!(
-        url,
-        libfreemkv::StreamUrl::M2ts { .. }
-            | libfreemkv::StreamUrl::Mkv { .. }
-            | libfreemkv::StreamUrl::Mp4 { .. }
-            | libfreemkv::StreamUrl::Mpg { .. }
-    )
+    url.info().source == Some(libfreemkv::SourceKind::Container)
 }
 
 fn info_cmd(args: &[String]) {

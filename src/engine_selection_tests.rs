@@ -42,6 +42,7 @@ fn title(id: u16, program: &str, secs: f64, language: &str) -> DiscTitle {
     title.playlist = format!("{id:05}.mpls");
     title.duration_secs = secs;
     title.clips.push(libfreemkv::Clip {
+        marks_on_pes_clock: true,
         clip_id: program.into(),
         in_time: 0,
         out_time: (secs * 45_000.0) as u32,

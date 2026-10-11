@@ -311,6 +311,7 @@ fn title_lines_count_clips_only_for_titles_made_of_them() {
         row(&disc)
     );
     let clip = libfreemkv::Clip {
+        marks_on_pes_clock: true,
         clip_id: "00001".into(),
         in_time: 0,
         out_time: 0,

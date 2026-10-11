@@ -2385,7 +2385,9 @@ fn run_extract_folder(
 }
 
 fn is_stream_source(path: &str) -> bool {
-    crate::ui::container_scheme(path).is_some()
+    crate::ui::container_scheme(path)
+        .and_then(libfreemkv::SchemeInfo::by_name)
+        .is_some_and(|i| i.source == Some(libfreemkv::SourceKind::Container))
 }
 
 // The URL scheme for a source already established as neither a drive nor a stream container: a
@@ -3558,6 +3560,7 @@ fn run_disc_scanning(
             max_passes: req.max_passes,
             abort_on_lost_secs: req.abort_lost_secs,
             is_iso_output: want_iso,
+            ..Default::default()
         };
         // An MKV deliverable stages only nav/UDF + the chosen titles (never bus-encrypted,
         // AACS BD Pre-recorded 0.953 §3.7) unless a kept, whole image can be made.

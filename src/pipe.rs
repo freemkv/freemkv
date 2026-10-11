@@ -999,10 +999,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
 // ── Pre-flight invocation validation (fail loud and EARLY) ──────────────────
 
 fn is_scheme_only_sink(parsed_dest: &libfreemkv::StreamUrl) -> bool {
-    matches!(
-        parsed_dest,
-        libfreemkv::StreamUrl::Null | libfreemkv::StreamUrl::Stdio
-    )
+    parsed_dest.info().is_scheme_only_sink()
 }
 
 #[allow(clippy::too_many_arguments)] // cohesive one-shot invocation validator
@@ -1134,22 +1131,13 @@ fn preflight_validate(
                 validate_file_dest(path)?;
             }
         }
-        // `dir://` target: must be creatable + writable, and (unless --force)
-        // empty. The producer re-checks these, but surfacing them here gives a
-        // clean localized message with zero side effects.
-        libfreemkv::StreamUrl::Dir { path } => {
-            validate_dir_dest(path, dest, force)?;
+        // A folder target (`dir://`, `demux://`, `video://`, …) must be creatable, writable and
+        // (unless --force) empty. The producer re-checks; here the message is clean and early.
+        other => {
+            if let (libfreemkv::UrlTarget::Dir, Some(dir)) = (other.info().target, other.path()) {
+                validate_dir_dest(dir, dest, force)?;
+            }
         }
-        // `demux://` / `video://` / `audio://` / `sub://` write per-track ES files
-        // into a directory (created on demand). Same creatable/writable/non-empty
-        // gate as `dir://`.
-        libfreemkv::StreamUrl::Demux { dir }
-        | libfreemkv::StreamUrl::Video { dir }
-        | libfreemkv::StreamUrl::Audio { dir }
-        | libfreemkv::StreamUrl::Sub { dir } => {
-            validate_dir_dest(dir, dest, force)?;
-        }
-        _ => {}
     }
 
     Ok(())
@@ -1457,13 +1445,7 @@ fn build_jobs(
             if is_scheme_only_sink(parsed_dest) {
                 // null:// / stdio:// — every title to the single sink, no naming.
                 sink_jobs(&indices)
-            } else if matches!(
-                parsed_dest,
-                libfreemkv::StreamUrl::Demux { .. }
-                    | libfreemkv::StreamUrl::Video { .. }
-                    | libfreemkv::StreamUrl::Audio { .. }
-                    | libfreemkv::StreamUrl::Sub { .. }
-            ) {
+            } else if parsed_dest.info().is_track_output() {
                 // demux:// — directory sink with its own per-track naming.
                 Some(demux_jobs(&indices, &demux_dir))
             } else if indices.len() == 1 && !is_dir_dest {
@@ -1492,13 +1474,7 @@ fn build_jobs(
                 // null:// / stdio:// — every requested title to the single sink.
                 return sink_jobs(&indices);
             }
-            if matches!(
-                parsed_dest,
-                libfreemkv::StreamUrl::Demux { .. }
-                    | libfreemkv::StreamUrl::Video { .. }
-                    | libfreemkv::StreamUrl::Audio { .. }
-                    | libfreemkv::StreamUrl::Sub { .. }
-            ) {
+            if parsed_dest.info().is_track_output() {
                 // demux:// — directory sink with its own per-track naming.
                 return Some(demux_jobs(&indices, &demux_dir));
             }
@@ -1511,13 +1487,7 @@ fn build_jobs(
             && is_dir_dest
             && title_nums.len() == 1
             && !is_scheme_only_sink(parsed_dest)
-            && !matches!(
-                parsed_dest,
-                libfreemkv::StreamUrl::Demux { .. }
-                    | libfreemkv::StreamUrl::Video { .. }
-                    | libfreemkv::StreamUrl::Audio { .. }
-                    | libfreemkv::StreamUrl::Sub { .. }
-            ) =>
+            && !parsed_dest.info().is_track_output() =>
         {
             // One title into a directory is still named per title, as for a scanned source.
             dir_jobs(&[title_nums[0].saturating_sub(1)], "disc")
@@ -1959,10 +1929,7 @@ fn run_title(
 }
 
 fn is_metadata_sink(dest: &str) -> bool {
-    matches!(
-        libfreemkv::parse_url(dest),
-        libfreemkv::StreamUrl::Chapters { .. } | libfreemkv::StreamUrl::Json { .. }
-    )
+    !libfreemkv::SinkCaps::of(&libfreemkv::parse_url(dest)).needs_frames
 }
 
 fn disc_copy_recovered_data(bytes_good: u64) -> bool {
@@ -2067,24 +2034,7 @@ fn pipe(
 // ── Disc → ISO (raw sector copy, not a stream) ────────────────────────────
 
 fn url_path_of(url: &libfreemkv::StreamUrl) -> Option<std::path::PathBuf> {
-    use libfreemkv::StreamUrl as U;
-    match url {
-        U::Mkv { path }
-        | U::M2ts { path }
-        | U::Mp4 { path }
-        | U::Mpg { path }
-        | U::Iso { path }
-        | U::Dir { path }
-        | U::Fvi { path }
-        | U::Chapters { path }
-        | U::Json { path } => Some(path.clone()),
-        U::Demux { dir } | U::Video { dir } | U::Audio { dir } | U::Sub { dir } => {
-            Some(dir.clone())
-        }
-        // No filesystem path to compare: a live drive, a socket, stdio, the
-        // bit bucket, and a URL we could not parse at all (rejected earlier).
-        U::Disc { .. } | U::Network { .. } | U::Stdio | U::Null | U::Unknown { .. } => None,
-    }
+    url.path().map(std::path::Path::to_path_buf)
 }
 
 /// The filesystem path behind a source URL, if it has one.
