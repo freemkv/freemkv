@@ -234,8 +234,9 @@ fn only_a_keepalive_plist_restarts_the_job() {
     assert!(!plist_keeps_alive(&dir.path().join("missing.plist")));
 }
 
-// The loaded job decides when launchctl knows it: its plist path and keepalive property.
-// A job launchctl does not list in the user's domain (a LaunchDaemon) is refused.
+// The loaded job decides when launchctl knows it: its keepalive property or the plist it
+// was loaded from. A job launchctl does not list in the user's domain (a LaunchDaemon) is
+// refused.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_loaded_launchd_job_decides_over_the_installed_plist() {
@@ -262,16 +263,45 @@ fn the_loaded_launchd_job_decides_over_the_installed_plist() {
         launchd_restarts(&job, &stale),
         "the loaded plist, not the stale file"
     );
-    let not_kept = Launchctl::Loaded(print(&loaded, "runatload | inferred program"));
-    assert!(!launchd_restarts(&not_kept, &loaded));
-    let wrong_plist = Launchctl::Loaded(print(&stale, "keepalive | runatload"));
-    assert!(!launchd_restarts(&wrong_plist, &loaded));
+    let listed_kept = Launchctl::Loaded(print(&stale, "keepalive | runatload"));
+    assert!(
+        launchd_restarts(&listed_kept, &stale),
+        "launchd lists the loaded job as kept alive"
+    );
+    let not_kept_anywhere = Launchctl::Loaded(print(&stale, "runatload"));
+    assert!(!launchd_restarts(&not_kept_anywhere, &loaded));
     assert!(
         !launchd_restarts(&Launchctl::NotLoaded, &loaded),
         "a LaunchDaemon"
     );
     assert!(launchd_restarts(&Launchctl::Unavailable, &loaded));
     assert!(!launchd_restarts(&Launchctl::Unavailable, &stale));
+}
+
+// launchd lists no "keepalive" property for a conditional KeepAlive {SuccessfulExit =
+// false} (it shows a semaphores block): the loaded job's plist decides. Shape captured from
+// `launchctl print gui/501/<label>` of such an agent.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_conditional_keepalive_of_the_loaded_job_restarts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let plist = dir.path().join("io.freemkv.library.plist");
+    std::fs::write(
+        &plist,
+        "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>KeepAlive</key>\
+         <dict><key>SuccessfulExit</key><false/></dict></dict></plist>",
+    )
+    .unwrap();
+    let print = format!(
+        "gui/501/io.freemkv.library = {{\n\tactive count = 1\n\tpath = {}\n\ttype = LaunchAgent\n\
+         \tstate = running\n\n\tenvironment = {{\n\t\tXPC_SERVICE_NAME => io.freemkv.library\n\t}}\n\n\
+         \tdomain = gui/501 [100002]\n\tminimum runtime = 10\n\texit timeout = 5\n\truns = 2\n\
+         \tsemaphores = {{\n\t\tsuccessful exit => 0\n\t}}\n\n\
+         \tproperties = runatload | managed LWCR | has LWCR\n}}\n",
+        plist.display()
+    );
+    let missing = dir.path().join("not-installed.plist");
+    assert!(launchd_restarts(&Launchctl::Loaded(print), &missing));
 }
 
 // A metadata refusal is a conflict (409); storage that may answer again is 503, other

@@ -2830,8 +2830,9 @@ fn launchctl_print(_: &str) -> Launchctl {
     Launchctl::Unavailable
 }
 
-// Whether launchd starts the job again after the exit-75 shutdown: the loaded job's
-// keepalive property and plist when launchctl lists it, else the installed `plist`.
+// Whether launchd starts the job again after the exit-75 shutdown. A listed job: its
+// "keepalive" property (unconditional), or its loaded plist's KeepAlive (a conditional one is
+// not listed as a property). Else the installed `plist`.
 #[cfg(target_os = "macos")]
 fn launchd_restarts(job: &Launchctl, plist: &std::path::Path) -> bool {
     match job {
@@ -2845,7 +2846,7 @@ fn launchd_restarts(job: &Launchctl, plist: &std::path::Path) -> bool {
             };
             let kept = field("properties = ")
                 .is_some_and(|p| p.split('|').any(|f| f.trim() == "keepalive"));
-            kept && field("path = ").is_some_and(|p| plist_keeps_alive(std::path::Path::new(p)))
+            kept || field("path = ").is_some_and(|p| plist_keeps_alive(std::path::Path::new(p)))
         }
     }
 }
