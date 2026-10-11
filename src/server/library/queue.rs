@@ -333,7 +333,6 @@ impl QueueFile {
     }
 }
 
-/// The engine writes its in-progress file beside the target.
 // The final file a `.partial` becomes, or `None` for a name without that suffix.
 fn partial_target(partial: &Path) -> Option<PathBuf> {
     let name = partial.file_name()?.to_str()?;
@@ -346,25 +345,39 @@ fn partial_target(partial: &Path) -> Option<PathBuf> {
 /// How long the partial sweep tries for a `<target>.lock` before leaving it to its holder.
 const SWEEP_LOCK_TRY: std::time::Duration = std::time::Duration::from_millis(300);
 
-// `target`'s artifact lock if no other writer holds it, tried for `SWEEP_LOCK_TRY`.
-fn try_artifact_lock(target: &Path) -> Option<libfreemkv::io::ArtifactLock> {
+// `target`'s artifact lock if no other writer holds it, tried for `SWEEP_LOCK_TRY`, and
+// whether its `<target>.lock` file was already there (acquiring creates a missing one).
+fn try_artifact_lock(target: &Path) -> Option<(libfreemkv::io::ArtifactLock, bool)> {
     let halt = libfreemkv::Halt::new();
     let timer = halt.clone();
     let (done, wait) = std::sync::mpsc::channel::<()>();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("partial-lock".into())
         .spawn(move || {
             if wait.recv_timeout(SWEEP_LOCK_TRY) == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
             {
                 timer.cancel();
             }
-        })
-        .ok()?;
-    let lock = libfreemkv::io::ArtifactLock::acquire(target, &[], &halt).ok();
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(target = %target.display(), error = %e, "partial sweep skipped: could not start its lock timer");
+        return None;
+    }
+    let sidecar = libfreemkv::io::artifact_lock::lock_path(target);
+    let existed = std::fs::symlink_metadata(&sidecar).is_ok();
+    let lock = libfreemkv::io::ArtifactLock::acquire(target, &[], &halt);
     drop(done);
-    lock
+    match lock {
+        Ok(lock) => Some((lock, existed)),
+        Err(libfreemkv::Error::Halted) => None,
+        Err(e) => {
+            tracing::warn!(lock = %sidecar.display(), error = %e, "partial sweep skipped: its lock could not be taken");
+            None
+        }
+    }
 }
 
+/// The engine writes its in-progress file beside the target.
 pub fn partial_path(target: &Path) -> PathBuf {
     let mut name = target.file_name().unwrap_or_default().to_os_string();
     name.push(".partial");
@@ -492,21 +505,23 @@ impl Queue {
             return false;
         }
         // Another writer's `<target>.lock` owns the partial; a free one is held to the end.
-        let Some(lock) = partial_target(path).and_then(|t| try_artifact_lock(&t)) else {
+        let Some((lock, existed)) = partial_target(path).and_then(|t| try_artifact_lock(&t))
+        else {
             return false;
         };
         let f = self.lock();
-        if f.jobs
+        let running = f
+            .jobs
             .iter()
             .filter(|j| j.state == JobState::Running)
             .flat_map(Job::output_targets)
-            .any(|p| partial_path(&p) == path)
-        {
-            return false;
-        }
-        let removed = unlink(path).is_ok();
+            .any(|p| partial_path(&p) == path);
+        let removed = !running && unlink(path).is_ok();
         drop(f);
-        if removed && let Err(e) = lock.delete() {
+        // A kept partial keeps a lock file that was there; one the sweep made goes.
+        if (removed || !existed)
+            && let Err(e) = lock.delete()
+        {
             tracing::warn!(path = %path.display(), error = %e, "could not remove a swept partial's lock");
         }
         removed

@@ -964,3 +964,73 @@ fn nothing_changes_a_queue_whose_file_could_not_be_read() {
     q.set_paused(true);
     assert!(q.snapshot().paused);
 }
+
+// A partial the sweep cannot remove leaves no `<target>.lock` the sweep made, and keeps
+// one that was already there.
+#[test]
+fn a_partial_the_sweep_keeps_leaves_no_lock_file_it_made() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let target = t.path().join("Movie (2020)/Movie (2020).mkv");
+    let partial = partial_path(&target);
+    let sidecar = libfreemkv::io::artifact_lock::lock_path(&target);
+    std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+    std::fs::write(&partial, b"orphan").unwrap();
+    let refused = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    assert!(!q.remove_orphan_partial_with(&partial, refused));
+    assert!(partial.exists());
+    assert!(!sidecar.exists(), "the sweep left a lock file it made");
+    std::fs::write(&sidecar, b"").unwrap();
+    assert!(!q.remove_orphan_partial_with(&partial, refused));
+    assert!(sidecar.exists(), "a lock file that was there is kept");
+    // A running job's partial is skipped without a lock file left behind.
+    std::fs::remove_file(&sidecar).unwrap();
+    let mut running = job(t.path(), "Movie (2020)");
+    running.target = target.clone();
+    q.add(vec![running]);
+    q.claim_next().unwrap();
+    assert!(!q.remove_orphan_partial(&partial));
+    assert!(!sidecar.exists(), "the sweep left a lock file beside a running job");
+}
+
+// A lock that cannot be taken for a reason other than its holder is logged, not skipped
+// silently.
+#[test]
+fn a_partial_lock_that_cannot_be_opened_is_logged() {
+    use tracing_subscriber::layer::SubscriberExt;
+    #[derive(Clone, Default)]
+    struct Buf(std::sync::Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let target = t.path().join("Movie/Movie.mkv");
+    let partial = partial_path(&target);
+    std::fs::create_dir_all(libfreemkv::io::artifact_lock::lock_path(&target)).unwrap();
+    std::fs::write(&partial, b"orphan").unwrap();
+    let buf = Buf::default();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(buf.clone())
+            .with_ansi(false),
+    );
+    let removed = tracing::subscriber::with_default(subscriber, || {
+        q.remove_orphan_partial_with(&partial, |_| panic!("unlinked without its lock"))
+    });
+    assert!(!removed);
+    let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    assert!(out.contains("its lock could not be taken"), "{out}");
+}
