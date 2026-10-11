@@ -107,9 +107,18 @@ fn problem_error(p: &Problem) -> std::io::Error {
         Fault::Unresponsive | Fault::Unmounted => K::TimedOut,
         Fault::Io | Fault::Other => K::Other,
     };
-    std::io::Error::new(
-        kind,
-        format!("{} Folder: {}. {}", p.message, p.path.display(), p.detail),
+    std::io::Error::new(kind, format!("{} {}", folder_sentence(p), p.detail))
+}
+
+// The failed folder check as one sentence: its message and the folder.
+fn folder_sentence(p: &Problem) -> String {
+    crate::strings::fmt_or(
+        "server.library.folder_failed",
+        "{message} Folder: {path}.",
+        &[
+            ("message", &p.message),
+            ("path", &p.path.display().to_string()),
+        ],
     )
 }
 
@@ -159,11 +168,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
             kept.display(),
             job.target.display()
         ),
-        None => format!(
-            "$ freemkv iso://{} mkv://{}",
-            job.iso.display(),
-            job.target.display()
-        ),
+        None => command_line(&job),
     };
     sink.emit(LineKind::Cmd, cmd);
     sink.emit(
@@ -186,6 +191,27 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
     sink.close_open_line();
     finish(lib, &job, ending, started.elapsed(), &sink);
     lib.set_running(|r| *r = None);
+}
+
+// The job as the CLI command it runs: its ISO and the file it writes, or the folder its
+// files share; a Change match's queue key names no file, so it is never shown.
+fn command_line(job: &Job) -> String {
+    let iso = format!("$ freemkv iso://{}", job.iso.display());
+    let targets = job.output_targets();
+    let dest = match targets.as_slice() {
+        _ if job.retire && job.plan.is_none() => None,
+        [one] => Some(one.clone()),
+        [first, rest @ ..] => first
+            .ancestors()
+            .skip(1)
+            .find(|dir| rest.iter().all(|t| t.starts_with(dir)))
+            .map(Path::to_path_buf),
+        [] => None,
+    };
+    match dest {
+        Some(dest) => format!("{iso} mkv://{}", dest.display()),
+        None => iso,
+    }
 }
 
 /// Freeze automatic title selection before execution, including single outputs.
@@ -932,14 +958,7 @@ fn remux_planned_with(
                 sink.lib
                     .queue
                     .finish_output(job.id, &output.id, OutputState::Failed);
-                return Ending::Failed(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    crate::strings::fmt_or(
-                        "server.library.changed_during",
-                        "{path} changed while this remux ran; it was not touched",
-                        &[("path", &changed.display().to_string())],
-                    ),
-                ));
+                return Ending::Failed(changed_during(&changed));
             }
             Err(e) if let Some(why) = sink.landing_unsaved() => {
                 keep_staged(sink, job.id, &output.id, &e);
@@ -1108,14 +1127,20 @@ fn may_replace(target: &Path, owned: &[Owned]) -> std::io::Result<bool> {
     match super::owned::present(target)? {
         super::owned::Present::File(stamp) if stamp == ours.stamp => Ok(true),
         super::owned::Present::Gone => Ok(false),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "{} changed since this remux was planned; it was not touched",
-                target.display()
-            ),
-        )),
+        _ => Err(changed_during(target)),
     }
+}
+
+// An owned library file that changed after it was captured: it is not overwritten.
+fn changed_during(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        crate::strings::fmt_or(
+            "server.library.changed_during",
+            "{path} changed while this remux ran; it was not touched",
+            &[("path", &path.display().to_string())],
+        ),
+    )
 }
 
 // A planned output must sit under the root its plan files into.
@@ -1790,8 +1815,13 @@ pub(crate) fn failure_message(
     if let Some(words) = phase.and_then(phase_words) {
         out.push_str(&format!(" It stopped while {words}."));
     }
-    if let Some(p) = folder {
-        out.push_str(&format!(" {} Folder: {}.", p.message, p.path.display()));
+    // A job that failed on this folder's check already names it.
+    if let Some(sentence) = folder
+        .map(folder_sentence)
+        .filter(|s| !out.contains(s.as_str()))
+    {
+        out.push(' ');
+        out.push_str(&sentence);
     }
     out.push(' ');
     out.push_str(&safe_text(job));

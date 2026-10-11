@@ -137,7 +137,10 @@ fn may_replace_refuses_an_owned_path_that_is_now_a_symlink_as_changed() {
     std::os::unix::fs::symlink(&real, &target).unwrap();
     let e = may_replace(&target, &owned).unwrap_err();
     assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}");
-    assert!(e.to_string().contains("changed since"), "{e}");
+    assert!(
+        e.to_string().contains("changed while this remux ran"),
+        "{e}"
+    );
 }
 
 #[cfg(unix)]
