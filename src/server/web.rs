@@ -3308,7 +3308,7 @@ fn handle_update_keydb(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     }
 
     use crate::server::keysource::KeydbError;
-    match crate::server::keysource::refresh_keydb(cfg, &keydb_url) {
+    match crate::server::keysource::refresh_keydb(cfg, &keydb_url, KEYDB_FETCH_TIMEOUT) {
         Ok(result) => {
             let body = serde_json::json!({
                 "ok": true,

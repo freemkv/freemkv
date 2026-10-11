@@ -184,32 +184,32 @@ impl std::fmt::Display for KeydbError {
 }
 
 /// Download the keydb at `url` through the address guard (resolve once, pin the connection,
-/// no redirects, [`crate::server::web::KEYDB_FETCH_TIMEOUT`] end to end) and save it to the
+/// no redirects, `limit` end to end: the caller's own budget) and save it to the
 /// service-canonical path. The one fetch behind boot, the daily refresh and the HTTP update.
 /// (The app's `keydb_fetch` is not reused: it has no end-to-end ceiling and a smaller cap.)
 pub fn refresh_keydb(
     cfg: &std::sync::RwLock<Config>,
     url: &str,
+    limit: std::time::Duration,
 ) -> std::result::Result<SaveReport, KeydbError> {
     use crate::server::web;
     // Resolve+validate once, then pin the connection to those IPs so DNS rebinding can't
     // redirect the fetch between validation and connect.
     let pinned = web::validate_fetch_url(url).map_err(KeydbError::UrlRejected)?;
-    let resp =
-        match web::keydb_update_call(pinned, url, web::KEYDB_FETCH_TIMEOUT, web::STALL_TIMEOUT) {
-            Ok(resp) => resp,
-            Err(ureq::Error::StatusCode(code)) => return Err(KeydbError::Status(code)),
-            Err(e) => {
-                // Detail stays in the log, through the URL-free `ureq_error_kind`.
-                let kind = web::ureq_error_kind(&e);
-                tracing::warn!(
-                    origin = %crate::server::webhook::webhook_url_origin(url),
-                    error_kind = %kind,
-                    "keydb update: could not connect to configured KEYDB server"
-                );
-                return Err(KeydbError::Connect(kind));
-            }
-        };
+    let resp = match web::keydb_update_call(pinned, url, limit, web::STALL_TIMEOUT) {
+        Ok(resp) => resp,
+        Err(ureq::Error::StatusCode(code)) => return Err(KeydbError::Status(code)),
+        Err(e) => {
+            // Detail stays in the log, through the URL-free `ureq_error_kind`.
+            let kind = web::ureq_error_kind(&e);
+            tracing::warn!(
+                origin = %crate::server::webhook::webhook_url_origin(url),
+                error_kind = %kind,
+                "keydb update: could not connect to configured KEYDB server"
+            );
+            return Err(KeydbError::Connect(kind));
+        }
+    };
     let body = web::read_capped_keydb_body(resp.into_body().into_reader(), web::KEYDB_MAX_BYTES)
         .map_err(|e| match e {
             web::KeydbReadError::Io => KeydbError::Read,

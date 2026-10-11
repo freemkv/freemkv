@@ -1025,7 +1025,11 @@ fn refresh_keydb_reports_each_failure_by_cause() {
     use std::io::{Read, Write};
     let cfg = std::sync::RwLock::new(Config::default());
     assert!(matches!(
-        refresh_keydb(&cfg, "ftp://example.com/k"),
+        refresh_keydb(
+            &cfg,
+            "ftp://example.com/k",
+            std::time::Duration::from_secs(5)
+        ),
         Err(KeydbError::UrlRejected(_))
     ));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1037,8 +1041,45 @@ fn refresh_keydb_reports_each_failure_by_cause() {
         let _ = sock
             .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     });
-    let err = refresh_keydb(&cfg, &format!("http://127.0.0.1:{port}/k")).unwrap_err();
+    let err = refresh_keydb(
+        &cfg,
+        &format!("http://127.0.0.1:{port}/k"),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap_err();
     upstream.join().unwrap();
     assert!(matches!(err, KeydbError::Status(404)), "{err:?}");
     assert!(!err.is_write_failure());
+}
+
+#[test]
+fn refresh_keydb_honours_the_limit_its_caller_passes() {
+    use std::io::Read;
+    let cfg = std::sync::RwLock::new(Config::default());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf);
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    });
+    let t = std::time::Instant::now();
+    let err = refresh_keydb(
+        &cfg,
+        &format!("http://127.0.0.1:{port}/k"),
+        std::time::Duration::from_millis(500),
+    )
+    .unwrap_err();
+    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{err:?}");
+    assert!(matches!(err, KeydbError::Connect(_)), "{err:?}");
+    upstream.join().unwrap();
+}
+
+#[test]
+fn each_caller_passes_its_own_keydb_budget() {
+    let daemon = include_str!("daemon.rs");
+    assert!(daemon.contains("refresh_keydb(cfg, url, crate::server::web::KEYDB_TRANSFER_BUDGET)"));
+    let web = include_str!("web.rs");
+    assert!(web.contains("refresh_keydb(cfg, &keydb_url, KEYDB_FETCH_TIMEOUT)"));
 }

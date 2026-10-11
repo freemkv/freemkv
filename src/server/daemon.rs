@@ -435,7 +435,7 @@ fn fetch_keydb(cfg: &std::sync::RwLock<config::Config>, url: &str, boot: bool) {
             "KEYDB update failed",
         )
     };
-    match keysource::refresh_keydb(cfg, url) {
+    match keysource::refresh_keydb(cfg, url, crate::server::web::KEYDB_TRANSFER_BUDGET) {
         Ok(r) => log::syslog(&format!(
             "{saved}: {} entries -> {}",
             r.entries,
