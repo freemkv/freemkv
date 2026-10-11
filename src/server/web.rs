@@ -123,6 +123,15 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     ),
 ];
 
+// This process image's id for the UI: a restart (exec keeps the pid) gets a new one.
+static BOOT_ID: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
+        .to_string()
+});
+
 // The app's own paths: each serves the shell, which routes client-side.
 const PAGES: &[&str] = &[
     "/",
@@ -356,11 +365,11 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
             .clone();
         json_response(request, 200, &get_state_json(&staging_dir));
     } else if is_get && url == "/api/version" {
-        json_response(
-            request,
-            200,
-            &format!("{{\"version\":\"{}\"}}", crate::server::VERSION_LABEL),
-        );
+        let body = serde_json::json!({
+            "version": crate::server::VERSION_LABEL,
+            "boot": BOOT_ID.as_str(),
+        });
+        json_response(request, 200, &body.to_string());
     } else if is_get && url == "/api/settings" {
         // Snapshot and drop the guard: rendering stats the keydb path, and
         // filesystem I/O (NFS) must not stall config writers.
@@ -389,13 +398,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     } else if is_get && url == "/api/system" {
         handle_system_info(request, cfg);
     } else if is_post && url == "/api/system/reboot" {
-        crate::server::REBOOT.store(true, std::sync::atomic::Ordering::Release);
-        crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
-        json_response(
-            request,
-            202,
-            r#"{"ok":true,"rebooting":true,"message":"Library is restarting; durable jobs and audit state are preserved."}"#,
-        );
+        handle_reboot(request);
     } else if is_post && url == "/api/move-errors/clear-all" {
         crate::server::mover::clear_all_move_errors();
         json_response(request, 200, r#"{"ok":true}"#);
@@ -2734,6 +2737,57 @@ fn roll_back_settings(
         *c = previous.clone();
         config::apply_decrypt_threads(previous.decrypt_threads);
     }
+}
+
+// POST /api/system/reboot: drain, then relaunch (see daemon::run). Refused (409) where
+// nothing would start the daemon again after it exits.
+fn handle_reboot(request: tiny_http::Request) {
+    if !relaunch_supported() {
+        let error = crate::strings::get_or(
+            "server.reboot.no_supervisor",
+            "Reboot is unavailable: this server was not started as a service, so nothing would start it again. Restart it yourself instead.",
+        );
+        let body = serde_json::json!({ "ok": false, "error": error });
+        return json_response(request, 409, &body.to_string());
+    }
+    crate::server::REBOOT.store(true, Ordering::Release);
+    crate::server::SHUTDOWN.store(true, Ordering::Release);
+    let message = crate::strings::get_or(
+        "server.reboot.restarting",
+        "Restarting: running work stops at its next safe point, then the server restarts.",
+    );
+    let body = serde_json::json!({
+        "ok": true,
+        "rebooting": true,
+        "boot": BOOT_ID.as_str(),
+        "message": message,
+    });
+    json_response(request, 202, &body.to_string());
+}
+
+// Linux re-execs itself; elsewhere the daemon exits 75 and needs a service manager.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn relaunch_supported() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn relaunch_supported() -> bool {
+    launchd_job(std::env::var_os("XPC_SERVICE_NAME").as_deref())
+}
+
+#[cfg(not(unix))]
+fn relaunch_supported() -> bool {
+    false
+}
+
+// launchd sets XPC_SERVICE_NAME to the job label; a terminal inherits "0" or the label
+// of the app it runs in ("application.…"), and neither restarts a server.
+#[cfg(target_os = "macos")]
+fn launchd_job(xpc_service_name: Option<&std::ffi::OsStr>) -> bool {
+    xpc_service_name
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| !name.is_empty() && name != "0" && !name.starts_with("application."))
 }
 
 fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {

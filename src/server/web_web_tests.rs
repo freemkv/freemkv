@@ -4410,30 +4410,83 @@ mod http {
         );
     }
 
-    #[test]
-    fn system_reboot_requests_a_fresh_instance_and_preserves_durable_state() {
-        // Own process: the reboot sets SHUTDOWN, which refuses every rip spawn.
+    // Run `name` (in `http`) alone in a child process with `env` applied: a reboot sets
+    // the process-wide SHUTDOWN, which refuses every rip spawn.
+    fn reboot_route_in_child(name: &str, env: Option<&str>) -> bool {
         const CHILD: &str = "FREEMKV_TEST_REBOOT_ROUTE_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "server::web::web_tests::http::system_reboot_requests_a_fresh_instance_and_preserves_durable_state",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "{status}");
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                &format!("server::web::web_tests::http::{name}"),
+                "--nocapture",
+            ])
+            .env(CHILD, "1");
+        match env {
+            Some(label) => child.env("XPC_SERVICE_NAME", label),
+            None => child.env_remove("XPC_SERVICE_NAME"),
+        };
+        let status = child.status().unwrap();
+        assert!(status.success(), "{name}: {status}");
+        false
+    }
+
+    fn version_boot(cfg: &Arc<RwLock<Config>>) -> String {
+        let (code, body) = roundtrip(cfg, "GET", "/api/version", None, &[]);
+        assert_eq!(code, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["version"], crate::server::VERSION_LABEL);
+        v["boot"].as_str().unwrap_or_default().to_string()
+    }
+
+    // The UI tells a restarted server from the old one by its boot id; the pid cannot
+    // do that, as exec keeps it.
+    #[test]
+    fn version_reports_a_stable_boot_id() {
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let boot = version_boot(&cfg);
+        assert!(!boot.is_empty());
+        assert_eq!(version_boot(&cfg), boot);
+    }
+
+    #[test]
+    fn system_reboot_requests_a_relaunch() {
+        if !reboot_route_in_child(
+            "system_reboot_requests_a_relaunch",
+            Some("io.freemkv.library"),
+        ) {
             return;
         }
         let cfg = Arc::new(RwLock::new(Config::default()));
+        let boot = version_boot(&cfg);
         let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
         assert_eq!(code, 202, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["rebooting"], true);
+        assert_eq!(v["boot"], boot.as_str());
+        assert!(!v["message"].as_str().unwrap_or_default().is_empty());
         assert!(crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
         assert!(crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    // A bare macOS run has no launchd job to start it again, so a reboot would only stop it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_reboot_is_refused_without_a_service_manager() {
+        if !reboot_route_in_child("system_reboot_is_refused_without_a_service_manager", None) {
+            return;
+        }
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
+        assert_eq!(code, 409, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(!v["error"].as_str().unwrap_or_default().is_empty());
+        assert!(!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
     }
 
     // ── handle_device_log (GET /api/logs/<device>) ──────────────────

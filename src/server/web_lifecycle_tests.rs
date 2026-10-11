@@ -82,6 +82,22 @@ fn wait_for_zero_waits_for_held_handlers_within_its_bound() {
     release.join().unwrap();
 }
 
+// Only a launchd job label means a service manager will start the daemon again.
+#[cfg(target_os = "macos")]
+#[test]
+fn only_a_launchd_job_label_counts_as_a_service_manager() {
+    use std::ffi::OsStr;
+    assert!(launchd_job(Some(OsStr::new("io.freemkv.library"))));
+    for terminal in [
+        None,
+        Some(""),
+        Some("0"),
+        Some("application.com.apple.Terminal.1234"),
+    ] {
+        assert!(!launchd_job(terminal.map(OsStr::new)), "{terminal:?}");
+    }
+}
+
 // tiny_http's accept thread exits after reporting an accept error, so the port
 // is dead for good: like a failed bind, that must stop the daemon visibly
 // (container restart policy) rather than leave workers running with no UI.

@@ -24,6 +24,51 @@ function storageFolderRow(m) {
     + '<td class="num"><span class="muted small">' + (m.latency_ms != null ? m.latency_ms + ' ms' : '') + '</span></td></tr>';
 }
 
+const NO_ANSWER = 'the server did not answer';
+const RESTARTING = 'Restarting… running work stops at its next safe point, then the server restarts. This page reconnects by itself.';
+const RESTART_NOTES = {
+  slow: 'Still restarting. If freemkv was started by hand rather than as a service, start it again.',
+  lost: 'The server has not come back; check the service logs.',
+};
+
+// Ask for a reboot and resolve to the /api/version answer read just before it, which the
+// wait compares against. A reboot answer lost to the restart itself still counts.
+async function requestReboot(call) {
+  const before = await call('GET', '/api/version').catch(() => null);
+  try {
+    const r = await call('POST', '/api/system/reboot');
+    return before || {boot: r && r.boot};
+  } catch (e) {
+    if (before && e.message === NO_ANSWER) return before;
+    throw e;
+  }
+}
+
+// Poll every 2 s until a server with a boot id other than `boot` answers (null if the
+// page is left first); `note` hears 'slow' after a minute and 'lost' after six.
+async function awaitRestart(boot, {get, sleep, now, stale, note}) {
+  const started = now();
+  let stage = '';
+  while (!stale()) {
+    await sleep(2000);
+    if (stale()) break;
+    const v = await get().catch(() => null);
+    if (v && v.boot && v.boot !== boot) return v;
+    const waited = now() - started;
+    const next = waited >= 360000 ? 'lost' : waited >= 60000 ? 'slow' : '';
+    if (next !== stage) { stage = next; note(stage); }
+  }
+  return null;
+}
+
+// GET /api/version, given up after 2 s so hung requests to a stopping server do not
+// fill the browser's connection pool.
+function versionWithin2s() {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 2000);
+  return api('GET', '/api/version', undefined, abort.signal).finally(() => clearTimeout(timer));
+}
+
 export default {
   title: 'System',
   mount(view, ctx) {
@@ -42,10 +87,11 @@ export default {
         <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>Health</th><th>Space</th><th>Last good access</th><th>Last error</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>
       <section class="card" style="margin-top:1.25rem"><div class="toolbar"><b>Staging</b><button class="btn btn-ghost btn-sm" id="clear-staging">Clear staging</button></div><p class="small muted" id="staged-kept" style="margin:.6rem 0 0"></p><p class="small muted" style="margin:.4rem 0 0">Removes failed rips (including their saved disc images) and empty leftover entries. Anything ripping, muxing, held for review, resumable, corrected or not yet delivered is kept.</p></section>`;
     let sys = null;
+    let restarting = false;
     const paint = () => {
       const d = sys;
       if (!d || ctx.stale()) return;
-      put($('#lede', view), 'freemkv <b>' + esc(d.version_label) + '</b> · '
+      if (!restarting) put($('#lede', view), 'freemkv <b>' + esc(d.version_label) + '</b> · '
         + storageSummary(d));
       put($('#about', view), '<dt>freemkv</dt><dd class="mono">' + esc(d.version_label) + '</dd>'
         + '<dt>Rip library</dt><dd class="mono">' + esc(d.libfreemkv) + '</dd>'
@@ -56,7 +102,7 @@ export default {
       if (document.activeElement !== dbg) { dbg.checked = !!d.debug_enabled; dbg.nextElementSibling.textContent = d.debug_enabled ? 'On' : 'Off'; }
       put($('#logdir', view), 'Logs live in <span class="mono">' + esc(d.log_dir) + '</span>. The download bundles every one of them.');
     };
-    const load = () => api('GET', '/api/system').then(d => { sys = d; paint(); }).catch(e => ctx.stale() || put($('#lede', view), '<span style="color:var(--bad)">Could not load: ' + esc(e.message) + '</span>'));
+    const load = () => api('GET', '/api/system').then(d => { sys = d; paint(); }).catch(e => ctx.stale() || restarting || put($('#lede', view), '<span style="color:var(--bad)">Could not load: ' + esc(e.message) + '</span>'));
     load();
     ctx.every(10000, load);
 
@@ -68,11 +114,24 @@ export default {
     $('#syslog', view).addEventListener('click', () => openDeviceTerminal('system', false));
     $('#bundle', view).addEventListener('click', () => toast('Preparing the log bundle…', 'info'));
     $('#reboot', view).addEventListener('click', (e) => twoStep(e.currentTarget, async (btn) => {
-      const r = await act(btn, () => api('POST', '/api/system/reboot'), 'Reboot library');
-      if (r) {
-        put($('#lede', view), '<span class="muted">Library restarting… reconnecting shortly.</span>');
-        btn.disabled = true;
-      }
+      const before = await act(btn, () => requestReboot(api), 'Reboot library');
+      if (!before) return;
+      restarting = true;
+      btn.disabled = true;
+      put($('#lede', view), '<span class="muted">' + RESTARTING + '</span>');
+      const v = await awaitRestart(before.boot, {
+        get: versionWithin2s,
+        sleep: ms => new Promise(done => setTimeout(done, ms)),
+        now: Date.now,
+        stale: ctx.stale,
+        note: stage => put($('#lede', view), '<span class="muted">' + RESTARTING + ' ' + RESTART_NOTES[stage] + '</span>'),
+      });
+      if (!v || ctx.stale()) return;
+      if (before.version && v.version !== before.version) return location.reload();
+      restarting = false;
+      btn.disabled = false;
+      toast('Library restarted', 'info');
+      load();
     }, 'Confirm reboot'));
     $('#clear-staging', view).addEventListener('click', (e) => twoStep(e.currentTarget, async (btn) => {
       const r = await act(btn, () => api('POST', '/api/library/staged/clear'), 'Clear staging');
