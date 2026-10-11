@@ -241,3 +241,29 @@ fn the_rip_holds_only_an_inserts_rip_for_a_missing_staging_folder() {
         forget(device);
     }
 }
+
+// The verified-fingerprint branch holds an insert's rip for a staging folder that cannot be
+// listed, and never an operator's.
+#[test]
+fn a_verified_scan_holds_only_an_inserts_rip_for_an_unusable_staging_folder() {
+    crate::strings::set_locale("en");
+    for insert in [false, true] {
+        let base = tempfile::tempdir().unwrap();
+        let file = base.path().join("staging");
+        std::fs::write(&file, b"").unwrap();
+        let cfg = Config {
+            staging_dir: file.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let device = "_staging_scan_verified_insert_test";
+        assert!(scan_staging_job(device, &cfg, Ok("sample-v1-ab".into()), insert).is_none());
+        let row = STATE.lock().unwrap().get(device).cloned().unwrap();
+        assert!(
+            row.last_error.contains("not a folder"),
+            "{}",
+            row.last_error
+        );
+        assert_eq!(staging_held(device), insert, "insert {insert}");
+        forget(device);
+    }
+}

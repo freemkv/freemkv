@@ -416,7 +416,7 @@ fn clear_kept_remuxes_with(
         picked(&target);
         match discard_kept(lib, &target, Some(stage), true) {
             Ok(true) => discarded += 1,
-            Ok(false) => {}
+            Ok(false) | Err((404, _)) => {}
             Err((_, msg)) => {
                 failed += 1;
                 tracing::warn!(target = %target.display(), error = %msg, "kept remux was not cleared");
@@ -454,7 +454,10 @@ fn discard_kept(
     }
     match lib.queue.take_staged(target, abandoned) {
         Ok(path) if path == kept => {}
+        // A kept remux whose job was deliberately re-queued is no failure however far the
+        // copy-in got: waiting, already claimed, or already finished.
         Err(Untaken::Waiting) => return Ok(false),
+        Err(Untaken::Copying | Untaken::Gone) if abandoned => return Ok(false),
         Ok(_) | Err(Untaken::Gone) => {
             return Err((409, "the kept file changed; reload and try again".into()));
         }

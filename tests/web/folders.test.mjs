@@ -178,6 +178,9 @@ test('a held queue file is shown beside a failed or slow folder, never hidden by
     assert.match(html, /library-queue\.json/, html);
     assert.ok(!html.includes('start on their own'), html);
   }
+  // The failed or slow folder's own banner is still rendered beside the hold.
+  assert.match(f.folderBanner([stale], hold, true), /remounted \(stale file handle\)/);
+  assert.match(f.folderBanner([slow], hold, true), /source ISO folder has not answered yet/);
   const label = f.remuxLinkLabel(hold, stale);
   assert.equal(label.aria, 'The remux queue is held until its file can be read');
   assert.match(label.title, /queue is held/);

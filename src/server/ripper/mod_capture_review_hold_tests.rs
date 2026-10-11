@@ -197,3 +197,34 @@ fn a_rip_time_hold_is_dispatched_by_the_mux_worker_once_corrected() {
     assert_eq!(marker.iso_path, iso.to_string_lossy());
     assert_eq!(marker.mapfile_path, map.to_string_lossy());
 }
+
+// The rip's own call site: a plan that fails after the sweep holds the capture, and the drive
+// keeps the hold's say (here, that it could not be saved), not the bare reason.
+#[test]
+fn a_failed_plan_at_the_hand_off_keeps_the_unsaved_hold_on_the_drive() {
+    crate::strings::set_locale("en");
+    let dir = scratch("failed-plan").join("gone");
+    let device = "_capture_failed_plan_test";
+    hold_failed_plan(
+        device,
+        &dir,
+        ("/x/Show.iso", "/x/Show.iso.mapfile"),
+        None,
+        &crate::server::planner::PlanError::EpisodeRange,
+    );
+    crate::server::muxer::MUX_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(dir.to_string_lossy().as_ref());
+    let row = STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(device)
+        .unwrap();
+    assert_eq!(row.status, "error");
+    assert!(
+        row.last_error.contains("Could not save the review hold:"),
+        "{}",
+        row.last_error
+    );
+}

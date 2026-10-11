@@ -298,3 +298,41 @@ fn clear_staging_never_takes_a_kept_remux_requeued_since_its_snapshot() {
     assert!(mkv.exists());
     assert_eq!(lib.queue.snapshot().count(JobState::Queued), 1);
 }
+
+// A kept remux whose copy-in is under way or already finished is no failure to clear.
+#[test]
+fn clear_staging_counts_a_copying_or_finished_kept_remux_as_neither_cleared_nor_failed() {
+    let t = tempfile::tempdir().unwrap();
+    let stage = t.path().join("stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    let (target, mkv) = kept_job(&lib, &stage);
+    let job = lib.queue.claim_next().unwrap();
+    lib.queue.finish(
+        job.id,
+        super::super::queue::JobResult::Failed {
+            code: None,
+            message: "the copy failed".into(),
+            finished_at: 0,
+        },
+    );
+    let claimed = std::cell::Cell::new(0);
+    let copying = clear_kept_remuxes_with(&lib, &stage, |_| {
+        assert!(lib.queue.retry_staged_now(&target));
+        claimed.set(lib.queue.claim_next().unwrap().id);
+    });
+    assert_eq!(copying, (0, 0), "claimed by the worker");
+    assert!(mkv.exists());
+    lib.queue.finish(
+        claimed.get(),
+        super::super::queue::JobResult::Failed {
+            code: None,
+            message: "the copy failed".into(),
+            finished_at: 0,
+        },
+    );
+    // The copy-in finishes and drops its kept file before the take.
+    let gone = clear_kept_remuxes_with(&lib, &stage, |_| lib.queue.set_staged(claimed.get(), None));
+    assert_eq!(gone, (0, 0));
+}

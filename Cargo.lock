@@ -332,7 +332,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "serde_json",
 ]
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -1028,7 +1028,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libfreemkv"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "aes",
  "base64",
@@ -1131,7 +1131,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1554,7 +1554,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1801,7 +1801,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
