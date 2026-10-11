@@ -358,32 +358,61 @@ fn replacing_a_completed_destination_holds_linkage_and_cleanup() {
 }
 
 #[test]
-fn replaced_destination_parent_is_not_rebound_by_its_path() {
+fn a_replaced_root_after_partial_delivery_holds_cleanup() {
     let _guard = super::super::TEST_STATE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (_temp, dir, cfg, manifest) = fixture();
+    Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap();
     let root = Path::new(&manifest.roots[0]);
-    std::fs::rename(root, root.with_file_name("old-output")).unwrap();
+    let old = root.with_file_name("old-output");
+    std::fs::rename(root, &old).unwrap();
     std::fs::create_dir(root).unwrap();
     super::super::check_and_move(&cfg);
-    assert!(
-        manifest
-            .entries
-            .iter()
-            .all(|entry| entry.source.exists() && !entry.destination.exists())
-    );
     assert!(dir.join(FILE).exists());
     assert!(crate::server::library::links::load(Path::new(&cfg.autorip_dir)).is_empty());
+    let first = &manifest.entries[0];
+    assert!(old.join(first.destination.file_name().unwrap()).exists());
+    assert!(!first.destination.exists() && !first.source.exists());
+    let row = super::super::MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get(dir.to_string_lossy().as_ref())
+        .cloned()
+        .unwrap();
+    assert!(row.reason.contains("delivery held"), "{}", row.reason);
+    super::super::clear_move_error(&dir.to_string_lossy());
 }
 
 #[test]
-fn changed_staging_directory_identity_refuses_journal_recovery() {
-    let (_temp, dir, _cfg, mut manifest) = fixture();
-    manifest.directory_id.0 = manifest.directory_id.0.wrapping_add(1);
-    manifest.save().unwrap();
-    assert!(Manifest::load(&dir).is_err());
-    assert!(manifest.entries.iter().all(|entry| entry.source.exists()));
+fn a_journal_moved_to_another_directory_is_refused() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let moved = dir.with_file_name("moved");
+    std::fs::rename(&dir, &moved).unwrap();
+    assert!(Manifest::load(&moved).is_err());
+    for entry in &manifest.entries {
+        assert!(moved.join(entry.source.file_name().unwrap()).exists());
+    }
+}
+
+#[test]
+fn the_journal_records_no_filesystem_ids() {
+    let (_temp, dir, _cfg, _) = fixture();
+    for index in 0..3 {
+        Manifest::deliver(&dir, index, &|_, _, _, _| {}).unwrap();
+    }
+    let journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join(FILE)).unwrap()).unwrap();
+    assert_eq!(journal["version"], 1);
+    let text = journal.to_string();
+    for id in [
+        "file_id",
+        "directory_id",
+        "destination_parent_id",
+        "published",
+    ] {
+        assert!(!text.contains(id), "{id} in {text}");
+    }
 }
 
 #[test]
@@ -991,5 +1020,61 @@ fn a_preallocated_destination_with_the_prepared_size_and_time_is_not_adopted() {
     assert_eq!(
         std::fs::read(&entry.destination).unwrap(),
         vec![0; prepared.len() as usize]
+    );
+}
+
+// Rewrite the journal as an older build wrote it, every filesystem id one device off:
+// what an SMB remount presents. Recorded sizes and times are kept.
+fn as_remounted_old_journal(dir: &Path) {
+    let path = dir.join(FILE);
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let remounted = |path: &Path| match libfreemkv::io::artifact_lock::file_identity(path) {
+        Ok((device, inode)) => serde_json::json!([device.wrapping_add(1), inode]),
+        Err(_) => serde_json::json!([1, 1]),
+    };
+    journal["directory_id"] = remounted(dir);
+    for entry in journal["entries"].as_array_mut().unwrap() {
+        let source = PathBuf::from(entry["source"].as_str().unwrap());
+        let destination = PathBuf::from(entry["destination"].as_str().unwrap());
+        entry["destination_parent_id"] = remounted(destination.parent().unwrap());
+        entry["source_identity"]["file_id"] = remounted(&source);
+        if entry["prepared"].is_object() {
+            entry["prepared"]["file_id"] = remounted(&destination);
+        }
+        entry["published"] = entry["prepared"].clone();
+    }
+    for saved in journal["cleanup"].as_array_mut().unwrap() {
+        let file = PathBuf::from(saved["path"].as_str().unwrap());
+        saved["identity"]["file_id"] = remounted(&file);
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+}
+
+#[test]
+fn an_old_journal_whose_ids_all_changed_on_remount_completes() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, manifest) = fixture();
+    Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap();
+    // Entry 1 was published from its temporary name; the crash came before completion.
+    let entry = &manifest.entries[1];
+    let candidate = entry.destination.with_extension("part");
+    std::fs::copy(&entry.source, &candidate).unwrap();
+    Manifest::prepare(&dir, 1, &candidate).unwrap();
+    libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
+    as_remounted_old_journal(&dir);
+    super::super::check_and_move(&cfg);
+    let row = super::super::MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get(dir.to_string_lossy().as_ref())
+        .map(|e| e.reason.clone());
+    assert!(!dir.exists(), "a remounted journal completes: {row:?}");
+    assert!(manifest.entries.iter().all(|e| e.destination.exists()));
+    assert_eq!(
+        crate::server::library::links::load(Path::new(&cfg.autorip_dir)).len(),
+        2
     );
 }

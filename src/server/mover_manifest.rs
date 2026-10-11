@@ -4,6 +4,8 @@
 //! (`util::Stamp`). No file is known by device/inode: SMB renumbers devices on remount
 //! and derives inodes from names. Adopting a destination found after a crash also
 //! needs its first and last 64 KiB to match the staged source, while that exists.
+//! Every destination folder must still resolve to the path recorded at freeze, so a
+//! folder swapped for a link (into staging, say) never passes for the destination.
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,7 +21,6 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 struct Entry {
     source: PathBuf,
     destination: PathBuf,
-    destination_parent_id: (u64, u64),
     source_identity: Stamp,
     prepared: Option<Stamp>,
     completed: bool,
@@ -45,7 +46,6 @@ struct Cleanup {
 pub(super) struct Manifest {
     version: u32,
     directory: PathBuf,
-    directory_id: (u64, u64),
     pub marker: serde_json::Value,
     pub outputs: Vec<crate::server::ripper::staging::Output>,
     pub roots: Vec<String>,
@@ -84,7 +84,6 @@ impl Manifest {
         let directory = dir.canonicalize()?;
         if manifest.version != 1
             || manifest.directory != directory
-            || manifest.directory_id != libfreemkv::io::artifact_lock::file_identity(&directory)?
             || manifest.entries.is_empty()
             || manifest.entries.iter().any(|e| {
                 e.source.parent() != Some(directory.as_path())
@@ -114,7 +113,6 @@ impl Manifest {
         moves: &[(PathBuf, String)],
     ) -> io::Result<Self> {
         let directory = dir.canonicalize()?;
-        let directory_id = libfreemkv::io::artifact_lock::file_identity(&directory)?;
         let roots = roots
             .into_iter()
             .map(|root| {
@@ -138,7 +136,6 @@ impl Manifest {
                     .file_name()
                     .ok_or_else(|| io::Error::other("delivery target has no filename"))?,
             );
-            let destination_parent_id = libfreemkv::io::artifact_lock::file_identity(&parent)?;
             match std::fs::symlink_metadata(&destination) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
@@ -160,7 +157,6 @@ impl Manifest {
             entries.push(Entry {
                 source,
                 destination,
-                destination_parent_id,
                 source_identity,
                 prepared: None,
                 completed: false,
@@ -181,7 +177,6 @@ impl Manifest {
         let manifest = Self {
             version: 1,
             directory,
-            directory_id,
             marker,
             outputs,
             roots,
@@ -249,7 +244,7 @@ impl Manifest {
             .entries
             .get_mut(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?;
-        verify_parent(&entry.destination, entry.destination_parent_id)?;
+        verify_parent(&entry.destination)?;
         entry.source_identity.verify(&entry.source)?;
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -276,7 +271,7 @@ impl Manifest {
             .get(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?
             .clone();
-        verify_parent(&entry.destination, entry.destination_parent_id)?;
+        verify_parent(&entry.destination)?;
         super::sweep_temporaries(&entry.destination)?;
         // Ours only as prepared: its recorded size and pinned time, and on adoption its
         // head and tail; never a pathname, a valid-looking media file, or size alone.
@@ -333,6 +328,7 @@ impl Manifest {
             .entries
             .get_mut(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?;
+        verify_parent(&entry.destination)?;
         entry.prepared()?.verify(&entry.destination)?;
         entry.completed = true;
         manifest.save()
@@ -340,7 +336,7 @@ impl Manifest {
 
     pub fn verify_delivered(&self) -> io::Result<()> {
         for entry in &self.entries {
-            verify_parent(&entry.destination, entry.destination_parent_id)?;
+            verify_parent(&entry.destination)?;
             if !entry.completed {
                 return Err(io::Error::other("delivery plan is incomplete"));
             }
@@ -365,7 +361,7 @@ impl Manifest {
         let started = std::time::Instant::now();
         let mut targets = Vec::new();
         for entry in &self.entries {
-            verify_parent(&entry.destination, entry.destination_parent_id)?;
+            verify_parent(&entry.destination)?;
             targets.push(entry.destination.clone());
         }
         targets.sort();
@@ -419,9 +415,6 @@ impl Manifest {
 
     // `removed` runs after the planned files are gone (tests add a late arrival there).
     fn cleanup_with(&self, removed: &dyn Fn()) -> io::Result<()> {
-        if libfreemkv::io::artifact_lock::file_identity(&self.directory)? != self.directory_id {
-            return Err(io::Error::other("staging directory identity changed"));
-        }
         self.verify_delivered()?;
         // Refuse newly introduced or changed files. Retain the journal until
         // last so a crash halfway through cleanup still retries linkage/cleanup.
@@ -444,7 +437,7 @@ impl Manifest {
         }
         for entry in &self.cleanup {
             if let Some(delivered) = self.entries.iter().find(|e| e.source == entry.path) {
-                verify_parent(&delivered.destination, delivered.destination_parent_id)?;
+                verify_parent(&delivered.destination)?;
                 delivered.prepared()?.verify(&delivered.destination)?;
             }
             match entry.identity.verify(&entry.path) {
@@ -471,14 +464,16 @@ impl Manifest {
     }
 }
 
-fn verify_parent(path: &Path, expected_id: (u64, u64)) -> io::Result<()> {
+// The destination's folder still resolves to itself (it was canonical at freeze).
+fn verify_parent(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("delivery target has no parent"))?;
-    if parent.canonicalize()? != parent
-        || libfreemkv::io::artifact_lock::file_identity(parent)? != expected_id
-    {
-        return Err(io::Error::other("delivery target parent changed"));
+    if parent.canonicalize()? != parent {
+        return Err(io::Error::other(format!(
+            "destination folder no longer resolves to itself: {}",
+            parent.display()
+        )));
     }
     Ok(())
 }
