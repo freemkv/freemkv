@@ -391,10 +391,11 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
         };
     };
     let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-    // A count ahead of the journal's is one the journal failed to record: it stands.
+    // The row already holds this state (its deadline clamped when first derived) or one the
+    // journal failed to record: it stands. Re-deriving would clamp afresh every pass.
     if errors
         .get(path)
-        .is_some_and(|row| row.attempts > state.attempts)
+        .is_some_and(|row| row.attempts >= state.attempts)
     {
         drop(errors);
         return if move_retry_ready(path, now) {

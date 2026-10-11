@@ -875,3 +875,39 @@ fn retry_reports_whether_it_was_scheduled() {
     assert!(row(key).is_none() && requested(key));
     prune_move_errors("/test-retry-report", &HashSet::new());
 }
+
+// A far-future journaled not_before is clamped once, when the row is restored; later passes
+// keep that deadline instead of clamping afresh from "now" forever, so the delivery runs.
+#[test]
+fn a_clamped_backoff_runs_out_across_passes() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dest) = journaled(tmp.path(), "Clamped");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    super::manifest::Manifest::record_retry(
+        &job,
+        Some(super::manifest::RetryState {
+            attempts: 1,
+            not_before: Some(std::time::SystemTime::now() + Duration::from_secs(365 * 24 * 3600)),
+            reason: "copy to destination failed".into(),
+            hint: "retry".into(),
+        }),
+    )
+    .unwrap();
+    check_and_move(&cfg);
+    assert!(!dest.exists(), "waits out the clamped backoff first");
+    // The 120 s run out.
+    if let Some(r) = MOVE_ERRORS.lock().unwrap().get_mut(&key) {
+        r.retry_after = Some(std::time::Instant::now());
+    }
+    for _ in 0..2 {
+        check_and_move(&cfg);
+    }
+    let left = row(&key);
+    clear_error(&key);
+    assert!(
+        dest.exists(),
+        "delivered once the clamped backoff ran out: {left:?}"
+    );
+}
