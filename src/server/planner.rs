@@ -598,14 +598,16 @@ mod tests {
         assert_eq!(plan.outputs[0].filename, "Show.mkv");
     }
 
+    // The engine's contract: a complete roster naming one episode is one output; one
+    // naming none proves nothing to select and is held (engine bbe7fd8), never guessed.
     #[test]
-    fn complete_authored_zero_or_one_episode_roster_keeps_single_output_policy() {
+    fn authored_one_episode_roster_is_one_output_and_an_empty_one_is_held() {
         let cfg = Config::default();
         let media = MediaMetadata {
             kind: Some(MediaKind::Tv),
             ..Default::default()
         };
-        for members in [0, 1] {
+        let disc = |members: usize| {
             let mut titles = vec![title(5700.0, 1000), title(90.0, 5)];
             for (index, title) in titles.iter_mut().enumerate() {
                 title.playlist_id = index as u16;
@@ -615,11 +617,17 @@ mod tests {
                     ordinal: (index < members).then_some(index),
                 };
             }
-            let plan = plan(&cfg, &titles, &media, Path::new("Show.mkv")).unwrap();
-            assert_eq!(plan.outputs.len(), 1);
-            assert_eq!(plan.outputs[0].filename, "Show.mkv");
-            assert_eq!(plan.outputs[0].episode, None);
-        }
+            titles
+        };
+        let plan_one = plan(&cfg, &disc(1), &media, Path::new("Show.mkv")).unwrap();
+        assert_eq!(plan_one.outputs.len(), 1);
+        assert_eq!(plan_one.outputs[0].filename, "Show.mkv");
+        assert_eq!(plan_one.outputs[0].episode, None);
+        assert!(matches!(
+            plan(&cfg, &disc(0), &media, Path::new("Show.mkv")),
+            Err(PlanError::Selection(review))
+                if review.reason == freemkv_engine::SelectionReviewReason::IncompleteEpisodeRoster
+        ));
     }
 
     fn authored_two_episode_disc() -> Vec<DiscTitle> {
