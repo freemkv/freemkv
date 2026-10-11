@@ -358,55 +358,48 @@ impl Manifest {
         &self,
         wait: std::time::Duration,
     ) -> io::Result<Vec<libfreemkv::io::ArtifactLock>> {
-        let started = std::time::Instant::now();
         let mut targets = Vec::new();
         for entry in &self.entries {
             verify_parent(&entry.destination)?;
             targets.push(entry.destination.clone());
         }
         targets.sort();
+        let Some(key) = targets.first().cloned() else {
+            return Ok(Vec::new());
+        };
+        if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "delivery lock wait cancelled",
+            ));
+        }
         let halt = libfreemkv::Halt::new();
-        let waiting_halt = halt.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let waiter = crate::server::daemon::spawn_background("mover-delivery-locks", move || {
-            let result = targets
-                .into_iter()
-                .map(|target| {
-                    libfreemkv::io::ArtifactLock::acquire(&target, &[], &waiting_halt)
-                        .map_err(io::Error::other)
-                })
-                .collect::<io::Result<Vec<_>>>();
-            let _ = tx.send(result);
-        })?;
-        loop {
-            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(result) => {
-                    let _ = waiter.join();
-                    return result;
+        // Busy means an earlier cancelled attempt is still draining; give it a moment.
+        for _ in 0..10 {
+            let (waiting_halt, owned) = (halt.clone(), targets.clone());
+            let acquired = crate::server::health::bounded(&key, wait, move || {
+                owned
+                    .into_iter()
+                    .map(|target| {
+                        libfreemkv::io::ArtifactLock::acquire(&target, &[], &waiting_halt)
+                            .map_err(io::Error::other)
+                    })
+                    .collect::<io::Result<Vec<_>>>()
+            });
+            match acquired {
+                crate::server::health::Bounded::Done(result) => return result,
+                crate::server::health::Bounded::Busy => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(io::Error::other("delivery lock worker stopped"));
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if started.elapsed() >= wait {
-                        halt.cancel();
-                        return Err(io::Error::new(
-                            io::ErrorKind::ResourceBusy,
-                            "another library operation holds a destination lock",
-                        ));
-                    }
-                    if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-                        halt.cancel();
-                        // The tracked worker releases any partial lock set on
-                        // cancellation; lifecycle drain accounts for its exit.
-                        return Err(io::Error::new(
-                            io::ErrorKind::Interrupted,
-                            "delivery lock wait cancelled",
-                        ));
-                    }
-                }
+                crate::server::health::Bounded::TimedOut => break,
             }
         }
+        // The abandoned acquire releases any partial lock set once cancelled.
+        halt.cancel();
+        Err(io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            "another library operation holds a destination lock",
+        ))
     }
 
     pub fn cleanup(&self) -> io::Result<()> {
