@@ -134,9 +134,13 @@ impl Stamp {
     pub fn read(path: &std::path::Path) -> std::io::Result<Self> {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
-        // No-follow open closes the check-then-open window for a swapped-in symlink.
+        // No-follow open closes the check-then-open window for a swapped-in symlink, and a
+        // non-blocking one lets a swapped-in FIFO be refused below instead of hanging.
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+        std::os::unix::fs::OpenOptionsExt::custom_flags(
+            &mut options,
+            libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        );
         // Read through an open handle: SMB clients refresh cached attributes on open.
         let metadata = options.open(path)?.metadata()?;
         if !metadata.is_file() {
@@ -252,6 +256,57 @@ pub fn source_lf(src: &str) -> std::borrow::Cow<'_, str> {
     } else {
         std::borrow::Cow::Borrowed(src)
     }
+}
+
+/// Create the folder `path` (one level) only on a live parent: refused when the parent is
+/// missing or an empty folder, which is what an unmounted share's mount point looks like
+/// (a write there would land on the local disk). An existing folder at `path` is fine.
+pub(crate) fn create_dir_on_live_parent(path: &std::path::Path) -> std::io::Result<()> {
+    if std::fs::metadata(path).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| std::io::Error::other(format!("{} has no parent folder", path.display())))?;
+    let mut entries = std::fs::read_dir(parent).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("the folder above {} is not there: {e}", path.display()),
+        )
+    })?;
+    if entries.next().is_none() {
+        return Err(std::io::Error::other(format!(
+            "not created: the folder above {} is empty (an unmounted share's mount point?)",
+            path.display()
+        )));
+    }
+    match std::fs::create_dir(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        other => other,
+    }
+}
+
+/// Run the test `path` alone in a child process with `env` set, returning its exit status.
+/// Panics unless the child ran exactly that one test: a filter matching nothing exits 0.
+#[cfg(test)]
+pub(crate) fn child_test(path: &str, env: &str) -> std::process::ExitStatus {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", path, "--nocapture"])
+        .env(env, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("running 1 test\n"),
+        "{path}: the child process did not run exactly this test:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.code() != Some(0) || stdout.contains("test result: ok. 1 passed"),
+        "{path}: the child exited 0 without passing it:\n{stdout}"
+    );
+    out.status
 }
 
 #[cfg(test)]

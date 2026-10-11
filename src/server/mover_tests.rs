@@ -2530,7 +2530,7 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
         assert!(
             recorded
                 .as_ref()
-                .is_some_and(|e| e.reason == "publication failed"),
+                .is_some_and(|e| e.reason.starts_with("publication failed: ")),
             "a failed copy that created no destination must not claim a \
                  partial copy needs hand-deleting, got: {recorded:?}"
         );
@@ -2656,7 +2656,7 @@ fn move_file_copy_failure_removes_this_attempts_dest() {
         assert!(
             recorded
                 .as_ref()
-                .is_some_and(|e| e.reason == "publication failed"),
+                .is_some_and(|e| e.reason.starts_with("publication failed: ")),
             "a failed copy that created no destination must not claim a \
                  partial copy needs hand-deleting, got: {recorded:?}"
         );
@@ -3626,15 +3626,7 @@ fn in_child(name: &str) -> bool {
     if std::env::var_os(CHILD).is_some() {
         return true;
     }
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            &format!("server::mover::tests::{name}"),
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .status()
-        .unwrap();
+    let status = crate::server::util::child_test(&format!("server::mover::tests::{name}"), CHILD);
     assert!(
         status.success(),
         "{name} failed in its child process: {status}"

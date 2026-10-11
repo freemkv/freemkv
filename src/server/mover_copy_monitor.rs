@@ -174,6 +174,8 @@ impl Monitor<'_> {
                 state.eta.clear();
             }
         }
+        // Shown first: the journal write below may sit on the same slow share.
+        super::commit_stall(&key);
     }
 
     fn worker_returned(&self) {

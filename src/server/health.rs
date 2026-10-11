@@ -222,6 +222,10 @@ pub struct Mount {
     // replaces a newer one, whichever is published last.
     #[serde(skip)]
     observed: u64,
+    // This verdict is a failed real write test: access() cannot clear it, only another
+    // write test that passes.
+    #[serde(skip)]
+    write_failed: bool,
 }
 
 // Orders the evidence behind published results.
@@ -236,6 +240,7 @@ impl Mount {
         let now = crate::server::util::epoch_secs();
         Mount {
             observed: observed_now(),
+            write_failed: false,
             role,
             path: path.to_path_buf(),
             ok: false,
@@ -476,7 +481,24 @@ const UNMOUNTED: &str = "the network share is not mounted";
 
 /// Check one folder now, on the calling thread (it may block on a dead mount).
 pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
+    check_with(role, path, want_write, probe_write)
+}
+
+// [`check`] with the write test given: the seam the tests use.
+fn check_with(
+    role: &'static str,
+    path: &Path,
+    want_write: bool,
+    write_test: fn(&Path) -> std::io::Result<()>,
+) -> Mount {
     let started = Instant::now();
+    // A folder whose last verdict is a failed write test is tested the same way again.
+    let write_tested = want_write
+        && LAST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|m| m.path == path && m.write_failed);
     let m = Mount::blank(role, path);
     if share_unmounted(path) {
         return m.failed(Fault::Unmounted, UNMOUNTED.into());
@@ -492,10 +514,16 @@ pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
     let mut m = m;
     if want_write {
         tracing::debug!(role, path = %path.display(), stage = "access", "folder probe");
-        let w = writable(path);
+        let w = if write_tested {
+            write_test(path)
+        } else {
+            writable(path)
+        };
         m.writable = Some(w.is_ok());
         if let Err(e) = w {
-            return m.failed(Fault::of(&e), format!("write access check failed: {e}"));
+            let mut m = m.failed(Fault::of(&e), format!("write access check failed: {e}"));
+            m.write_failed = write_tested;
+            return m;
         }
     }
     tracing::debug!(role, path = %path.display(), stage = "statvfs", "folder probe");
@@ -722,7 +750,10 @@ where
 #[derive(Clone, Copy)]
 enum Wait {
     Until(Instant),
-    // Until an answer or the hang verdict, whichever comes first.
+    // Until `Instant` for its own probe, but never for another caller's still out: a batch
+    // reports that folder as not answered and goes on to the next.
+    NoQueue(Instant),
+    // Until an answer or the hang verdict, whichever comes first, counted from the call.
     UntilHung,
 }
 
@@ -747,10 +778,15 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let far = Instant::now() + Duration::from_secs(365 * 24 * 3600);
+    let called = Instant::now();
+    // The whole call, waiting for an earlier probe included, is bounded by one deadline.
     let deadline = match wait {
-        Wait::Until(t) => t,
-        Wait::UntilHung => far,
+        Wait::Until(t) | Wait::NoQueue(t) => t,
+        Wait::UntilHung => called + hang_after,
+    };
+    let queue_until = match wait {
+        Wait::NoQueue(_) => called,
+        _ => deadline,
     };
     let refused = |hung| Pending {
         rx: None,
@@ -759,7 +795,7 @@ where
         mount,
     };
     let id = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
-    let started = {
+    {
         let mut held = IN_FLIGHT.probes.lock().unwrap_or_else(|e| e.into_inner());
         while let Some(age) = held
             .iter()
@@ -770,10 +806,10 @@ where
                 return refused(true);
             }
             let now = Instant::now();
-            if now >= deadline || stopping() {
+            if now >= queue_until || stopping() {
                 return refused(false);
             }
-            let slice = (hang_after - age).min(deadline - now).min(STOP_POLL);
+            let slice = (hang_after - age).min(queue_until - now).min(STOP_POLL);
             #[cfg(test)]
             tests::waiting(key);
             held = IN_FLIGHT
@@ -786,16 +822,14 @@ where
         if stopping() {
             return refused(false);
         }
-        let started = Instant::now();
         held.push(Probe {
             id,
             path: key.to_path_buf(),
             mount,
-            started: Some(started),
+            started: Some(Instant::now()),
             seq: observed_now(),
         });
-        started
-    };
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("folder-probe".into())
@@ -819,11 +853,7 @@ where
     }
     Pending {
         rx: Some(rx),
-        // Our own probe is waited for until it hangs, counted from when it started.
-        deadline: match wait {
-            Wait::Until(t) => t,
-            Wait::UntilHung => started + hang_after,
-        },
+        deadline,
         hung: false,
         mount,
     }
@@ -897,7 +927,7 @@ where
         .into_iter()
         .map(|(key, item)| {
             let f = f.clone();
-            begin_with(&key, Wait::Until(deadline), hang_after, move || f(item))
+            begin_with(&key, Wait::NoQueue(deadline), hang_after, move || f(item))
         })
         .collect();
     started
@@ -956,10 +986,9 @@ fn check_reporting(role: &'static str, path: PathBuf, want_write: bool) -> Mount
     result
 }
 
-// Check every folder at once, waiting up to `wait` between them; results keep the input
-// order. A probe out longer than `wait` reads "checking", one out for `hang_after` "not
-// responding"; `None` for a probe out less than `wait` (one started by someone else just now).
-// Either way the probe publishes its answer when it comes.
+// Check every folder at once within `wait`, in input order. A probe out longer than `wait`
+// reads "checking", one out for `hang_after` "not responding", a younger one `None`; each
+// probe publishes its answer whenever it comes.
 fn check_folders(
     folders: Vec<(&'static str, PathBuf, bool)>,
     wait: Duration,
@@ -1062,6 +1091,16 @@ enum Slot {
 // even before its first row exists.
 static WATCHED: Mutex<Vec<(&'static str, PathBuf)>> = Mutex::new(Vec::new());
 
+/// The role the health list watches `path` under ("Movies", "TV", ...), if it does.
+pub fn watched_role(path: &Path) -> Option<&'static str> {
+    WATCHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(_, p)| p == path)
+        .map(|(role, _)| *role)
+}
+
 // Publish a probe's answer, whenever it comes, for a folder the health list shows or watches.
 fn publish_answer(mut m: Mount) {
     let watched = WATCHED
@@ -1075,8 +1114,14 @@ fn publish_answer(mut m: Mount) {
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .any(|x| x.path == m.path);
+    // Worded for the watched folder, whatever role the prober gave ("output").
     if let Some(role) = watched {
         m.role = role;
+        if let Some(fault) = m.fault {
+            m.message = Some(fault.message(role));
+        } else if m.state == State::Checking {
+            m.message = Some(checking_message(role));
+        }
     }
     if watched.is_some() || shown {
         publish(vec![m], false);
@@ -1248,11 +1293,121 @@ fn probe_write_with(
         .write(true)
         .create_new(true)
         .open(&probe)?;
-    // Writability is proven; a marker left behind is a warning, never a failed folder.
-    if let Err(e) = remove(&probe) {
-        tracing::warn!(probe = %probe.display(), error = %e, "writability probe left behind");
+    // Writability is proven; a marker left behind is a warning, never a failed folder. It is
+    // swept by the next write test of this folder that cleans up after itself.
+    match remove(&probe) {
+        Ok(()) => schedule_sweep(dir),
+        Err(e) => {
+            tracing::warn!(probe = %probe.display(), error = %e, "writability probe left behind");
+            PROBE_SWEEP
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .leftovers
+                .push(probe);
+        }
     }
     Ok(())
+}
+
+// Sweeps of leftover write-test files: when each folder was last swept, the ones running,
+// and our own markers whose removal failed.
+#[derive(Default)]
+struct ProbeSweep {
+    last: std::collections::HashMap<PathBuf, Instant>,
+    running: std::collections::HashSet<PathBuf>,
+    leftovers: Vec<PathBuf>,
+}
+
+static PROBE_SWEEP: std::sync::LazyLock<Mutex<ProbeSweep>> =
+    std::sync::LazyLock::new(Default::default);
+
+// A marker older than this is no live probe (another server's included); also the least
+// time between two sweeps of one folder that left nothing of ours behind.
+const STALE_PROBE: Duration = Duration::from_secs(3600);
+
+// Sweep `dir` on its own thread, after the write test has answered: listing a large folder on
+// a slow share must not count against the probe. At most one at a time per folder.
+fn schedule_sweep(dir: &Path) {
+    let leftovers: Vec<PathBuf> = {
+        let mut sweep = PROBE_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
+        let (ours, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut sweep.leftovers)
+            .into_iter()
+            .partition(|p| p.parent() == Some(dir));
+        let due = sweep
+            .last
+            .get(dir)
+            .is_none_or(|t| t.elapsed() >= STALE_PROBE);
+        if (!due && ours.is_empty()) || !sweep.running.insert(dir.to_path_buf()) {
+            sweep.leftovers = rest;
+            sweep.leftovers.extend(ours);
+            return;
+        }
+        sweep.leftovers = rest;
+        sweep.last.insert(dir.to_path_buf(), Instant::now());
+        ours
+    };
+    let owned = dir.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("probe-sweep".into())
+        .spawn(move || {
+            sweep_probes(&owned, &leftovers);
+            PROBE_SWEEP
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .running
+                .remove(&owned);
+        });
+    if spawned.is_err() {
+        PROBE_SWEEP
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .running
+            .remove(dir);
+    }
+}
+
+// Remove writability markers left in `dir`: `leftovers` (ours that failed to go), and any
+// `.freemkv-probe-<pid>-<nanos>` regular file older than an hour; logged when it removes any.
+fn sweep_probes(dir: &Path, leftovers: &[PathBuf]) {
+    #[cfg(test)]
+    tests::sweep_starting(dir);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for path in entries.flatten().map(|e| e.path()) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let Some((pid, nanos)) = name
+            .strip_prefix(".freemkv-probe-")
+            .and_then(|rest| rest.split_once('-'))
+        else {
+            continue;
+        };
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= STALE_PROBE);
+        if digits(pid)
+            && digits(nanos)
+            && meta.is_file()
+            && (stale || leftovers.contains(&path))
+            && std::fs::remove_file(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        crate::server::log::syslog(&format!(
+            "Removed {removed} leftover write-test file(s) (.freemkv-probe-*) from {}",
+            dir.display()
+        ));
+    }
 }
 
 /// Before a remux or a move starts: `dir` must answer a stat and a create-and-delete
@@ -1291,8 +1446,8 @@ where
     preflight_finish(role, dir, limit, hang_after, started)
 }
 
-// A limit that reaches the hang bound waits for the answer or the hang verdict, counted from
-// when the probe actually started (not from this call); a shorter one waits that long.
+// A limit that reaches the hang bound waits for the answer or the hang bound, whichever comes
+// first, counted from this call; a shorter one waits that long.
 fn wait_for(limit: Duration, hang_after: Duration) -> Wait {
     if limit >= hang_after {
         Wait::UntilHung
@@ -1366,7 +1521,11 @@ where
                 m.latency_ms = Some(started.elapsed().as_millis() as u64);
                 m
             }
-            Err(e) => Problem::new(role, &owned, Fault::of(e), e.to_string()).mount(),
+            Err(e) => {
+                let mut m = Problem::new(role, &owned, Fault::of(e), e.to_string()).mount();
+                m.write_failed = true;
+                m
+            }
         });
         result
     }))
@@ -1453,6 +1612,9 @@ fn heal(cfg: &Config) {
         }
         *last = Some(now);
     }
+    if stopping() {
+        return;
+    }
     tracing::warn!(mountpoint = %share.mountpoint, mounted, "recovering container-owned NFS mount");
     if crate::server::daemon::remount_nfs(&share, mounted) {
         STALE_REPORTS
@@ -1483,6 +1645,15 @@ pub fn root_warnings(cfg: &Config) -> Vec<String> {
         .collect()
 }
 
+// One health round: check every folder, then heal the share unless the server is stopping
+// (a remount can take 45 s the stop's drain does not have).
+fn round(refresh: impl FnOnce(), heal: impl FnOnce()) {
+    refresh();
+    if !stopping() {
+        heal();
+    }
+}
+
 /// Start the health thread; `None` if it could not be spawned.
 pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
     let cfg = cfg.clone();
@@ -1495,9 +1666,13 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
             }
             while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                 let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-                refresh(&c);
-                #[cfg(unix)]
-                heal(&c);
+                round(
+                    || refresh(&c),
+                    || {
+                        #[cfg(unix)]
+                        heal(&c);
+                    },
+                );
                 crate::server::sleep_unless_shutdown(Duration::from_secs(INTERVAL_SECS));
             }
         })

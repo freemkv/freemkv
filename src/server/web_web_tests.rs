@@ -4597,6 +4597,15 @@ mod http {
         let (c3, b3) = roundtrip(&cfg, "POST", "/api/move-errors/clear?x=1", None, &[]);
         assert_eq!(c3, 400);
         assert!(b3.contains("missing path"));
+        // A Retry says whether anything was scheduled.
+        let key = "/test-web-retry-scheduled/job";
+        let url = "/api/move-errors/clear?path=%2Ftest-web-retry-scheduled%2Fjob";
+        let (c4, b4) = roundtrip(&cfg, "POST", url, None, &[]);
+        assert_eq!(c4, 200);
+        assert!(b4.contains("\"scheduled\":false"), "{b4}");
+        crate::server::mover::record_test_error(key);
+        let (_, b5) = roundtrip(&cfg, "POST", url, None, &[]);
+        assert!(b5.contains("\"scheduled\":true"), "{b5}");
     }
 
     // ── SSE first frame (GET /events): it loops forever, so roundtrip

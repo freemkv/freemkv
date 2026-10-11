@@ -415,8 +415,9 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         if target.is_empty() {
             return json_response(request, 400, r#"{"ok":false,"error":"missing path"}"#);
         }
-        crate::server::mover::clear_move_error(&target);
-        json_response(request, 200, r#"{"ok":true}"#);
+        let scheduled = crate::server::mover::clear_move_error(&target);
+        let body = serde_json::json!({ "ok": true, "scheduled": scheduled });
+        json_response(request, 200, &body.to_string());
     } else if is_post && url == "/api/mux-errors/clear-all" {
         crate::server::muxer::clear_all_mux_errors();
         json_response(request, 200, r#"{"ok":true}"#);

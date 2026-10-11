@@ -1,0 +1,1004 @@
+// Retry state, operator Retry and the error rows' lifetime (audit round 2).
+use super::*;
+use std::collections::HashSet;
+use std::time::Duration;
+
+fn guard() -> std::sync::MutexGuard<'static, ()> {
+    super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn row(key: &str) -> Option<MoverError> {
+    MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned()
+}
+
+fn requested(key: &str) -> bool {
+    RETRY_REQUESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(key)
+}
+
+// Retry, Retry all and the mover's prune run on different threads at once; none of them may
+// wait forever for a lock another holds.
+#[test]
+fn retry_clicks_and_the_mover_prune_never_deadlock() {
+    let _g = guard();
+    let root = "/test-retry-deadlock";
+    let key = format!("{root}/job");
+    let (tx, rx) = std::sync::mpsc::channel();
+    for which in 0..3 {
+        let (key, tx) = (key.clone(), tx.clone());
+        std::thread::spawn(move || {
+            for _ in 0..20_000 {
+                match which {
+                    0 => clear_all_move_errors(),
+                    1 => prune_move_errors(root, &HashSet::from([key.clone()])),
+                    _ => {
+                        record_error_with(&key, "copy failed", "retry", |_| {});
+                        clear_move_error(&key);
+                    }
+                }
+            }
+            let _ = tx.send(());
+        });
+    }
+    for _ in 0..3 {
+        rx.recv_timeout(Duration::from_secs(60))
+            .expect("Retry, Retry all and the prune deadlocked");
+    }
+    clear_error(&key);
+    prune_move_errors(root, &HashSet::new());
+}
+
+// A Retry posted for a path with no row (any LAN client can post one) leaves nothing behind,
+// and a request no staging dir can consume is pruned.
+#[test]
+fn a_retry_request_needs_a_row_and_is_pruned_with_it() {
+    let _g = guard();
+    let unknown = "/lan/never-a-row-4b1d";
+    clear_move_error(unknown);
+    assert!(!requested(unknown), "a Retry without a row is not kept");
+
+    let dest = "/library/Movies/Kept (2020)/Kept (2020).mkv";
+    record_error_with(dest, "publication failed", "fix it", |_| {});
+    clear_move_error(dest);
+    prune_move_errors("/staging-prune-test", &HashSet::new());
+    assert!(
+        !requested(dest),
+        "a request for a non-staging key is pruned"
+    );
+}
+
+// A destination-keyed row belongs to the delivery that raised it: once that staging dir is
+// gone, the row goes with it.
+#[test]
+fn a_destination_row_is_pruned_with_its_staging_dir() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let job = staging.join("job");
+    let library = tmp.path().join("library");
+    for d in [&job, &library] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let src = job.join("a.mkv");
+    std::fs::write(&src, b"bytes").unwrap();
+    let dest = library.join("a.mkv");
+    let outcome = move_file(
+        &src,
+        &dest,
+        &|_, _, _, _| {},
+        std::sync::Arc::new(|_| Err(std::io::Error::other("checkpoint refused"))),
+        &job,
+    );
+    assert_eq!(outcome, MoveOutcome::Failed);
+    let key = dest.to_string_lossy().into_owned();
+    assert!(row(&key).is_some(), "fixture: the destination row exists");
+
+    let root = staging.to_string_lossy().into_owned();
+    prune_move_errors(&root, &HashSet::new());
+    let left = row(&key);
+    clear_error(&key);
+    assert!(left.is_none(), "the abandoned delivery's row is pruned");
+}
+
+// A journaled delivery of one MKV in `tmp`: (config, staging job dir, planned destination).
+fn journaled(tmp: &Path, title: &str) -> (Config, std::path::PathBuf, std::path::PathBuf) {
+    let (cfg, job, mut dests) = journaled_files(tmp, title, &["mkv"]);
+    (cfg, job, dests.remove(0))
+}
+
+// A journaled delivery of `title.<ext>` for each of `exts`, straight into the output root.
+fn journaled_files(
+    tmp: &Path,
+    title: &str,
+    exts: &[&str],
+) -> (Config, std::path::PathBuf, Vec<std::path::PathBuf>) {
+    let staging = tmp.join("staging");
+    let job = staging.join(title);
+    let output = tmp.join("output");
+    for d in [&job, &output, &tmp.join("config")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let marker = serde_json::json!({"title": title, "year": 2024, "media_type": "movie"});
+    std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+    let mut moves = Vec::new();
+    let mut dests = Vec::new();
+    for ext in exts {
+        let mut bytes = vec![0x1A, 0x45, 0xDF, 0xA3];
+        bytes.extend_from_slice(&[0x5Au8; 2048]);
+        let src = job.join(format!("{title}.{ext}"));
+        std::fs::write(&src, &bytes).unwrap();
+        let dest = output.join(format!("{title}.{ext}"));
+        moves.push((src, dest.to_string_lossy().into_owned()));
+        dests.push(dest);
+    }
+    super::manifest::Manifest::create(
+        &job,
+        marker,
+        Vec::new(),
+        vec![output.to_string_lossy().into_owned()],
+        &moves,
+    )
+    .unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: output.to_string_lossy().into_owned(),
+        autorip_dir: tmp.join("config").to_string_lossy().into_owned(),
+        keep_iso: true,
+        ..Config::default()
+    };
+    (cfg, job, dests)
+}
+
+#[cfg(unix)]
+fn is_root() -> bool {
+    // SAFETY: geteuid has no preconditions.
+    unsafe { libc::geteuid() == 0 }
+}
+
+// The journal cannot be saved (staging full or read-only): its retry state goes stale, so
+// re-deriving the count from it would never reach the cap. The in-memory count stands, and
+// a failure whose budget cannot be recorded holds the delivery instead of retrying.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_retry_state_holds_instead_of_copying_forever() {
+    use std::os::unix::fs::PermissionsExt;
+    if is_root() {
+        return;
+    }
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dest) = journaled(tmp.path(), "Unsaved");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    super::manifest::Manifest::record_retry(
+        &job,
+        Some(super::manifest::RetryState {
+            attempts: 1,
+            not_before: Some(std::time::SystemTime::now() - Duration::from_secs(1)),
+            reason: "copy to destination failed".into(),
+            hint: "retry".into(),
+        }),
+    )
+    .unwrap();
+    std::fs::set_permissions(&job, std::fs::Permissions::from_mode(0o555)).unwrap();
+    check_and_move(&cfg);
+    let first = row(&key);
+    // The backoff ran out; the journal still says one attempt.
+    if let Some(r) = MOVE_ERRORS.lock().unwrap().get_mut(&key) {
+        r.retry_after = Some(std::time::Instant::now());
+        r.retry_held = false;
+    }
+    check_and_move(&cfg);
+    let second = row(&key);
+    std::fs::set_permissions(&job, std::fs::Permissions::from_mode(0o755)).unwrap();
+    clear_error(&key);
+    let first = first.expect("a row");
+    assert!(!dest.exists());
+    assert!(
+        first.retry_held && first.reason.contains("could not be saved"),
+        "{first:?}"
+    );
+    let second = second.expect("a row");
+    assert_eq!(
+        second.attempts, 3,
+        "the journal's stale count never wins: {second:?}"
+    );
+    assert!(second.retry_held, "{second:?}");
+}
+
+// A journaled backoff that has run out is due on the next pass.
+#[test]
+fn an_expired_journaled_backoff_delivers() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dest) = journaled(tmp.path(), "Expired");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    super::manifest::Manifest::record_retry(
+        &job,
+        Some(super::manifest::RetryState {
+            attempts: 1,
+            not_before: Some(std::time::SystemTime::now() - Duration::from_secs(1)),
+            reason: "copy to destination failed".into(),
+            hint: "retry".into(),
+        }),
+    )
+    .unwrap();
+    check_and_move(&cfg);
+    let left = row(&key);
+    clear_error(&key);
+    assert!(dest.exists(), "delivered: {left:?}");
+}
+
+// A journal's not_before is staging data: an absurd value (corruption, a clock that was far
+// ahead) neither panics the mover nor postpones the retry past the longest real backoff.
+#[test]
+fn a_restored_backoff_is_clamped_to_the_longest_real_one() {
+    let far = std::time::UNIX_EPOCH + Duration::from_secs(i64::MAX as u64 - 1000);
+    let year = std::time::SystemTime::now() + Duration::from_secs(365 * 24 * 3600);
+    for not_before in [far, year] {
+        let mut r = MoverError {
+            path: "clamp".into(),
+            reason: String::new(),
+            hint: String::new(),
+            attempts: 0,
+            retry_held: false,
+            waiting_for_folder: false,
+            worker_active: false,
+            retrying: false,
+            waiting_root: None,
+            copy_stalled: false,
+            retry_after: None,
+            owner: None,
+            missing_folder: false,
+            stall_resume: None,
+            teardown_attempts: 0,
+        };
+        let state = super::manifest::RetryState {
+            attempts: 2,
+            not_before: Some(not_before),
+            reason: String::new(),
+            hint: String::new(),
+        };
+        let now = std::time::Instant::now();
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_retry(&mut r, &state);
+        }));
+        assert!(applied.is_ok(), "{not_before:?} panicked the mover");
+        let after = r.retry_after.expect("a backoff, not a hold");
+        assert!(
+            after <= now + Duration::from_secs(121),
+            "{not_before:?} postponed the retry by {:?}",
+            after - now
+        );
+    }
+}
+
+// Disc 1's journal froze `Twin.mkv` but has not published it yet (held, backing off or cut
+// off by a restart). Disc 2 must not freeze the same name: it is filed as `_2`.
+#[test]
+fn a_destination_frozen_by_another_delivery_is_taken() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, first, frozen) = journaled(tmp.path(), "Twin");
+    let first_key = first.to_string_lossy().into_owned();
+    record_error_with(&first_key, "copy to destination failed", "retry", |_| {});
+    hold_for_operator(&first_key);
+    let second = tmp.path().join("staging/Twin disc 2");
+    std::fs::create_dir_all(&second).unwrap();
+    let marker = serde_json::json!({"title": "Twin", "year": 2024, "media_type": "movie"});
+    std::fs::write(second.join(".done"), marker.to_string()).unwrap();
+    std::fs::write(
+        second.join("Twin.mkv"),
+        std::fs::read(first.join("Twin.mkv")).unwrap(),
+    )
+    .unwrap();
+
+    check_and_move(&cfg);
+    let second_row = row(&second.to_string_lossy());
+    clear_error(&first_key);
+    clear_error(&second.to_string_lossy());
+    assert!(
+        !frozen.exists(),
+        "disc 1's frozen name is left to disc 1: {second_row:?}"
+    );
+    assert!(
+        frozen.with_file_name("Twin_2.mkv").exists(),
+        "disc 2 filed beside it: {second_row:?}"
+    );
+}
+
+#[cfg(unix)]
+fn inode(path: &Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
+}
+
+// Delivered, but the staging teardown fails (a file appeared after the freeze). The row
+// backs off like a failed copy instead of re-running the whole post-copy stage every tick,
+// and a re-pass over the delivered files rewrites neither the journal nor the links.
+#[cfg(unix)]
+#[test]
+fn a_failed_teardown_backs_off_and_its_re_pass_writes_nothing() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dests) = journaled_files(tmp.path(), "Tidy", &["mkv", "iso"]);
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    std::fs::write(job.join("late arrival.txt"), b"not planned").unwrap();
+    check_and_move(&cfg);
+    let first = row(&key);
+    let links = tmp
+        .path()
+        .join("config")
+        .join(crate::server::library::links::LINKS_FILE);
+    let journal = job.join(super::manifest::FILE);
+    let (links_before, journal_before) = (inode(&links), inode(&journal));
+    let delivered = super::manifest::Manifest::deliver(&job, 0, &|_, _, _, _| {});
+    let journal_after_deliver = inode(&journal);
+    if let Some(r) = MOVE_ERRORS.lock().unwrap().get_mut(&key) {
+        r.retry_after = Some(std::time::Instant::now());
+    }
+    check_and_move(&cfg);
+    let links_after = inode(&links);
+    clear_error(&key);
+    assert!(dests.iter().all(|d| d.exists()), "fixture: delivered");
+    let first = first.expect("the teardown failure is shown");
+    assert!(first.reason.contains("staging cleanup failed"), "{first:?}");
+    assert_eq!(first.attempts, 0, "the copy budget is not spent: {first:?}");
+    assert!(
+        first
+            .retry_after
+            .is_some_and(|t| t > std::time::Instant::now()),
+        "not due again at once: {first:?}"
+    );
+    assert!(
+        matches!(delivered, Ok(MoveOutcome::Skipped)),
+        "{delivered:?}"
+    );
+    assert_eq!(journal_before, journal_after_deliver, "journal rewritten");
+    assert_eq!(links_before, links_after, "links rewritten");
+}
+
+// A delivered rip whose staging listing came back incomplete keeps its staging folder (its
+// teardown would delete what it could not see), shows why, and backs off.
+#[test]
+fn the_incomplete_listing_skip_backs_off_too() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dest) = journaled(tmp.path(), "Unlisted");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    test_hooks::LISTING_FAULTS.lock().unwrap().push(job.clone());
+    check_and_move(&cfg);
+    test_hooks::LISTING_FAULTS
+        .lock()
+        .unwrap()
+        .retain(|p| *p != job);
+    let left = row(&key);
+    clear_error(&key);
+    assert!(dest.exists() && job.exists(), "delivered, staging kept");
+    let left = left.expect("the skip is shown");
+    assert!(
+        left.reason.contains("could not be fully listed"),
+        "{left:?}"
+    );
+    assert!(
+        left.retry_after
+            .is_some_and(|t| t > std::time::Instant::now()),
+        "backs off: {left:?}"
+    );
+}
+
+// A journaled delivery into `output/<title> (2024)/`, whose folder the test may remove.
+fn journaled_in_folder(
+    tmp: &Path,
+    title: &str,
+) -> (Config, std::path::PathBuf, std::path::PathBuf) {
+    let staging = tmp.join("staging");
+    let job = staging.join(title);
+    let output = tmp.join("output");
+    let folder = output.join(format!("{title} (2024)"));
+    for d in [&job, &folder, &tmp.join("config")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let marker = serde_json::json!({"title": title, "year": 2024, "media_type": "movie"});
+    std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+    let src = job.join(format!("{title}.mkv"));
+    std::fs::write(&src, [0x1A, 0x45, 0xDF, 0xA3, 1, 2, 3, 4, 5, 6]).unwrap();
+    let dest = folder.join(format!("{title}.mkv"));
+    super::manifest::Manifest::create(
+        &job,
+        marker,
+        Vec::new(),
+        vec![output.to_string_lossy().into_owned()],
+        &[(src, dest.to_string_lossy().into_owned())],
+    )
+    .unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: output.to_string_lossy().into_owned(),
+        autorip_dir: tmp.join("config").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    (cfg, job, folder)
+}
+
+// Retry on a row waiting for the output ROOT (not responding, stale, unmounted...) only
+// retries: the root may come back as an empty local folder, so it never consents to
+// recreating the delivery's missing title folder. Only the missing-folder row does.
+#[test]
+fn retry_on_a_root_wait_never_recreates_a_missing_title_folder() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, folder) = journaled_in_folder(tmp.path(), "Remounted");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    std::fs::remove_dir(&folder).unwrap();
+    let root = Path::new(&cfg.output_dir);
+    record_error_at_stage(
+        &key,
+        "waiting for the output folder: The output folder is not responding",
+        "Remount the share",
+        Some(root),
+        |_| {},
+    );
+    clear_move_error(&key);
+    check_and_move(&cfg);
+    let waiting = row(&key);
+    assert!(
+        !folder.exists(),
+        "a root-wait Retry recreated the folder: {waiting:?}"
+    );
+    let waiting = waiting.expect("the missing folder is shown");
+    assert!(waiting.reason.contains("missing"), "{waiting:?}");
+    // Retry on the missing-folder row itself is the consent.
+    clear_move_error(&key);
+    check_and_move(&cfg);
+    clear_error(&key);
+    assert!(folder.exists() && !job.exists(), "recreated and delivered");
+}
+
+// A Retry on a dir with no journal yet is spent on its next pass, never kept for a later
+// journal (where it would read as consent to recreate folders).
+#[test]
+fn a_retry_on_an_unjournaled_dir_is_spent_on_its_next_pass() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let job = staging.join("Early");
+    std::fs::create_dir_all(&job).unwrap();
+    let marker = serde_json::json!({"title": "Early", "year": 2024, "media_type": "movie"});
+    std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+    std::fs::write(job.join("Early.mkv"), [0x1A, 0x45, 0xDF, 0xA3, 0, 0]).unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        // Never created: the destination root is missing, so nothing is frozen.
+        output_dir: tmp.path().join("absent").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let key = job.to_string_lossy().into_owned();
+    record_error_at_stage(
+        &key,
+        "waiting for the output folder",
+        "",
+        Some(Path::new(&cfg.output_dir)),
+        |_| {},
+    );
+    clear_move_error(&key);
+    assert!(requested(&key), "fixture: Retry recorded");
+    check_and_move(&cfg);
+    let left = requested(&key);
+    clear_error(&key);
+    assert!(
+        !job.join(super::manifest::FILE).exists(),
+        "fixture: no journal"
+    );
+    assert!(!left, "the request outlived the pass");
+}
+
+// A pass that leaves without attempting anything (here: the marker became unreadable) must
+// not leave the row saying "Retrying now." with its Retry button disabled.
+#[test]
+fn a_pass_that_attempts_nothing_clears_retrying() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let job = staging.join("Torn");
+    std::fs::create_dir_all(&job).unwrap();
+    std::fs::write(job.join(".done"), b"").unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: tmp.path().join("output").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let key = job.to_string_lossy().into_owned();
+    record_error_with(
+        &key,
+        "a planned output is missing before delivery",
+        "",
+        |_| {},
+    );
+    check_and_move(&cfg);
+    let left = row(&key);
+    clear_error(&key);
+    let left = left.expect("the row stays");
+    assert!(!left.retrying, "{left:?}");
+}
+
+// A disc-variant name that cannot be examined holds the plan with a reason naming it,
+// instead of falling back to the base name it knows is taken.
+#[cfg(unix)]
+#[test]
+fn an_unexaminable_destination_is_named_not_assumed() {
+    use std::os::unix::fs::PermissionsExt;
+    if is_root() {
+        return;
+    }
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let job = staging.join("Sealed");
+    let movies = tmp.path().join("output/Movies");
+    let folder = movies.join("Sealed (2024)");
+    std::fs::create_dir_all(&job).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    let marker = serde_json::json!({"title": "Sealed", "year": 2024, "media_type": "movie"});
+    std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+    std::fs::write(job.join("Sealed.mkv"), [0x1A, 0x45, 0xDF, 0xA3, 0, 0]).unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: tmp.path().join("output").to_string_lossy().into_owned(),
+        movie_dir: movies.to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let key = job.to_string_lossy().into_owned();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+    check_and_move(&cfg);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let left = row(&key);
+    clear_error(&key);
+    let left = left.expect("held with a reason");
+    assert!(
+        left.reason.contains("uncertain destination") && left.reason.contains("Sealed (2024).mkv"),
+        "{left:?}"
+    );
+    assert!(!job.join(super::manifest::FILE).exists(), "no plan frozen");
+}
+
+// The `<destination>.lock` sidecars a pass takes never stay in the library when the pass
+// ends without delivering (here: a foreign file holds the frozen name).
+#[test]
+fn a_pass_that_does_not_deliver_leaves_no_lock_sidecars() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dest) = journaled(tmp.path(), "Locked");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    std::fs::write(&dest, b"someone else's file").unwrap();
+    check_and_move(&cfg);
+    clear_error(&key);
+    let locks: Vec<_> = std::fs::read_dir(dest.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".lock"))
+        .collect();
+    assert!(locks.is_empty(), "{locks:?}");
+}
+
+// A TV rip refused before delivery (a listed episode is missing) leaves no empty
+// `Show (Year)/Season NN/` folders in the library.
+#[test]
+fn a_refused_delivery_creates_no_library_folders() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let tv = tmp.path().join("output/TV");
+    std::fs::create_dir_all(&tv).unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: tmp.path().join("output").to_string_lossy().into_owned(),
+        tv_dir: "TV".into(),
+        ..Config::default()
+    };
+    let job = staging.join("Show_S01");
+    std::fs::create_dir_all(&job).unwrap();
+    let mut st = crate::server::ripper::staging::DiscState::new(
+        crate::server::ripper::staging::StagingState::Done,
+    );
+    st.title = "Show".into();
+    st.disc_name = "Show".into();
+    st.year = 2012;
+    st.media_type = "tv".into();
+    st.season = Some(1);
+    let output = |name: &str, episode| crate::server::ripper::staging::Output {
+        filename: name.into(),
+        episode: Some(episode),
+        episode_name: String::new(),
+        ..Default::default()
+    };
+    st.outputs = vec![output("Show_E01.mkv", 1), output("Show_E02.mkv", 2)];
+    crate::server::ripper::staging::write_state(&job, &st);
+    std::fs::write(job.join("Show_E01.mkv"), vec![0x11u8; 64]).unwrap();
+    let key = job.to_string_lossy().into_owned();
+    check_and_move(&cfg);
+    let left = row(&key);
+    clear_error(&key);
+    let left = left.expect("refused");
+    assert!(left.reason.contains("missing before delivery"), "{left:?}");
+    let made: Vec<_> = std::fs::read_dir(&tv).unwrap().collect();
+    assert!(
+        made.is_empty(),
+        "folders created for a refused delivery: {made:?}"
+    );
+}
+
+// The share drops (its root is gone, or replaced by a bare local folder) between the root's
+// check and the folder creation: nothing is created above or in place of the checked root.
+#[test]
+fn folders_are_created_only_below_the_checked_root() {
+    let _g = guard();
+    for recreate in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let movies = tmp.path().join("share/Movies");
+        let job = staging.join("Dropped");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::create_dir_all(&movies).unwrap();
+        let marker = serde_json::json!({"title": "Dropped", "year": 2024, "media_type": "movie"});
+        std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+        std::fs::write(job.join("Dropped.mkv"), [0x1A, 0x45, 0xDF, 0xA3, 0, 0]).unwrap();
+        let cfg = Config {
+            staging_dir: staging.to_string_lossy().into_owned(),
+            output_dir: tmp.path().join("share").to_string_lossy().into_owned(),
+            movie_dir: movies.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let dropped = movies.clone();
+        let _hook = test_hooks::on_preflight(
+            &movies,
+            std::sync::Arc::new(move || {
+                let _ = std::fs::remove_dir(&dropped);
+                if recreate {
+                    let _ = std::fs::create_dir(&dropped);
+                }
+            }),
+        );
+        let key = job.to_string_lossy().into_owned();
+        check_and_move(&cfg);
+        drop(_hook);
+        let left = row(&key);
+        clear_error(&key);
+        assert!(
+            !movies.join("Dropped (2024)").exists(),
+            "recreate={recreate}: created on the dropped root: {left:?}"
+        );
+        assert!(job.join("Dropped.mkv").exists());
+        assert!(left.is_some(), "recreate={recreate}: the refusal is shown");
+    }
+}
+
+// A stalled copy's attempt is in the journal as soon as the stall is declared, while the
+// worker is still blocked: a restart then cannot buy a fresh full copy. The worker's
+// return does not count it twice.
+#[test]
+fn a_stall_is_counted_in_the_journal_when_it_is_declared() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, _dest) = journaled(tmp.path(), "Stalled");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (hook_job, hook_seen) = (job.clone(), seen.clone());
+    let _hooks = test_hooks::set(
+        tmp.path(),
+        Duration::from_millis(40),
+        std::sync::Arc::new(move || {
+            // Blocked "in the kernel" until the stall's attempt is in the journal (or 10 s).
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let attempts = loop {
+                let attempts = super::manifest::Manifest::load(&hook_job)
+                    .ok()
+                    .flatten()
+                    .and_then(|m| m.retry().map(|r| r.attempts));
+                if attempts.is_some() || std::time::Instant::now() > deadline {
+                    break attempts;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            *hook_seen.lock().unwrap() = Some(attempts);
+        }),
+    );
+    check_and_move(&cfg);
+    drop(_hooks);
+    let left = row(&key);
+    let journal = super::manifest::Manifest::load(&job)
+        .unwrap()
+        .unwrap()
+        .retry()
+        .map(|r| r.attempts);
+    clear_error(&key);
+    let while_blocked = *seen.lock().unwrap();
+    assert_eq!(
+        while_blocked,
+        Some(Some(1)),
+        "counted while the worker is blocked"
+    );
+    assert_eq!(journal, Some(1), "counted once");
+    let left = left.expect("the stall is shown");
+    assert_eq!(left.attempts, 1, "{left:?}");
+    assert!(left.retry_after.is_some() && !left.retry_held, "{left:?}");
+}
+
+// A failed copy is retried after 30 s, then 2 min, then held for Retry: its hint says so
+// instead of promising a retry on the next tick.
+#[test]
+fn failed_copy_hints_describe_the_real_retry_schedule() {
+    for hint in [SIZE_MISMATCH_HINT, POST_COPY_INVALID_HINT] {
+        assert!(!hint.contains("next tick"), "{hint}");
+        assert!(hint.contains("Retry"), "{hint}");
+    }
+}
+
+// A refused publication step: the delivery's own row carries the OS error (the
+// log line said only "copy to destination failed"), and the destination's row gives an
+// instruction in its hint slot, not the raw error.
+#[cfg(unix)]
+#[test]
+fn a_refused_publication_names_its_error_on_the_delivery_row() {
+    use std::os::unix::fs::PermissionsExt;
+    if is_root() {
+        return;
+    }
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, _folder) = journaled_in_folder(tmp.path(), "Refused");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    // The publication checkpoint opens the staged file read-write: read-only refuses it.
+    let source = job.join("Refused.mkv");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o444)).unwrap();
+    check_and_move(&cfg);
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let staging_row = row(&key);
+    let dest_rows: Vec<MoverError> = MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|e| e.owner.as_deref() == Some(key.as_str()))
+        .cloned()
+        .collect();
+    clear_error(&key);
+    let staging_row = staging_row.expect("a row");
+    assert!(
+        staging_row.reason.contains("ermission denied"),
+        "{staging_row:?}"
+    );
+    assert!(!dest_rows.is_empty(), "fixture: a destination row");
+    for r in dest_rows {
+        assert!(!r.hint.contains("os error"), "{r:?}");
+        assert!(r.reason.contains("ermission denied"), "{r:?}");
+    }
+}
+
+// A hand-off this build wrote (its state.json has `disc_identity`, empty for an unverified
+// disc or not) is never read as a 1.8.3 one: a listed output that is missing holds the rip
+// instead of being taken as "already filed by the earlier version".
+#[test]
+fn a_current_hand_off_with_a_missing_output_is_held_not_taken_as_legacy() {
+    let _g = guard();
+    for identity in ["", "a1b2c3"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let output = tmp.path().join("output");
+        let job = staging.join("Current");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        let mut st = crate::server::ripper::staging::DiscState::new(
+            crate::server::ripper::staging::StagingState::Done,
+        );
+        st.title = "Current".into();
+        st.disc_name = "Current".into();
+        st.year = 2024;
+        st.media_type = "movie".into();
+        st.disc_identity = identity.into();
+        st.outputs = vec![crate::server::ripper::staging::Output {
+            filename: "Current.mkv".into(),
+            ..Default::default()
+        }];
+        crate::server::ripper::staging::write_state(&job, &st);
+        let written = std::fs::read_to_string(job.join("state.json")).unwrap();
+        assert!(written.contains("\"disc_identity\""), "{written}");
+        std::fs::write(job.join("Current.iso"), vec![0u8; 4096]).unwrap();
+        let cfg = Config {
+            staging_dir: staging.to_string_lossy().into_owned(),
+            output_dir: output.to_string_lossy().into_owned(),
+            autorip_dir: tmp.path().join("config").to_string_lossy().into_owned(),
+            keep_iso: true,
+            ..Config::default()
+        };
+        let key = job.to_string_lossy().into_owned();
+        check_and_move(&cfg);
+        let left = row(&key);
+        clear_error(&key);
+        let left = left.unwrap_or_else(|| panic!("identity {identity:?}: not held"));
+        assert!(
+            left.reason
+                .contains("a planned output is missing before delivery"),
+            "identity {identity:?}: {left:?}"
+        );
+        assert!(job.join("Current.iso").exists(), "identity {identity:?}");
+        assert_eq!(
+            std::fs::read_dir(&output).unwrap().count(),
+            0,
+            "nothing filed"
+        );
+    }
+}
+
+// Journal updates from two threads (the stall monitor committing an attempt while the
+// copy worker checkpoints its candidate) never lose one another's change.
+#[test]
+fn concurrent_journal_updates_are_not_lost() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_cfg, job, _dest) = journaled(tmp.path(), "Racing");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (writer_job, writer_stop) = (job.clone(), stop.clone());
+    let writer = std::thread::spawn(move || {
+        let mut attempts = 0;
+        while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            attempts += 1;
+            super::manifest::Manifest::record_retry(
+                &writer_job,
+                Some(super::manifest::RetryState {
+                    attempts,
+                    not_before: None,
+                    reason: String::new(),
+                    hint: String::new(),
+                }),
+            )
+            .unwrap();
+        }
+    });
+    std::thread::sleep(Duration::from_millis(20));
+    super::manifest::Manifest::mark_announced(&job).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+    let journal = super::manifest::Manifest::load(&job).unwrap().unwrap();
+    assert!(journal.announced(), "an update was lost");
+}
+
+// Retry says whether it scheduled anything: not for a path with no row, nor while the row's
+// copy worker is still blocked.
+#[test]
+fn retry_reports_whether_it_was_scheduled() {
+    let _g = guard();
+    let key = "/test-retry-report/job";
+    assert!(!clear_move_error(key), "no row");
+    record_error_with(key, "copy failed", "retry", |_| {});
+    MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get_mut(key)
+        .unwrap()
+        .worker_active = true;
+    assert!(!clear_move_error(key), "worker still blocked");
+    MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get_mut(key)
+        .unwrap()
+        .worker_active = false;
+    assert!(clear_move_error(key), "scheduled");
+    assert!(row(key).is_none() && requested(key));
+    prune_move_errors("/test-retry-report", &HashSet::new());
+}
+
+// A far-future journaled not_before is clamped once, when the row is restored; later passes
+// keep that deadline instead of clamping afresh from "now" forever, so the delivery runs.
+#[test]
+fn a_clamped_backoff_runs_out_across_passes() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, dest) = journaled(tmp.path(), "Clamped");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    super::manifest::Manifest::record_retry(
+        &job,
+        Some(super::manifest::RetryState {
+            attempts: 1,
+            not_before: Some(std::time::SystemTime::now() + Duration::from_secs(365 * 24 * 3600)),
+            reason: "copy to destination failed".into(),
+            hint: "retry".into(),
+        }),
+    )
+    .unwrap();
+    check_and_move(&cfg);
+    assert!(!dest.exists(), "waits out the clamped backoff first");
+    // The 120 s run out.
+    if let Some(r) = MOVE_ERRORS.lock().unwrap().get_mut(&key) {
+        r.retry_after = Some(std::time::Instant::now());
+    }
+    for _ in 0..2 {
+        check_and_move(&cfg);
+    }
+    let left = row(&key);
+    clear_error(&key);
+    assert!(
+        dest.exists(),
+        "delivered once the clamped backoff ran out: {left:?}"
+    );
+}
+
+// A declared stall is shown (worker active, bar blocked) before its attempt is written to the
+// journal, which may sit on the same slow share.
+#[test]
+fn a_stall_is_shown_before_its_attempt_is_written() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, _dest) = journaled(tmp.path(), "ShownFirst");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    let hook_key = key.clone();
+    let _hooks = test_hooks::set(
+        tmp.path(),
+        Duration::from_millis(40),
+        // Blocked until the stall has been declared and committed (or 10 s).
+        std::sync::Arc::new(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline
+                && !test_hooks::STALL_COMMITS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(k, ..)| *k == hook_key)
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }),
+    );
+    check_and_move(&cfg);
+    drop(_hooks);
+    clear_error(&key);
+    let seen: Vec<_> = test_hooks::STALL_COMMITS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, ..)| *k == key)
+        .cloned()
+        .collect();
+    assert_eq!(seen, vec![(key.clone(), true, true)]);
+}
+
+// A teardown that keeps failing backs off (30 s, then 2 min) and is then held for Retry,
+// on its own count: the delivery's copy budget is untouched.
+#[test]
+fn a_failing_teardown_is_held_after_its_own_backoffs() {
+    let _g = guard();
+    let key = "/test-teardown-budget/job";
+    clear_error(key);
+    let now = std::time::Instant::now();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        teardown_blocked(key, "staging cleanup failed: x", "inspect");
+        let r = row(key).unwrap();
+        seen.push((r.attempts, r.retry_held, r.retry_after.map(|t| t > now)));
+    }
+    clear_error(key);
+    assert_eq!(
+        seen,
+        vec![
+            (0, false, Some(true)),
+            (0, false, Some(true)),
+            (0, true, None)
+        ]
+    );
+}
