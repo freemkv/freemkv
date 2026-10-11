@@ -9,13 +9,11 @@
 
 /// Whether two paths name the same existing file.
 ///
-/// Canonicalised, so `./Disc.iso`, `Disc.iso`, `sub/../Disc.iso`, an absolute
-/// path to it, and a symlink to it are all one file. A destination that does
-/// not exist yet cannot be the source, so a failed canonicalize on either
-/// side answers `false` rather than refusing the rip.
-///
-/// Canonical equality alone misses a hardlink — two canonical names sharing
-/// one file — so filesystem identity (the library's `file_identity`) is compared too.
+/// Canonicalised, so `./Disc.iso`, `sub/../Disc.iso`, an absolute path and a
+/// symlink to it are all one file. A destination that does not exist yet cannot
+/// be the source: a failed canonicalize answers `false`, never a refusal. A
+/// hardlink (two canonical names, one file) is caught by comparing filesystem
+/// identity (the library's `file_identity`) too.
 pub fn same_file(source: Option<&std::path::Path>, dest: &std::path::Path) -> bool {
     let Some(source) = source else { return false };
     let (Ok(a), Ok(b)) = (std::fs::canonicalize(source), std::fs::canonicalize(dest)) else {

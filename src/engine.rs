@@ -1537,10 +1537,8 @@ impl Bars {
             None if self.read.as_ref().is_some_and(|r| !r.over) && prog.bytes_total > 0 => {
                 (prog.bytes_done as f64 / prog.bytes_total as f64 * 100.0).min(100.0)
             }
-            // A completed title has cleared `current`, but its last engine
-            // progress sample is still 100%.  Do not leak that stale sample
-            // into the per-title bar while the next title is being opened.
-            // All-unknown sizes (0) say nothing about completion; fall through.
+            // Between titles the last engine sample is a stale 100%; keep it out of the
+            // per-title bar. All-unknown sizes (0) say nothing about completion.
             None if planned > 0 && self.passed < planned => 0.0,
             None if planned > 0 => 100.0,
             None if prog.bytes_total > 0 => {
