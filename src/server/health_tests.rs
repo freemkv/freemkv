@@ -554,12 +554,17 @@ fn a_batch_over_busy_folders_costs_one_limit_not_one_per_folder() {
 
 #[test]
 fn empty_or_relative_roots_are_warned_about() {
-    let mut cfg = Config::default();
-    cfg.output_dir = "/data/out".into();
-    cfg.staging_dir = "/data/stage".into();
+    let cfg = Config {
+        output_dir: "/data/out".into(),
+        staging_dir: "/data/stage".into(),
+        ..Config::default()
+    };
     assert!(root_warnings(&cfg).is_empty());
-    cfg.output_dir = String::new();
-    cfg.staging_dir = "stage".into();
+    let cfg = Config {
+        output_dir: String::new(),
+        staging_dir: "stage".into(),
+        ..Config::default()
+    };
     let w = root_warnings(&cfg);
     assert_eq!(w.len(), 2);
     assert!(w[0].contains("Output") && w[0].contains("not set"));
