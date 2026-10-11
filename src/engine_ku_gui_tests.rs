@@ -497,3 +497,17 @@ fn a_raw_gui_copy_asks_no_key_source() {
     assert_eq!(disc_copy_scope(OutKind::IsoImage, false), whole);
     assert_eq!(disc_copy_scope(OutKind::DecryptedFolder, true), whole);
 }
+
+// A recheck whose key lookup fails (a key service down, a keydb unreadable) gives that
+// failure as its verdict, not a definitive missing-key "Cannot rip".
+#[test]
+fn a_failed_key_lookup_in_the_recheck_is_the_verdict() {
+    let fx = bd_image(&[Some(K1), Some(K1)], 1);
+    let dir = TempDir::new("recheck-lookup-fails");
+    let iso = fx.write(dir.path(), "disc.iso").display().to_string();
+    let f = factory(&[(Answer::Unavailable, &[K1])], &Calls::default());
+    let (set, verdict) = preflight_ticked(&iso, &[0, 1], None, f, &libfreemkv::Halt::new());
+    assert!(set.is_none());
+    let reason = verdict.expect_err("the lookup failed; no verdict about the keys");
+    assert!(reason.starts_with('E'), "{reason}");
+}

@@ -1426,7 +1426,8 @@ pub fn key_sources(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
 }
 
 /// The open preflight of `titles` once the ticks changed: Open's set (`seed`) topped up for
-/// them from `sources`, asking only for what it lacks, then judged. Returns the set used.
+/// them from `sources`, asking only for what it lacks, then judged. Returns the set used; a
+/// failed lookup is the verdict (`Err`, with `seed` returned).
 pub fn preflight_ticked(
     path: &str,
     titles: &[usize],
@@ -1448,8 +1449,17 @@ pub fn preflight_ticked(
             halt: Some(halt.clone()),
         };
         let src = fe::ImageSource::from_path(path);
-        let (opened, _trace) = crate::rip_keys::open_image(&src, sources, o);
-        opened.ok().map(|o| o.keys).or_else(|| seed.cloned())
+        match crate::rip_keys::open_image(&src, sources, o).0 {
+            Ok(opened) => Some(opened.keys),
+            // Judging with keys known not to cover the titles would blame a missing key.
+            Err(e) => {
+                tracing::warn!(path, code = e.code(), "open recheck: key lookup failed");
+                return (
+                    seed.cloned(),
+                    Err(gui_error(&e, std::path::Path::new(path))),
+                );
+            }
+        }
     };
     let verdict = preflight_with_keys(path, "/tmp", titles, set.as_ref());
     (set, verdict)
