@@ -16,7 +16,7 @@ fn scan_metadata(title: &str) -> super::super::staging::UserMetadata {
         episode_start: None,
         title: title.into(),
         year: 2020,
-        media_type: "movie".into(),
+        media_type: crate::server::planner::MediaKind::Movie,
         tmdb_id: 1,
         poster_url: String::new(),
         overview: String::new(),
@@ -101,7 +101,7 @@ fn metadata_publication_cannot_reverse_commit_order() {
         episode_start: None,
         title: title.into(),
         year: 2020,
-        media_type: "movie".into(),
+        media_type: crate::server::planner::MediaKind::Movie,
         tmdb_id: 1,
         poster_url: String::new(),
         overview: String::new(),
@@ -182,7 +182,7 @@ fn metadata_publication_rejects_another_job() {
             episode_start: None,
             title: "Old disc".into(),
             year: 2020,
-            media_type: "movie".into(),
+            media_type: crate::server::planner::MediaKind::Movie,
             tmdb_id: 1,
             poster_url: String::new(),
             overview: String::new(),
@@ -606,7 +606,7 @@ fn minimal_pass_ctx(device: &str) -> PassContext {
         tmdb_year: 0,
         tmdb_poster: String::new(),
         tmdb_overview: String::new(),
-        tmdb_media_type: String::new(),
+        tmdb_media_type: crate::server::planner::MediaKind::Movie,
         duration: String::new(),
         codecs: String::new(),
         filename: "test.mkv".to_string(),
@@ -1168,7 +1168,7 @@ fn push_pass_state_preserves_every_damage_indicator_field() {
     ctx.tmdb_year = 2024;
     ctx.tmdb_poster = "https://example/poster.jpg".to_string();
     ctx.tmdb_overview = "An example overview.".to_string();
-    ctx.tmdb_media_type = "movie".to_string();
+    ctx.tmdb_media_type = "movie".into();
     ctx.duration = "2:15:00".to_string();
     ctx.codecs = "HEVC/DTS-HD".to_string();
     let pass_state = std::sync::Mutex::new(PassProgressState::new());

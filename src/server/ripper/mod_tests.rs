@@ -538,7 +538,7 @@ fn presentation_preference_key_scope_tracks_selected_title_not_index_zero() {
             ..Default::default()
         };
         assert_eq!(
-            super::rip_key_scope(&disc, &cfg, "movie", ""),
+            super::rip_key_scope(&disc, &cfg, crate::server::planner::MediaKind::Movie, ""),
             libfreemkv::keys::KeyScope::Titles(expected)
         );
     }
@@ -3002,7 +3002,7 @@ fn staging_disc_owned_by_worker_detects_ripped_and_muxing() {
         tmdb_year: 0,
         tmdb_poster: String::new(),
         tmdb_overview: String::new(),
-        tmdb_media_type: String::new(),
+        tmdb_media_type: crate::server::planner::MediaKind::Movie,
         max_retries: 1,
         abort_on_lost_secs: 0,
         rip_elapsed_secs: 0.0,
@@ -3869,7 +3869,7 @@ fn ordinary_wipe_preserves_cast_away_metadata() {
                     episode_start: None,
                     title: "Cast Away".into(),
                     year: 2000,
-                    media_type: "movie".into(),
+                    media_type: crate::server::planner::MediaKind::Movie,
                     tmdb_id: 8358,
                     poster_url: String::new(),
                     overview: "Selected by the operator".into(),

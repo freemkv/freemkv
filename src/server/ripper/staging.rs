@@ -8,6 +8,7 @@
 //! Lifecycle: `Sweeping` → `Ripped` → `Done`/`Review` → `Completed`; terminal `Failed`;
 //! resumable `AbortedLoss`.
 
+use crate::server::planner::MediaKind;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -45,7 +46,8 @@ pub(crate) fn job_lease(dir: &Path) -> JobMutex {
 pub struct UserMetadata {
     pub title: String,
     pub year: u16,
-    pub media_type: String,
+    #[serde(default, deserialize_with = "crate::server::planner::lenient")]
+    pub media_type: MediaKind,
     #[serde(default)]
     pub episode_start: Option<u16>,
     pub tmdb_id: u64,
@@ -59,7 +61,7 @@ impl UserMetadata {
         UserMetadata {
             title: st.title.clone(),
             year: st.year,
-            media_type: st.media_type.clone(),
+            media_type: st.media_type,
             episode_start: st.episode_start,
             tmdb_id: st.tmdb_id,
             poster_url: st.tmdb_poster.clone(),
@@ -70,7 +72,7 @@ impl UserMetadata {
     fn apply(&self, st: &mut DiscState) {
         st.title = self.title.clone();
         st.year = self.year;
-        st.media_type = self.media_type.clone();
+        st.media_type = self.media_type;
         st.episode_start = self.episode_start;
         st.tmdb_id = self.tmdb_id;
         st.tmdb_poster = self.poster_url.clone();
@@ -267,9 +269,9 @@ pub struct DiscState {
     pub title: String,
     #[serde(default)]
     pub year: u16,
-    /// "movie" | "tv" (empty ⇒ the mover defaults it to "movie").
-    #[serde(default)]
-    pub media_type: String,
+    /// Unknown or missing reads back as Movie.
+    #[serde(default, deserialize_with = "crate::server::planner::lenient")]
+    pub media_type: MediaKind,
     #[serde(default)]
     pub tmdb_id: u64,
     #[serde(default)]
@@ -334,7 +336,7 @@ impl DiscState {
             disc_format: String::new(),
             title: String::new(),
             year: 0,
-            media_type: String::new(),
+            media_type: MediaKind::default(),
             tmdb_id: 0,
             tmdb_poster: String::new(),
             tmdb_overview: String::new(),
@@ -534,15 +536,9 @@ fn try_write_state_inner(
 }
 
 fn metadata_changes_plan(st: &DiscState, metadata: &UserMetadata) -> bool {
-    // Unknown detected type follows the movie capture path. All callers must
-    // use the same normalization for validation and lifecycle transitions.
-    let current_type = if st.media_type.is_empty() {
-        "movie"
-    } else {
-        &st.media_type
-    };
-    current_type != metadata.media_type
-        || (metadata.media_type == "tv" && st.tmdb_id != metadata.tmdb_id)
+    // An unknown detected type already reads as Movie.
+    st.media_type != metadata.media_type
+        || (metadata.media_type.is_tv() && st.tmdb_id != metadata.tmdb_id)
         || st.episode_start != metadata.episode_start
 }
 
@@ -615,7 +611,7 @@ fn save_user_metadata_inner(
     origin: Option<(&str, &str, &str)>,
     require_review: bool,
 ) -> io::Result<u64> {
-    if metadata.media_type != "tv" {
+    if !metadata.media_type.is_tv() {
         metadata.episode_start = None;
     } else if metadata.episode_start == Some(0) {
         return Err(io::Error::other(
@@ -823,7 +819,7 @@ impl DiscState {
             tmdb_year: self.year,
             tmdb_poster: self.tmdb_poster.clone(),
             tmdb_overview: self.tmdb_overview.clone(),
-            tmdb_media_type: self.media_type.clone(),
+            tmdb_media_type: self.media_type,
             max_retries: self.max_retries,
             abort_on_lost_secs: self.abort_on_lost_secs,
             rip_elapsed_secs: self.rip.elapsed_secs,
@@ -852,7 +848,7 @@ impl DiscState {
         self.year = m.tmdb_year;
         self.tmdb_poster = m.tmdb_poster.clone();
         self.tmdb_overview = m.tmdb_overview.clone();
-        self.media_type = m.tmdb_media_type.clone();
+        self.media_type = m.tmdb_media_type;
         self.max_retries = m.max_retries;
         self.abort_on_lost_secs = m.abort_on_lost_secs;
         self.origin_device = m.origin_device.clone();
@@ -1858,7 +1854,7 @@ fn apply_legacy_handoff_body(dir: &Path, st: &mut DiscState) {
         st.disc_format = f;
     }
     if let Some(m) = s("media_type").filter(|x| !x.is_empty()) {
-        st.media_type = m;
+        st.media_type = MediaKind::parse(&m);
     }
     if let Some(p) = s("poster_url") {
         st.tmdb_poster = p;

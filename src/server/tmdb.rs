@@ -1,10 +1,13 @@
+use crate::server::planner::MediaKind;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TmdbResult {
     pub title: String,
     pub year: u16,
     pub poster_url: String,
     pub overview: String,
-    pub media_type: String, // "movie" or "tv"
+    #[serde(default, deserialize_with = "crate::server::planner::lenient")]
+    pub media_type: MediaKind,
     /// TMDB numeric id for this match (0 = unknown). Carried so a consumer —
     /// autorip's own metadata enrichment, or kdb resolving a volume id via
     /// [`lookup`] — can fetch anything else it wants straight from TMDB by id,
@@ -295,7 +298,7 @@ fn pick_best(query: &str, results: &[serde_json::Value], prefer_tv: bool) -> Opt
         (
             exact,
             cand.year > 0,
-            prefer_tv && cand.media_type == "tv",
+            prefer_tv && cand.media_type.is_tv(),
             pop,
         )
     };
@@ -338,15 +341,16 @@ fn parse_result(v: &serde_json::Value) -> Option<(TmdbResult, f64)> {
     if media_type != "movie" && media_type != "tv" {
         return None;
     }
+    let kind = MediaKind::parse(media_type);
     let title = v
-        .get(if media_type == "tv" { "name" } else { "title" })?
+        .get(if kind.is_tv() { "name" } else { "title" })?
         .as_str()?
         .to_string();
     if title.is_empty() {
         return None;
     }
     let date = v
-        .get(if media_type == "tv" {
+        .get(if kind.is_tv() {
             "first_air_date"
         } else {
             "release_date"
@@ -370,7 +374,7 @@ fn parse_result(v: &serde_json::Value) -> Option<(TmdbResult, f64)> {
             year,
             poster_url: poster,
             overview,
-            media_type: media_type.to_string(),
+            media_type: kind,
             tmdb_id,
         },
         v["popularity"].as_f64().unwrap_or(0.0),

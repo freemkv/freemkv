@@ -65,10 +65,37 @@ fn the_staged_titles_are_every_title_the_mux_reads() {
     };
     let titles = vec![title("00000.mpls", 6000.0), title("00001.mpls", 60.0)];
     let movie = mkv_rip(false);
-    assert_eq!(staged_titles(&titles, &movie, "movie", "Film", 1), [0, 1]);
-    assert_eq!(staged_titles(&titles, &movie, "movie", "Film", 0), [0]);
+    assert_eq!(
+        staged_titles(
+            &titles,
+            &movie,
+            crate::server::planner::MediaKind::Movie,
+            "Film",
+            1
+        ),
+        [0, 1]
+    );
+    assert_eq!(
+        staged_titles(
+            &titles,
+            &movie,
+            crate::server::planner::MediaKind::Movie,
+            "Film",
+            0
+        ),
+        [0]
+    );
     // An index past the disc's titles is never staged.
-    assert_eq!(staged_titles(&titles, &movie, "movie", "Film", 9), [0]);
+    assert_eq!(
+        staged_titles(
+            &titles,
+            &movie,
+            crate::server::planner::MediaKind::Movie,
+            "Film",
+            9
+        ),
+        [0]
+    );
 }
 
 /// A scoped staging image works end to end the way the server uses it: the sweep reads only

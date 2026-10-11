@@ -12,7 +12,7 @@ fn capture_reset_keeps_corrected_identity_but_discards_old_artifacts() {
         episode_start: None,
         title: "Cast Away".into(),
         year: 2000,
-        media_type: "movie".into(),
+        media_type: crate::server::planner::MediaKind::Movie,
         tmdb_id: 8358,
         poster_url: String::new(),
         overview: String::new(),
@@ -174,7 +174,7 @@ fn capture_reset_does_not_hold_the_state_lock_while_deleting() {
                 episode_start: None,
                 title: "Cast Away".into(),
                 year: 2000,
-                media_type: "movie".into(),
+                media_type: crate::server::planner::MediaKind::Movie,
                 tmdb_id: 8358,
                 poster_url: String::new(),
                 overview: String::new(),
@@ -2041,7 +2041,7 @@ fn ripped_marker_round_trips_through_disc_state() {
         tmdb_year: 1999,
         tmdb_poster: "poster".into(),
         tmdb_overview: "overview".into(),
-        tmdb_media_type: "tv".into(),
+        tmdb_media_type: crate::server::planner::MediaKind::Tv,
         max_retries: 4,
         abort_on_lost_secs: 7,
         rip_elapsed_secs: 1.5,
@@ -2076,7 +2076,7 @@ fn singlepass_empty_outputs_refuse_plan_change_from_persisted_mode() {
             episode_start: None,
             title: "Show".into(),
             year: 2020,
-            media_type: "tv".into(),
+            media_type: crate::server::planner::MediaKind::Tv,
             tmdb_id: 10,
             poster_url: String::new(),
             overview: String::new(),
@@ -2101,7 +2101,7 @@ fn operator_metadata_survives_stale_worker_snapshot_and_restart() {
             episode_start: None,
             title: "Cast Away".into(),
             year: 2000,
-            media_type: "movie".into(),
+            media_type: crate::server::planner::MediaKind::Movie,
             tmdb_id: 8358,
             poster_url: String::new(),
             overview: "Chosen movie".into(),
@@ -2136,7 +2136,7 @@ fn persisted_mode_guard_allows_idle_selection_and_multipass_replanning() {
                 episode_start: None,
                 title: "Selected".into(),
                 year: 2020,
-                media_type: "tv".into(),
+                media_type: crate::server::planner::MediaKind::Tv,
                 tmdb_id: new_id,
                 poster_url: String::new(),
                 overview: String::new(),
@@ -2181,7 +2181,7 @@ fn a_metadata_edit_while_mux_finishes_holds_the_old_plan() {
                 episode_start: None,
                 title: "Correct show".into(),
                 year: 2020,
-                media_type: "tv".into(),
+                media_type: crate::server::planner::MediaKind::Tv,
                 tmdb_id: 2,
                 poster_url: String::new(),
                 overview: String::new(),
@@ -2249,7 +2249,7 @@ fn a_correction_needing_a_pruned_iso_is_refused_and_the_job_held() {
         episode_start: None,
         title: "Castaway Show".into(),
         year: 2000,
-        media_type: "tv".into(),
+        media_type: crate::server::planner::MediaKind::Tv,
         tmdb_id: 77,
         poster_url: String::new(),
         overview: String::new(),
@@ -2264,7 +2264,7 @@ fn a_correction_needing_a_pruned_iso_is_refused_and_the_job_held() {
     // A correction that keeps the plan needs no image and is accepted.
     let same_plan = UserMetadata {
         title: "Cast Away".into(),
-        media_type: "movie".into(),
+        media_type: crate::server::planner::MediaKind::Movie,
         ..as_tv.clone()
     };
     save_review_metadata(dir.path(), same_plan).unwrap();
@@ -2287,4 +2287,28 @@ fn a_correction_needing_a_pruned_iso_is_refused_and_the_job_held() {
     fs::write(&st.mapfile_path, b"map").unwrap();
     save_review_metadata(kept.path(), as_tv).unwrap();
     assert!(read_state(kept.path()).unwrap().replan_required);
+}
+
+#[test]
+fn state_json_media_type_round_trips_old_values() {
+    use crate::server::planner::MediaKind;
+    let mut v = serde_json::to_value(DiscState::new(StagingState::Stopped)).unwrap();
+    for (raw, want) in [
+        (Some("tv"), MediaKind::Tv),
+        (Some("movie"), MediaKind::Movie),
+        (Some(""), MediaKind::Movie),
+        (None, MediaKind::Movie),
+    ] {
+        match raw {
+            Some(r) => v["media_type"] = serde_json::json!(r),
+            None => {
+                v.as_object_mut().unwrap().remove("media_type");
+            }
+        }
+        let st: DiscState = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(st.media_type, want, "{raw:?}");
+    }
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.media_type = MediaKind::Tv;
+    assert_eq!(serde_json::to_value(&st).unwrap()["media_type"], "tv");
 }

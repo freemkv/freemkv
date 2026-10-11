@@ -36,8 +36,8 @@ pub struct RippedMarker {
     /// string) for backward-compat with pre-rc.4 markers that predate
     /// this field; the resume mux path falls back to "movie" when empty,
     /// matching the mover's own default.
-    #[serde(default)]
-    pub tmdb_media_type: String,
+    #[serde(default, deserialize_with = "crate::server::planner::lenient")]
+    pub tmdb_media_type: crate::server::planner::MediaKind,
     pub max_retries: u8,
     pub abort_on_lost_secs: u32,
     pub rip_elapsed_secs: f64,

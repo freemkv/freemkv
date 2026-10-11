@@ -149,7 +149,7 @@ fn marker(iso: &std::path::Path) -> crate::server::muxer::RippedMarker {
         tmdb_year: 2020,
         tmdb_poster: String::new(),
         tmdb_overview: String::new(),
-        tmdb_media_type: "tv".to_string(),
+        tmdb_media_type: crate::server::planner::MediaKind::Tv,
         max_retries: 1,
         abort_on_lost_secs: 0,
         rip_elapsed_secs: 0.0,

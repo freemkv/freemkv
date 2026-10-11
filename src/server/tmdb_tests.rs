@@ -933,3 +933,28 @@ fn checked_lookup_reports_a_failed_query_unless_another_is_confident() {
     });
     assert!(guess.is_err());
 }
+
+#[test]
+fn old_tmdb_result_json_reads_media_type_leniently() {
+    use crate::server::planner::MediaKind;
+    let base = r#"{"title":"T","year":2020,"poster_url":"","overview":"""#;
+    for (extra, want) in [
+        (r#","media_type":"tv"}"#, MediaKind::Tv),
+        (r#","media_type":"movie"}"#, MediaKind::Movie),
+        (r#","media_type":""}"#, MediaKind::Movie),
+        (r#","media_type":"anime"}"#, MediaKind::Movie),
+        ("}", MediaKind::Movie),
+    ] {
+        let r: TmdbResult = serde_json::from_str(&format!("{base}{extra}")).unwrap();
+        assert_eq!(r.media_type, want, "{extra}");
+    }
+    let tv = TmdbResult {
+        title: "T".into(),
+        year: 1,
+        poster_url: String::new(),
+        overview: String::new(),
+        media_type: MediaKind::Tv,
+        tmdb_id: 0,
+    };
+    assert_eq!(serde_json::to_value(&tv).unwrap()["media_type"], "tv");
+}

@@ -58,7 +58,7 @@ fn clear_staging_removes_only_abandoned_failures_and_empty_leftovers() {
     st.user_metadata = Some(UserMetadata {
         title: "Cast Away".into(),
         year: 2000,
-        media_type: "movie".into(),
+        media_type: crate::server::planner::MediaKind::Movie,
         episode_start: None,
         tmdb_id: 8358,
         poster_url: String::new(),

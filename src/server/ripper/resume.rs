@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64};
 use std::sync::{Arc, RwLock};
 
 use crate::server::config::Config;
+use crate::server::planner::MediaKind;
 
 use super::staging::{self, ResumeAction, StagingResumeHint};
 
@@ -574,17 +575,6 @@ fn resolve_done_codecs(post_mux_state: Option<String>, pre_mux_snapshot: String)
         .unwrap_or(pre_mux_snapshot)
 }
 
-// Resolve the media_type written into the resume .done/.review marker.
-// Mirrors the mover's default-to-"movie" so a cold auto-resume (empty
-// STATE) writes an explicit value instead of relying on that fallback.
-fn resolve_media_type(carried: &str) -> String {
-    if carried.is_empty() {
-        "movie".to_string()
-    } else {
-        carried.to_string()
-    }
-}
-
 // Handle a durability-gate (fsync) failure on the resume mux output. Caps the _mux worker's
 // re-dispatch loop via.restart_count/RESTART_LIMIT the same way resume_or_quarantine_staging
 // does.
@@ -831,7 +821,7 @@ pub(super) fn check_resume_state(saved: &staging::DiscState) -> Result<(), Strin
 pub(super) fn check_resume_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: &str,
+    media_type: MediaKind,
     disc_label: &str,
     has_plan: bool,
     replan_required: bool,
@@ -989,13 +979,13 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     };
     let media_type = saved_state
         .as_ref()
-        .map(|s| s.media_type.clone())
+        .map(|s| s.media_type)
         .unwrap_or_else(|| {
             super::STATE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(device)
-                .map(|s| s.tmdb_media_type.clone())
+                .map(|s| s.tmdb_media_type)
                 .unwrap_or_default()
         });
     let replan_required = saved_state.as_ref().is_some_and(|s| s.replan_required);
@@ -1018,7 +1008,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     if let Err(error) = check_resume_selection(
         &disc.titles,
         &cfg_read,
-        &media_type,
+        media_type,
         &disc_label,
         !plan_outputs.is_empty(),
         replan_required,
@@ -1050,7 +1040,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         let outputs = match super::plan_mux_outputs(
             &disc.titles,
             &cfg_read,
-            &saved.media_type,
+            saved.media_type,
             &saved.disc_label,
             saved.tmdb_id,
             &filename,
@@ -1479,7 +1469,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             m.tmdb_year,
             m.tmdb_poster.clone(),
             m.tmdb_overview.clone(),
-            m.tmdb_media_type.clone(),
+            m.tmdb_media_type,
         ),
         None => state_tmdb
             .as_ref()
@@ -1489,15 +1479,12 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                     rs.tmdb_year,
                     rs.tmdb_poster.clone(),
                     rs.tmdb_overview.clone(),
-                    rs.tmdb_media_type.clone(),
+                    rs.tmdb_media_type,
                 )
             })
             .unwrap_or_default(),
     };
-    // The mover routes by `media_type` (movie_dir vs tv_dir), defaulting
-    // missing/empty to "movie". Resolve the same default here so a cold
-    // auto-resume writes an explicit value instead of relying on the reader.
-    let media_type = resolve_media_type(&tmdb_media_type);
+    let media_type = tmdb_media_type;
 
     // Title-confidence gate — routes through the SAME `title_is_confident`
     // (mod.rs) the fresh-rip completion path uses (the Done/Review hand-off is
@@ -1563,7 +1550,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             s.disc_name = disc_label.clone();
             s.disc_format = disc_format.clone();
             s.year = tmdb_year;
-            s.media_type = media_type.clone();
+            s.media_type = media_type;
             s.tmdb_poster = tmdb_poster.clone();
             s.tmdb_overview = tmdb_overview.clone();
             s.resumed = true;
@@ -2021,7 +2008,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         s.disc_name = disc_label.clone();
         s.disc_format = disc_format.clone();
         s.year = tmdb_year;
-        s.media_type = media_type.clone();
+        s.media_type = media_type;
         s.tmdb_poster = tmdb_poster.clone();
         s.tmdb_overview = tmdb_overview.clone();
         s.resumed = true;
@@ -2269,7 +2256,7 @@ pub(crate) fn remux_from_ripped_marker(
             tmdb_year: marker.tmdb_year,
             tmdb_poster: marker.tmdb_poster.clone(),
             tmdb_overview: marker.tmdb_overview.clone(),
-            tmdb_media_type: marker.tmdb_media_type.clone(),
+            tmdb_media_type: marker.tmdb_media_type,
             ..Default::default()
         },
     );
