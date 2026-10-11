@@ -1264,12 +1264,13 @@ fn a_stalled_copy_consumes_a_retry_attempt_instead_of_holding() {
         .unwrap_or_else(|e| e.into_inner());
     let (_temp, dir, cfg, manifest) = fixture();
     let key = dir.to_string_lossy().into_owned();
-    super::super::test_hooks::set(
+    let _hooks = super::super::test_hooks::set(
+        _temp.path(),
         Duration::from_millis(40),
-        Some(Box::new(|| std::thread::sleep(Duration::from_millis(250)))),
+        std::sync::Arc::new(|| std::thread::sleep(Duration::from_millis(250))),
     );
     super::super::check_and_move(&cfg);
-    super::super::test_hooks::set(Duration::from_secs(60), None);
+    drop(_hooks);
     assert!(manifest.entries[0].source.exists());
     let row = super::super::MOVE_ERRORS
         .lock()
@@ -1288,4 +1289,22 @@ fn a_stalled_copy_consumes_a_retry_attempt_instead_of_holding() {
             .attempts,
         1
     );
+}
+
+#[test]
+fn another_jobs_stall_hook_does_not_touch_this_delivery() {
+    use std::time::Duration;
+    let (_ta, _da, _ca, _ma) = fixture();
+    let (_tb, dir_b, _cb, manifest_b) = fixture();
+    let _hooks = super::super::test_hooks::set(
+        _ta.path(),
+        Duration::from_millis(40),
+        std::sync::Arc::new(|| std::thread::sleep(Duration::from_millis(250))),
+    );
+    let outcome = Manifest::deliver(&dir_b, 0, &|_, _, _, _| {}).unwrap();
+    assert!(
+        matches!(outcome, super::super::MoveOutcome::Moved),
+        "{outcome:?}"
+    );
+    assert!(manifest_b.entries[0].destination.exists());
 }
