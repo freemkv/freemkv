@@ -16,14 +16,24 @@ pub struct Arbiter {
     // Bumped on every rip start, so a remux can tell it was preempted even if
     // the rip already finished by the time it looks.
     rip_starts: AtomicU64,
+    // The threads holding a slot, so a test reads only its own worker's claims.
+    #[cfg(test)]
+    holders: std::sync::Mutex<Vec<std::thread::ThreadId>>,
 }
 
 /// Held by a rip or mux worker for the length of its disk-writing work.
 #[must_use = "the slot is released when this guard drops"]
-pub struct RipSlot<'a>(&'a Arbiter);
+pub struct RipSlot<'a>(&'a Arbiter, #[cfg(test)] std::thread::ThreadId);
 
 impl Drop for RipSlot<'_> {
     fn drop(&mut self) {
+        #[cfg(test)]
+        {
+            let mut holders = self.0.holders.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(at) = holders.iter().position(|t| *t == self.1) {
+                holders.swap_remove(at);
+            }
+        }
         self.0.rips.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -33,6 +43,8 @@ impl Arbiter {
         Self {
             rips: AtomicUsize::new(0),
             rip_starts: AtomicU64::new(0),
+            #[cfg(test)]
+            holders: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -40,7 +52,26 @@ impl Arbiter {
     pub fn rip(&self) -> RipSlot<'_> {
         self.rips.fetch_add(1, Ordering::SeqCst);
         self.rip_starts.fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
+        {
+            let id = std::thread::current().id();
+            self.holders
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(id);
+            RipSlot(self, id)
+        }
+        #[cfg(not(test))]
         RipSlot(self)
+    }
+
+    // Whether `thread` holds a slot: a test's own worker, whatever other tests hold.
+    #[cfg(test)]
+    pub(crate) fn held_by(&self, thread: std::thread::ThreadId) -> bool {
+        self.holders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&thread)
     }
 
     /// True while any rip or ripper-side mux holds the slot.
