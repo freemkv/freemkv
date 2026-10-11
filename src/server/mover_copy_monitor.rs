@@ -63,20 +63,22 @@ impl Monitor<'_> {
     ) -> io::Result<u64> {
         let mut last_bytes = 0;
         let mut last_beats = self.activity.beats();
-        let mut advanced = Instant::now();
+        let progress = libfreemkv::halt::Liveness::new();
+        let mut timer = libfreemkv::halt::StallTimer::new(self.stall_window, &progress);
         let mut stalled = None;
         let mut cancelled = false;
         let mut speed = freemkv_engine::SpeedEstimator::new();
-        speed.observe(advanced, 0);
+        speed.observe(Instant::now(), 0);
         loop {
             let now = Instant::now();
             let done = self.written.load(Ordering::Relaxed);
             let beats = self.activity.beats();
             if done != last_bytes || beats != last_beats {
                 (last_bytes, last_beats) = (done, beats);
-                advanced = now;
+                progress.bump();
             }
-            if stalled.is_none() && now.duration_since(advanced) >= self.stall_window {
+            let expired = timer.poll(&progress) == libfreemkv::halt::Stall::Expired;
+            if stalled.is_none() && expired {
                 let reason = format!(
                     "{} stalled for {} seconds without byte progress: {}",
                     self.activity.operation(),
@@ -140,16 +142,23 @@ impl Monitor<'_> {
     fn blocked(&self, reason: &str) {
         // No filesystem logging from this monitor: the log may share the
         // stalled mount. Publish the actionable reason directly to SSE state.
+        // The silent sink keeps filesystem logging out of this monitor.
         let key = self.job.to_string_lossy();
+        super::record_error_with(
+            &key,
+            reason,
+            "Cancellation requested; an already-entered publication may still finish. Cannot retry while the filesystem call is active; restore/remount the filesystem and wait for the worker to return. Sources and ownership are retained.",
+            |_| {},
+        );
+        if let Some(error) = super::MOVE_ERRORS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(key.as_ref())
         {
-            let mut errors = super::MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-            let attempts = errors.get(key.as_ref()).map_or(0, |e| e.attempts);
-            errors.insert(key.to_string(), super::MoverError {
-                path: key.to_string(), reason: reason.into(),
-                hint: "Cancellation requested; an already-entered publication may still finish. Cannot retry while the filesystem call is active; restore/remount the filesystem and wait for the worker to return. Sources and ownership are retained.".into(),
-                attempts, worker_active: true, copy_stalled: true,
-                retry_held: true, retry_after: None, waiting_for_folder: false, retrying: false, waiting_root: None,
-            });
+            error.worker_active = true;
+            error.copy_stalled = true;
+            error.retry_held = true;
+            error.retry_after = None;
         }
         for state in super::MOVE_STATE
             .lock()
@@ -175,7 +184,7 @@ impl Monitor<'_> {
             && error.copy_stalled
         {
             error.worker_active = false;
-            error.hint = "The copy worker has returned. Source files and delivery journal are retained; restore the filesystem, then choose Retry to reconcile any completed publication.".into();
+            error.hint = "The copy worker has returned. Source files and delivery journal are retained; restore the filesystem; the delivery retries on its backoff, or choose Retry now to reconcile any completed publication.".into();
         }
     }
 }

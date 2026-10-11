@@ -1631,7 +1631,7 @@ fn check_and_move(cfg: &Config) {
                 }
             }
             if matches!(outcome, MoveOutcome::Stalled | MoveOutcome::Interrupted) {
-                // The worker has drained; stalled stays held until Retry, an
+                // The worker has drained; a stall consumes a retry attempt, an
                 // interruption just stops. Publish no further artifact this tick.
                 break;
             }
@@ -1712,7 +1712,7 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
         if outcomes.iter().any(|o| matches!(o, MoveOutcome::Stalled)) {
-            hold_for_operator(&dir_str);
+            schedule_move_retry(&dir_str);
             continue;
         }
         if any_unsupported {
@@ -2429,6 +2429,14 @@ fn absolute_for_log(dest: &str) -> String {
 
 type BeforePublish = std::sync::Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
 
+fn publish_rename(src: &Path, dest: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if test_hooks::force_copy() {
+        return Err(std::io::ErrorKind::CrossesDevices.into());
+    }
+    libfreemkv::io::publish::no_replace(src, dest)
+}
+
 fn move_file(
     src: &Path,
     dest: &Path,
@@ -2454,7 +2462,7 @@ fn move_file(
         );
         return MoveOutcome::Failed;
     }
-    match libfreemkv::io::publish::no_replace(src, dest) {
+    match publish_rename(src, dest) {
         Ok(()) => {
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
@@ -2511,6 +2519,8 @@ fn move_file(
             Some(&worker_halt),
             &|candidate| {
                 check_candidate(&src_owned, &dest_owned, candidate)?;
+                #[cfg(test)]
+                test_hooks::before_publish();
                 before_publish(candidate)
             },
             Some(&worker_activity),
@@ -2532,8 +2542,8 @@ fn move_file(
         halt: &flush_halt,
         progress: on_progress,
         source_size: src_size,
-        stall_window: std::time::Duration::from_secs(60),
-        poll_interval: std::time::Duration::from_millis(250),
+        stall_window: copy_stall_window(),
+        poll_interval: copy_poll_interval(),
     }
     .wait(rx, copy_handle);
     match result {
@@ -2581,6 +2591,48 @@ fn log_interrupted_delivery(dir: &str) {
     crate::server::log::syslog(&format!(
         "Delivery of {dir} interrupted by shutdown; it resumes on the next start"
     ));
+}
+
+#[cfg(not(test))]
+fn copy_stall_window() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
+}
+#[cfg(not(test))]
+fn copy_poll_interval() -> std::time::Duration {
+    std::time::Duration::from_millis(250)
+}
+#[cfg(test)]
+fn copy_stall_window() -> std::time::Duration {
+    test_hooks::stall_window()
+}
+#[cfg(test)]
+fn copy_poll_interval() -> std::time::Duration {
+    std::time::Duration::from_millis(5)
+}
+
+// Test seams: a short stall window and a hook that blocks inside the copy worker.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::Mutex;
+    use std::time::Duration;
+    type Hook = Box<dyn Fn() + Send + Sync>;
+    static WINDOW: Mutex<Duration> = Mutex::new(Duration::from_secs(60));
+    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+    pub fn force_copy() -> bool {
+        HOOK.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+    pub fn stall_window() -> Duration {
+        *WINDOW.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn set(window: Duration, hook: Option<Hook>) {
+        *WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = window;
+        *HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+    pub fn before_publish() {
+        if let Some(hook) = HOOK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            hook();
+        }
+    }
 }
 
 fn copy_failure_outcome(error: &std::io::Error) -> MoveOutcome {

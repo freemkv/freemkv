@@ -1255,3 +1255,37 @@ fn a_metadata_preserving_copy_of_the_source_is_adopted() {
     ));
     assert!(Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
 }
+
+#[test]
+fn a_stalled_copy_consumes_a_retry_attempt_instead_of_holding() {
+    use std::time::Duration;
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, manifest) = fixture();
+    let key = dir.to_string_lossy().into_owned();
+    super::super::test_hooks::set(
+        Duration::from_millis(40),
+        Some(Box::new(|| std::thread::sleep(Duration::from_millis(250)))),
+    );
+    super::super::check_and_move(&cfg);
+    super::super::test_hooks::set(Duration::from_secs(60), None);
+    assert!(manifest.entries[0].source.exists());
+    let row = super::super::MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get(&key)
+        .cloned()
+        .unwrap();
+    assert_eq!(row.attempts, 1);
+    assert!(row.retry_after.is_some() && !row.retry_held);
+    assert_eq!(
+        Manifest::load(&dir)
+            .unwrap()
+            .unwrap()
+            .retry()
+            .unwrap()
+            .attempts,
+        1
+    );
+}
