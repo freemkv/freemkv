@@ -618,19 +618,22 @@ fn locate_refuses_a_partial_listing_or_an_uninspectable_entry() {
     assert!(gone.unwrap_err().contains("Vanished"));
 }
 
-// A configured staging folder whose share is not mounted (its mount point is an empty
-// folder) is not made on the local disk; nor is the isolated job inside it.
+// A configured staging folder that is missing is never created (its share may not be
+// mounted); the job waits, saying why, and is made once the folder is there.
 #[test]
-fn an_unverified_job_is_not_made_under_an_unmounted_shares_mount_point() {
+fn a_missing_configured_staging_folder_is_never_created() {
     let base = tempfile::tempdir().unwrap();
     let mount_point = base.path().join("nas");
     std::fs::create_dir(&mount_point).unwrap();
+    std::fs::create_dir(mount_point.join("Movies")).unwrap();
     let root = mount_point.join("staging");
     let error = fresh_unverified_job(&staging_cfg(&root)).unwrap_err();
-    assert!(error.contains("empty"), "{error}");
+    assert!(
+        error.contains("is missing — is the share mounted?"),
+        "{error}"
+    );
     assert!(!root.exists());
-    // Mounted (the share holds folders): made, one level.
-    std::fs::create_dir(mount_point.join("Movies")).unwrap();
+    std::fs::create_dir(&root).unwrap();
     let job = fresh_unverified_job(&staging_cfg(&root)).unwrap();
     assert!(root.join(job).is_dir());
 }

@@ -66,7 +66,8 @@ pub fn retitle_staging_for_device(
             "the staging network share is not mounted; the correction was not saved",
         ));
     }
-    create_job_dir(&c, &dir)
+    crate::server::config::staging_root_ready(&c).map_err(|p| std::io::Error::other(p.message))?;
+    create_job_dir(&dir)
         .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create staging: {e}")))?;
     staging::save_user_metadata_for_device(
         &dir,
@@ -1365,6 +1366,13 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                     }
                 };
 
+                // A rip held for its staging folder starts again, as an insert, once it is there.
+                if presence == libfreemkv::DiscPresence::Present && staging_held(&device) {
+                    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+                    if staging_hold_lifted(&device, &c, crate::server::util::epoch_secs()) {
+                        had_disc.remove(&device);
+                    }
+                }
                 let is_new_insert = !had_disc.contains(&device);
                 // One is_in_cooldown read for both halves: asking twice could
                 // straddle the expiry and dispatch without latching.
@@ -1393,6 +1401,10 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                             tracing::info!(device = %device, "disc removed");
                             drop_session(&device);
                         }
+                        STAGING_HELD
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&device);
                         continue;
                     }
                 };
@@ -1728,6 +1740,10 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             }
         }
         Err(e) => {
+            if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
+                hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+                return;
+            }
             let job = match jobs::fresh_unverified_job(&cfg_read) {
                 Ok(job) => job,
                 Err(alloc) => {
@@ -2344,14 +2360,69 @@ fn stand_down_idle(device: &str, loss_aborted: bool) {
     drop_session(device);
 }
 
-// Create staging job folder `dir`, one level under the staging root, making the root as
-// `create_staging_root` does, so neither lands on an unmounted share's mount point.
-fn create_job_dir(cfg: &Config, dir: &std::path::Path) -> std::io::Result<()> {
-    crate::server::config::create_staging_root(cfg)?;
+// Create staging job folder `dir`, one level under a staging root `staging_root_ready` passed:
+// a missing root is never made here.
+fn create_job_dir(dir: &std::path::Path) -> std::io::Result<()> {
     match std::fs::create_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
         other => other,
     }
+}
+
+/// How often a rip held for its staging folder looks for it again, in seconds.
+const STAGING_HOLD_RECHECK_SECS: u64 = 10;
+
+// Drives whose rip waits for the staging folder, with when it was last looked for.
+static STAGING_HELD: std::sync::Mutex<std::collections::BTreeMap<String, u64>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+// Hold `device`'s rip until the staging folder `problem` names is there; the drive shows why.
+fn hold_for_staging(device: &str, problem: &crate::server::health::Problem, now: u64) {
+    STAGING_HELD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(device.to_string(), now);
+    crate::server::log::device_log(device, &problem.message);
+    update_state_with(device, |s| {
+        s.status = "error".into();
+        s.last_error = problem.message.clone();
+    });
+}
+
+fn staging_held(device: &str) -> bool {
+    STAGING_HELD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(device)
+}
+
+// Whether `device`'s held rip may start again: its staging folder is ready, looked for at
+// most every `STAGING_HOLD_RECHECK_SECS` on a bounded probe, so a hung share stalls nothing.
+fn staging_hold_lifted(device: &str, cfg: &Config, now: u64) -> bool {
+    {
+        let mut held = STAGING_HELD.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(last) = held.get_mut(device) else {
+            return false;
+        };
+        if now < last.saturating_add(STAGING_HOLD_RECHECK_SECS) {
+            return false;
+        }
+        *last = now;
+    }
+    let owned = cfg.clone();
+    let probe = crate::server::health::bounded(
+        std::path::Path::new(&cfg.staging_dir),
+        Duration::from_secs(2),
+        move || crate::server::config::staging_root_ready(&owned).is_ok(),
+    );
+    let ready = matches!(probe, crate::server::health::Bounded::Done(true));
+    if ready {
+        STAGING_HELD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(device);
+    }
+    ready
 }
 
 // List the immediate-child basenames of the staging root with the same NFS cold-cache
@@ -2939,12 +3010,16 @@ fn rip_disc_inner(
     // Freeze actual execution mode before a correction can alter the plan. The
     // scan's verified identity lands in the same first write, so an early return
     // never leaves an identity-less job that location refuses for good.
+    if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
+        hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+        return;
+    }
     let started = if crate::server::health::share_unmounted(&job_path) {
         Err(std::io::Error::other(
             "staging network share is not mounted",
         ))
     } else {
-        create_job_dir(&cfg_read, &job_path).and_then(|()| {
+        create_job_dir(&job_path).and_then(|()| {
             staging::begin_capture(&job_path, cfg_read.max_retries, &verified_identity)
         })
     };
@@ -3260,10 +3335,15 @@ fn rip_disc_inner(
     }
     let staging = cfg_read.staging_device_dir(&job_id);
     // Under an unmounted share the dir would be made on the container's own disk.
+    if let Err(problem) = crate::server::config::staging_root_ready(&cfg_read) {
+        hold_for_staging(device, &problem, crate::server::util::epoch_secs());
+        unregister_halt(device);
+        return;
+    }
     let made = if crate::server::health::share_unmounted(std::path::Path::new(&staging)) {
         Err(std::io::Error::other("its network share is not mounted"))
     } else {
-        create_job_dir(&cfg_read, std::path::Path::new(&staging))
+        create_job_dir(std::path::Path::new(&staging))
     };
     if let Err(e) = made {
         // Bail loudly instead of pressing on: a missing staging dir
@@ -6483,6 +6563,9 @@ mod held_eject_tests;
 #[path = "mod_key_retry_tests.rs"]
 mod key_retry_tests;
 
+#[cfg(test)]
+#[path = "mod_staging_hold_tests.rs"]
+mod staging_hold_tests;
 #[cfg(test)]
 #[path = "mod_staging_scope_tests.rs"]
 mod staging_scope_tests;
