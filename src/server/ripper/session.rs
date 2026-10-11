@@ -100,6 +100,13 @@ pub fn spawn_rip_thread<F>(device: &str, role: &str, f: F) -> std::io::Result<()
 where
     F: FnOnce() + Send + 'static,
 {
+    // Nothing reopens admission once a stop begins, so a late request's rip is refused.
+    if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "the server is stopping",
+        ));
+    }
     let name = format!("{}-{}", role, device);
     // Per-thread span carrying build + device for the worker's whole life;
     // tracing spans are thread-local, so events from this crate AND from

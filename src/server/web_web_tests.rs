@@ -4412,16 +4412,21 @@ mod http {
 
     #[test]
     fn system_reboot_requests_a_fresh_instance_and_preserves_durable_state() {
-        struct Reset;
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                crate::server::REBOOT.store(false, std::sync::atomic::Ordering::Release);
-                crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
-            }
+        // Own process: the reboot sets SHUTDOWN, which refuses every rip spawn.
+        const CHILD: &str = "FREEMKV_TEST_REBOOT_ROUTE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "server::web::web_tests::http::system_reboot_requests_a_fresh_instance_and_preserves_durable_state",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "{status}");
+            return;
         }
-        let _reset = Reset;
-        crate::server::REBOOT.store(false, std::sync::atomic::Ordering::Release);
-        crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
         let cfg = Arc::new(RwLock::new(Config::default()));
         let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
         assert_eq!(code, 202, "{body}");
