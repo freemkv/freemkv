@@ -17,6 +17,10 @@ use crate::server::util::Stamp;
 pub(super) const FILE: &str = crate::server::ripper::staging::DELIVERY_JOURNAL;
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+// Serializes every journal read-modify-write: the stall monitor commits an attempt while the
+// copy worker may be checkpointing. Held only around staging I/O, never a destination's.
+static UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     source: PathBuf,
@@ -201,9 +205,18 @@ impl Manifest {
     }
 
     pub fn mark_announced(dir: &Path) -> io::Result<()> {
+        Self::update(dir, |manifest| {
+            manifest.announced = true;
+            Ok(())
+        })
+    }
+
+    // Load, change and save the journal in `dir` as one step against other updates.
+    fn update(dir: &Path, change: impl FnOnce(&mut Self) -> io::Result<()>) -> io::Result<()> {
+        let _serial = UPDATE.lock().unwrap_or_else(|e| e.into_inner());
         let mut manifest =
             Self::load(dir)?.ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
-        manifest.announced = true;
+        change(&mut manifest)?;
         manifest.save()
     }
 
@@ -213,6 +226,7 @@ impl Manifest {
 
     /// Persist (or clear) the retry state of the plan in `dir`; no journal, nothing to do.
     pub fn record_retry(dir: &Path, state: Option<RetryState>) -> io::Result<()> {
+        let _serial = UPDATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(mut manifest) = Self::load(dir)? else {
             return Ok(());
         };
@@ -221,6 +235,35 @@ impl Manifest {
             manifest.save()?;
         }
         Ok(())
+    }
+
+    /// Every destination frozen by the journal of another staging dir under `root`, in
+    /// both its planned and its canonical form. An unreadable journal reserves nothing.
+    pub fn reserved_elsewhere(root: &Path, except: &Path) -> Vec<PathBuf> {
+        let Ok(dirs) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut reserved = Vec::new();
+        for dir in dirs.flatten().map(|e| e.path()).filter(|d| d != except) {
+            if let Ok(Some(journal)) = Self::load(&dir) {
+                for e in journal.entries {
+                    reserved.extend(e.planned.map(PathBuf::from));
+                    reserved.push(e.destination);
+                }
+            }
+        }
+        reserved
+    }
+
+    /// Each entry's destination root and folder, as frozen (canonical).
+    pub fn folders(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let root = self.roots.iter().find(|r| e.destination.starts_with(r))?;
+                Some((PathBuf::from(root), e.destination.parent()?.to_path_buf()))
+            })
+            .collect()
     }
 
     pub fn moves(&self) -> Vec<(PathBuf, String)> {
@@ -237,12 +280,13 @@ impl Manifest {
             .collect()
     }
 
+    // The destination work (sync, stamp) runs before the journal update takes its lock.
     fn prepare(dir: &Path, index: usize, candidate: &Path) -> io::Result<()> {
-        let mut manifest =
+        let manifest =
             Self::load(dir)?.ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
         let entry = manifest
             .entries
-            .get_mut(index)
+            .get(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?;
         verify_parent(&entry.destination)?;
         entry.source_identity.verify(&entry.source)?;
@@ -255,8 +299,14 @@ impl Manifest {
         if identity.size != entry.source_identity.size {
             return Err(io::Error::other("delivery candidate size changed"));
         }
-        entry.prepared = Some(identity);
-        manifest.save()
+        Self::update(dir, |manifest| {
+            manifest
+                .entries
+                .get_mut(index)
+                .ok_or_else(|| io::Error::other("invalid delivery entry"))?
+                .prepared = Some(identity);
+            Ok(())
+        })
     }
 
     pub fn deliver(
@@ -264,7 +314,7 @@ impl Manifest {
         index: usize,
         progress: &dyn Fn(u8, f64, f64, f64),
     ) -> io::Result<super::MoveOutcome> {
-        let mut manifest =
+        let manifest =
             Self::load(dir)?.ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
         let entry = manifest
             .entries
@@ -290,12 +340,17 @@ impl Manifest {
                     return Ok(super::MoveOutcome::Collision);
                 }
                 entry.prepared()?.verify(&entry.destination)?;
-                if !entry.completed {
-                    adoptable(&entry)?;
+                // Already recorded as delivered: nothing to adopt, sync or save again.
+                if entry.completed {
+                    super::clear_stale_dest_error(&entry.destination);
+                    return Ok(super::MoveOutcome::Skipped);
                 }
+                adoptable(&entry)?;
                 sync_parent(&entry.destination)?;
-                manifest.entries[index].completed = true;
-                manifest.save()?;
+                Self::update(dir, |manifest| {
+                    manifest.entries[index].completed = true;
+                    Ok(())
+                })?;
                 super::clear_stale_dest_error(&entry.destination);
                 return Ok(super::MoveOutcome::Skipped);
             }
@@ -322,16 +377,23 @@ impl Manifest {
     }
 
     fn settle(dir: &Path, index: usize) -> io::Result<()> {
-        let mut manifest =
+        let manifest =
             Self::load(dir)?.ok_or_else(|| io::Error::other("delivery manifest disappeared"))?;
         let entry = manifest
             .entries
-            .get_mut(index)
+            .get(index)
             .ok_or_else(|| io::Error::other("invalid delivery entry"))?;
         verify_parent(&entry.destination)?;
-        entry.prepared()?.verify(&entry.destination)?;
-        entry.completed = true;
-        manifest.save()
+        let prepared = entry.prepared()?;
+        prepared.verify(&entry.destination)?;
+        // Completed only as verified: a prepared stamp changed since is not this file.
+        Self::update(dir, |manifest| match manifest.entries.get_mut(index) {
+            Some(entry) if entry.prepared == Some(prepared) => {
+                entry.completed = true;
+                Ok(())
+            }
+            _ => Err(io::Error::other("delivery identity changed while settling")),
+        })
     }
 
     pub fn verify_delivered(&self) -> io::Result<()> {

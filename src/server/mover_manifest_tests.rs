@@ -426,20 +426,26 @@ fn copied_source_is_retained_when_final_or_source_identity_changes_before_cleanu
         Manifest::deliver(&dir, index, &|_, _, _, _| {}).unwrap();
     }
     let completed = Manifest::load(&dir).unwrap().unwrap();
+    // The originals are set aside outside staging: inside it they would be unplanned
+    // artifacts, which fail cleanup whatever the identity checks decide.
+    let aside = _temp.path().join("aside");
+    std::fs::create_dir_all(&aside).unwrap();
     let source = &manifest.entries[0].source;
-    let retained = source.with_extension("original");
-    std::fs::rename(source, &retained).unwrap();
+    std::fs::rename(source, aside.join("source.original")).unwrap();
     std::fs::write(source, b"foreign staged replacement").unwrap();
-    assert!(completed.cleanup().is_err());
+    let error = completed.cleanup().unwrap_err();
+    assert!(error.to_string().contains("changed since"), "{error}");
     assert_eq!(
         std::fs::read(source).unwrap(),
         b"foreign staged replacement"
     );
     assert!(dir.join(FILE).exists());
+    std::fs::rename(aside.join("source.original"), source).unwrap();
     let destination = &manifest.entries[1].destination;
-    std::fs::rename(destination, destination.with_extension("original")).unwrap();
+    std::fs::rename(destination, aside.join("destination.original")).unwrap();
     std::fs::write(destination, b"foreign final replacement").unwrap();
-    assert!(completed.cleanup().is_err());
+    let error = completed.cleanup().unwrap_err();
+    assert!(error.to_string().contains("changed since"), "{error}");
     assert!(manifest.entries[1].source.exists());
 }
 
@@ -496,6 +502,10 @@ fn a_zero_length_destination_is_held_as_interrupted_publication() {
 #[test]
 fn a_failed_delivery_keeps_its_backoff_across_a_restart() {
     use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root opens the read-only source read-write anyway
+    }
     let _guard = super::super::TEST_STATE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());

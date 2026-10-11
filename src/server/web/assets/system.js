@@ -33,7 +33,6 @@ function staleLegacyNote(names) {
     + ' from 1.8.3 that no disc can resume (' + shown + '); delete by hand if not needed';
 }
 
-const NO_ANSWER = 'the server did not answer';
 const RESTARTING = 'Restarting… running work stops at its next safe point, then the server restarts. This page reconnects by itself.';
 const RESTART_NOTES = {
   slow: 'Still restarting. If freemkv was started by hand rather than as a service, start it again.',
@@ -41,16 +40,21 @@ const RESTART_NOTES = {
 };
 
 // Ask for a reboot and resolve to the /api/version answer read just before it, which the
-// wait compares against. A reboot answer lost to the restart itself still counts.
+// wait compares against. Only an accepted reboot (202, `rebooting`) is waited for: the
+// server answers before it stops, so a request with no answer may never have arrived.
 async function requestReboot(call) {
   const before = await call('GET', '/api/version').catch(() => null);
-  try {
-    const r = await call('POST', '/api/system/reboot');
-    return before || {boot: r && r.boot};
-  } catch (e) {
-    if (before && e.message === NO_ANSWER) return before;
-    throw e;
-  }
+  const r = await call('POST', '/api/system/reboot');
+  if (!r || r.rebooting !== true) throw new Error('the reboot was not accepted');
+  return before || {boot: r.boot};
+}
+
+// The toast for Clear staging: what was removed and, as a warning, what could not be.
+function stagedClearToast(r) {
+  const n = r.discarded || 0;
+  let text = n + ' staging item' + (n === 1 ? '' : 's') + ' cleared';
+  if (r.failed) text += '; ' + r.failed + ' could not be removed';
+  return [text, r.failed ? 'warn' : 'info'];
 }
 
 // Poll every 2 s until a server with a boot id other than `boot` answers (null if the
@@ -145,7 +149,7 @@ export default {
     $('#clear-staging', view).addEventListener('click', (e) => twoStep(e.currentTarget, async (btn) => {
       const r = await act(btn, () => api('POST', '/api/library/staged/clear'), 'Clear staging');
       if (r) {
-        toast(r.discarded + ' staging item' + (r.discarded === 1 ? '' : 's') + ' cleared', r.failed ? 'warn' : 'info');
+        toast(...stagedClearToast(r));
         if (r.legacy && r.legacy.length) toast(staleLegacyNote(r.legacy), 'warn');
         load();
       }

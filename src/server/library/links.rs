@@ -48,8 +48,16 @@ fn record_many(config_dir: &Path, mkvs: &[&Path], iso: &Path) -> std::io::Result
     // Links decide what a remux may overwrite or retire. An unreadable map
     // cannot safely be replaced with a new, incomplete one.
     let mut links = read(config_dir)?;
+    let mut changed = false;
     for mkv in mkvs {
-        links.insert(mkv.to_path_buf(), iso.to_path_buf());
+        changed |= links
+            .insert(mkv.to_path_buf(), iso.to_path_buf())
+            .as_deref()
+            != Some(iso);
+    }
+    // Already recorded: no durable rewrite.
+    if !changed {
+        return Ok(());
     }
     let json = serde_json::to_vec_pretty(&links).map_err(std::io::Error::other)?;
     crate::server::ripper::staging::write_marker_durable(&config_dir.join(LINKS_FILE), &json)

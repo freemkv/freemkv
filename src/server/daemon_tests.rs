@@ -572,15 +572,7 @@ fn in_child(name: &str) -> bool {
     if std::env::var_os(CHILD).is_some() {
         return true;
     }
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            &format!("server::daemon::tests::{name}"),
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .status()
-        .unwrap();
+    let status = crate::server::util::child_test(&format!("server::daemon::tests::{name}"), CHILD);
     assert!(
         status.success(),
         "{name} failed in its child process: {status}"
@@ -657,15 +649,10 @@ fn second_stop_signal_force_exits() {
         handle_signal(libc::SIGINT);
         unreachable!("the second signal must _exit(1)");
     }
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "server::daemon::tests::second_stop_signal_force_exits",
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .status()
-        .unwrap();
+    let status = crate::server::util::child_test(
+        "server::daemon::tests::second_stop_signal_force_exits",
+        CHILD,
+    );
     assert_eq!(status.code(), Some(1), "{status}");
 }
 
@@ -947,6 +934,37 @@ fn a_reboot_cut_short_exits_75() {
         |_| {},
     );
     let (code, _) = exited.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(code, RESTART_EXIT_CODE);
+}
+
+// The exit code is decided when the deadline expires, not when it is armed or the stop is
+// requested: a reboot asked for (or a stop signal vetoing one) during the drain counts.
+#[test]
+fn the_deadline_decides_its_exit_code_when_it_expires() {
+    let reboot = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = reboot.clone();
+    let progress = Arc::new(StopProgress::default());
+    let (tx, exited) = std::sync::mpsc::channel();
+    spawn_stop_deadline(
+        Duration::from_millis(300),
+        || true,
+        progress,
+        move || {
+            if flag.load(Ordering::Acquire) {
+                RESTART_EXIT_CODE
+            } else {
+                0
+            }
+        },
+        |_| {},
+        move |c| {
+            let _ = tx.send(c);
+        },
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    reboot.store(true, Ordering::Release);
+    let code = exited.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(code, RESTART_EXIT_CODE);
 }
 

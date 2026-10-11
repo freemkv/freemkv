@@ -10,6 +10,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
   for (const key of ['results', 'kind', 'search', 'query', 'season', 'disc', 'episode-start']) nodes[key] = { value: '' };
   nodes.query.value = 'Cast Away'; nodes.season.value = '1';
   let closed = false, refreshed = 0, body = '', closeHook;
+  const toasts = [];
   const choice = { title: '<Cast Away>', year: 2000, tmdb_id: 8358, media_type: kind };
   const supplied = {
     esc: value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'),
@@ -30,7 +31,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
       return { el: { querySelector: selector => nodes[selector.slice(6, -1)] },
         onClose: hook => { closeHook = hook; }, close: () => { closed = true; closeHook?.(); } };
     },
-    refreshNow: () => { refreshed++; }, toast: () => {}, stagedActions: () => 'retained',
+    refreshNow: () => { refreshed++; }, toast: (text, kind) => { toasts.push([text, kind]); }, stagedActions: () => 'retained',
   };
   const module = new vm.SourceTextModule(source + '\nexport { changeMatch, actHtml };', { context });
   const imports = new Map([...source.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)]
@@ -42,7 +43,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
     }, { context });
   });
   await module.evaluate();
-  return { ui: module.namespace, nodes, calls, get body() { return body; }, get closed() { return closed; }, get refreshed() { return refreshed; } };
+  return { ui: module.namespace, nodes, calls, toasts, get body() { return body; }, get closed() { return closed; }, get refreshed() { return refreshed; } };
 }
 
 for (const kind of ['movie', 'tv']) test(`change match submits explicit ${kind} identity and revision`, async () => {
@@ -143,6 +144,8 @@ test('a saved match is not reported as queued when admission fails', async () =>
   await h.nodes.results.onclick(pick);
   const saves = h.calls.filter(c => c.method === 'POST' && c.url === '/api/library/match/remux');
   assert.deepEqual(saves.map(c => c.payload.expected_revision), [7]);
+  assert.deepEqual(h.toasts, [['Match saved, but no remux was queued. Refresh the Library to check its status.', 'info']]);
+  assert.ok(!h.toasts.some(([text]) => text.startsWith('Queued remux')));
 });
 
 test('the dialog lists the files made from this ISO, or says there are none', async () => {

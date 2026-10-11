@@ -442,6 +442,12 @@ fn only_safe_commands_survive_a_running_job() {
         Cmd::Quit,
         Cmd::QuitRequested,
         Cmd::TestKeyserver(String::new()),
+        // A Settings window opened before the rip keeps working: OK, Update keydb.
+        Cmd::CommitSettings(Box::default()),
+        Cmd::UpdateKeydb {
+            url: String::new(),
+            path: String::new(),
+        },
     ] {
         assert!(
             !blocked_while_running(&c),

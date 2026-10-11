@@ -92,3 +92,22 @@ fn a_new_link_joins_the_earlier_ones() {
         Some(&PathBuf::from("/i/A.iso"))
     );
 }
+
+// Recording links already there is not a durable rewrite of the file.
+#[cfg(unix)]
+#[test]
+fn recording_the_same_links_again_writes_nothing() {
+    use std::os::unix::fs::MetadataExt;
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join(LINKS_FILE);
+    record(t.path(), Path::new("/m/A.mkv"), Path::new("/i/A.iso")).unwrap();
+    let before = std::fs::metadata(&file).unwrap().ino();
+    record(t.path(), Path::new("/m/A.mkv"), Path::new("/i/A.iso")).unwrap();
+    assert_eq!(std::fs::metadata(&file).unwrap().ino(), before);
+    record(t.path(), Path::new("/m/A.mkv"), Path::new("/i/B.iso")).unwrap();
+    assert_ne!(
+        std::fs::metadata(&file).unwrap().ino(),
+        before,
+        "a change is saved"
+    );
+}

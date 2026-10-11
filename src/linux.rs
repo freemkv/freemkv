@@ -269,6 +269,7 @@ impl Shell {
         }
         if let Some(p) = self.prefs.borrow().as_ref() {
             p.paint_keydb(v.keydb_note.as_deref(), v.keydb_busy);
+            p.paint_keyserver(self.app.borrow().keyserver_verdict());
         }
         for (action, gate) in self.actions.borrow().iter() {
             action.set_enabled(glue::action_enabled(gate.clone(), running, opening));

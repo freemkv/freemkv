@@ -59,7 +59,12 @@ fn gui_open_token_cancels_inflight_key_lookup() {
         std::time::Instant::now()
     });
     let r = with_sources(f, || {
-        scan_with_keys_under(&iso.display().to_string(), &KeyConfig::default(), &tok)
+        scan_with_keys_under(
+            &iso.display().to_string(),
+            &KeyConfig::default(),
+            &tok,
+            &|_| Vec::new(),
+        )
     });
     let pressed = press.join().unwrap();
     assert!(

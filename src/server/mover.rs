@@ -144,6 +144,19 @@ pub struct MoverError {
     copy_stalled: bool,
     #[serde(skip)]
     retry_after: Option<std::time::Instant>,
+    // The staging dir whose delivery raised this destination-keyed row; it goes with that dir.
+    #[serde(skip)]
+    owner: Option<String>,
+    // The journaled wait for a missing title folder: the one row whose Retry consents to
+    // recreating it. A root wait (unresponsive, stale, unmounted...) never does.
+    #[serde(skip)]
+    missing_folder: bool,
+    // A declared stall's committed backoff, applied once its blocked worker returns.
+    #[serde(skip)]
+    stall_resume: Option<Option<std::time::Instant>>,
+    // Failed staging teardowns of a delivered rip, counted apart from the copy budget.
+    #[serde(skip)]
+    teardown_attempts: u32,
 }
 
 fn retry_delay(attempts: u32) -> Option<std::time::Duration> {
@@ -164,6 +177,36 @@ fn mark_retrying(path: &str) {
     }
 }
 
+// Clears the row's "Retrying now." when the pass that set it ends, by whatever exit; a pass
+// that recorded a new failure has already rewritten it.
+struct RetryingGuard(String);
+
+impl Drop for RetryingGuard {
+    fn drop(&mut self) {
+        if let Some(error) = MOVE_ERRORS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&self.0)
+        {
+            error.retrying = false;
+        }
+    }
+}
+
+// The destination lock sidecars of one pass. Every exit deletes them (a cooperating writer
+// re-creates its own), so no `<destination>.lock` is ever left in the library.
+struct TargetLocks(Vec<libfreemkv::io::ArtifactLock>);
+
+impl Drop for TargetLocks {
+    fn drop(&mut self) {
+        for lock in self.0.drain(..) {
+            if let Err(e) = lock.delete() {
+                tracing::warn!(error = %e, "delivery lock sidecar retained");
+            }
+        }
+    }
+}
+
 fn move_retry_ready(path: &str, now: std::time::Instant) -> bool {
     MOVE_ERRORS
         .lock()
@@ -175,13 +218,44 @@ fn move_retry_ready(path: &str, now: std::time::Instant) -> bool {
 // Only an attempted delivery consumes the retry budget. A health probe waiting
 // for a mount must remain able to recover as soon as that mount responds.
 fn schedule_move_retry(path: &str) {
+    schedule_move_retry_with(path, crate::server::log::syslog);
+}
+
+// `schedule_move_retry` with the log sink given (the stall monitor's is silent).
+fn schedule_move_retry_with(path: &str, log: impl FnOnce(&str)) {
     let attempts = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(path)
         .map(|error| error.attempts.saturating_add(1));
     if let Some(attempts) = attempts {
-        commit_retry(path, attempts, retry_delay(attempts));
+        commit_retry_with(path, attempts, retry_delay(attempts), log);
+    }
+}
+
+// A stall is an attempt, committed as it is declared (after the row shows it): a restart while
+// the worker is still blocked cannot buy a fresh copy. The row holds until the worker returns.
+fn commit_stall(path: &str) {
+    #[cfg(test)]
+    test_hooks::committing_stall(path);
+    schedule_move_retry_with(path, |_| {});
+}
+
+// The stalled worker returned: the backoff committed at the stall applies from now on.
+fn finish_stall(path: &str) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    match errors
+        .get_mut(path)
+        .and_then(|row| Some((row.stall_resume.take()?, row)))
+    {
+        Some((resume, row)) => {
+            row.retry_after = resume;
+            row.retry_held = resume.is_none();
+        }
+        None => {
+            drop(errors);
+            schedule_move_retry(path);
+        }
     }
 }
 
@@ -212,24 +286,46 @@ fn hold_for_operator(path: &str) {
 }
 
 // Operator Retry requests not yet applied to a delivery journal's retry state. The flag
-// records that the retried row was the missing-folder wait.
+// records that the retried row was the journaled missing-title-folder wait.
 static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(Default::default);
 
+// The longest backoff [`retry_delay`] gives: no restored wait is ever longer.
+const LONGEST_BACKOFF: std::time::Duration = std::time::Duration::from_secs(120);
+
 // Derive the row's retry fields from a retry state, the journal's record of them.
 fn apply_retry(row: &mut MoverError, state: &manifest::RetryState) {
+    apply_retry_at(row, state, std::time::Instant::now());
+}
+
+// `apply_retry` as of `now`. The journal's wall-clock time is staging data: a far-future
+// value (corruption, a clock stepped back) is clamped, never added unchecked.
+fn apply_retry_at(row: &mut MoverError, state: &manifest::RetryState, now: std::time::Instant) {
     row.attempts = state.attempts;
     row.retry_after = state.not_before.map(|t| {
-        std::time::Instant::now()
-            + t.duration_since(std::time::SystemTime::now())
-                .unwrap_or_default()
+        let left = t
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default()
+            .min(LONGEST_BACKOFF);
+        now.checked_add(left).unwrap_or(now)
     });
     row.retry_held = row.retry_after.is_none();
 }
 
 // A journaled dir's retry state is written first and is authoritative, so neither a
-// restart nor a reboot buys another full-file copy; the row is then derived from it.
+// restart nor a reboot buys another full-file copy; the row is then derived from it. A
+// state that cannot be saved holds the delivery: the stale journal would reset the count.
 fn commit_retry(path: &str, attempts: u32, delay: Option<std::time::Duration>) {
+    commit_retry_with(path, attempts, delay, crate::server::log::syslog);
+}
+
+// `commit_retry` with the log sink given.
+fn commit_retry_with(
+    path: &str,
+    attempts: u32,
+    delay: Option<std::time::Duration>,
+    log: impl FnOnce(&str),
+) {
     let Some(row) = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -244,16 +340,36 @@ fn commit_retry(path: &str, attempts: u32, delay: Option<std::time::Duration>) {
         reason: row.reason,
         hint: row.hint,
     };
-    if let Err(error) = manifest::Manifest::record_retry(Path::new(path), Some(state.clone())) {
-        tracing::warn!(%error, dir = path, "mover: retry state not persisted");
+    let saved = manifest::Manifest::record_retry(Path::new(path), Some(state.clone()));
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(row) = errors.get_mut(path) else {
+        return;
+    };
+    apply_retry(row, &state);
+    // A blocked worker's row stays held; the committed backoff applies once it returns.
+    let stalled = row.worker_active;
+    if stalled {
+        row.stall_resume = Some(row.retry_after);
+        row.retry_after = None;
+        row.retry_held = true;
     }
-    if let Some(row) = MOVE_ERRORS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_mut(path)
-    {
-        apply_retry(row, &state);
+    let Err(error) = saved else {
+        return;
+    };
+    tracing::warn!(%error, dir = path, "mover: retry state not persisted");
+    row.retry_after = None;
+    row.retry_held = true;
+    if stalled {
+        row.stall_resume = Some(None);
     }
+    row.reason = format!(
+        "{}; automatic retries stopped because the retry state could not be saved: {error}",
+        row.reason
+    );
+    row.hint = "Free space on the staging storage or make it writable, then choose Retry. Staged source files are retained.".into();
+    let line = format!("Move held: {path} — {}", row.reason);
+    drop(errors);
+    log(&line);
 }
 
 // Whether a journaled dir may attempt delivery now, and whether the operator asked.
@@ -287,11 +403,28 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             Attempt::Requested
         };
     }
-    let Some(state) = saved.retry() else {
-        return Attempt::Due;
-    };
     let now = std::time::Instant::now();
+    let Some(state) = saved.retry() else {
+        return if move_retry_ready(path, now) {
+            Attempt::Due
+        } else {
+            Attempt::Wait
+        };
+    };
     let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    // The row already holds this state (its deadline clamped when first derived) or one the
+    // journal failed to record: it stands. Re-deriving would clamp afresh every pass.
+    if errors
+        .get(path)
+        .is_some_and(|row| row.attempts >= state.attempts)
+    {
+        drop(errors);
+        return if move_retry_ready(path, now) {
+            Attempt::Due
+        } else {
+            Attempt::Wait
+        };
+    }
     let row = errors
         .entry(path.to_string())
         .or_insert_with(|| MoverError {
@@ -306,8 +439,12 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             retrying: false,
             copy_stalled: false,
             retry_after: None,
+            owner: None,
+            missing_folder: false,
+            stall_resume: None,
+            teardown_attempts: 0,
         });
-    apply_retry(row, state);
+    apply_retry_at(row, state, now);
     drop(errors);
     if move_retry_ready(path, now) {
         Attempt::Due
@@ -337,6 +474,7 @@ fn record_error_at_stage(
         let mut m = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
         let same_reason = m.get(path).map(|e| e.reason == reason).unwrap_or(false);
         let attempts = m.get(path).map_or(0, |e| e.attempts);
+        let teardown_attempts = m.get(path).map_or(0, |e| e.teardown_attempts);
         let retry_after = m
             .get(path)
             .map_or(Some(std::time::Instant::now()), |e| e.retry_after);
@@ -354,6 +492,10 @@ fn record_error_at_stage(
                 retrying: false,
                 copy_stalled: false,
                 retry_after,
+                owner: None,
+                missing_folder: false,
+                stall_resume: None,
+                teardown_attempts,
             },
         );
         same_reason
@@ -380,11 +522,12 @@ fn clear_recovered_folder_waits_for(root: &Path) {
     errors.retain(|_, e| !(e.attempts == 0 && e.waiting_root.as_deref() == Some(root)));
 }
 
+// Drop the row for `path` and every destination row its delivery raised.
 fn clear_error(path: &str) {
     MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(path);
+        .retain(|key, e| key != path && e.owner.as_deref() != Some(path));
 }
 
 // Drop any MOVE_ERRORS row keyed by this DESTINATION path, on every exit from move_file that
@@ -393,43 +536,88 @@ fn clear_stale_dest_error(dest: &Path) {
     clear_error(&dest.to_string_lossy());
 }
 
-// Drop MOVE_ERRORS rows whose staging dir is gone. `seen` is every staging child this pass
-// listed; a key is dropped only if it is a direct child of staging_root AND was absent.
-fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String>) {
-    let root = Path::new(staging_root);
-    // Recover-and-proceed on poison, matching record_error's peers: leaving
-    // the map untouched is the unbounded growth this exists to stop.
-    let mut m = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-    m.retain(|key, _| Path::new(key).parent() != Some(root) || seen.contains(key));
-    RETRY_REQUESTS
+thread_local! {
+    // The cause of this thread's latest failed delivery step, for the delivery's own row.
+    static LAST_FAILURE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn note_failure(detail: String) {
+    LAST_FAILURE.with(|f| *f.borrow_mut() = Some(detail));
+}
+
+fn take_failure() -> Option<String> {
+    LAST_FAILURE.with(|f| f.borrow_mut().take())
+}
+
+// A row keyed by a delivery's destination, owned by its staging dir `job`: the step and
+// its OS error as the reason, an instruction as the hint. The delivery's row gets the cause.
+fn record_dest_error(dest: &Path, job: &Path, step: &str, error: &dyn std::fmt::Display) {
+    let key = dest.to_string_lossy();
+    let reason = format!("{step}: {error}");
+    note_failure(reason.clone());
+    let hint = crate::strings::get_or(
+        "server.mover.destination_step_failed",
+        "Check the destination folder's permissions, free space and mount. The delivery's own row shows when it is tried again.",
+    );
+    record_error(&key, &reason, &hint);
+    if let Some(row) = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|key, _| Path::new(key).parent() != Some(root) || seen.contains(key));
+        .get_mut(key.as_ref())
+    {
+        row.owner = Some(job.to_string_lossy().into_owned());
+    }
+}
+
+// Both retry maps, always locked MOVE_ERRORS first: one order everywhere, so Retry, Retry
+// all and the mover's prune can never deadlock.
+fn with_retry_maps<R>(
+    f: impl FnOnce(&mut BTreeMap<String, MoverError>, &mut std::collections::HashMap<String, bool>) -> R,
+) -> R {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut errors, &mut requests)
+}
+
+// Drop MOVE_ERRORS rows whose staging dir is gone. `seen` is every staging child this pass
+// listed; a key (or a destination row's owner) is dropped only if it is a direct child of
+// staging_root AND was absent. A Retry request survives only for a listed staging child.
+fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String>) {
+    let root = Path::new(staging_root);
+    let live = |key: &str| Path::new(key).parent() != Some(root) || seen.contains(key);
+    with_retry_maps(|errors, requests| {
+        errors.retain(|key, e| live(key) && e.owner.as_deref().is_none_or(live));
+        requests.retain(|key, _| Path::new(key).parent() == Some(root) && seen.contains(key));
+    });
 }
 
 /// Operator-initiated Retry: clear this error and its retry budget. The next
 /// mover tick may attempt delivery again; no media is removed by this action.
-pub fn clear_move_error(path: &str) {
-    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-    if errors.get(path).is_none_or(|e| !e.worker_active) {
-        let folder_wait = errors.remove(path).is_some_and(|e| e.waiting_for_folder);
-        let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
-        *requests.entry(path.to_string()).or_insert(false) |= folder_wait;
-    }
+/// False when nothing was scheduled: no such row, or its copy worker is still blocked.
+pub fn clear_move_error(path: &str) -> bool {
+    with_retry_maps(|errors, requests| {
+        if errors.get(path).is_some_and(|e| !e.worker_active)
+            && let Some(row) = errors.remove(path)
+        {
+            *requests.entry(path.to_string()).or_insert(false) |= row.missing_folder;
+            return true;
+        }
+        false
+    })
 }
 
 /// Operator-initiated Retry all: reset errors and their retry budgets.
+// Retry all is Retry on every row, so each missing-folder row among them consents to
+// recreating its folder, deliberately: the operator chose every row.
 pub fn clear_all_move_errors() {
-    let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
-    MOVE_ERRORS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain(|path, e| {
+    with_retry_maps(|errors, requests| {
+        errors.retain(|path, e| {
             if !e.worker_active {
-                *requests.entry(path.clone()).or_insert(false) |= e.waiting_for_folder;
+                *requests.entry(path.clone()).or_insert(false) |= e.missing_folder;
             }
             e.worker_active
         });
+    });
 }
 
 /// Outcome of moving a single file. Distinguishes between an active move
@@ -442,7 +630,7 @@ enum MoveOutcome {
     Skipped,
     /// Atomic rename succeeded — src is gone, dest has the bytes.
     Moved,
-    /// Copy itself failed. Caller can retry on the next tick.
+    /// Copy itself failed. Retried on the delivery's backoff.
     Failed,
     /// This attempt stalled and drained. Immutable even if the operator
     /// clears its UI error before the enclosing batch processes the result.
@@ -465,7 +653,7 @@ enum MoveOutcome {
     /// the operator gets an accurate hint — an ENOSPC/short-write hint is
     /// wrong for a structurally-invalid-but-correctly-sized copy. Like
     /// `SizeMismatch`, the caller leaves the staging dir alone (src is the
-    /// source of truth) and retries next tick.
+    /// source of truth) and retries on the delivery's backoff.
     PostCopyInvalid,
     /// Destination already exists as a DIFFERENT file (present, non-empty, and a
     /// different size than src, or the same size with different content). The
@@ -1090,6 +1278,12 @@ fn finish_filed_elsewhere(dir: &Path, display_name: &str) {
     }
 }
 
+// A plain error row for `path`, for tests outside the mover.
+#[cfg(test)]
+pub(crate) fn record_test_error(path: &str) {
+    record_error_with(path, "test failure", "test hint", |_| {});
+}
+
 // Forget in-memory mover state, as a process restart would.
 #[cfg(test)]
 pub(super) fn forget_process_state() {
@@ -1214,6 +1408,7 @@ fn check_and_move(cfg: &Config) {
             continue;
         };
         mark_retrying(&dir.to_string_lossy());
+        let _retrying = RetryingGuard(dir.to_string_lossy().into_owned());
 
         let delivery = match manifest::Manifest::load(&dir) {
             Ok(delivery) => delivery,
@@ -1228,7 +1423,14 @@ fn check_and_move(cfg: &Config) {
         };
         let attempt = match &delivery {
             Some(saved) => restore_retry(&dir.to_string_lossy(), saved),
-            None => Attempt::Due,
+            None => {
+                // Nothing to reset without a journal: the Retry is spent on this pass.
+                RETRY_REQUESTS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(dir.to_string_lossy().as_ref());
+                Attempt::Due
+            }
         };
         if attempt == Attempt::Wait {
             continue;
@@ -1360,9 +1562,13 @@ fn check_and_move(cfg: &Config) {
             cfg.keep_iso || crate::server::ripper::output_is_iso_image(&cfg.output_format);
         let (mut ripped_files, listing_complete): (Vec<std::path::PathBuf>, bool) =
             match std::fs::read_dir(&dir) {
-                Ok(entries) => {
-                    collect_ripped_files(entries.map(|r| r.map(|e| e.path())), move_iso, &dir)
-                }
+                Ok(entries) => collect_ripped_files(
+                    entries
+                        .map(|r| r.map(|e| e.path()))
+                        .chain(listing_faults(&dir)),
+                    move_iso,
+                    &dir,
+                ),
                 Err(e) => {
                     // Enumerating the staging dir failed (e.g. transient NFS
                     // read_dir error). Without this arm the dir is skipped
@@ -1468,16 +1674,21 @@ fn check_and_move(cfg: &Config) {
         // a stale or hung share holds the move (output kept in staging) and never blocks here.
         // Each root is tested once per attempt.
         let mut root_checks = RootChecks::default();
+        let mut folder_missing = false;
         let unavailable = if let Some(saved) = &delivery {
-            saved
+            match saved
                 .roots
                 .iter()
                 .find_map(|root| root_checks.check(Path::new(root)).err())
-                .or_else(|| {
-                    (attempt != Attempt::Recreate)
-                        .then(|| missing_folder(&planned_moves))
-                        .flatten()
-                })
+            {
+                Some(problem) => Some(problem),
+                None if attempt != Attempt::Recreate => {
+                    let missing = missing_folder(&planned_moves);
+                    folder_missing = missing.is_some();
+                    missing
+                }
+                None => None,
+            }
         } else {
             unreachable_root(cfg, &tmdb_result, &planned_moves, &mut root_checks)
         };
@@ -1498,6 +1709,14 @@ fn check_and_move(cfg: &Config) {
                 Some(&p.path),
                 crate::server::log::syslog,
             );
+            if folder_missing
+                && let Some(row) = MOVE_ERRORS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_mut(&dir_str)
+            {
+                row.missing_folder = true;
+            }
             continue;
         }
         clear_recovered_folder_wait(&dir_str);
@@ -1518,12 +1737,17 @@ fn check_and_move(cfg: &Config) {
         if delivery.is_none() {
             let mut uncertain = None;
             let mut residue = None;
+            // Names another disc's journal froze are taken, published yet or not.
+            let reserved = manifest::Manifest::reserved_elsewhere(Path::new(staging_root), &dir);
             let variant = crate::server::util::disc_variant(|n| {
                 if uncertain.is_some() || residue.is_some() {
                     return false;
                 }
                 for (_, dest) in planned_moves.iter() {
                     let candidate = dest_with_variant(dest, n);
+                    if is_reserved(&candidate, &reserved) {
+                        return false;
+                    }
                     match unowned_dest_claim(&candidate) {
                         DestClaim::Claimable => {}
                         DestClaim::OtherFile => return false,
@@ -1557,22 +1781,19 @@ fn check_and_move(cfg: &Config) {
                         *dest = dest_with_variant(dest, n);
                     }
                 }
-                None if legacy && uncertain.is_some() => {
-                    // A legacy rip never falls back to the base names it could not examine.
+                None if uncertain.is_some() => {
+                    // Never the base names it could not rule out: nothing is frozen until
+                    // the name can be examined.
                     let path = uncertain.unwrap_or_default();
                     record_error(
                         &dir_str,
                         &format!(
-                            "cannot examine the destination {}; nothing was moved",
+                            "uncertain destination: cannot examine the destination {}; nothing was moved",
                             absolute_for_log(&path)
                         ),
                         "Check the output folder's permissions and mount. The rip stays in staging and is tried again on the next pass.",
                     );
                     continue;
-                }
-                None if uncertain.is_some() => {
-                    // Left to the collision guard's stat-error branch, which logs
-                    // the deferral and retries next tick.
                 }
                 None => {
                     // Every variant name is held by a different file: hold, never overwrite.
@@ -1642,29 +1863,7 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
 
-        // Create destination directories under the root confirmed above. A journaled
-        // delivery's folders existed at freeze: only an operator Retry recreates them.
-        let mut dest_ok = true;
-        let create_folders = delivery.is_none() || attempt == Attempt::Recreate;
-        for (_, dest) in planned_moves.iter().filter(|_| create_folders) {
-            if let Some(parent) = Path::new(dest).parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                record_error(
-                    &dir_str,
-                    &format!(
-                        "cannot create destination directory {}: {e}",
-                        absolute_for_log(&parent.to_string_lossy())
-                    ),
-                    "check write permissions on the output / movie / tv directory",
-                );
-                dest_ok = false;
-            }
-        }
-        if !dest_ok {
-            continue;
-        }
-
+        // Refused before any folder is made: a refusal leaves nothing in the library.
         if delivery.is_none() {
             if !listing_complete {
                 record_error(
@@ -1686,6 +1885,48 @@ fn check_and_move(cfg: &Config) {
                 );
                 continue;
             }
+        }
+
+        // Create destination directories below the root confirmed above, one level at a
+        // time. A journaled delivery's folders existed at freeze: only Retry on its
+        // missing-folder row recreates them.
+        let folders: Vec<(std::path::PathBuf, std::path::PathBuf)> = match &delivery {
+            None => planned_moves
+                .iter()
+                .filter_map(|(src, dest)| {
+                    let fname = src.file_name().unwrap_or_default().to_string_lossy();
+                    let root = destination_root_for(cfg, &tmdb_result, &fname);
+                    Some((root.into(), Path::new(dest).parent()?.to_path_buf()))
+                })
+                .collect(),
+            Some(saved) if attempt == Attempt::Recreate => saved.folders(),
+            Some(_) => Vec::new(),
+        };
+        let mut created = Vec::new();
+        let mut dest_ok = true;
+        for (root, folder) in &folders {
+            match create_below_root(root, folder, root_checks.identity(root)) {
+                Ok(made) => created.extend(made),
+                Err(e) => {
+                    record_error(
+                        &dir_str,
+                        &format!(
+                            "cannot create destination directory {}: {e}",
+                            absolute_for_log(&folder.to_string_lossy())
+                        ),
+                        "check write permissions on the output / movie / tv directory",
+                    );
+                    dest_ok = false;
+                    break;
+                }
+            }
+        }
+        if !dest_ok {
+            remove_created(&created);
+            continue;
+        }
+
+        if delivery.is_none() {
             match manifest::Manifest::create(
                 &dir,
                 marker.clone(),
@@ -1697,6 +1938,10 @@ fn check_and_move(cfg: &Config) {
                     planned_moves = saved.moves();
                 }
                 Err(e) => {
+                    // A save that failed after its rename left a journal naming these folders.
+                    if std::fs::symlink_metadata(dir.join(manifest::FILE)).is_err() {
+                        remove_created(&created);
+                    }
                     record_error(
                         &dir_str,
                         &format!("cannot persist delivery plan: {e}"),
@@ -1711,7 +1956,7 @@ fn check_and_move(cfg: &Config) {
             m.ok_or_else(|| std::io::Error::other("delivery manifest disappeared"))?
                 .lock_targets()
         }) {
-            Ok(locks) => locks,
+            Ok(locks) => TargetLocks(locks),
             Err(e) => {
                 if shutdown_interrupted(&e) {
                     log_interrupted_delivery(&dir_str);
@@ -1766,6 +2011,7 @@ fn check_and_move(cfg: &Config) {
         }
         let mut outcomes: Vec<MoveOutcome> = Vec::new();
         let mut held: Option<String> = None;
+        take_failure();
         let mut announced_moving = false;
         for (i, (src, dest)) in planned_moves.iter().enumerate() {
             let on_progress = move |pct: u8, gb: f64, total_gb: f64, speed: f64| {
@@ -1894,7 +2140,7 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
         if outcomes.iter().any(|o| matches!(o, MoveOutcome::Stalled)) {
-            schedule_move_retry(&dir_str);
+            finish_stall(&dir_str);
             continue;
         }
         if any_unsupported {
@@ -1924,7 +2170,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination size does not match source",
-                "check the destination filesystem for ENOSPC / short writes; the mover removes only its temp file and retries next tick (if a dst file remains, remove it)",
+                SIZE_MISMATCH_HINT,
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -1934,7 +2180,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination is structurally invalid or unreadable",
-                "the copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); the mover removes only its temp file and retries next tick (if a dst file remains, remove it) — see device_system.log for the specific check",
+                POST_COPY_INVALID_HINT,
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -1951,12 +2197,16 @@ fn check_and_move(cfg: &Config) {
         }
 
         if any_failed {
-            // Leave the dir alone; mover will retry next tick.
+            // Leave the dir alone; it is retried on its backoff, then held for Retry.
             // Surface a summary error so the UI shows what's failing.
+            let reason = match take_failure() {
+                Some(cause) => format!("copy to destination failed: {cause}"),
+                None => "copy to destination failed".to_string(),
+            };
             record_error(
                 &dir_str,
-                "copy to destination failed",
-                "see device_system.log for the underlying error",
+                &reason,
+                "See device_system.log for the underlying error. The delivery is tried again after 30 s, then 2 min; after that it waits for Retry.",
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -1977,23 +2227,22 @@ fn check_and_move(cfg: &Config) {
                 continue;
             }
         };
-        // Remember the entire frozen output set, including earlier passes.
-        if let Err(error) = crate::server::library::links::record_delivery(
-            &cfg.autorip_dir,
-            planned_moves.iter().map(|(_, d)| d.as_str()),
-        ) {
-            record_error(
-                &dir_str,
-                &format!("files delivered, but source linkage could not be saved: {error}"),
-                "The delivered files and staging metadata are retained. Repair library-links.json or its folder permissions, then choose Retry.",
-            );
-            schedule_move_retry(&dir_str);
-            continue;
-        }
-
-        // Once per delivery, after linkage and before the teardown gates; the journal
-        // remembers it, so a delivery whose files moved on an earlier tick still fires.
+        // Remember the entire frozen output set, including earlier passes. Linkage and the
+        // webhook happen once per delivery: `announced` records both, so a re-pass whose
+        // teardown failed earlier neither rewrites the links nor wakes the indexer again.
         if !delivered.announced() {
+            if let Err(error) = crate::server::library::links::record_delivery(
+                &cfg.autorip_dir,
+                planned_moves.iter().map(|(_, d)| d.as_str()),
+            ) {
+                record_error(
+                    &dir_str,
+                    &format!("files delivered, but source linkage could not be saved: {error}"),
+                    "The delivered files and staging metadata are retained. Repair library-links.json or its folder permissions, then choose Retry.",
+                );
+                schedule_move_retry(&dir_str);
+                continue;
+            }
             crate::server::webhook::send_move(
                 cfg,
                 &display_name,
@@ -2006,12 +2255,16 @@ fn check_and_move(cfg: &Config) {
 
         // Every file this pass could SEE is accounted for, not every file that IS there: a
         // listing error drops an entry the destructive remove_dir_all teardown would then
-        // silently delete. Treat like a failed copy: leave the dir and retry next tick.
+        // silently delete. Treat like a failed copy: leave the dir; it retries on its backoff.
         if !listing_complete {
-            crate::server::log::syslog(&format!(
-                "Staging teardown skipped — directory could not be fully listed: {}",
-                dir.display()
-            ));
+            teardown_blocked(
+                &dir_str,
+                &format!(
+                    "staging teardown skipped: the directory could not be fully listed: {}",
+                    dir.display()
+                ),
+                "The files are delivered; staging is kept until it can be listed in full. Check the staging mount; the teardown retries after a backoff, then waits for Retry.",
+            );
             continue;
         }
 
@@ -2021,18 +2274,14 @@ fn check_and_move(cfg: &Config) {
         let cleanup_err = delivered.cleanup().err();
 
         if cleanup_err.is_none() {
-            for lock in target_locks {
-                if let Err(e) = lock.delete() {
-                    tracing::warn!(error = %e, "delivered file lock sidecar retained");
-                }
-            }
+            drop(target_locks);
             clear_error(&dir_str);
             crate::server::log::syslog(&format!("Move complete: {}", display_name));
         } else if let Some(e) = cleanup_err {
-            record_error(
+            teardown_blocked(
                 &dir_str,
                 &format!("staging cleanup failed: {}", e),
-                "Inspect changed or unplanned staging artifacts and retry; they are not automatically deleted.",
+                "The files are delivered. Inspect changed or unplanned staging artifacts; they are not automatically deleted. The teardown retries after a backoff, then waits for Retry.",
             );
         }
 
@@ -2045,6 +2294,37 @@ fn check_and_move(cfg: &Config) {
     }
     // Same unbounded-growth prune for the stranded-dir one-time-warn dedup set.
     prune_stranded_warned(&seen_dirs);
+}
+
+// What a failed copy's row tells the operator to do.
+const SIZE_MISMATCH_HINT: &str = "Check the destination filesystem for ENOSPC / short writes. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
+const POST_COPY_INVALID_HINT: &str = "The copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); see device_system.log for the specific check. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
+
+// A delivered dir whose staging teardown cannot run: shown, retried after 30 s and 2 min, then
+// held for Retry, on a count of its own (no copy is involved). In memory: a restart re-checks.
+fn teardown_blocked(dir: &str, reason: &str, hint: &str) {
+    record_error(dir, reason, hint);
+    if let Some(row) = MOVE_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(dir)
+    {
+        row.teardown_attempts = row.teardown_attempts.saturating_add(1);
+        row.retry_after = retry_delay(row.teardown_attempts)
+            .and_then(|d| std::time::Instant::now().checked_add(d));
+        row.retry_held = row.retry_after.is_none();
+    }
+}
+
+// Listing errors the tests inject into a staging dir's listing; none otherwise.
+fn listing_faults(dir: &Path) -> Vec<std::io::Result<std::path::PathBuf>> {
+    #[cfg(test)]
+    return test_hooks::listing_faults(dir);
+    #[cfg(not(test))]
+    {
+        let _ = dir;
+        Vec::new()
+    }
 }
 
 // The move webhook's `output_path`: the media file, not the ISO archive, and the
@@ -2142,11 +2422,26 @@ enum DestClaim {
     Unknown,
 }
 
+// Whether `candidate` is one of `reserved`, as planned or through its folder's real path.
+fn is_reserved(candidate: &str, reserved: &[std::path::PathBuf]) -> bool {
+    let path = Path::new(candidate);
+    let canonical = path
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .zip(path.file_name())
+        .map(|(parent, name)| parent.join(name));
+    reserved
+        .iter()
+        .any(|r| r == path || canonical.as_ref() == Some(r))
+}
+
 // A new plan owns no existing files, even when their bytes happen to match.
 // Retries use the frozen manifest's exact pre-publication identity instead.
 fn unowned_dest_claim(dest: &str) -> DestClaim {
     match std::fs::symlink_metadata(dest) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DestClaim::Claimable,
+        // A file where the folder goes: no file can be there; creating the folder reports it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => DestClaim::Claimable,
         Err(_) => DestClaim::Unknown,
         Ok(m) if m.is_file() => match fresh_metadata(Path::new(dest)) {
             Err(_) => DestClaim::Unknown,
@@ -2379,10 +2674,79 @@ fn validate_root_checked(root: &str, checks: &mut RootChecks) -> Result<(), Stri
         .map_err(|p| root_reason(root, &p))
 }
 
+// Create `folder` one level at a time below `root`, which must still be the folder its check
+// passed (`identity`): a share dropped since is never recreated on the local disk. On
+// failure nothing it made is left; on success it returns what it made.
+fn create_below_root(
+    root: &Path,
+    folder: &Path,
+    identity: Option<(u64, u64)>,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let below = folder.strip_prefix(root).map_err(|_| {
+        std::io::Error::other(format!("not under its destination root {}", root.display()))
+    })?;
+    let gone = || {
+        std::io::Error::other(format!(
+            "the destination root {} changed since its check (a share that dropped or was remounted?)",
+            root.display()
+        ))
+    };
+    let meta = std::fs::metadata(root).map_err(|_| gone())?;
+    if !meta.is_dir()
+        || identity.is_some_and(|id| file_identity(&meta) != Some(id))
+        || crate::server::health::share_unmounted(root)
+    {
+        return Err(gone());
+    }
+    let mut created = Vec::new();
+    let mut at = root.to_path_buf();
+    for part in below.components() {
+        let std::path::Component::Normal(name) = part else {
+            remove_created(&created);
+            return Err(std::io::Error::other(
+                "unexpected destination path component",
+            ));
+        };
+        at.push(name);
+        match std::fs::create_dir(&at) {
+            Ok(()) => created.push(at.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && at.is_dir() => {}
+            Err(e) => {
+                remove_created(&created);
+                return Err(e);
+            }
+        }
+    }
+    Ok(created)
+}
+
+// Remove folders this pass made, deepest first, where still empty.
+fn remove_created(created: &[std::path::PathBuf]) {
+    for folder in created.iter().rev() {
+        let _ = std::fs::remove_dir(folder);
+    }
+}
+
+// A folder's (device, inode), where the platform has them.
+fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
 // The bounded write test of each destination root, run at most once per move attempt.
 struct RootChecks {
     // A check was cut short by the server stopping.
     stopped: bool,
+    // Each passed root's identity, taken as its check answered.
+    identities: Vec<(std::path::PathBuf, (u64, u64))>,
     limit: std::time::Duration,
     probe: fn(&Path) -> std::io::Result<()>,
     done: Vec<(
@@ -2405,6 +2769,7 @@ impl RootChecks {
     fn with(limit: std::time::Duration, probe: fn(&Path) -> std::io::Result<()>) -> Self {
         RootChecks {
             stopped: false,
+            identities: Vec::new(),
             limit,
             probe,
             done: Vec::new(),
@@ -2417,10 +2782,31 @@ impl RootChecks {
         }
         #[cfg(test)]
         test_hooks::preflighted(root);
-        let result = crate::server::health::preflight_with("output", root, self.limit, self.probe);
+        let role = crate::server::health::watched_role(root).unwrap_or("output");
+        let result = crate::server::health::preflight_with(role, root, self.limit, self.probe);
+        if result.is_ok()
+            && let Some(id) = std::fs::metadata(root)
+                .ok()
+                .as_ref()
+                .and_then(file_identity)
+        {
+            self.identities.push((root.to_path_buf(), id));
+        }
+        #[cfg(test)]
+        test_hooks::after_preflight(root);
         self.stopped |= result.as_ref().is_err_and(|p| p.stopped());
         self.done.push((root.to_path_buf(), result.clone()));
         result
+    }
+}
+
+impl RootChecks {
+    // The identity `root` had when its check passed.
+    fn identity(&self, root: &Path) -> Option<(u64, u64)> {
+        self.identities
+            .iter()
+            .find(|(p, _)| p == root)
+            .map(|(_, id)| *id)
     }
 }
 
@@ -2659,11 +3045,7 @@ fn move_file(
     let src_meta = fresh_metadata(src);
 
     if let Err(e) = before_publish(src) {
-        record_error(
-            &dest.to_string_lossy(),
-            "publication checkpoint failed",
-            &e.to_string(),
-        );
+        record_dest_error(dest, job, "publication checkpoint failed", &e);
         return MoveOutcome::Failed;
     }
     match publish_rename(src, dest, job) {
@@ -2671,11 +3053,7 @@ fn move_file(
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
-                record_error(
-                    &dest.to_string_lossy(),
-                    "publication directory sync failed",
-                    &e.to_string(),
-                );
+                record_dest_error(dest, job, "publication directory sync failed", &e);
                 return MoveOutcome::Failed;
             }
             clear_stale_dest_error(dest);
@@ -2684,11 +3062,7 @@ fn move_file(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return MoveOutcome::Collision,
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {}
         Err(e) => {
-            record_error(
-                &dest.to_string_lossy(),
-                "publication failed",
-                &e.to_string(),
-            );
+            record_dest_error(dest, job, "publication failed", &e);
             return if e.kind() == std::io::ErrorKind::Unsupported {
                 MoveOutcome::Unsupported
             } else {
@@ -2760,11 +3134,7 @@ fn move_file(
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
-                record_error(
-                    &dest.to_string_lossy(),
-                    "publication directory sync failed",
-                    &e.to_string(),
-                );
+                record_dest_error(dest, job, "publication directory sync failed", &e);
                 return MoveOutcome::Failed;
             }
             clear_stale_dest_error(dest);
@@ -2774,6 +3144,7 @@ fn move_file(
         Err(e) => {
             if !copy_monitor::was_stalled(&e) && !shutdown_interrupted(&e) {
                 crate::server::log::syslog(&format!("Copy failed for {dest_str}: {e}"));
+                note_failure(e.to_string());
             }
             copy_failure_outcome(&e)
         }
@@ -2896,6 +3267,71 @@ pub(crate) mod test_hooks {
         ));
         Preflights(id, n)
     }
+    type Watch = (u64, PathBuf, Hook);
+    static AFTER_PREFLIGHT: Mutex<Vec<Watch>> = Mutex::new(Vec::new());
+    /// Runs `hook` after each write test of a root under `scope` has answered, until dropped.
+    pub struct Watching(u64);
+    impl Drop for Watching {
+        fn drop(&mut self) {
+            AFTER_PREFLIGHT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(id, ..)| *id != self.0);
+        }
+    }
+    pub fn on_preflight(scope: &Path, hook: Hook) -> Watching {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        AFTER_PREFLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((id, scope.to_path_buf(), hook));
+        Watching(id)
+    }
+    pub fn after_preflight(root: &Path) {
+        let hooks: Vec<Hook> = AFTER_PREFLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, scope, _)| root.starts_with(scope))
+            .map(|(_, _, hook)| hook.clone())
+            .collect();
+        for hook in hooks {
+            hook();
+        }
+    }
+    /// What the UI showed for a stalled job as its attempt was committed: (worker active,
+    /// a bar shown blocked).
+    pub static STALL_COMMITS: Mutex<Vec<(String, bool, bool)>> = Mutex::new(Vec::new());
+    pub fn committing_stall(path: &str) {
+        let active = super::MOVE_ERRORS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .is_some_and(|e| e.worker_active && e.copy_stalled);
+        let blocked = super::MOVE_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|s| matches!(s.phase, super::MovePhase::Blocked));
+        STALL_COMMITS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((path.to_string(), active, blocked));
+    }
+    /// Staging dirs whose listing reports one entry error.
+    pub static LISTING_FAULTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    pub fn listing_faults(dir: &Path) -> Vec<std::io::Result<PathBuf>> {
+        let faulty = LISTING_FAULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|p| p == dir);
+        if faulty {
+            vec![Err(std::io::Error::other("injected listing fault"))]
+        } else {
+            Vec::new()
+        }
+    }
     pub fn preflighted(root: &Path) {
         for (_, scope, n) in PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             if root.starts_with(scope) {
@@ -2932,3 +3368,7 @@ mod tests;
 #[cfg(test)]
 #[path = "mover_upgrade_tests.rs"]
 mod upgrade_tests;
+
+#[cfg(test)]
+#[path = "mover_retry_tests.rs"]
+mod retry_tests;

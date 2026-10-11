@@ -674,6 +674,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
             return 1;
         }
     };
+    let main_pick = MainPick::of(&flags);
     let ParsedFlags {
         presentation_language,
         verbose,
@@ -787,9 +788,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
             .map(|(disc, _, _)| disc)
             .or_else(|| iso_disc.as_ref().map(|(disc, _)| disc));
         // An unscanned source has one title, so the presentation language changes nothing.
-        if let Some(index) =
-            scanned.and_then(|disc| main_title(&disc.titles, &streams.audio, presentation_language))
-        {
+        if let Some(index) = scanned.and_then(|disc| main_pick.title(&disc.titles)) {
             title_nums = vec![index + 1];
         }
     }
@@ -832,6 +831,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         Some(j) => j,
         None => return 1,
     };
+    #[cfg(test)]
+    RAN_TITLES.with(|r| *r.borrow_mut() = Some(jobs.iter().map(|(t, _)| *t).collect()));
 
     // Show summary for multi-title
     if let Some(ref t) = titles
@@ -1538,7 +1539,22 @@ pub(crate) fn resolve_info_keys(
     set.ok().map(|s| s.status())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The scan `scan_iso` answers with on this thread (tests have no image).
+    pub(crate) static TEST_SCAN: std::cell::RefCell<Option<fn() -> libfreemkv::Disc>> =
+        const { std::cell::RefCell::new(None) };
+    /// The titles `run` built its jobs for on this thread.
+    pub(crate) static RAN_TITLES: std::cell::RefCell<Option<Vec<Option<usize>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
+    #[cfg(test)]
+    if let Some(scan) = TEST_SCAN.with(|t| *t.borrow()) {
+        let reader = libfreemkv::test_util::MemSource::new(Vec::new());
+        return Some((scan(), Box::new(reader)));
+    }
     // `dir://` is an image-level source too: `scan_dir` synthesizes a UDF
     // volume and returns the same pair `scan_iso` does. Without this arm,
     // opening a source "as an image" silently rejected folders.
@@ -1579,13 +1595,19 @@ fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
 /// path) and then the service. The default keydb path also supplies the drive
 /// handshake's host certificates.
 pub(crate) fn key_settings(keys: &KeyConfig) -> crate::plan_core::KeySettings {
+    let (flags, default) = cli_keys(keys);
+    crate::plan_core::cli_key_settings(&flags, &default)
+}
+
+// The key flags as `plan_core` takes them, and the keydb path they default to.
+fn cli_keys(keys: &KeyConfig) -> (crate::plan_core::CliKeys, String) {
     let flags = crate::plan_core::CliKeys {
         keydb: keys.keydb_path.clone(),
         key_url: keys.key_url.clone(),
         key_auth: keys.key_auth.clone(),
     };
     let default = resolved_keydb_path(&keys.keydb_path);
-    crate::plan_core::cli_key_settings(&flags, &default.to_string_lossy())
+    (flags, default.to_string_lossy().into_owned())
 }
 
 /// Print the SSRF-rejected-`--key-url` warning (once) if the configured key URL
@@ -2088,17 +2110,8 @@ pub(crate) fn cli_plan(
     keys: &KeyConfig,
     flags: (bool, bool, bool),
 ) -> freemkv_engine::Plan {
-    let (raw, multipass, force) = flags;
-    freemkv_engine::Plan {
-        source: source.to_string(),
-        dest: dest.to_string(),
-        titles: freemkv_engine::Selection::default(),
-        streams: freemkv_engine::StreamChoice::default(),
-        raw,
-        multipass,
-        keys: crate::plan_core::key_params(&key_settings(keys)),
-        force,
-    }
+    let (cli_keys, default_keydb) = cli_keys(keys);
+    crate::plan_core::cli_plan(source, dest, &cli_keys, &default_keydb, flags)
 }
 
 // The CLI's rendering of the plan it runs (`--log-level 2`). Exhaustive on purpose (anti-drift
@@ -2820,6 +2833,27 @@ fn no_titles_error(titles: &[libfreemkv::DiscTitle]) -> Option<String> {
 }
 
 // The main title (0-based): title 0, or a cut of it in the wanted language. Never a review.
+/// How an automatic selection picks the main title: the parsed `-a` audio languages and
+/// `--presentation-language`, which can choose a language cut of the first title.
+struct MainPick {
+    audio: freemkv_engine::StreamFilter,
+    presentation_language: Option<String>,
+}
+
+impl MainPick {
+    fn of(flags: &ParsedFlags) -> Self {
+        MainPick {
+            audio: flags.streams.audio.clone(),
+            presentation_language: flags.presentation_language.clone(),
+        }
+    }
+
+    /// The main title of `titles` (0-based); `None` when there are none.
+    fn title(&self, titles: &[libfreemkv::DiscTitle]) -> Option<usize> {
+        main_title(titles, &self.audio, self.presentation_language.clone())
+    }
+}
+
 fn main_title(
     titles: &[libfreemkv::DiscTitle],
     audio: &freemkv_engine::StreamFilter,

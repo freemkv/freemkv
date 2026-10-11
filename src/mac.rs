@@ -1338,6 +1338,14 @@ impl Controller {
         let mut edited = self.ivars().app.borrow().settings_form().clone();
         self.read_prefs_form(&mut edited);
         self.act(crate::ui::Cmd::CommitSettings(Box::new(edited)));
+        // A refused value (an unknown presentation language) shows the kept one again.
+        let base = self.ivars().app.borrow().settings_form().clone();
+        for (k, f) in self.ivars().pf_fields.borrow().iter() {
+            let kept = base.get(k);
+            if f.stringValue().to_string() != kept {
+                f.setStringValue(&NSString::from_str(&kept));
+            }
+        }
     }
 
     /// A Settings text field's live value by key; empty when it is not built.
@@ -1853,9 +1861,8 @@ impl Controller {
         }
     }
 
-    /// Read every Settings control back into `st` (no save, no close). Shared by
-    /// OK and the live language switch so the form-reading rules (canonical enum
-    /// values, container/format mapping) live in one place.
+    /// Write `st` into every Settings control: a reused visible window shows the
+    /// core's form base again.
     fn refill_prefs(&self, mtm: MainThreadMarker, st: &crate::settings::Settings) {
         let iv = self.ivars();
         fill_prefs(
@@ -1873,6 +1880,9 @@ impl Controller {
             }
         }
     }
+    /// Read every Settings control back into `st` (no save, no close). Shared by
+    /// OK and the live language switch so the form-reading rules (canonical enum
+    /// values, container/format mapping) live in one place.
     fn read_prefs_form(&self, st: &mut crate::settings::Settings) {
         for (k, f) in self.ivars().pf_fields.borrow().iter() {
             st.set(k, { f.stringValue() }.to_string());

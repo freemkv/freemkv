@@ -167,6 +167,7 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
             return;
         }
     };
+    let _ = STARTED.set(std::time::Instant::now());
     crate::server::log::syslog(&format!("Web server listening on {}", addr));
     tracing::info!(address = %addr, "web server listening");
     serve(cfg, |timeout| server.recv_timeout(timeout));
@@ -415,8 +416,9 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         if target.is_empty() {
             return json_response(request, 400, r#"{"ok":false,"error":"missing path"}"#);
         }
-        crate::server::mover::clear_move_error(&target);
-        json_response(request, 200, r#"{"ok":true}"#);
+        let scheduled = crate::server::mover::clear_move_error(&target);
+        let body = serde_json::json!({ "ok": true, "scheduled": scheduled });
+        json_response(request, 200, &body.to_string());
     } else if is_post && url == "/api/mux-errors/clear-all" {
         crate::server::muxer::clear_all_mux_errors();
         json_response(request, 200, r#"{"ok":true}"#);
@@ -646,13 +648,25 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
     json_response(request, 200, r#"{"ok":true}"#);
 }
 
-// Metadata refusals are plain `io::Error::other` messages (a conflict with the job's
-// state); any other kind is storage failing to take the write, a server error.
+// Metadata refusals are plain `io::Error::other` messages (a conflict with the job's state).
+// Storage that may answer again (a share timing out, a stale handle) is 503; any other
+// kind is storage failing to take the write, 500.
 fn metadata_error_status(e: &std::io::Error) -> u16 {
-    if e.kind() == std::io::ErrorKind::Other {
-        409
-    } else {
-        500
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::Other => 409,
+        K::TimedOut
+        | K::WouldBlock
+        | K::Interrupted
+        | K::ResourceBusy
+        | K::StaleNetworkFileHandle
+        | K::NetworkDown
+        | K::NetworkUnreachable
+        | K::HostUnreachable
+        | K::ConnectionReset
+        | K::ConnectionAborted
+        | K::NotConnected => 503,
+        _ => 500,
     }
 }
 
@@ -2695,15 +2709,23 @@ fn roll_back_settings(
 }
 
 // POST /api/system/reboot: drain, then relaunch (see daemon::run). Refused (409) where
-// nothing would start the daemon again after it exits.
+// nothing would start the daemon again after it exits, and (429) too soon after the last.
 fn handle_reboot(request: tiny_http::Request) {
     if !relaunch_supported() {
         let error = crate::strings::get_or(
             "server.reboot.no_supervisor",
-            "Reboot is unavailable: this server was not started as a service, so nothing would start it again. Restart it yourself instead.",
+            "Reboot is unavailable: no service manager will start this server again after it stops. Restart it yourself instead.",
         );
         let body = serde_json::json!({ "ok": false, "error": error });
         return json_response(request, 409, &body.to_string());
+    }
+    if !claim_reboot(std::time::Instant::now()) {
+        let error = crate::strings::get_or(
+            "server.reboot.too_soon",
+            "Reboot is unavailable for a minute after the server starts or after the last reboot request. Try again shortly.",
+        );
+        let body = serde_json::json!({ "ok": false, "error": error });
+        return json_response(request, 429, &body.to_string());
     }
     crate::server::REBOOT.store(true, Ordering::Release);
     crate::server::SHUTDOWN.store(true, Ordering::Release);
@@ -2720,7 +2742,38 @@ fn handle_reboot(request: tiny_http::Request) {
     json_response(request, 202, &body.to_string());
 }
 
-// Linux re-execs itself; elsewhere the daemon exits 75 and needs a service manager.
+/// The least time between reboots, and after a start: the routes have no authentication
+/// and DNS rebinding defeats the Origin check, so a hostile page could else keep the
+/// server restarting.
+const REBOOT_SPACING: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// When this process image started serving (set by [`run`]; exec in place resets it).
+static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+static LAST_REBOOT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+// Take the reboot slot at `now`, unless a start or the last request is too recent.
+fn claim_reboot(now: std::time::Instant) -> bool {
+    let mut last = LAST_REBOOT.lock().unwrap_or_else(|e| e.into_inner());
+    if !reboot_allowed(now, STARTED.get().copied(), *last) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+fn reboot_allowed(
+    now: std::time::Instant,
+    started: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+) -> bool {
+    [started, last]
+        .into_iter()
+        .flatten()
+        .all(|at| now.saturating_duration_since(at) >= REBOOT_SPACING)
+}
+
+// Linux re-execs itself; elsewhere the daemon exits 75 and needs a service manager. On
+// Windows none is detected, so a reboot is refused.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn relaunch_supported() -> bool {
     true
@@ -2728,10 +2781,88 @@ fn relaunch_supported() -> bool {
 
 #[cfg(target_os = "macos")]
 fn relaunch_supported() -> bool {
-    launchd_job(
-        std::env::var_os("XPC_SERVICE_NAME").as_deref(),
-        parent_pid(),
-    )
+    let label = std::env::var_os("XPC_SERVICE_NAME");
+    let Some(name) = label.as_deref().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    if !launchd_job(label.as_deref(), parent_pid()) || name.contains('/') || name.starts_with('.') {
+        return false;
+    }
+    let installed = std::env::var_os("HOME").map(|home| {
+        std::path::Path::new(&home)
+            .join("Library/LaunchAgents")
+            .join(format!("{name}.plist"))
+    });
+    installed.is_some_and(|plist| launchd_restarts(&launchctl_print(name), &plist))
+}
+
+/// What `launchctl print gui/<uid>/<label>` says about this job.
+#[cfg(target_os = "macos")]
+enum Launchctl {
+    /// launchctl could not be run: the installed plist alone decides.
+    Unavailable,
+    /// Not a job in the user's GUI domain (a LaunchDaemon, say): refused.
+    NotLoaded,
+    /// Its output.
+    Loaded(String),
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn launchctl_print(label: &str) -> Launchctl {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    match std::process::Command::new("/bin/launchctl")
+        .arg("print")
+        .arg(format!("gui/{uid}/{label}"))
+        .output()
+    {
+        Err(_) => Launchctl::Unavailable,
+        Ok(o) if !o.status.success() => Launchctl::NotLoaded,
+        Ok(o) => Launchctl::Loaded(String::from_utf8_lossy(&o.stdout).into_owned()),
+    }
+}
+
+// Test seam: the route tests never ask the real launchd (this machine may run the job).
+#[cfg(all(target_os = "macos", test))]
+fn launchctl_print(_: &str) -> Launchctl {
+    Launchctl::Unavailable
+}
+
+// Whether launchd starts the job again after the exit-75 shutdown: the loaded job's
+// keepalive property and plist when launchctl lists it, else the installed `plist`.
+#[cfg(target_os = "macos")]
+fn launchd_restarts(job: &Launchctl, plist: &std::path::Path) -> bool {
+    match job {
+        Launchctl::Unavailable => plist_keeps_alive(plist),
+        Launchctl::NotLoaded => false,
+        Launchctl::Loaded(out) => {
+            let field = |name: &str| {
+                out.lines()
+                    .find_map(|l| l.strip_prefix('\t')?.strip_prefix(name))
+                    .map(str::trim)
+            };
+            let kept = field("properties = ")
+                .is_some_and(|p| p.split('|').any(|f| f.trim() == "keepalive"));
+            kept && field("path = ").is_some_and(|p| plist_keeps_alive(std::path::Path::new(p)))
+        }
+    }
+}
+
+// KeepAlive true, or conditions that include SuccessfulExit = false (restart after a
+// non-zero exit). Other conditions alone do not restart a job that exited 75.
+#[cfg(target_os = "macos")]
+fn plist_keeps_alive(plist: &std::path::Path) -> bool {
+    let plutil = |args: &[&str]| {
+        std::process::Command::new("/usr/bin/plutil")
+            .args(args)
+            .arg(plist)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    plutil(&["-extract", "KeepAlive", "raw"]).as_deref() == Some("true")
+        || plutil(&["-extract", "KeepAlive.SuccessfulExit", "raw"]).as_deref() == Some("false")
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -2796,8 +2927,96 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         response = response.with_header(h);
     }
 
+    // A client that stops reading (a suspended tab, a half-open link) fails the write
+    // instead of holding this thread and its SSE slot.
+    if let Some(peer) = request.remote_addr().copied() {
+        set_write_timeout_for_peer(peer, SSE_WRITE_TIMEOUT);
+    }
     let stream = request.upgrade("sse", response);
     sse_session(stream, cfg, &stop, opened);
+}
+
+/// How long one write to an SSE client may block before the stream is dropped.
+const SSE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+// tiny_http hides the socket: find the connection to `peer` among this process's
+// descriptors and set its write timeout. Unix only; elsewhere TCP's own timers apply.
+#[cfg(unix)]
+fn set_write_timeout_for_peer(peer: std::net::SocketAddr, timeout: std::time::Duration) -> bool {
+    let Ok(dir) = std::fs::read_dir("/dev/fd").or_else(|_| std::fs::read_dir("/proc/self/fd"))
+    else {
+        return false;
+    };
+    let fds = dir
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok());
+    let tv = libc::timeval {
+        tv_sec: libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX),
+        tv_usec: libc::suseconds_t::try_from(timeout.subsec_micros()).unwrap_or(0),
+    };
+    let mut set = false;
+    for fd in fds.filter(|&fd| socket_peer(fd) == Some(peer)) {
+        // SAFETY: `tv` is a live timeval of the size passed; a descriptor closed since only
+        // fails the call, and one reused would have to be the same connection to match.
+        let r = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDTIMEO,
+                (&tv as *const libc::timeval).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        set |= r == 0;
+    }
+    if !set {
+        tracing::debug!(%peer, "no socket found for the SSE client; its writes have no timeout");
+    }
+    set
+}
+
+// The remote address of socket `fd`, or None for anything else.
+#[cfg(unix)]
+fn socket_peer(fd: i32) -> Option<std::net::SocketAddr> {
+    // SAFETY: sockaddr_storage is plain data, valid all-zero.
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: getpeername writes at most `len` bytes into `ss`; a non-socket fails it.
+    let r = unsafe {
+        libc::getpeername(
+            fd,
+            (&mut ss as *mut libc::sockaddr_storage).cast(),
+            &mut len,
+        )
+    };
+    if r != 0 {
+        return None;
+    }
+    match i32::from(ss.ss_family) {
+        libc::AF_INET => {
+            // SAFETY: the family says `ss` holds a sockaddr_in, which it is large enough for.
+            let a = unsafe { &*(&ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            let ip = std::net::Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr));
+            Some(std::net::SocketAddr::from((ip, u16::from_be(a.sin_port))))
+        }
+        libc::AF_INET6 => {
+            // SAFETY: as above, for sockaddr_in6.
+            let a =
+                unsafe { &*(&ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
+            Some(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                std::net::Ipv6Addr::from(a.sin6_addr.s6_addr),
+                u16::from_be(a.sin6_port),
+                a.sin6_flowinfo,
+                a.sin6_scope_id,
+            )))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn set_write_timeout_for_peer(_: std::net::SocketAddr, _: std::time::Duration) -> bool {
+    false
 }
 
 fn sse_session<W: std::io::Write>(
