@@ -153,8 +153,15 @@ pub fn lookup(label: &str, api_key: &str) -> Result<Option<TmdbResult>, LookupFa
 }
 
 /// TMDB could not be asked (network, HTTP or response failure), as opposed to "no match".
+/// Carries the best non-confident guess the queries that did answer found.
 #[derive(Debug)]
-pub struct LookupFailed;
+pub struct LookupFailed(pub Option<TmdbResult>);
+
+/// The lookup's answer for a caller that must not wait on TMDB: a failed query still
+/// yields the best guess found.
+pub fn best_effort(found: Result<Option<TmdbResult>, LookupFailed>) -> Option<TmdbResult> {
+    found.unwrap_or_else(|failed| failed.0)
+}
 
 // `lookup`'s variant loop over any `search/multi` source.
 fn lookup_using(
@@ -190,7 +197,7 @@ fn lookup_using(
     }
     match fallback {
         Some(best) if is_confident_match(label, &best.title, best.year) => Ok(Some(best)),
-        _ if failed => Err(LookupFailed),
+        found if failed => Err(LookupFailed(found)),
         found => Ok(found),
     }
 }

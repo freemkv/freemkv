@@ -964,3 +964,16 @@ fn old_tmdb_result_json_reads_media_type_leniently() {
     };
     assert_eq!(serde_json::to_value(&tv).unwrap()["media_type"], "tv");
 }
+
+#[test]
+fn a_failed_variant_still_hands_the_rip_the_best_guess() {
+    // The first query guesses a TV show (not confident); the peeled query fails.
+    let answer = lookup_using("HEAT_UE", |q| match q {
+        "Heat Ue" => Some(results_for("Heat Wave", "2001-01-01", "tv")),
+        _ => None,
+    });
+    assert!(answer.is_err(), "the worker still sees the failure");
+    let guess = best_effort(answer).unwrap();
+    assert_eq!(guess.media_type, crate::server::planner::MediaKind::Tv);
+    assert!(best_effort(lookup_using("HEAT_UE", |_| None)).is_none());
+}

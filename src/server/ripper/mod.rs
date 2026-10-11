@@ -1727,11 +1727,12 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     let tmdb = saved_state
         .clone()
         .and_then(jobs::metadata_from_state)
-        // A TMDB outage must not block a rip.
+        // A TMDB outage must not block a rip: keep the best guess it did give.
         .or_else(|| {
-            crate::server::tmdb::lookup(&id_name, &cfg_read.tmdb_api_key)
-                .ok()
-                .flatten()
+            crate::server::tmdb::best_effort(crate::server::tmdb::lookup(
+                &id_name,
+                &cfg_read.tmdb_api_key,
+            ))
         });
     let display_name = tmdb
         .as_ref()
@@ -2794,10 +2795,11 @@ fn rip_disc_inner(
                 .unwrap_or(&disc.volume_id)
                 .to_string();
 
-            // A TMDB outage must not block a rip.
-            let tmdb = crate::server::tmdb::lookup(&disc_name, &cfg_read.tmdb_api_key)
-                .ok()
-                .flatten();
+            // A TMDB outage must not block a rip: keep the best guess it did give.
+            let tmdb = crate::server::tmdb::best_effort(crate::server::tmdb::lookup(
+                &disc_name,
+                &cfg_read.tmdb_api_key,
+            ));
 
             // The rip's key set, once, right after the scan (KU §2.1); see scan_disc.
             let media_type = tmdb.as_ref().map(|t| t.media_type).unwrap_or_default();
