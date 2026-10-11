@@ -1796,7 +1796,28 @@ fn check_and_move(cfg: &Config) {
             let mut uncertain = None;
             let mut residue = None;
             // Names another disc's journal froze are taken, published yet or not.
-            let reserved = manifest::Manifest::reserved_elsewhere(Path::new(staging_root), &dir);
+            let reserved = match manifest::Manifest::reserved_elsewhere(
+                Path::new(staging_root),
+                &dir,
+            ) {
+                Ok(reserved) => reserved,
+                Err(e) => {
+                    tracing::warn!(dir = %dir_str, error = %e, "mover: reserved names unreadable");
+                    record_error(
+                        &dir_str,
+                        &crate::strings::fmt_or(
+                            "server.mover.reservations_unreadable",
+                            "cannot read the names other rips' deliveries reserved: {error}",
+                            &[("error", &e.to_string())],
+                        ),
+                        &crate::strings::get_or(
+                            "server.mover.reservations_unreadable_hint",
+                            "Nothing was moved or named yet. It is tried again on the next pass; if this persists, repair the staging storage or the other rip's delivery journal.",
+                        ),
+                    );
+                    continue;
+                }
+            };
             let variant = crate::server::util::disc_variant(|n| {
                 if uncertain.is_some() || residue.is_some() {
                     return false;

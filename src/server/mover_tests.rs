@@ -3520,6 +3520,44 @@ fn check_and_move_card_carries_the_create_dir_error() {
     assert!(disc_dir.join("Blocked.mkv").exists(), "staging preserved");
 }
 
+// Another rip's delivery journal that cannot be read may hold the name this rip would take:
+// nothing is frozen until it can be read (fail closed), and the row says why.
+#[test]
+fn an_unreadable_journal_elsewhere_blocks_freezing_a_new_plan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let movie_dir = tmp.path().join("output/Movies");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+    let other = staging.join("Other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join(super::manifest::FILE), b"{ not a journal").unwrap();
+    // A stray file beside the rips is no journal and blocks nothing.
+    std::fs::write(staging.join("notes.txt"), b"x").unwrap();
+    let disc_dir = staging.join("Fresh");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    std::fs::write(disc_dir.join(".done"), marker_json("Fresh")).unwrap();
+    write_minimal_mkv(&disc_dir.join("Fresh.mkv"), &[0xAA; 1024]);
+    let dir_str = disc_dir.to_string_lossy().to_string();
+    let other_str = other.to_string_lossy().to_string();
+    let _g = errors_guard();
+    clear_error(&dir_str);
+    check_and_move(&cfg);
+    let recorded = error_snapshot(&dir_str);
+    clear_error(&dir_str);
+    clear_error(&other_str);
+    let recorded = recorded.expect("a row says why it waits");
+    assert!(recorded.reason.contains("reserved"), "{recorded:?}");
+    assert!(disc_dir.join("Fresh.mkv").exists(), "nothing was moved");
+    assert!(
+        super::manifest::Manifest::load(&disc_dir)
+            .unwrap()
+            .is_none(),
+        "no plan was frozen"
+    );
+}
+
 // A delivery plan that cannot be saved (staging full or read-only) is not retried every
 // tick, making and removing the title folders on the share each time: it backs off.
 #[cfg(unix)]

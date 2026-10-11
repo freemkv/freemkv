@@ -238,21 +238,33 @@ impl Manifest {
     }
 
     /// Every destination frozen by the journal of another staging dir under `root`, in
-    /// both its planned and its canonical form. An unreadable journal reserves nothing.
-    pub fn reserved_elsewhere(root: &Path, except: &Path) -> Vec<PathBuf> {
-        let Ok(dirs) = std::fs::read_dir(root) else {
-            return Vec::new();
-        };
+    /// both its planned and its canonical form. A listing or journal that cannot be read
+    /// is an error: it may hold a name, so nothing new may be frozen until it can be read.
+    pub fn reserved_elsewhere(root: &Path, except: &Path) -> io::Result<Vec<PathBuf>> {
         let mut reserved = Vec::new();
-        for dir in dirs.flatten().map(|e| e.path()).filter(|d| d != except) {
-            if let Ok(Some(journal)) = Self::load(&dir) {
-                for e in journal.entries {
-                    reserved.extend(e.planned.map(PathBuf::from));
-                    reserved.push(e.destination);
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let dir = entry.path();
+            if dir == except || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let journal = match Self::load(&dir) {
+                Ok(journal) => journal,
+                // Gone since the listing: nothing of it to reserve.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!("{}: {e}", dir.join(FILE).display()),
+                    ));
                 }
+            };
+            for e in journal.into_iter().flat_map(|j| j.entries) {
+                reserved.extend(e.planned.map(PathBuf::from));
+                reserved.push(e.destination);
             }
         }
-        reserved
+        Ok(reserved)
     }
 
     /// Each entry's destination root and folder, as frozen (canonical).
@@ -347,8 +359,14 @@ impl Manifest {
                 }
                 adoptable(&entry)?;
                 sync_parent(&entry.destination)?;
+                #[cfg(test)]
+                tests::adopting(dir);
                 Self::update(dir, |manifest| {
-                    manifest.entries[index].completed = true;
+                    manifest
+                        .entries
+                        .get_mut(index)
+                        .ok_or_else(|| io::Error::other("invalid delivery entry"))?
+                        .completed = true;
                     Ok(())
                 })?;
                 super::clear_stale_dest_error(&entry.destination);
