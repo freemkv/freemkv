@@ -2427,6 +2427,39 @@ fn clear_staging_lists_unmatchable_1_8_3_folders_without_deleting_them() {
     assert!(legacy.join("Heat.mkv").exists());
 }
 
+// Only an inert 1.8.3 leftover is offered for deleting by hand: never one the mover still
+// delivers or holds, a capture waiting in Review, or a folder a live owner holds.
+#[test]
+fn live_1_8_3_hand_offs_and_review_captures_are_not_listed_as_unmatchable() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = |name: &str, state: StagingState, extra: &[&str]| {
+        let dir = root.path().join(name);
+        fs::create_dir(&dir).unwrap();
+        try_write_state(&dir, &DiscState::new(state)).unwrap();
+        fs::write(dir.join(format!("{name}.mkv")), b"muxed").unwrap();
+        for file in extra {
+            fs::write(dir.join(file), b"{}").unwrap();
+        }
+        dir
+    };
+    legacy("Done", StagingState::Done, &[]);
+    legacy("Ripped", StagingState::Ripped, &[]);
+    legacy("Review", StagingState::Review, &[]);
+    legacy("HandedOff", StagingState::Stopped, &[DONE_MARKER]);
+    legacy("Journaled", StagingState::Stopped, &[DELIVERY_JOURNAL]);
+    let leased = legacy("Leased", StagingState::Stopped, &[]);
+    legacy("Inert", StagingState::Stopped, &[]);
+    let lease = job_lease(&leased);
+    let _held = lease.try_lock().unwrap();
+    let listed = std::thread::spawn({
+        let root = root.path().to_path_buf();
+        move || unmatchable_legacy_jobs(&root)
+    })
+    .join()
+    .unwrap();
+    assert_eq!(listed, ["Inert"]);
+}
+
 // The multi-GB unlinks of a prune run without the state lock, so a correction request
 // is not held behind them; the files are already renamed aside, so it is refused.
 #[test]

@@ -2464,7 +2464,8 @@ pub(crate) fn clear_abandoned_staging(root: &Path) -> (usize, usize) {
 }
 
 /// 1.8.3 title-named staging folders no disc can match again (no saved identity and no
-/// identity-bearing map): kept, but listed so the operator can remove them by hand.
+/// identity-bearing map) and nothing else will finish: kept, but listed so the operator can
+/// remove them by hand. A hand-off, a delivery, a Review capture or a leased one is not.
 pub(crate) fn unmatchable_legacy_jobs(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -2478,6 +2479,7 @@ pub(crate) fn unmatchable_legacy_jobs(root: &Path) -> Vec<String> {
                 && !name.starts_with(UNVERIFIED_JOB_PREFIX)
                 && !is_system_folder(name)
         })
+        .filter(|(_, dir)| inert_legacy(dir))
         .filter(|(_, dir)| {
             read_state(dir).is_none_or(|s| s.disc_identity.is_empty())
                 && super::resume::find_iso_and_mapfile(dir)
@@ -2490,6 +2492,27 @@ pub(crate) fn unmatchable_legacy_jobs(root: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+// Nothing will finish this folder: no hand-off marker or delivery journal, not handed off,
+// muxed, muxing or in Review, and no owner holds its lease.
+fn inert_legacy(dir: &Path) -> bool {
+    let lease = job_lease(dir);
+    let Ok(_idle) = lease.try_lock() else {
+        return false;
+    };
+    let live_state = read_state(dir).is_some_and(|s| {
+        s.muxing
+            || matches!(
+                s.state,
+                StagingState::Ripped | StagingState::Done | StagingState::Review
+            )
+    });
+    !live_state
+        && delivery_journal_absent(dir)
+        && [DONE_MARKER, REVIEW_MARKER, RIPPED_MARKER]
+            .iter()
+            .all(|m| matches!(std::fs::symlink_metadata(dir.join(m)), Err(e) if e.kind() == io::ErrorKind::NotFound))
 }
 
 // Hidden and NAS system folders (`.snapshot`, `@eaDir`, `#recycle`): never a rip.
