@@ -3684,3 +3684,18 @@ fn only_a_shutdown_makes_an_interrupted_copy_an_interruption() {
     assert_eq!(outcome, MoveOutcome::Interrupted);
     assert_eq!(io_error, MoveOutcome::Failed, "real I/O errors still fail");
 }
+
+#[test]
+fn a_running_attempt_marks_its_row_retrying_until_it_fails_again() {
+    let _guard = super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let path = "test-retrying-row";
+    super::clear_move_error(path);
+    super::record_error_with(path, "copy to destination failed", "", |_| {});
+    super::mark_retrying(path);
+    assert!(super::MOVE_ERRORS.lock().unwrap()[path].retrying);
+    super::record_error_with(path, "copy to destination failed", "", |_| {});
+    assert!(!super::MOVE_ERRORS.lock().unwrap()[path].retrying);
+    super::clear_move_error(path);
+}
