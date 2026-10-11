@@ -2956,6 +2956,28 @@ fn a_quit_asks_exactly_once_and_only_while_a_rip_runs() {
     assert!(!needs_rip_confirmation(true, true));
 }
 
+// The tick that sees a rip finish keeps the timer while a worker is still out (a Settings
+// write, a key-service URL check, a recheck), as the idle tick does: its answer is collected.
+#[test]
+fn a_finished_rip_keeps_ticking_for_workers_still_out() {
+    let mut app = App::new();
+    let (_check_tx, check_rx) = std::sync::mpsc::channel();
+    app.keyserver_check = Some(check_rx);
+    let st = Arc::new(RunState::default());
+    st.finished.store(true, Ordering::SeqCst);
+    app.run = Some(st);
+    let fx = app.tick();
+    assert!(app.run.is_none(), "the finish was seen");
+    assert!(!fx.contains(&Effect::StopTicking), "{fx:?}");
+    let (_save_tx, save_rx) = std::sync::mpsc::channel();
+    app.keyserver_check = None;
+    app.saving = Some((save_rx, true));
+    let st = Arc::new(RunState::default());
+    st.finished.store(true, Ordering::SeqCst);
+    app.run = Some(st);
+    assert!(!app.tick().contains(&Effect::StopTicking));
+}
+
 #[test]
 fn stop_and_quit_latches_cancels_and_lets_the_close_through() {
     let mut app = App::new();

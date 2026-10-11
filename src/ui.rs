@@ -3984,15 +3984,7 @@ impl App {
             // Keep the timer alive while the probe is still out; stopping it
             // here would strand the result with nothing left to collect it.
             let mut fx = probe_fx;
-            if self.probe.is_none()
-                && !self.opening()
-                && self.ejecting.is_none()
-                && self.update_check.is_none()
-                && self.keydb.is_none()
-                && self.keyserver_check.is_none()
-                && self.saving.is_none()
-                && self.recheck.is_none()
-            {
+            if !self.workers_out() {
                 // An idle disc keeps the tick for its watch, without a redraw per tick.
                 if self.presence.is_none() && !self.watching_disc() {
                     fx.push(Effect::StopTicking);
@@ -4045,7 +4037,7 @@ impl App {
             // The rip may have ejected its disc: the watch asks on the next tick.
             self.presence_at = None;
             let mut fx = vec![Effect::Redraw];
-            if self.update_check.is_none() && self.keydb.is_none() && !self.watching_disc() {
+            if !self.workers_out() && self.presence.is_none() && !self.watching_disc() {
                 fx.push(Effect::StopTicking);
             }
             if self.settings.notify_when_rip_finished {
@@ -4063,6 +4055,18 @@ impl App {
             return fx;
         }
         vec![Effect::Redraw]
+    }
+
+    // A worker whose answer only the tick collects is still out: the timer must keep running.
+    fn workers_out(&self) -> bool {
+        self.probe.is_some()
+            || self.opening()
+            || self.ejecting.is_some()
+            || self.update_check.is_some()
+            || self.keydb.is_some()
+            || self.keyserver_check.is_some()
+            || self.saving.is_some()
+            || self.recheck.is_some()
     }
 
     pub fn dismiss_result(&mut self) -> Vec<Effect> {
