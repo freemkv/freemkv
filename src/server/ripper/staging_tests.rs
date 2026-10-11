@@ -2451,3 +2451,34 @@ fn a_prune_unlinks_outside_the_state_lock() {
         "only state.json is left"
     );
 }
+
+// An unreadable state.json is a storage failure, not a conflict with the job's state:
+// the error keeps its own kind so the web layer does not answer 409.
+#[test]
+fn an_unreadable_state_keeps_its_error_kind() {
+    let corrupt = tempfile::tempdir().unwrap();
+    fs::write(state_path(corrupt.path()), b"{ torn").unwrap();
+    let io_fault = tempfile::tempdir().unwrap();
+    fs::create_dir(state_path(io_fault.path())).unwrap();
+    let selection = UserMetadata {
+        title: "Heat".into(),
+        year: 1995,
+        media_type: crate::server::planner::MediaKind::Movie,
+        episode_start: None,
+        tmdb_id: 949,
+        poster_url: String::new(),
+        overview: String::new(),
+    };
+    for dir in [corrupt.path(), io_fault.path()] {
+        let saved = save_user_metadata(dir, selection.clone()).unwrap_err();
+        assert_ne!(saved.kind(), io::ErrorKind::Other, "{saved}");
+        let written = try_write_state(dir, &DiscState::new(StagingState::Stopped)).unwrap_err();
+        assert_ne!(written.kind(), io::ErrorKind::Other, "{written}");
+    }
+    assert_eq!(
+        save_user_metadata(corrupt.path(), selection)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+}

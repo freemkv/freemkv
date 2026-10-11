@@ -390,6 +390,8 @@ pub struct StateUnreadable {
     pub transient: bool,
     /// Raw error text for logs; kept out of `reason` (the card de-dupe key).
     pub detail: String,
+    /// The read's own error kind (EIO, ESTALE, …), or `InvalidData` for bad contents.
+    pub kind: io::ErrorKind,
 }
 
 impl StateUnreadable {
@@ -398,6 +400,7 @@ impl StateUnreadable {
             reason: "state.json could not be read (I/O error)".to_string(),
             transient: true,
             detail: e.to_string(),
+            kind: e.kind(),
         }
     }
 
@@ -406,7 +409,13 @@ impl StateUnreadable {
             reason,
             transient: false,
             detail: String::new(),
+            kind: io::ErrorKind::InvalidData,
         }
+    }
+
+    /// As an error that keeps the storage failure's kind (never a plain conflict).
+    pub fn to_io_error(&self) -> io::Error {
+        io::Error::new(self.kind, self.log_text())
     }
 
     /// Reason plus the raw error detail, for logs.
@@ -478,7 +487,7 @@ pub(crate) fn state_for_write(
                 "{} — refusing to overwrite it; the dir is held for the operator",
                 u.log_text()
             );
-            Err(io::Error::new(io::ErrorKind::InvalidData, u.held_reason()))
+            Err(io::Error::new(u.kind, u.held_reason()))
         }
     }
 }
@@ -513,7 +522,7 @@ pub fn cancel_held(dir: &Path) -> io::Result<bool> {
     let mut st = match read_state_checked(dir) {
         StateRead::Valid(st) if st.state == StagingState::Review && !st.reset_in_progress => *st,
         StateRead::Valid(_) | StateRead::Absent => return Ok(false),
-        StateRead::Unreadable(u) => return Err(io::Error::other(u.log_text())),
+        StateRead::Unreadable(u) => return Err(u.to_io_error()),
     };
     st.state = StagingState::Failed;
     st.failure_reason = Some("cancelled by operator".to_string());
@@ -543,7 +552,7 @@ fn try_write_state_inner(staging_disc_dir: &Path, st: &DiscState) -> io::Result<
                 st.disc_identity = saved.disc_identity;
             }
         }
-        StateRead::Unreadable(u) => return Err(io::Error::other(u.log_text())),
+        StateRead::Unreadable(u) => return Err(u.to_io_error()),
         StateRead::Absent => (),
     }
     apply_user_metadata(&mut st);
@@ -639,7 +648,8 @@ fn save_user_metadata_inner(
     let mut st = match read_state_checked(dir) {
         StateRead::Valid(st) => *st,
         StateRead::Absent if origin.is_some() => DiscState::new(StagingState::Stopped),
-        _ => {
+        StateRead::Unreadable(u) => return Err(u.to_io_error()),
+        StateRead::Absent => {
             return Err(io::Error::other(
                 "staging state unavailable; retry after scan",
             ));
@@ -2630,7 +2640,12 @@ fn reset_capture_with(
     let old = match read_state_checked(dir) {
         StateRead::Valid(st) => Some(*st),
         StateRead::Absent => None,
-        _ => return Err(io::Error::other("cannot reset unreadable staging metadata")),
+        StateRead::Unreadable(u) => {
+            return Err(io::Error::new(
+                u.kind,
+                format!("cannot reset unreadable staging metadata: {}", u.log_text()),
+            ));
+        }
     };
     let keep = !verified_identity.is_empty()
         || old.as_ref().is_some_and(|s| {
