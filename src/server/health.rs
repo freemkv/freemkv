@@ -1296,39 +1296,81 @@ fn probe_write_with(
     // Writability is proven; a marker left behind is a warning, never a failed folder. It is
     // swept by the next write test of this folder that cleans up after itself.
     match remove(&probe) {
-        Ok(()) => sweep_probes(dir),
+        Ok(()) => schedule_sweep(dir),
         Err(e) => {
             tracing::warn!(probe = %probe.display(), error = %e, "writability probe left behind");
-            let mut sweep = PROBE_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
-            sweep.0.remove(dir);
-            sweep.1.push(probe);
+            PROBE_SWEEP
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .leftovers
+                .push(probe);
         }
     }
     Ok(())
 }
 
-// Folders swept this run, and our own markers whose removal failed.
-type ProbeSweep = (std::collections::HashSet<PathBuf>, Vec<PathBuf>);
+// Sweeps of leftover write-test files: when each folder was last swept, the ones running,
+// and our own markers whose removal failed.
+#[derive(Default)]
+struct ProbeSweep {
+    last: std::collections::HashMap<PathBuf, Instant>,
+    running: std::collections::HashSet<PathBuf>,
+    leftovers: Vec<PathBuf>,
+}
+
 static PROBE_SWEEP: std::sync::LazyLock<Mutex<ProbeSweep>> =
     std::sync::LazyLock::new(Default::default);
 
-// A marker older than this is no live probe (another server's included).
+// A marker older than this is no live probe (another server's included); also the least
+// time between two sweeps of one folder that left nothing of ours behind.
 const STALE_PROBE: Duration = Duration::from_secs(3600);
 
-// Remove writability markers left in `dir`: ours that failed to go, and any
-// `.freemkv-probe-<pid>-<nanos>` regular file older than an hour. Once per folder per run,
-// and again after a removal fails; logged once when it removes anything.
-fn sweep_probes(dir: &Path) {
+// Sweep `dir` on its own thread, after the write test has answered: listing a large folder on
+// a slow share must not count against the probe. At most one at a time per folder.
+fn schedule_sweep(dir: &Path) {
     let leftovers: Vec<PathBuf> = {
         let mut sweep = PROBE_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
-        let (ours, rest): (Vec<_>, Vec<_>) =
-            sweep.1.drain(..).partition(|p| p.parent() == Some(dir));
-        sweep.1 = rest;
-        if !sweep.0.insert(dir.to_path_buf()) && ours.is_empty() {
+        let (ours, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut sweep.leftovers)
+            .into_iter()
+            .partition(|p| p.parent() == Some(dir));
+        let due = sweep
+            .last
+            .get(dir)
+            .is_none_or(|t| t.elapsed() >= STALE_PROBE);
+        if (!due && ours.is_empty()) || !sweep.running.insert(dir.to_path_buf()) {
+            sweep.leftovers = rest;
+            sweep.leftovers.extend(ours);
             return;
         }
+        sweep.leftovers = rest;
+        sweep.last.insert(dir.to_path_buf(), Instant::now());
         ours
     };
+    let owned = dir.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("probe-sweep".into())
+        .spawn(move || {
+            sweep_probes(&owned, &leftovers);
+            PROBE_SWEEP
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .running
+                .remove(&owned);
+        });
+    if spawned.is_err() {
+        PROBE_SWEEP
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .running
+            .remove(dir);
+    }
+}
+
+// Remove writability markers left in `dir`: `leftovers` (ours that failed to go), and any
+// `.freemkv-probe-<pid>-<nanos>` regular file older than an hour; logged when it removes any.
+fn sweep_probes(dir: &Path, leftovers: &[PathBuf]) {
+    #[cfg(test)]
+    tests::sweep_starting(dir);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

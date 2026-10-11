@@ -8,6 +8,21 @@ thread_local! {
     pub(crate) static STOPPING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+// Sweeps of leftover write-test files held until the test lets them run, by folder.
+pub(crate) static HELD_SWEEPS: Mutex<Vec<(PathBuf, std::sync::mpsc::Receiver<()>)>> =
+    Mutex::new(Vec::new());
+
+pub(crate) fn sweep_starting(dir: &Path) {
+    let gate = {
+        let mut held = HELD_SWEEPS.lock().unwrap_or_else(|e| e.into_inner());
+        let at = held.iter().position(|(p, _)| p == dir);
+        at.map(|i| held.remove(i).1)
+    };
+    if let Some(gate) = gate {
+        let _ = gate.recv();
+    }
+}
+
 // Folders some caller has waited on for an earlier probe.
 static WAITED_ON: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
@@ -1094,8 +1109,8 @@ fn leftover_probe_files_are_swept_by_a_later_preflight() {
         .collect();
     assert_eq!(ours.len(), 1, "fixture: a marker left behind");
     probe_write(dir).unwrap();
-    assert!(!stale.exists(), "a stale marker is swept");
-    assert!(!ours[0].exists(), "our own leftover is swept");
+    eventually("a stale marker is swept", || !stale.exists());
+    eventually("our own leftover is swept", || !ours[0].exists());
     assert!(
         fresh.exists(),
         "a recent marker may be another server's live probe"
@@ -1149,4 +1164,34 @@ fn a_failed_write_test_is_not_overridden_by_access() {
         !checked.ok,
         "access() overrode the failed write test: {checked:?}"
     );
+}
+
+// The sweep lists the whole folder, which on a slow share takes time: the write test answers
+// first, and the sweep runs after it, off the timed probe.
+#[test]
+fn a_write_test_answers_before_its_sweep() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().to_path_buf();
+    let stale = dir.join(".freemkv-probe-9-9");
+    std::fs::write(&stale, b"").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
+        .unwrap();
+    let (open, gate) = std::sync::mpsc::channel();
+    HELD_SWEEPS.lock().unwrap().push((dir.clone(), gate));
+    let (tx, answered) = std::sync::mpsc::channel();
+    let probed = dir.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(probe_write(&probed));
+    });
+    let answer = answered.recv_timeout(Duration::from_secs(10));
+    let _ = open.send(());
+    assert!(
+        matches!(answer, Ok(Ok(()))),
+        "the answer waited for the sweep"
+    );
+    eventually("swept after the answer", || !stale.exists());
 }
