@@ -79,7 +79,7 @@ pub(super) fn fresh_unverified_job(cfg: &crate::server::config::Config) -> Resul
             "cannot create staging: its network share is not mounted",
         ));
     }
-    crate::server::config::staging_root_ready(cfg).map_err(|p| p.message)?;
+    crate::server::config::staging_root_ready(cfg).map_err(|p| super::staging_problem_text(&p))?;
     let stamp = crate::server::util::epoch_secs();
     for n in 0..1000u32 {
         let prefix = staging::UNVERIFIED_JOB_PREFIX;
