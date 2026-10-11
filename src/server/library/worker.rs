@@ -56,7 +56,7 @@ fn next_job(
     preflight: Preflight<'_>,
     now: u64,
 ) -> Option<(Job, u64)> {
-    if arbiter.rip_active() {
+    if arbiter.rip_active() || lib.hold_for_unreadable_queue(now) {
         return None;
     }
     let Some(next) = lib.queue.peek_next() else {
@@ -184,7 +184,7 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     if job.plan.is_some() || job.staged.is_some() {
         return Ok(());
     }
-    if let Some(saved) = lib.source_match(&job.iso).map_err(std::io::Error::other)? {
+    if let Some(saved) = lib.match_store()?.get(&job.iso) {
         if saved.is_for(super::links::iso_stamp(&job.iso)) {
             return attach_corrected_plan(lib, cfg, job, &saved.media);
         }
@@ -768,7 +768,7 @@ fn remux_planned_with(
                     episode,
                 )
             {
-                return Ending::Failed(e);
+                return Ending::Failed(links_not_saved(&targets[ordinal], &e));
             }
             continue;
         }
@@ -789,7 +789,7 @@ fn remux_planned_with(
                 Some(landed),
                 episode,
             ) {
-                return Ending::Failed(e);
+                return Ending::Failed(links_not_saved(&target, &e));
             }
             continue;
         }
@@ -879,7 +879,7 @@ fn remux_planned_with(
         if let Err(e) =
             super::links::record_output(&sink.lib.config_dir, &target, &job.iso, landed, episode)
         {
-            return Ending::Failed(e);
+            return Ending::Failed(links_not_saved(&target, &e));
         }
     }
     if job.retire {
@@ -900,12 +900,27 @@ fn remux_planned_with(
             Ok(kept) if kept.is_empty() => {}
             Ok(kept) => {
                 let message = super::retire::kept_message(targets.len(), &kept);
-                return Ending::Failed(std::io::Error::other(message));
+                return Ending::Failed(std::io::Error::other(super::retire::KeptOld(message)));
             }
             Err(e) => return cancelled_ending(sink).unwrap_or(Ending::Failed(e)),
         }
     }
     Ending::Done { writing_app }
+}
+
+// A landed output whose link could not be saved: the file is there, and the config folder is not.
+fn links_not_saved(target: &Path, e: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        e.kind(),
+        crate::strings::fmt_or(
+            "server.library.links_not_saved",
+            "{path} is in place, but library-links.json in the config folder could not be updated ({error}). Fix that file or its folder's permissions, then Retry.",
+            &[
+                ("path", &target.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ),
+    )
 }
 
 // True when the queue shows every output of job `id` as Done (and the job exists).
@@ -1361,8 +1376,22 @@ pub(crate) fn finish(
             // Not retried; still name a folder that is unhealthy right now, and what is safe.
             let changed =
                 job.staged.is_some() && code == Some(libfreemkv::error::E_REMUX_TARGET_EXISTS);
+            let kept_old = e
+                .get_ref()
+                .is_some_and(|inner| inner.is::<super::retire::KeptOld>());
+            // Nothing is left to finish after kept old files: they are no longer tracked.
+            let safe = if kept_old {
+                crate::strings::get_or(
+                    "server.library.safe.retained",
+                    "The source ISO is retained.",
+                )
+            } else {
+                safe_text(job)
+            };
             let mut message = if changed {
                 target_changed_message(&text, job)
+            } else if kept_old {
+                format!("{text} {safe}")
             } else {
                 failure_message(&text, phase.as_deref(), unhealthy.as_ref(), job, None)
             };
@@ -1390,7 +1419,7 @@ pub(crate) fn finish(
             if changed {
                 sink.line(LineKind::Err, target_changed_message(&text, job));
             }
-            sink.line(LineKind::Out, safe_text(job).into());
+            sink.line(LineKind::Out, safe);
             if let Some(k) = &kept {
                 sink.line(LineKind::Warn, kept_text(k, changed));
             }
@@ -1552,7 +1581,7 @@ fn retry_storage_fault(
         lib.hold_for(p, now);
         sink.line(LineKind::Err, format!("{} {}", p.message, p.hint));
     }
-    sink.line(LineKind::Out, safe_text(job).into());
+    sink.line(LineKind::Out, safe_text(job));
     if let Some(bytes) = kept {
         sink.line(
             LineKind::Out,
@@ -1577,16 +1606,45 @@ fn retry_storage_fault(
     true
 }
 
-fn safe_text(job: &Job) -> &'static str {
-    if job.retire {
-        "The source ISO is retained. Old files made from this ISO are removed only after every \
-         new file is in place, and only if unchanged; run Change match again to finish."
+// What is safe after `job` stopped, from the outputs its queue entry shows landed.
+fn safe_text(job: &Job) -> String {
+    use crate::strings::get_or;
+    let done = job
+        .outputs
+        .iter()
+        .filter(|o| o.state == OutputState::Done)
+        .count();
+    let all_done = done > 0 && done == job.outputs.len();
+    if job.retire && all_done {
+        get_or(
+            "server.library.safe.retire_done",
+            "Every new file is in place; run Change match again to remove the old files made from this ISO that remain. The source ISO is retained.",
+        )
+    } else if job.retire {
+        get_or(
+            "server.library.safe.retire_pending",
+            "The source ISO is retained. Old files made from this ISO are removed only after every new file is in place, and only if unchanged; run Change match again to finish.",
+        )
     } else if job.plan.as_ref().is_some_and(|plan| plan.outputs.len() > 1) {
-        "The source ISO is retained. Completed outputs remain in the library; unfinished outputs can be retried."
+        get_or(
+            "server.library.safe.outputs",
+            "The source ISO is retained. Completed outputs remain in the library; unfinished outputs can be retried.",
+        )
+    } else if done > 0 {
+        get_or(
+            "server.library.safe.landed",
+            "The new MKV is in the library.",
+        )
     } else if job.replace {
-        "Your existing MKV is unchanged."
+        get_or(
+            "server.library.safe.unchanged",
+            "Your existing MKV is unchanged.",
+        )
     } else {
-        "No MKV was written to the library."
+        get_or(
+            "server.library.safe.nothing_written",
+            "No MKV was written to the library.",
+        )
     }
 }
 
@@ -1608,7 +1666,7 @@ pub(crate) fn failure_message(
         out.push_str(&format!(" {} Folder: {}.", p.message, p.path.display()));
     }
     out.push(' ');
-    out.push_str(safe_text(job));
+    out.push_str(&safe_text(job));
     if retry_at.is_some() {
         out.push_str(" It is retried automatically once the folder checks out.");
     }

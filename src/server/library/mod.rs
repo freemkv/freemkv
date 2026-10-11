@@ -293,7 +293,10 @@ impl Snapshot {
 /// The Library's state: the queue, the probe cache, the index and the console.
 pub struct Library {
     pub queue: Queue,
-    source_matches: Result<matches::MatchStore, String>,
+    // Opened on first good read; an unreadable file is tried again on the next use.
+    source_matches: Mutex<Option<Arc<matches::MatchStore>>>,
+    // The last open failure was logged; cleared once the file reads again.
+    matches_unreadable: AtomicBool,
     match_gate: Mutex<()>,
     pub probes: ProbeCache,
     pub audits: audit::Audits,
@@ -449,9 +452,10 @@ pub struct Listing {
 
 impl Library {
     pub fn open(config_dir: &Path, log_dir: &Path) -> Self {
-        Self {
+        let lib = Self {
             queue: Queue::open(config_dir),
-            source_matches: matches::MatchStore::open(config_dir).map_err(|e| e.to_string()),
+            source_matches: Mutex::new(None),
+            matches_unreadable: AtomicBool::new(false),
             match_gate: Mutex::new(()),
             probes: ProbeCache::default(),
             audits: audit::Audits::open(config_dir),
@@ -468,15 +472,57 @@ impl Library {
             wake: (Mutex::new(false), Condvar::new()),
             busy: AtomicBool::new(false),
             hold: Mutex::new(None),
+        };
+        let _ = lib.match_store();
+        lib
+    }
+
+    /// The saved matches, opened now if they are not yet: an unreadable file is an error
+    /// that names it, logged once, and read again on the next call.
+    pub(crate) fn match_store(&self) -> std::io::Result<Arc<matches::MatchStore>> {
+        let mut slot = self
+            .source_matches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = slot.as_ref() {
+            return Ok(store.clone());
+        }
+        match matches::MatchStore::open(&self.config_dir) {
+            Ok(store) => {
+                if self.matches_unreadable.swap(false, Ordering::SeqCst) {
+                    tracing::info!("saved source matches are readable again");
+                }
+                Ok(slot.insert(Arc::new(store)).clone())
+            }
+            Err(e) => {
+                if !self.matches_unreadable.swap(true, Ordering::SeqCst) {
+                    tracing::error!(error = %e, dir = %self.config_dir.display(), "library-matches.json cannot be read; remuxes wait until it is repaired");
+                }
+                Err(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "the saved matches (library-matches.json in {}) cannot be read: {e}",
+                        self.config_dir.display()
+                    ),
+                ))
+            }
         }
     }
 
     /// Unreadable saved corrections are an error, never an automatic lookup.
     pub fn source_match(&self, source: &Path) -> Result<Option<matches::SavedMatch>, String> {
-        self.source_matches
-            .as_ref()
+        self.match_store()
             .map(|store| store.get(source))
-            .map_err(Clone::clone)
+            .map_err(|e| e.to_string())
+    }
+
+    // The saved match as already loaded: no disk access, for the listing.
+    fn loaded_match(&self, source: &Path) -> Option<matches::SavedMatch> {
+        let slot = self
+            .source_matches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        slot.as_ref().and_then(|store| store.get(source))
     }
 
     fn require_indexed_source(&self, d: &Dirs, source: &Path) -> std::io::Result<()> {
@@ -523,7 +569,7 @@ impl Library {
             + Sync
             + 'static,
     {
-        let saved = self.source_match(source).map_err(std::io::Error::other)?;
+        let saved = self.match_store()?.get(source);
         let links = links::read_entries(&self.config_dir)?;
         let d = dirs(cfg);
         let roots = owned::roots(&d);
@@ -578,10 +624,7 @@ impl Library {
         if let Some(reason) = self.queue_block(&d, true) {
             return Err(std::io::Error::other(reason));
         }
-        let store = self
-            .source_matches
-            .as_ref()
-            .map_err(|e| std::io::Error::other(e.clone()))?;
+        let store = self.match_store()?;
         let iso_title = self
             .snapshot()
             .isos
@@ -705,7 +748,11 @@ impl Library {
                 );
             }
         }
-        let links = links::load(&self.config_dir);
+        let entries = links::entries(&self.config_dir);
+        let links: HashMap<PathBuf, PathBuf> = entries
+            .iter()
+            .map(|(mkv, l)| (mkv.clone(), l.iso.clone()))
+            .collect();
         // Path to position, so merging links and delivered outputs is linear.
         let mut at: HashMap<PathBuf, usize> = HashMap::new();
         for (i, m) in mkvs.files.iter().enumerate() {
@@ -725,6 +772,7 @@ impl Library {
             .into_iter()
             .collect();
         let checked = check_targets(candidates, INJECT_STAT_LIMIT, stat_target);
+        self.forget_gone_links(d, &entries, &checked);
         let injectable = |p: &Path| checked.get(p).is_none_or(|t| *t != Target::Gone);
         for target in links.keys() {
             if !at.contains_key(target) && injectable(target) {
@@ -819,6 +867,33 @@ impl Library {
             incomplete: mkvs.incomplete || isos.incomplete,
             scanned_at: Some(crate::server::util::epoch_secs()),
             scan_ms: started.elapsed().as_millis() as u64,
+        }
+    }
+
+    // Drop the links whose MKV a stat found missing, so they are not looked for on every
+    // scan. Only under a root that lists entries: an empty one may be an unmounted share.
+    fn forget_gone_links(
+        &self,
+        d: &Dirs,
+        entries: &HashMap<PathBuf, links::Link>,
+        checked: &HashMap<PathBuf, Target>,
+    ) {
+        let populated: Vec<&PathBuf> = std::iter::once(&d.library)
+            .chain(d.tv.as_ref())
+            .filter(|root| std::fs::read_dir(root).is_ok_and(|mut r| r.next().is_some()))
+            .collect();
+        let gone: HashMap<PathBuf, links::Link> = entries
+            .iter()
+            .filter(|(mkv, _)| checked.get(*mkv) == Some(&Target::Gone))
+            .filter(|(mkv, _)| populated.iter().any(|root| mkv.starts_with(root)))
+            .map(|(mkv, l)| (mkv.clone(), l.clone()))
+            .collect();
+        match links::forget_gone(&self.config_dir, &gone) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "forgot links to library files that are gone"),
+            Err(e) => {
+                tracing::warn!(error = %e, "links to gone library files could not be forgotten")
+            }
         }
     }
 
@@ -1038,10 +1113,7 @@ impl Library {
                     ),
                     None => (None, None),
                 };
-                let source_match = r
-                    .iso
-                    .as_deref()
-                    .and_then(|iso| self.source_match(iso).ok().flatten());
+                let source_match = r.iso.as_deref().and_then(|iso| self.loaded_match(iso));
                 let title = source_match
                     .as_ref()
                     .map(|m| {
@@ -1094,6 +1166,9 @@ impl Library {
     /// library beside a full ISO folder looks like an unmounted share, and a
     /// new MKV would then land on the local disk under the mountpoint.
     pub fn queue_block(&self, d: &Dirs, creates: bool) -> Option<String> {
+        if let Some(why) = self.queue.unreadable() {
+            return Some(format!("{why} Nothing was queued."));
+        }
         if let Some(h) = folder_gate(&folder_views(d), false) {
             return Some(format!(
                 "{} ({}) {} Nothing was queued.",
@@ -1151,6 +1226,23 @@ impl Library {
         }
         self.hold()
             .filter(|h| h.recheck_at.is_some_and(|t| now < t))
+    }
+
+    /// Hold the queue while its file could not be loaded; true when it is held so.
+    pub(crate) fn hold_for_unreadable_queue(&self, now: u64) -> bool {
+        let Some(why) = self.queue.unreadable() else {
+            return false;
+        };
+        self.set_hold(Some(Hold {
+            role: "config",
+            path: self.queue.path().to_path_buf(),
+            state: health::State::Unhealthy,
+            message: why.to_string(),
+            hint: String::new(),
+            since: now,
+            recheck_at: None,
+        }));
+        true
     }
 
     /// Hold the queue for the preflight failure `p`.
@@ -1387,33 +1479,53 @@ enum Target {
     Unverified,
 }
 
-// Stat every path under one shared deadline, one probe per folder so a hung folder costs one
-// thread. Only NotFound drops a row.
+/// How many folders a scan stats at once.
+const TARGET_PROBES: usize = 16;
+
+// Stat every path under one shared deadline, one probe per folder, at most TARGET_PROBES
+// folders at a time; once a folder does not answer, the rest stay unverified rather than
+// pin more threads on a dead share. Only NotFound drops a row.
 fn check_targets(
     paths: Vec<PathBuf>,
     limit: std::time::Duration,
     stat: fn(&Path) -> std::io::Result<()>,
 ) -> HashMap<PathBuf, Target> {
+    let deadline = std::time::Instant::now() + limit;
     let mut folders: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for p in paths {
         let folder = p.parent().map(Path::to_path_buf).unwrap_or_default();
         folders.entry(folder).or_default().push(p);
     }
     let items: Vec<_> = folders.into_iter().collect();
-    let answers = health::bounded_each(items.clone(), limit, move |files: Vec<PathBuf>| {
-        files
-            .into_iter()
-            .map(|p| match stat(&p) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (p, Target::Gone),
-                _ => (p, Target::Present),
-            })
-            .collect::<Vec<_>>()
-    });
     let mut out = HashMap::new();
-    for ((_, files), answer) in items.into_iter().zip(answers) {
-        match answer {
-            health::Bounded::Done(found) => out.extend(found),
-            _ => out.extend(files.into_iter().map(|p| (p, Target::Unverified))),
+    let mut answering = true;
+    for batch in items.chunks(TARGET_PROBES) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if !answering || left.is_zero() {
+            out.extend(
+                batch
+                    .iter()
+                    .flat_map(|(_, files)| files.iter().map(|p| (p.clone(), Target::Unverified))),
+            );
+            continue;
+        }
+        let answers = health::bounded_each(batch.to_vec(), left, move |files: Vec<PathBuf>| {
+            files
+                .into_iter()
+                .map(|p| match stat(&p) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (p, Target::Gone),
+                    _ => (p, Target::Present),
+                })
+                .collect::<Vec<_>>()
+        });
+        for ((_, files), answer) in batch.iter().zip(answers) {
+            match answer {
+                health::Bounded::Done(found) => out.extend(found),
+                _ => {
+                    answering = false;
+                    out.extend(files.iter().map(|p| (p.clone(), Target::Unverified)));
+                }
+            }
         }
     }
     out

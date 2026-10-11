@@ -89,9 +89,9 @@ fn v1_8_3_library_lists_the_same_rows_with_no_phantoms() {
     let (_cfg, lib, d) = upgraded(&root);
     assert!(lib.source_match(Path::new("/x.iso")).is_ok());
     same_as_v1_8_3(&root, &listed(&lib, &d));
-    // The link to an MKV removed since (Zulu) is kept but makes no row.
+    // The link to an MKV removed since (Zulu) makes no row, and the scan forgets it.
     let links = super::super::links::load(&root.join("config"));
-    assert_eq!(links.len(), 2);
+    assert_eq!(links.len(), 1);
 }
 
 #[test]

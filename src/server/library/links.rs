@@ -176,6 +176,25 @@ pub(super) fn forget(config_dir: &Path, mkv: &Path, iso: &Path) -> std::io::Resu
     write(config_dir, &links)
 }
 
+/// Drop the links in `gone` whose MKV was found missing, unless the link changed since.
+pub(super) fn forget_gone(
+    config_dir: &Path,
+    gone: &HashMap<PathBuf, Link>,
+) -> std::io::Result<usize> {
+    if gone.is_empty() {
+        return Ok(0);
+    }
+    let _g = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut links = read_for_write(config_dir, true)?;
+    let before = links.len();
+    links.retain(|mkv, link| gone.get(mkv) != Some(link));
+    let dropped = before - links.len();
+    if dropped > 0 {
+        write(config_dir, &links)?;
+    }
+    Ok(dropped)
+}
+
 fn record_many(
     config_dir: &Path,
     mkvs: &[(&Path, Option<Stamp>)],

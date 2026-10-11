@@ -134,7 +134,8 @@ impl Job {
             || self.outputs.iter().any(|o| o.staged.is_some())
     }
 
-    fn owns_target(&self, target: &Path) -> bool {
+    /// Whether `target` is this job's row target or one of its output targets.
+    pub(crate) fn owns_target(&self, target: &Path) -> bool {
         self.target == target || self.outputs.iter().any(|o| o.target == target)
     }
 
@@ -348,6 +349,25 @@ pub struct Queue {
     saved: Mutex<u64>,
     generation: AtomicU64,
     durability_pending: AtomicBool,
+    // Set when the file on disk could not be loaded: it is never written over.
+    unreadable: Option<String>,
+}
+
+// The queue file's bytes (`None`: there is none), tried a few times: a share that answers
+// EIO or ESTALE for a moment must not cost the queue.
+fn read_retrying(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    let mut tries = 0;
+    loop {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if tries >= 2 => return Err(e),
+            Err(_) => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200 * tries));
+            }
+        }
+    }
 }
 
 // Unlike a plain io::Result, preserve whether rename committed the new bytes.
@@ -398,19 +418,36 @@ impl Queue {
         removed
     }
 
-    /// Load (or start) the queue in `config_dir`, re-queueing a job a restart cut off.
+    /// Load (or start) the queue in `config_dir`, re-queueing a job a restart cut off. A
+    /// damaged file is set aside under a name of its own and the queue starts empty; a file
+    /// that cannot be read (after a few tries) is left as it is, and the queue holds
+    /// without ever writing over it ([`Self::unreadable`]).
     pub fn open(config_dir: &Path) -> Self {
         let path = config_dir.join(QUEUE_FILE);
-        let mut file = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<QueueFile>(&bytes).unwrap_or_else(|e| {
-                tracing::warn!(path = %path.display(), error = %e, "library queue unreadable; starting empty");
-                let _ = std::fs::rename(&path, path.with_extension("json.unreadable"));
+        let mut unreadable = None;
+        let mut file = match read_retrying(&path) {
+            Ok(Some(bytes)) => serde_json::from_slice::<QueueFile>(&bytes).unwrap_or_else(|e| {
+                match super::set_aside(&path) {
+                    Ok(aside) => {
+                        tracing::warn!(path = %path.display(), aside = %aside.display(), error = %e, "library queue damaged; set aside, starting empty");
+                    }
+                    Err(aside_error) => {
+                        tracing::error!(path = %path.display(), error = %aside_error, "damaged library queue could not be set aside");
+                        unreadable = Some(format!(
+                            "{} is damaged ({e}) and could not be set aside ({aside_error}); the remux queue is held and the file is left as it is.",
+                            path.display()
+                        ));
+                    }
+                }
                 QueueFile::default()
             }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => QueueFile::default(),
+            Ok(None) => QueueFile::default(),
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "library queue unreadable; starting empty");
-                let _ = std::fs::rename(&path, path.with_extension("json.unreadable"));
+                tracing::error!(path = %path.display(), error = %e, "library queue unreadable; held, file left as it is");
+                unreadable = Some(format!(
+                    "{} cannot be read ({e}); the remux queue is held and the file is left as it is. Fix the config folder, then restart.",
+                    path.display()
+                ));
                 QueueFile::default()
             }
         };
@@ -432,9 +469,20 @@ impl Queue {
             saved: Mutex::new(0),
             generation: AtomicU64::new(1),
             durability_pending: AtomicBool::new(true),
+            unreadable,
         };
         q.persist_now();
         q
+    }
+
+    /// Why the queue file could not be loaded: nothing is claimed or written until a restart.
+    pub fn unreadable(&self) -> Option<&str> {
+        self.unreadable.as_deref()
+    }
+
+    /// The queue file.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Bumped on every change; the UI refetches when it moves.
@@ -577,6 +625,9 @@ impl Queue {
     /// Take the oldest queued job past its backoff and mark it running. `None` while
     /// paused. An idle queue is left alone: no generation bump, no write.
     pub fn claim_next(&self) -> Option<Job> {
+        if self.unreadable.is_some() {
+            return None;
+        }
         if self.durability_pending.load(Ordering::SeqCst) {
             self.persist_now();
         }
@@ -1015,7 +1066,7 @@ impl Queue {
     /// Drop the queued (not running) job for `target`. Returns how many went. A job with a
     /// kept file stays listed as failed, so the file is still offered.
     pub fn remove_queued(&self, target: &Path) -> usize {
-        self.mutate(|f| unqueue(f, |j| j.target == target))
+        self.mutate(|f| unqueue(f, |j| j.owns_target(target)))
     }
 
     /// Drop every queued job and un-pause: an empty queue has nothing to
@@ -1073,6 +1124,9 @@ impl Queue {
         f: impl FnOnce(&mut QueueFile) -> std::io::Result<T>,
         write: impl FnOnce(&Path, &[u8]) -> Result<(), (bool, std::io::Error)>,
     ) -> std::io::Result<T> {
+        if let Some(why) = &self.unreadable {
+            return Err(std::io::Error::other(why.clone()));
+        }
         let mut state = self.lock();
         let mut next = state.clone();
         let out = f(&mut next)?;
@@ -1116,6 +1170,9 @@ impl Queue {
         json: &[u8],
         write: impl FnOnce(&Path, &[u8]) -> Result<(), (bool, std::io::Error)>,
     ) {
+        if self.unreadable.is_some() {
+            return;
+        }
         let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
         if generation < *saved
             || (generation == *saved && !self.durability_pending.load(Ordering::SeqCst))

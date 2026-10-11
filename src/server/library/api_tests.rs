@@ -184,3 +184,57 @@ fn discard_deletes_only_a_kept_pair_in_staging_and_never_while_it_is_copied_in()
     );
     assert_eq!(lib.queue.snapshot().count(JobState::Queued), 0);
 }
+
+#[test]
+fn discard_finds_a_planned_jobs_kept_file_by_its_output_target() {
+    use crate::server::planner::{MediaMetadata, PlannedOutput, RemuxPlan};
+    let t = tempfile::tempdir().unwrap();
+    let stage = t.path().join("stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    lib.queue.add(vec![NewJob {
+        title: "Show".into(),
+        iso: "/i/Show.iso".into(),
+        target: PathBuf::from("/m/Show/Show.mkv"),
+        replace: false,
+    }]);
+    let job = lib.queue.claim_next().unwrap();
+    let plan = RemuxPlan {
+        media: MediaMetadata::default(),
+        outputs: (1..=2)
+            .map(|n| PlannedOutput {
+                id: format!("episode-{n}"),
+                title_index: n,
+                episode: Some(n as u16),
+                episode_name: String::new(),
+                filename: format!("Show_S01E0{n}.mkv"),
+            })
+            .collect(),
+    };
+    assert!(lib.queue.set_plan(job.id, plan));
+    let episode = lib.queue.snapshot().jobs[0].output_targets()[1].clone();
+    let mkv = stage.join("Show_S01E02.0123456789ab.staged.mkv");
+    std::fs::write(&mkv, b"finished").unwrap();
+    std::fs::write(mkv.with_extension("json"), b"{}").unwrap();
+    lib.queue
+        .set_output_staged(job.id, "episode-2", Some(mkv.clone()));
+    lib.queue.set_staged(
+        job.id,
+        Some(StagedFile {
+            path: mkv.clone(),
+            bytes: 8,
+            attempts: 1,
+        }),
+    );
+    lib.queue.finish(
+        job.id,
+        super::super::queue::JobResult::Failed {
+            code: None,
+            message: "x".into(),
+            finished_at: 1,
+        },
+    );
+    discard_kept(&lib, &episode, Some(&stage)).unwrap();
+    assert!(!mkv.exists());
+}

@@ -385,12 +385,7 @@ fn source_match_survives_library_reopen() {
         kind: Some(crate::server::planner::MediaKind::Movie),
         ..Default::default()
     };
-    let saved = lib
-        .source_matches
-        .as_ref()
-        .unwrap()
-        .save(&iso, 0, media)
-        .unwrap();
+    let saved = lib.match_store().unwrap().save(&iso, 0, media).unwrap();
     drop(lib);
     let reopened = Library::open(t.path(), &t.path().join("logs"));
     assert_eq!(reopened.source_match(&iso).unwrap(), Some(saved));
@@ -519,4 +514,48 @@ fn recorded_targets_are_checked_under_one_deadline_and_only_not_found_drops() {
     let mut checked = HashMap::new();
     checked.insert(PathBuf::from("/h1/a.mkv"), Target::Unverified);
     assert!(stat_unless_unverified(&checked, Path::new("/h1/a.mkv")).is_err());
+}
+
+#[test]
+fn a_scan_forgets_links_to_files_gone_from_a_populated_library_only() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    let gone = d.library.join("Gone/Gone.mkv");
+    std::fs::create_dir_all(gone.parent().unwrap()).unwrap();
+    std::fs::write(&gone, b"x").unwrap();
+    std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+    let cfg = t.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    links::record(&cfg, &gone, &d.isos.as_ref().unwrap().join("Gone.iso")).unwrap();
+    std::fs::remove_dir_all(gone.parent().unwrap()).unwrap();
+    let lib = Library::open(&cfg, &t.path().join("logs"));
+    // An empty library may be an unmounted share: nothing is forgotten.
+    lib.index_now(&d);
+    assert!(links::load(&cfg).contains_key(&gone));
+    std::fs::create_dir_all(d.library.join("Other")).unwrap();
+    lib.index_now(&d);
+    assert!(!links::load(&cfg).contains_key(&gone));
+}
+
+static IN_STAT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static MOST_IN_STAT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn slow_stat(_: &Path) -> std::io::Result<()> {
+    let now = IN_STAT.fetch_add(1, Ordering::SeqCst) + 1;
+    MOST_IN_STAT.fetch_max(now, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(30));
+    IN_STAT.fetch_sub(1, Ordering::SeqCst);
+    Ok(())
+}
+
+#[test]
+fn recorded_targets_are_checked_a_bounded_number_of_folders_at_a_time() {
+    let paths: Vec<PathBuf> = (0..64)
+        .map(|n| PathBuf::from(format!("/bounded-check/{n}/x.mkv")))
+        .collect();
+    let checked = check_targets(paths, Duration::from_secs(20), slow_stat);
+    assert_eq!(checked.len(), 64);
+    assert!(checked.values().all(|t| *t == Target::Present));
+    let most = MOST_IN_STAT.load(Ordering::SeqCst);
+    assert!(most <= TARGET_PROBES, "{most} folders checked at once");
 }

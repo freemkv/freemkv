@@ -81,8 +81,7 @@ fn explicit_remux_match_is_not_skipped_by_disabled_auto_lookup() {
         let t = tempfile::tempdir().unwrap();
         let lib = Library::open(t.path(), &t.path().join("logs"));
         let iso = t.path().join("missing.iso");
-        lib.source_matches
-            .as_ref()
+        lib.match_store()
             .unwrap()
             .save(
                 &iso,
@@ -271,11 +270,12 @@ fn replace_keeping_sig(path: &Path, bytes: &[u8]) {
 
 #[test]
 fn enqueue_reports_unavailable_matches_instead_of_silent_zero() {
-    let (_dir, mut lib, dirs) = library_with(&["A"]);
+    let (dir, lib, dirs) = library_with(&["A"]);
     lib.index_now(&dirs);
-    lib.source_matches = Err("damaged match store".into());
+    std::fs::write(dir.path().join("config/library-matches.json"), b"damaged").unwrap();
+    *lib.source_matches.lock().unwrap() = None;
     let error = lib.enqueue_checked(&dirs, |_| true).unwrap_err();
-    assert!(error.contains("damaged match store"));
+    assert!(error.contains("library-matches.json"), "{error}");
     assert!(error.contains("0 jobs queued"));
     assert!(lib.queue.snapshot().jobs.is_empty());
 }
@@ -1694,3 +1694,6 @@ mod landing;
 
 #[path = "worker_mounts_tests.rs"]
 mod mounts;
+
+#[path = "worker_failure_tests.rs"]
+mod failures;

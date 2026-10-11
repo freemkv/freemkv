@@ -393,7 +393,7 @@ fn discard_kept(
         .jobs
         .iter()
         .rev()
-        .find(|j| j.target == target && j.staged.is_some())
+        .find(|j| j.owns_target(target) && j.staged.is_some())
         .and_then(|j| j.staged.clone());
     let Some(kept) = kept else {
         return Err((404, "no finished file is kept for that title".into()));

@@ -219,8 +219,7 @@ fn remux_of_an_iso_with_a_saved_match_replans_but_never_retires() {
     let (_t, cfg, lib, sources) = corrected_library(&["Castaway", "Other"]);
     // Remux, Retry and Remux all on an ISO with a saved match replan, but never delete.
     let d = dirs(&cfg);
-    lib.source_matches
-        .as_ref()
+    lib.match_store()
         .unwrap()
         .save(&sources[1], 0, show())
         .unwrap();

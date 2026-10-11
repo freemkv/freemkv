@@ -127,6 +127,18 @@ fn retire_one(r: &Retire<'_>, old: &Owned) -> io::Result<bool> {
     }
 }
 
+/// A retire that kept old files: every new file landed, and nothing is left to finish.
+#[derive(Debug)]
+pub(super) struct KeptOld(pub String);
+
+impl std::fmt::Display for KeptOld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for KeptOld {}
+
 /// The failure a retire with kept files ends in: every new file landed, these old ones stay.
 pub(super) fn kept_message(new: usize, kept: &[PathBuf]) -> String {
     let paths: Vec<String> = kept.iter().map(|p| p.display().to_string()).collect();
