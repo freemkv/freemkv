@@ -704,6 +704,89 @@ fn the_unreadable_queue_hold_clears_once_the_file_reads() {
     assert!(lib.queue.unreadable().is_none());
 }
 
+// Change match and Remux stat a matched ISO before they take the match gate, once per ISO,
+// on a bounded probe: a share that hangs is refused, never waited on under the gate.
+#[test]
+fn a_matched_iso_is_stat_once_outside_the_match_gate() {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    let (t, cfg, mut lib, sources) = super::match_tests::corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    // Two rows of one ISO: a split disc's episodes, both linked to it.
+    let episodes: Vec<PathBuf> = (1..=2)
+        .map(|e| d.library.join(format!("Castaway/Castaway S01E0{e}.mkv")))
+        .collect();
+    std::fs::create_dir_all(d.library.join("Castaway")).unwrap();
+    for e in &episodes {
+        std::fs::write(e, b"an episode").unwrap();
+    }
+    let delivered: Vec<String> = episodes
+        .iter()
+        .chain([&sources[0]])
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    links::record_delivery(
+        t.path().join("config").to_str().unwrap(),
+        delivered.iter().map(String::as_str),
+    )
+    .unwrap();
+    lib.rescan(&d);
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    lib.iso_stat = Arc::new(move |p: &Path| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        entered_tx.send(()).unwrap();
+        let _ = release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5));
+        links::iso_stamp(p)
+    });
+    let lib = &lib;
+    std::thread::scope(|scope| {
+        let confirm = scope.spawn(|| {
+            lib.confirm_match_and_queue(&cfg, &sources[0], 0, super::match_tests::show())
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            lib.match_gate.try_lock().is_ok(),
+            "Change match stats under the gate"
+        );
+        release.send(()).unwrap();
+        confirm.join().unwrap().unwrap();
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // The Change match job would take the ISO's rows in; Remux is asked for on its own.
+    lib.queue.clear_queued();
+    let remux_all = || lib.enqueue_checked(&d, |r| r.iso.as_deref() == Some(sources[0].as_path()));
+    std::thread::scope(|scope| {
+        let remux = scope.spawn(remux_all);
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            lib.match_gate.try_lock().is_ok(),
+            "Remux stats under the gate"
+        );
+        release.send(()).unwrap();
+        assert_eq!(remux.join().unwrap().unwrap(), 2);
+    });
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "one stat for the ISO of both rows"
+    );
+    std::thread::scope(|scope| {
+        let remux = scope.spawn(remux_all);
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The share never answers: the request is refused at the limit.
+        let refused = remux.join().unwrap().unwrap_err();
+        assert!(refused.contains("not responding"), "{refused}");
+        release.send(()).unwrap();
+    });
+}
+
 #[test]
 fn an_iso_whose_share_hangs_is_refused_without_waiting_on_it() {
     let t = tempfile::tempdir().unwrap();

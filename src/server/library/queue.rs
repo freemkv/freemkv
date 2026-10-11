@@ -748,7 +748,6 @@ impl Queue {
                 .entry(job.target.clone())
                 .or_default()
                 .push(existing + added.len());
-            held.insert(job.iso.clone());
             added.push(job);
         }
         // A new job replaces the finished entries that named its target.
