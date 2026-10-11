@@ -3260,6 +3260,32 @@ fn open_preflight_is_keyed_for_every_ticked_title() {
     );
 }
 
+// Start cancels the open recheck: its key lookup would run beside the rip's own, and its
+// open-time verdict and key set must not land on the Progress page of the running rip.
+#[test]
+fn start_cancels_the_open_recheck_and_ignores_its_answer() {
+    let out = tempfile::tempdir().unwrap();
+    let mut app = App::new();
+    app.output_dir = out.path().display().to_string();
+    app.apply_scan("/nonexistent/recheck.iso", Ok(probe_scan()), false);
+    let halt = libfreemkv::Halt::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.recheck = Some((app.source.clone(), halt.clone(), rx));
+    app.dispatch(Cmd::Run);
+    assert!(app.run.is_some(), "the rip started");
+    assert!(halt.is_cancelled(), "the recheck runs on beside the rip");
+    let _ = tx.send((None, Ok(Vec::new())));
+    app.tick();
+    let ready = crate::strings::get("gui.log.ready_rip");
+    assert!(
+        !logged(&app, &ready),
+        "the recheck's verdict reached the rip's log"
+    );
+    if let Some(run) = &app.run {
+        run.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
 // A Settings commit while the background scan ran changes the ticks: the worker's verdict
 // was for other titles, so they are checked again on a worker, with keys looked up for the
 // titles Open did not key, and the UI thread never re-scans the image.

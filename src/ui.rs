@@ -3808,6 +3808,10 @@ impl App {
         } else {
             None
         };
+        // The rip resolves its own keys; the open recheck's lookup and verdict are moot now.
+        if let Some((_, halt, _)) = self.recheck.take() {
+            halt.cancel();
+        }
         let state = Arc::new(RunState::default());
         self.run = Some(state.clone());
         self.reported_bad = 0;
