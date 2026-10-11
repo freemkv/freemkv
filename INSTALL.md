@@ -102,8 +102,15 @@ write the configuration. An already-running service is never restarted by the
 installer; log out and back in after its jobs finish to apply an update.
 
 **Reboot library** (System page) relies on this service: the server exits and
-launchd's `KeepAlive` starts it again. A server started by hand has nothing to
-start it again, so it refuses the reboot; stop and start it yourself instead.
+launchd's `KeepAlive` starts it again. The installer sets `KeepAlive` to true on
+a new install; an edited plist must keep it true, or use conditions that include
+`SuccessfulExit` false. A server started by hand, or a job launchd would not
+start again, refuses the reboot; stop and start it yourself instead.
+
+The installer also sets `ExitTimeOut` to 130 s, longer than the server's own
+116 s stop limit, so launchd does not kill a stop that is still draining. After
+re-running the installer over an existing service, log out and back in (or
+`launchctl bootout` and `launchctl bootstrap` the job) for launchd to apply it.
 
 The LaunchAgent sets `ProcessType` to `Interactive` so macOS gives Library
 app-level resource limits. Leaving this unspecified can throttle SMB moves:
