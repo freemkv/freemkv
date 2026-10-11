@@ -75,10 +75,11 @@ pub(super) fn fresh_unverified_job(root: &Path) -> Result<String, String> {
     std::fs::create_dir_all(root).map_err(|e| format!("cannot create staging: {e}"))?;
     let stamp = crate::server::util::epoch_secs();
     for n in 0..1000u32 {
+        let prefix = staging::UNVERIFIED_JOB_PREFIX;
         let job = if n == 0 {
-            format!("unverified-{stamp}")
+            format!("{prefix}{stamp}")
         } else {
-            format!("unverified-{stamp}-{n}")
+            format!("{prefix}{stamp}-{n}")
         };
         match std::fs::create_dir(root.join(&job)) {
             Ok(()) => return Ok(job),

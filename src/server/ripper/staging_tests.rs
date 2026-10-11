@@ -2359,3 +2359,66 @@ fn a_live_start_over_is_not_finished_by_another_thread() {
     assert!(!finish_interrupted_reset(dir.path()).unwrap());
     assert!(dir.path().join("Heat.iso").exists());
 }
+
+// An unverified-<epoch> job is never adopted by a later scan, so once Stopped and no
+// drive shows it any more, Clear staging reclaims it (with its partial capture).
+#[test]
+fn clear_staging_reclaims_stopped_unverified_jobs_no_drive_shows() {
+    let root = tempfile::tempdir().unwrap();
+    let job = |name: &str| {
+        let dir = root.path().join(name);
+        fs::create_dir(&dir).unwrap();
+        let mut st = DiscState::new(StagingState::Stopped);
+        st.user_metadata = Some(UserMetadata {
+            title: "Scratched".into(),
+            year: 2001,
+            media_type: crate::server::planner::MediaKind::Movie,
+            episode_start: None,
+            tmdb_id: 1,
+            poster_url: String::new(),
+            overview: String::new(),
+        });
+        try_write_state(&dir, &st).unwrap();
+        fs::write(dir.join("Scratched.iso"), b"partial").unwrap();
+        fs::write(dir.join("Scratched.iso.mapfile"), b"map").unwrap();
+        dir
+    };
+    let orphan = job("unverified-1760000000");
+    let shown = job("unverified-1760000001");
+    let verified = job("disc-0123");
+    super::super::update_state_with("dev-unverified-shown", |s| {
+        s.job_id = "unverified-1760000001".into();
+    });
+    let (removed, failed) = clear_abandoned_staging(root.path());
+    super::super::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove("dev-unverified-shown");
+    assert_eq!((removed, failed), (1, 0));
+    assert!(!orphan.exists(), "an unadoptable capture was kept for good");
+    assert!(shown.exists(), "the drive still shows this job");
+    assert!(
+        verified.exists(),
+        "a verified job can be resumed by its disc"
+    );
+}
+
+// A 1.8.3 title-named folder no disc can match again is listed for the operator, not
+// deleted (its owner might still want the partial).
+#[test]
+fn clear_staging_lists_unmatchable_1_8_3_folders_without_deleting_them() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("Heat");
+    fs::create_dir(&legacy).unwrap();
+    fs::write(legacy.join("Heat.mkv"), b"partial").unwrap();
+    fs::write(legacy.join(".disc-label"), b"HEAT").unwrap();
+    let job = root.path().join("disc-0123");
+    fs::create_dir(&job).unwrap();
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.disc_identity = "0123".into();
+    try_write_state(&job, &st).unwrap();
+    fs::write(job.join("Heat.mkv"), b"partial").unwrap();
+    assert_eq!(unmatchable_legacy_jobs(root.path()), ["Heat"]);
+    clear_abandoned_staging(root.path());
+    assert!(legacy.join("Heat.mkv").exists());
+}

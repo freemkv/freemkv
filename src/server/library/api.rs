@@ -314,10 +314,13 @@ pub fn handle(
                     }
                 }
             }
+            // 1.8.3 folders no disc can match again are listed for the operator, never deleted.
+            let legacy = crate::server::ripper::staging::unmatchable_legacy_jobs(&root);
             json_response(
                 request,
                 200,
-                &json!({"ok": true, "discarded": discarded, "failed": failed}).to_string(),
+                &json!({"ok": true, "discarded": discarded, "failed": failed, "legacy": legacy})
+                    .to_string(),
             );
         }
         (_, true, "/api/library/queue/stop-all") => {

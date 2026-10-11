@@ -2439,6 +2439,47 @@ pub(crate) fn clear_abandoned_staging(root: &Path) -> (usize, usize) {
     (removed, failed)
 }
 
+/// 1.8.3 title-named staging folders no disc can match again (no saved identity and no
+/// identity-bearing map): kept, but listed so the operator can remove them by hand.
+pub(crate) fn unmatchable_legacy_jobs(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| Some((e.file_name().to_str()?.to_owned(), e.path())))
+        .filter(|(name, _)| !name.starts_with("disc-") && !name.starts_with(UNVERIFIED_JOB_PREFIX))
+        .filter(|(_, dir)| {
+            read_state(dir).is_none_or(|s| s.disc_identity.is_empty())
+                && super::resume::find_iso_and_mapfile(dir)
+                    .and_then(|(_, map)| freemkv_engine::Mapfile::load(&map).ok())
+                    .is_none_or(|map| map.disc_hash().is_none())
+                && std::fs::read_dir(dir).is_ok_and(|mut e| e.next().is_some())
+                && !holds_only_ripper_bookkeeping(dir)
+        })
+        .map(|(name, _)| name)
+        .collect();
+    names.sort();
+    names
+}
+
+/// Prefix of a job allocated for a disc whose identity could not be verified.
+pub(crate) const UNVERIFIED_JOB_PREFIX: &str = "unverified-";
+
+// A Stopped unverified job no drive shows any more: no later scan can adopt it again.
+fn unadoptable_unverified(dir: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name.starts_with(UNVERIFIED_JOB_PREFIX)
+        && !super::STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|row| row.job_id == name)
+}
+
 // Caller owns the job lease. The decision and the deletion share the state lock,
 // so a concurrent correction or Accept damage either lands first (kept) or fails.
 fn clear_if_abandoned(dir: &Path) -> io::Result<bool> {
@@ -2449,6 +2490,7 @@ fn clear_if_abandoned(dir: &Path) -> io::Result<bool> {
     if snap.had_entry_error || snap.state_unreadable.is_some() {
         return Ok(false);
     }
+    let unadoptable = unadoptable_unverified(dir);
     let lock = state_lock(dir);
     let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     if !delivery_journal_absent(dir) {
@@ -2460,7 +2502,10 @@ fn clear_if_abandoned(dir: &Path) -> io::Result<bool> {
         StateRead::Absent => None,
         StateRead::Unreadable(_) => return Ok(false),
     };
-    if st.as_ref().is_some_and(|s| s.state == StagingState::Failed) {
+    let stopped = st
+        .as_ref()
+        .is_some_and(|s| s.state == StagingState::Stopped);
+    if st.as_ref().is_some_and(|s| s.state == StagingState::Failed) || (stopped && unadoptable) {
         std::fs::remove_dir_all(dir)?;
         return Ok(true);
     }
