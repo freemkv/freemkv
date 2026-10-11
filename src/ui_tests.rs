@@ -2956,6 +2956,28 @@ fn a_quit_asks_exactly_once_and_only_while_a_rip_runs() {
     assert!(!needs_rip_confirmation(true, true));
 }
 
+// The tick that sees a rip finish keeps the timer while a worker is still out (a Settings
+// write, a key-service URL check, a recheck), as the idle tick does: its answer is collected.
+#[test]
+fn a_finished_rip_keeps_ticking_for_workers_still_out() {
+    let mut app = App::new();
+    let (_check_tx, check_rx) = std::sync::mpsc::channel();
+    app.keyserver_check = Some(check_rx);
+    let st = Arc::new(RunState::default());
+    st.finished.store(true, Ordering::SeqCst);
+    app.run = Some(st);
+    let fx = app.tick();
+    assert!(app.run.is_none(), "the finish was seen");
+    assert!(!fx.contains(&Effect::StopTicking), "{fx:?}");
+    let (_save_tx, save_rx) = std::sync::mpsc::channel();
+    app.keyserver_check = None;
+    app.saving = Some((save_rx, true));
+    let st = Arc::new(RunState::default());
+    st.finished.store(true, Ordering::SeqCst);
+    app.run = Some(st);
+    assert!(!app.tick().contains(&Effect::StopTicking));
+}
+
 #[test]
 fn stop_and_quit_latches_cancels_and_lets_the_close_through() {
     let mut app = App::new();
@@ -3260,6 +3282,32 @@ fn open_preflight_is_keyed_for_every_ticked_title() {
     );
 }
 
+// Start cancels the open recheck: its key lookup would run beside the rip's own, and its
+// open-time verdict and key set must not land on the Progress page of the running rip.
+#[test]
+fn start_cancels_the_open_recheck_and_ignores_its_answer() {
+    let out = tempfile::tempdir().unwrap();
+    let mut app = App::new();
+    app.output_dir = out.path().display().to_string();
+    app.apply_scan("/nonexistent/recheck.iso", Ok(probe_scan()), false);
+    let halt = libfreemkv::Halt::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.recheck = Some((app.source.clone(), halt.clone(), rx));
+    app.dispatch(Cmd::Run);
+    assert!(app.run.is_some(), "the rip started");
+    assert!(halt.is_cancelled(), "the recheck runs on beside the rip");
+    let _ = tx.send((None, Ok(Vec::new())));
+    app.tick();
+    let ready = crate::strings::get("gui.log.ready_rip");
+    assert!(
+        !logged(&app, &ready),
+        "the recheck's verdict reached the rip's log"
+    );
+    if let Some(run) = &app.run {
+        run.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
 // A Settings commit while the background scan ran changes the ticks: the worker's verdict
 // was for other titles, so they are checked again on a worker, with keys looked up for the
 // titles Open did not key, and the UI thread never re-scans the image.
@@ -3471,6 +3519,31 @@ fn quit_writes_the_queued_latest_settings_after_a_slow_write() {
         WRITTEN.lock().unwrap().last(),
         Some(&latest),
         "the latest was lost"
+    );
+}
+
+// A write still out when Quit gives up on it is reported as not saved, not dropped silently.
+#[test]
+fn quit_reports_a_write_it_could_not_wait_for() {
+    let mut app = picking(pick_disc());
+    app.save_fn = |_| {
+        std::thread::sleep(std::time::Duration::from_millis(2600));
+        Ok(())
+    };
+    app.pick_audio(Some("deu"));
+    assert_eq!(app.dispatch(Cmd::Quit), vec![Effect::Quit]);
+    let unsaved = crate::strings::fmt_or(
+        "gui.log.settings_save_error",
+        "Could not save settings: {e}",
+        &[("e", "")],
+    );
+    assert!(app.settings_unsaved, "the change may be lost");
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.text.starts_with(unsaved.trim_end())),
+        "{:?}",
+        app.log.iter().map(|l| &l.text).collect::<Vec<_>>()
     );
 }
 

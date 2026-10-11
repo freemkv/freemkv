@@ -241,21 +241,38 @@ fn commit_stall(path: &str) {
     schedule_move_retry_with(path, |_| {});
 }
 
-// The stalled worker returned: the backoff committed at the stall applies from now on.
+// The stalled worker returned: the stall's attempt stands, and its backoff runs from now (a
+// share back from a long hang is not copied to again at once), recorded afresh.
 fn finish_stall(path: &str) {
     let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
     match errors
         .get_mut(path)
         .and_then(|row| Some((row.stall_resume.take()?, row)))
     {
-        Some((resume, row)) => {
-            row.retry_after = resume;
-            row.retry_held = resume.is_none();
+        Some((Some(_), row)) => {
+            let attempts = row.attempts;
+            drop(errors);
+            commit_retry(path, attempts, retry_delay(attempts));
+        }
+        Some((None, row)) => {
+            row.retry_after = None;
+            row.retry_held = true;
         }
         None => {
             drop(errors);
             schedule_move_retry(path);
         }
+    }
+}
+
+// A delivery refused before its journal exists has none to count in: its row carries the
+// backoff (30 s, 2 min, then held for Retry). In memory: a restart tries again.
+fn back_off_unjournaled(path: &str) {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(row) = errors.get_mut(path) {
+        row.attempts = row.attempts.saturating_add(1);
+        row.retry_after = retry_delay(row.attempts).map(|d| std::time::Instant::now() + d);
+        row.retry_held = row.retry_after.is_none();
     }
 }
 
@@ -362,11 +379,15 @@ fn commit_retry_with(
     if stalled {
         row.stall_resume = Some(None);
     }
-    row.reason = format!(
-        "{}; automatic retries stopped because the retry state could not be saved: {error}",
-        row.reason
+    row.reason = crate::strings::fmt_or(
+        "server.mover.retry_state_unsaved",
+        "{reason}; automatic retries stopped because the retry state could not be saved: {error}",
+        &[("reason", &row.reason), ("error", &error.to_string())],
     );
-    row.hint = "Free space on the staging storage or make it writable, then choose Retry. Staged source files are retained.".into();
+    row.hint = crate::strings::get_or(
+        "server.mover.retry_state_unsaved_hint",
+        "Free space on the staging storage or make it writable, then choose Retry. Staged source files are retained.",
+    );
     let line = format!("Move held: {path} — {}", row.reason);
     drop(errors);
     log(&line);
@@ -593,16 +614,22 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
 
 /// Operator-initiated Retry: clear this error and its retry budget. The next
 /// mover tick may attempt delivery again; no media is removed by this action.
+/// A destination row retries the delivery that owns it (and only that row's own
+/// missing-folder wait consents to recreating the folder).
 /// False when nothing was scheduled: no such row, or its copy worker is still blocked.
 pub fn clear_move_error(path: &str) -> bool {
     with_retry_maps(|errors, requests| {
-        if errors.get(path).is_some_and(|e| !e.worker_active)
-            && let Some(row) = errors.remove(path)
-        {
-            *requests.entry(path.to_string()).or_insert(false) |= row.missing_folder;
-            return true;
+        let Some(row) = errors.get(path) else {
+            return false;
+        };
+        let delivery = row.owner.clone().unwrap_or_else(|| path.to_string());
+        if row.worker_active || errors.get(&delivery).is_some_and(|e| e.worker_active) {
+            return false;
         }
-        false
+        let consents = errors.remove(path).is_some_and(|r| r.missing_folder);
+        errors.remove(&delivery);
+        *requests.entry(delivery).or_insert(false) |= consents;
+        true
     })
 }
 
@@ -1284,6 +1311,31 @@ pub(crate) fn record_test_error(path: &str) {
     record_error_with(path, "test failure", "test hint", |_| {});
 }
 
+// A held delivery row for `owner` and a destination row it raised for `dest`.
+#[cfg(test)]
+pub(crate) fn record_test_dest_error(dest: &str, owner: &str) {
+    record_error_with(owner, "test failure", "test hint", |_| {});
+    record_error_with(dest, "publication failed: test", "test hint", |_| {});
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(row) = errors.get_mut(owner) {
+        row.retry_after = None;
+        row.retry_held = true;
+    }
+    if let Some(row) = errors.get_mut(dest) {
+        row.owner = Some(owner.to_string());
+    }
+}
+
+// Whether an operator Retry for `path` was waiting for the next pass; it is taken.
+#[cfg(test)]
+pub(crate) fn take_retry_request(path: &str) -> bool {
+    RETRY_REQUESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(path)
+        .is_some()
+}
+
 // Forget in-memory mover state, as a process restart would.
 #[cfg(test)]
 pub(super) fn forget_process_state() {
@@ -1425,11 +1477,17 @@ fn check_and_move(cfg: &Config) {
             Some(saved) => restore_retry(&dir.to_string_lossy(), saved),
             None => {
                 // Nothing to reset without a journal: the Retry is spent on this pass.
-                RETRY_REQUESTS
+                let requested = RETRY_REQUESTS
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .remove(dir.to_string_lossy().as_ref());
-                Attempt::Due
+                    .remove(dir.to_string_lossy().as_ref())
+                    .is_some();
+                if requested || move_retry_ready(&dir.to_string_lossy(), std::time::Instant::now())
+                {
+                    Attempt::Due
+                } else {
+                    Attempt::Wait
+                }
             }
         };
         if attempt == Attempt::Wait {
@@ -1738,7 +1796,28 @@ fn check_and_move(cfg: &Config) {
             let mut uncertain = None;
             let mut residue = None;
             // Names another disc's journal froze are taken, published yet or not.
-            let reserved = manifest::Manifest::reserved_elsewhere(Path::new(staging_root), &dir);
+            let reserved = match manifest::Manifest::reserved_elsewhere(
+                Path::new(staging_root),
+                &dir,
+            ) {
+                Ok(reserved) => reserved,
+                Err(e) => {
+                    tracing::warn!(dir = %dir_str, error = %e, "mover: reserved names unreadable");
+                    record_error(
+                        &dir_str,
+                        &crate::strings::fmt_or(
+                            "server.mover.reservations_unreadable",
+                            "cannot read the names other rips' deliveries reserved: {error}",
+                            &[("error", &e.to_string())],
+                        ),
+                        &crate::strings::get_or(
+                            "server.mover.reservations_unreadable_hint",
+                            "Nothing was moved or named yet. It is tried again on the next pass; if this persists, repair the staging storage or the other rip's delivery journal.",
+                        ),
+                    );
+                    continue;
+                }
+            };
             let variant = crate::server::util::disc_variant(|n| {
                 if uncertain.is_some() || residue.is_some() {
                     return false;
@@ -1902,6 +1981,12 @@ fn check_and_move(cfg: &Config) {
             Some(saved) if attempt == Attempt::Recreate => saved.folders(),
             Some(_) => Vec::new(),
         };
+        // Every episode of a season shares one folder: made (or checked) once.
+        let mut distinct = std::collections::HashSet::new();
+        let folders: Vec<_> = folders
+            .into_iter()
+            .filter(|f| distinct.insert(f.clone()))
+            .collect();
         let mut created = Vec::new();
         let mut dest_ok = true;
         for (root, folder) in &folders {
@@ -1914,7 +1999,10 @@ fn check_and_move(cfg: &Config) {
                             "cannot create destination directory {}: {e}",
                             absolute_for_log(&folder.to_string_lossy())
                         ),
-                        "check write permissions on the output / movie / tv directory",
+                        &crate::strings::get_or(
+                            "server.mover.folder_create_failed_hint",
+                            "Check that the destination share is mounted and writable: a share that dropped or was remounted since its check refuses this too. It is tried again on the next pass; nothing was moved.",
+                        ),
                     );
                     dest_ok = false;
                     break;
@@ -1936,6 +2024,8 @@ fn check_and_move(cfg: &Config) {
             ) {
                 Ok(saved) => {
                     planned_moves = saved.moves();
+                    // A frozen plan is a new delivery: earlier refusals' backoff is spent.
+                    clear_error(&dir_str);
                 }
                 Err(e) => {
                     // A save that failed after its rename left a journal naming these folders.
@@ -1947,6 +2037,7 @@ fn check_and_move(cfg: &Config) {
                         &format!("cannot persist delivery plan: {e}"),
                         "Staged sources are retained; repair storage or the conflicting destination and retry.",
                     );
+                    back_off_unjournaled(&dir_str);
                     continue;
                 }
             }
@@ -2170,7 +2261,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination size does not match source",
-                SIZE_MISMATCH_HINT,
+                &crate::strings::get_or("server.mover.size_mismatch_hint", SIZE_MISMATCH_HINT),
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2180,7 +2271,10 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination is structurally invalid or unreadable",
-                POST_COPY_INVALID_HINT,
+                &crate::strings::get_or(
+                    "server.mover.post_copy_invalid_hint",
+                    POST_COPY_INVALID_HINT,
+                ),
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2206,7 +2300,10 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 &reason,
-                "See device_system.log for the underlying error. The delivery is tried again after 30 s, then 2 min; after that it waits for Retry.",
+                &crate::strings::get_or(
+                    "server.mover.copy_failed_hint",
+                    "See device_system.log for the underlying error. The delivery is tried again after 30 s, then 2 min; after that it waits for Retry.",
+                ),
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2263,7 +2360,10 @@ fn check_and_move(cfg: &Config) {
                     "staging teardown skipped: the directory could not be fully listed: {}",
                     dir.display()
                 ),
-                "The files are delivered; staging is kept until it can be listed in full. Check the staging mount; the teardown retries after a backoff, then waits for Retry.",
+                &crate::strings::get_or(
+                    "server.mover.teardown_listing_hint",
+                    "The files are delivered; staging is kept until it can be listed in full. Check the staging mount; the teardown retries after a backoff, then waits for Retry.",
+                ),
             );
             continue;
         }
@@ -2281,7 +2381,10 @@ fn check_and_move(cfg: &Config) {
             teardown_blocked(
                 &dir_str,
                 &format!("staging cleanup failed: {}", e),
-                "The files are delivered. Inspect changed or unplanned staging artifacts; they are not automatically deleted. The teardown retries after a backoff, then waits for Retry.",
+                &crate::strings::get_or(
+                    "server.mover.teardown_cleanup_hint",
+                    "The files are delivered. Inspect changed or unplanned staging artifacts; they are not automatically deleted. The teardown retries after a backoff, then waits for Retry.",
+                ),
             );
         }
 
@@ -2296,7 +2399,7 @@ fn check_and_move(cfg: &Config) {
     prune_stranded_warned(&seen_dirs);
 }
 
-// What a failed copy's row tells the operator to do.
+// What a failed copy's row tells the operator to do (English; the catalog may translate it).
 const SIZE_MISMATCH_HINT: &str = "Check the destination filesystem for ENOSPC / short writes. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
 const POST_COPY_INVALID_HINT: &str = "The copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); see device_system.log for the specific check. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
 

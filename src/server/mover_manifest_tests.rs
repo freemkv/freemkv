@@ -1,6 +1,21 @@
 use super::*;
 use crate::server::config::Config;
 
+type Hook = Option<Box<dyn Fn(&Path)>>;
+
+thread_local! {
+    // Run between an adoption's checks and its journal update, on this thread.
+    static ADOPTING: std::cell::RefCell<Hook> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn adopting(dir: &Path) {
+    ADOPTING.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(dir);
+        }
+    });
+}
+
 fn fixture() -> (tempfile::TempDir, PathBuf, Config, Manifest) {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path().join("staging/job");
@@ -1264,6 +1279,35 @@ fn a_metadata_preserving_copy_of_the_source_is_adopted() {
         super::super::MoveOutcome::Skipped
     ));
     assert!(Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
+}
+
+// The journal is reloaded for the adoption's update: one replaced meanwhile by a shorter
+// (still valid) journal is an error for this delivery, never a panic of the mover thread.
+#[test]
+fn an_adoption_whose_journal_shrank_meanwhile_is_an_error() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[2];
+    Manifest::prepare(&dir, 2, &entry.source).unwrap();
+    std::fs::copy(&entry.source, &entry.destination).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&entry.destination)
+        .unwrap()
+        .set_modified(Stamp::read(&entry.source).unwrap().modified)
+        .unwrap();
+    ADOPTING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(|dir: &Path| {
+            let mut shorter = Manifest::load(dir).unwrap().unwrap();
+            shorter.entries.truncate(1);
+            shorter.save().unwrap();
+        }))
+    });
+    let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Manifest::deliver(&dir, 2, &|_, _, _, _| {})
+    }));
+    ADOPTING.with(|hook| *hook.borrow_mut() = None);
+    let delivered = delivered.expect("the mover thread panicked");
+    assert!(delivered.is_err());
 }
 
 #[test]

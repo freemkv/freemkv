@@ -915,20 +915,18 @@ fn boot_recreates_the_persisted_relocated_default_output() {
     assert!(boot_dirs(&cfg, false).contains(&cfg.output_dir));
 }
 
-// A configured staging folder on a share that is not mounted at boot is not created on the
-// local disk (rips would fill it, hidden under the mount once it arrives). It is created
-// when its parent is there, and the relocated default always is.
+// A configured staging folder is never created at boot: it may be a share's mount point the
+// OS removed while the share is not mounted, under a populated folder (/Volumes holding
+// "Macintosh HD"), and rips would fill the local disk. The default under the config folder is.
 #[test]
-fn boot_creates_a_configured_staging_folder_only_where_its_parent_exists() {
+fn boot_never_creates_a_configured_staging_folder() {
     let temp = tempfile::tempdir().unwrap();
-    let unmounted = temp.path().join("Volumes/nas/staging");
-    let mounted = temp.path().join("mnt");
-    // A mounted share has content; an empty mount point is refused (test below).
-    std::fs::create_dir_all(mounted.join("movies")).unwrap();
+    let volumes = temp.path().join("Volumes");
+    std::fs::create_dir_all(volumes.join("Macintosh HD")).unwrap();
     let cfg_dir = temp.path().join("cfg");
     for (staging, created) in [
-        (unmounted.clone(), false),
-        (mounted.join("staging"), true),
+        (volumes.join("staging"), false),
+        (temp.path().join("nas/staging"), false),
         (cfg_dir.join("staging"), true),
     ] {
         let cfg = Config {
@@ -937,36 +935,57 @@ fn boot_creates_a_configured_staging_folder_only_where_its_parent_exists() {
             output_dir: temp.path().join("out").to_string_lossy().into_owned(),
             ..Config::default()
         };
-        let dirs = boot_dirs(&cfg, false);
-        ensure_dirs_bounded(dirs, std::time::Duration::from_secs(5), boot_create(&cfg));
+        let results = ensure_dirs_bounded(
+            boot_dirs(&cfg, false),
+            std::time::Duration::from_secs(5),
+            boot_create(&cfg),
+        );
         assert_eq!(staging.is_dir(), created, "{}", staging.display());
+        if !created {
+            let reason = results
+                .iter()
+                .find(|(d, _)| *d == cfg.staging_dir)
+                .and_then(|(_, r)| r.clone().err())
+                .expect("refused with a reason");
+            assert!(reason.contains("is the share mounted?"), "{reason}");
+        }
     }
-    assert!(!temp.path().join("Volumes").exists());
 }
 
-// On Linux an unmounted share's mount point is an empty folder that exists: a configured
-// staging folder is not created inside it at boot.
+// Rips ask the same question: a missing configured staging folder is a visible reason to
+// hold, naming the folder; one that is there (or appears later) is ready.
 #[test]
-fn boot_does_not_create_staging_inside_an_empty_mount_point() {
+fn a_missing_staging_folder_holds_with_a_reason_until_it_appears() {
     let temp = tempfile::tempdir().unwrap();
-    let mountpoint = temp.path().join("mnt/nas");
-    std::fs::create_dir_all(&mountpoint).unwrap();
+    let staging = temp.path().join("Volumes/staging");
+    std::fs::create_dir_all(temp.path().join("Volumes/Macintosh HD")).unwrap();
     let cfg = Config {
         autorip_dir: temp.path().join("cfg").to_string_lossy().into_owned(),
-        staging_dir: mountpoint.join("staging").to_string_lossy().into_owned(),
-        output_dir: temp.path().join("out").to_string_lossy().into_owned(),
+        staging_dir: staging.to_string_lossy().into_owned(),
         ..Config::default()
     };
-    let created = ensure_dirs_bounded(
-        boot_dirs(&cfg, false),
-        std::time::Duration::from_secs(5),
-        boot_create(&cfg),
+    let problem = staging_root_ready(&cfg).expect_err("missing");
+    assert_eq!(
+        problem.message,
+        format!(
+            "staging folder {} is missing — is the share mounted?",
+            staging.display()
+        )
     );
-    assert!(!mountpoint.join("staging").exists(), "{created:?}");
-    let reason = created
-        .iter()
-        .find(|(d, _)| *d == cfg.staging_dir)
-        .and_then(|(_, r)| r.clone().err())
-        .expect("refused with a reason");
-    assert!(reason.contains("empty"), "{reason}");
+    assert!(!staging.exists(), "not created");
+    std::fs::create_dir(&staging).unwrap();
+    assert_eq!(staging_root_ready(&cfg).unwrap(), staging);
+    let default = Config {
+        autorip_dir: temp.path().join("cfg").to_string_lossy().into_owned(),
+        staging_dir: temp
+            .path()
+            .join("cfg/staging")
+            .to_string_lossy()
+            .into_owned(),
+        ..Config::default()
+    };
+    assert!(
+        staging_root_ready(&default).unwrap().is_dir(),
+        "the default is ours"
+    );
 }

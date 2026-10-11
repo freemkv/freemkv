@@ -222,10 +222,12 @@ pub struct Mount {
     // replaces a newer one, whichever is published last.
     #[serde(skip)]
     observed: u64,
-    // This verdict is a failed real write test: access() cannot clear it, only another
-    // write test that passes.
+    // A real write test failed here: access() cannot clear it, only another write test that
+    // passes (`write_passed`); kept across every other verdict until then.
     #[serde(skip)]
     write_failed: bool,
+    #[serde(skip)]
+    write_passed: bool,
 }
 
 // Orders the evidence behind published results.
@@ -241,6 +243,7 @@ impl Mount {
         Mount {
             observed: observed_now(),
             write_failed: false,
+            write_passed: false,
             role,
             path: path.to_path_buf(),
             ok: false,
@@ -525,6 +528,7 @@ fn check_with(
             m.write_failed = write_tested;
             return m;
         }
+        m.write_passed = write_tested;
     }
     tracing::debug!(role, path = %path.display(), stage = "statvfs", "folder probe");
     match statvfs(path) {
@@ -896,24 +900,29 @@ where
 }
 
 /// Run `f` on every item at once, each bounded by `limit` on its folder, so folders on one
-/// dead mount cost one timeout between them. Results keep the input order.
+/// dead mount cost one timeout between them. An item whose folder another caller is probing
+/// waits for that probe within `limit`, without holding up the rest. Results keep the input
+/// order.
 pub fn bounded_each<I, T, F>(items: Vec<(PathBuf, I)>, limit: Duration, f: F) -> Vec<Bounded<T>>
 where
     I: Send + 'static,
     T: Send + 'static,
     F: Fn(I) -> T + Send + Sync + 'static,
 {
-    bounded_each_with(items, limit, HANG_AFTER, f)
+    bounded_each_with(items, limit, HANG_AFTER, true, f)
         .into_iter()
         .map(|(b, _)| b)
         .collect()
 }
 
 // [`bounded_each`] with the hang bound given; each result with the mount its probe ran on.
+// `queue`: an item whose folder another caller is probing waits for it within `limit`, apart
+// from the rest; otherwise it reads as not answered at once (the health list).
 fn bounded_each_with<I, T, F>(
     items: Vec<(PathBuf, I)>,
     limit: Duration,
     hang_after: Duration,
+    queue: bool,
     f: F,
 ) -> Vec<(Bounded<T>, MountKey)>
 where
@@ -923,13 +932,51 @@ where
 {
     let f = Arc::new(f);
     let deadline = Instant::now() + limit;
-    let started: Vec<_> = items
-        .into_iter()
-        .map(|(key, item)| {
-            let f = f.clone();
-            begin_with(&key, Wait::NoQueue(deadline), hang_after, move || f(item))
+    let wait = if queue {
+        Wait::Until(deadline)
+    } else {
+        Wait::NoQueue(deadline)
+    };
+    let begin = |(key, item): (PathBuf, I)| {
+        let f = f.clone();
+        begin_with(&key, wait, hang_after, move || f(item))
+    };
+    let started: Vec<_> = if queue {
+        let slots: Vec<_> = items.into_iter().map(|i| Mutex::new(Some(i))).collect();
+        let take = |slot: &Mutex<Option<(PathBuf, I)>>| {
+            let item = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            item.map(begin)
+        };
+        std::thread::scope(|s| {
+            let handles: Vec<_> = slots
+                .iter()
+                .map(|slot| {
+                    std::thread::Builder::new()
+                        .name("probe-queue".into())
+                        .spawn_scoped(s, || take(slot))
+                })
+                .collect();
+            slots
+                .iter()
+                .zip(handles)
+                .map(|(slot, h)| {
+                    let begun = match h {
+                        Ok(h) => h.join().ok().flatten(),
+                        // No thread to wait on: start it here instead.
+                        Err(_) => take(slot),
+                    };
+                    begun.unwrap_or_else(|| Pending {
+                        rx: None,
+                        deadline,
+                        hung: false,
+                        mount: key_for(probe_generation(), None),
+                    })
+                })
+                .collect()
         })
-        .collect();
+    } else {
+        items.into_iter().map(begin).collect()
+    };
     started
         .into_iter()
         .map(|p| {
@@ -998,7 +1045,7 @@ fn check_folders(
         .iter()
         .map(|(role, path, w)| (path.clone(), (*role, path.clone(), *w)))
         .collect();
-    let results = bounded_each_with(items, wait, hang_after, |(role, path, w)| {
+    let results = bounded_each_with(items, wait, hang_after, false, |(role, path, w)| {
         let m = check_reporting(role, path, w);
         publish_answer(m.clone());
         m
@@ -1038,6 +1085,9 @@ fn no_answer_for(after: Duration) -> String {
 // still running).
 fn merge(prev: Option<&Mount>, mut next: Mount) -> Mount {
     let Some(prev) = prev else { return next };
+    if !next.write_passed {
+        next.write_failed |= prev.write_failed;
+    }
     if !next.state.failed() && next.total_bytes.is_none() {
         next.free_bytes = prev.free_bytes;
         next.total_bytes = prev.total_bytes;
@@ -1294,16 +1344,20 @@ fn probe_write_with(
         .create_new(true)
         .open(&probe)?;
     // Writability is proven; a marker left behind is a warning, never a failed folder. It is
-    // swept by the next write test of this folder that cleans up after itself.
+    // swept by the next write test of this folder that cleans up after itself, or once stale.
     match remove(&probe) {
-        Ok(()) => schedule_sweep(dir),
+        Ok(()) => schedule_sweep(dir, true),
         Err(e) => {
             tracing::warn!(probe = %probe.display(), error = %e, "writability probe left behind");
-            PROBE_SWEEP
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .leftovers
-                .push(probe);
+            let mut sweep = PROBE_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
+            if !sweep.leftovers.contains(&probe) {
+                sweep.leftovers.push(probe);
+            }
+            // Past the cap the oldest go: the stale sweep still finds them.
+            let over = sweep.leftovers.len().saturating_sub(MAX_LEFTOVERS);
+            sweep.leftovers.drain(..over);
+            drop(sweep);
+            schedule_sweep(dir, false);
         }
     }
     Ok(())
@@ -1325,14 +1379,18 @@ static PROBE_SWEEP: std::sync::LazyLock<Mutex<ProbeSweep>> =
 // time between two sweeps of one folder that left nothing of ours behind.
 const STALE_PROBE: Duration = Duration::from_secs(3600);
 
+// Our markers whose removal failed that are remembered; older ones wait for the stale sweep.
+const MAX_LEFTOVERS: usize = 256;
+
 // Sweep `dir` on its own thread, after the write test has answered: listing a large folder on
-// a slow share must not count against the probe. At most one at a time per folder.
-fn schedule_sweep(dir: &Path) {
+// a slow share must not count against the probe. At most one at a time per folder; `removed`:
+// our own marker went, so our leftovers there may go too (else only stale ones, when due).
+fn schedule_sweep(dir: &Path, removed: bool) {
     let leftovers: Vec<PathBuf> = {
         let mut sweep = PROBE_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
         let (ours, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut sweep.leftovers)
             .into_iter()
-            .partition(|p| p.parent() == Some(dir));
+            .partition(|p| removed && p.parent() == Some(dir));
         let due = sweep
             .last
             .get(dir)
@@ -1519,6 +1577,7 @@ where
             Ok(()) => {
                 let mut m = Mount::blank(role, &owned).passed();
                 m.latency_ms = Some(started.elapsed().as_millis() as u64);
+                m.write_passed = true;
                 m
             }
             Err(e) => {

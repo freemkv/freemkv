@@ -1025,8 +1025,8 @@ fn a_round_that_sees_a_stop_does_not_heal() {
     assert!(healed.get(), "a normal round heals");
 }
 
-// One folder whose probe is still out (another caller's) does not hold up starting the
-// others: it reads as not answered, and every other folder is checked within the limit.
+// The health list: one folder whose probe is still out (another caller's) does not hold up
+// the round; it reads as not answered at once, and every other folder is checked.
 #[test]
 fn a_busy_folder_does_not_hold_up_the_rest_of_the_batch() {
     let busy = PathBuf::from("/test/batch-queue-busy");
@@ -1036,22 +1036,56 @@ fn a_busy_folder_does_not_hold_up_the_rest_of_the_batch() {
         let _ = gate.recv();
     });
     let t = Instant::now();
-    // Queued behind the busy folder, the batch would wait out its whole 5 s limit.
-    let out = bounded_each(
-        vec![(busy.clone(), 1), (free.clone(), 2)],
+    // Queued behind the busy folder, the round would wait out its whole 5 s.
+    let out = check_folders(
+        vec![("Movies", busy.clone(), false), ("TV", free.clone(), false)],
         Duration::from_secs(5),
-        |n| n,
+        Duration::from_secs(3600),
     );
     let took = t.elapsed();
     release.send(()).unwrap();
     let _ = running.wait();
-    assert_ne!(
-        out[0],
-        Bounded::Done(1),
-        "the busy folder is not probed twice"
-    );
-    assert_eq!(out[1], Bounded::Done(2), "the free folder is checked");
+    assert!(out[0].is_none(), "the busy folder is not probed twice");
+    assert!(out[1].is_some(), "the free folder is checked");
     assert!(took < Duration::from_millis(2500), "took {took:?}");
+}
+
+// Every other batch (Change match, the Library scan) waits within its limit for another
+// caller's probe of the same folder, without holding up the rest of the batch.
+#[test]
+fn a_batch_waits_within_its_limit_for_a_probe_already_out() {
+    let busy = PathBuf::from("/test/batch-wait-busy");
+    let free = PathBuf::from("/test/batch-wait-free");
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let running = begin(&busy, Duration::from_secs(30), move || {
+        let _ = gate.recv();
+    });
+    let (ran, free_ran) = std::sync::mpsc::channel::<()>();
+    let ran = Mutex::new(ran);
+    let batch = {
+        let (busy, free) = (busy.clone(), free.clone());
+        std::thread::spawn(move || {
+            bounded_each(
+                vec![(busy, 1), (free, 2)],
+                Duration::from_secs(10),
+                move |n| {
+                    if n == 2 {
+                        let _ = ran.lock().unwrap().send(());
+                    }
+                    n
+                },
+            )
+        })
+    };
+    let started_free = free_ran.recv_timeout(Duration::from_secs(5));
+    release.send(()).unwrap();
+    let out = batch.join().unwrap();
+    let _ = running.wait();
+    assert!(
+        started_free.is_ok(),
+        "the free folder waited on the busy one"
+    );
+    assert_eq!(out, vec![Bounded::Done(1), Bounded::Done(2)]);
 }
 
 // A preflight waits at most one hang bound in all, from the call: waiting for another
@@ -1127,6 +1161,9 @@ fn leftover_probe_files_are_swept_by_a_later_preflight() {
         })
         .collect();
     assert_eq!(ours.len(), 1, "fixture: a marker left behind");
+    eventually("the failed write test's sweep is done", || {
+        !PROBE_SWEEP.lock().unwrap().running.contains(dir)
+    });
     probe_write(dir).unwrap();
     eventually("a stale marker is swept", || !stale.exists());
     eventually("our own leftover is swept", || !ours[0].exists());
@@ -1135,6 +1172,39 @@ fn leftover_probe_files_are_swept_by_a_later_preflight() {
         "a recent marker may be another server's live probe"
     );
     assert!(foreign.exists() && folder.exists(), "only our marker files");
+}
+
+// A folder where our marker can never be removed (create allowed, delete denied) is still
+// swept of stale markers, at the usual rate, and what we remember of ours stays bounded.
+#[test]
+fn markers_that_cannot_be_removed_are_still_swept_and_bounded() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path();
+    let stale = dir.join(".freemkv-probe-123-456");
+    std::fs::write(&stale, b"").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 3600))
+        .unwrap();
+    let denied = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    probe_write_with(dir, denied).unwrap();
+    eventually("a stale marker is swept", || !stale.exists());
+    for _ in 0..MAX_LEFTOVERS + 10 {
+        probe_write_with(dir, denied).unwrap();
+    }
+    let sweep = PROBE_SWEEP.lock().unwrap();
+    let ours = sweep
+        .leftovers
+        .iter()
+        .filter(|p| p.parent() == Some(dir))
+        .count();
+    assert!(ours <= MAX_LEFTOVERS, "{ours} remembered");
+    assert!(
+        sweep.last.contains_key(dir),
+        "swept once, then rate-limited"
+    );
 }
 
 // The mover's preflight of a watched root is published under that folder's own name, not
@@ -1183,6 +1253,42 @@ fn a_failed_write_test_is_not_overridden_by_access() {
         !checked.ok,
         "access() overrode the failed write test: {checked:?}"
     );
+}
+
+// A failed write test outlives verdicts that are not write tests (a slow round's "checking",
+// a hang, a read error): only a write test that passes clears it.
+#[test]
+fn a_failed_write_test_outlives_other_verdicts_until_one_passes() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t = tempfile::tempdir().unwrap();
+    let path = t.path().to_path_buf();
+    WATCHED.lock().unwrap().push(("Movies", path.clone()));
+    fn quota(_: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::EDQUOT))
+    }
+    fn fine(_: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+    let failed = preflight_with("Movies", &path, Duration::from_secs(5), quota);
+    publish(vec![Mount::checking("Movies", &path)], true);
+    let after_checking = check_with("Movies", &path, true, quota);
+    publish(vec![after_checking.clone()], false);
+    publish(vec![not_responding("Movies", &path, HANG_AFTER)], false);
+    let after_hang = check_with("Movies", &path, true, quota);
+    publish(vec![after_hang.clone()], false);
+    let passed = check_with("Movies", &path, true, fine);
+    publish(vec![passed.clone()], false);
+    let cleared = check_with("Movies", &path, true, quota);
+    WATCHED.lock().unwrap().retain(|(_, p)| *p != path);
+    LAST.lock().unwrap().retain(|m| m.path != path);
+    assert!(failed.is_err());
+    assert!(
+        !after_checking.ok,
+        "a checking row cleared it: {after_checking:?}"
+    );
+    assert!(!after_hang.ok, "a hang row cleared it: {after_hang:?}");
+    assert!(passed.ok, "{passed:?}");
+    assert!(cleared.ok, "a passing write test clears it: {cleared:?}");
 }
 
 // The sweep lists the whole folder, which on a slow share takes time: the write test answers
