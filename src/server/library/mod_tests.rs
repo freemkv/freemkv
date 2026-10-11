@@ -459,9 +459,8 @@ fn queueing_many_rows_writes_the_queue_once() {
     assert_eq!(titles, ["A (2001)", "B (2002)", "C (2003)"]);
 }
 
-#[cfg(unix)]
 #[test]
-fn a_recorded_target_that_is_gone_makes_no_row_but_one_outside_the_roots_that_exists_does() {
+fn a_recorded_target_that_is_gone_makes_no_row_wherever_it_was_recorded() {
     let t = tempfile::tempdir().unwrap();
     let d = dirs_in(t.path());
     std::fs::create_dir_all(&d.library).unwrap();
@@ -470,21 +469,54 @@ fn a_recorded_target_that_is_gone_makes_no_row_but_one_outside_the_roots_that_ex
     std::fs::create_dir_all(&cfg).unwrap();
     let iso = d.isos.as_ref().unwrap().join("A (2000).iso");
     std::fs::write(&iso, b"x").unwrap();
-    // A missing file whose parent is a regular file fails with ENOTDIR, not NotFound.
-    std::fs::write(d.library.join("plain"), b"x").unwrap();
-    let broken = d.library.join("plain").join("A (2000).mkv");
-    let elsewhere = t.path().join("elsewhere").join("B (2001).mkv");
-    links::record(&cfg, &broken, &iso).unwrap();
-    links::record(&cfg, &elsewhere, &iso).unwrap();
+    let inside = d.library.join("A (2000)").join("A (2000).mkv");
+    let outside = t.path().join("elsewhere").join("B (2001).mkv");
+    links::record(&cfg, &inside, &iso).unwrap();
+    links::record(&cfg, &outside, &iso).unwrap();
     let lib = Library::open(&cfg, &t.path().join("logs"));
     lib.rescan(&d);
     let snap = lib.snapshot();
-    assert!(
-        !snap.mkvs.iter().any(|m| m.path == broken),
-        "a gone file inside a scanned root is no row"
-    );
-    std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
-    std::fs::write(&elsewhere, b"x").unwrap();
+    assert!(!snap.mkvs.iter().any(|m| m.path == inside));
+    assert!(!snap.mkvs.iter().any(|m| m.path == outside));
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    std::fs::write(&outside, b"x").unwrap();
     lib.rescan(&d);
-    assert!(lib.snapshot().mkvs.iter().any(|m| m.path == elsewhere));
+    assert!(lib.snapshot().mkvs.iter().any(|m| m.path == outside));
+}
+
+fn hanging_stat(_: &Path) -> std::io::Result<()> {
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    Ok(())
+}
+
+fn refused_stat(p: &Path) -> std::io::Result<()> {
+    if p.ends_with("missing.mkv") {
+        Err(std::io::ErrorKind::NotFound.into())
+    } else {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    }
+}
+
+#[test]
+fn recorded_targets_are_checked_under_one_deadline_and_only_not_found_drops() {
+    let hung = vec![PathBuf::from("/h1/a.mkv"), PathBuf::from("/h2/b.mkv")];
+    let started = std::time::Instant::now();
+    let found = check_targets(
+        hung.clone(),
+        std::time::Duration::from_millis(200),
+        hanging_stat,
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(hung.iter().all(|p| found[p] == Target::Unverified));
+    let two = vec![
+        PathBuf::from("/x/missing.mkv"),
+        PathBuf::from("/x/denied.mkv"),
+    ];
+    let found = check_targets(two, std::time::Duration::from_secs(2), refused_stat);
+    assert_eq!(found[Path::new("/x/missing.mkv")], Target::Gone);
+    assert_eq!(found[Path::new("/x/denied.mkv")], Target::Present);
+    // An unverified path is kept without another unbounded stat.
+    let mut checked = HashMap::new();
+    checked.insert(PathBuf::from("/h1/a.mkv"), Target::Unverified);
+    assert!(stat_unless_unverified(&checked, Path::new("/h1/a.mkv")).is_err());
 }

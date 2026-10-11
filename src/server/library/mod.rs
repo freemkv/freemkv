@@ -667,8 +667,23 @@ impl Library {
         for (i, m) in mkvs.files.iter().enumerate() {
             at.entry(m.path.clone()).or_insert(i);
         }
+        let candidates: Vec<PathBuf> = links
+            .keys()
+            .cloned()
+            .chain(self.queue.snapshot().jobs.into_iter().flat_map(|job| {
+                job.outputs
+                    .into_iter()
+                    .filter(|o| o.state == queue::OutputState::Done)
+                    .map(|o| o.target)
+            }))
+            .filter(|p| !at.contains_key(p))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let checked = check_targets(candidates, INJECT_STAT_LIMIT, stat_target);
+        let injectable = |p: &Path| checked.get(p).is_none_or(|t| *t != Target::Gone);
         for target in links.keys() {
-            if !at.contains_key(target) && injectable(d, target) {
+            if !at.contains_key(target) && injectable(target) {
                 at.insert(target.clone(), mkvs.files.len());
                 mkvs.files.push(index::MkvFile {
                     path: target.clone(),
@@ -695,7 +710,7 @@ impl Library {
                     .into_owned();
                 if let Some(&i) = at.get(&output.target) {
                     mkvs.files[i].title = title;
-                } else if injectable(d, &output.target) {
+                } else if injectable(&output.target) {
                     at.insert(output.target.clone(), mkvs.files.len());
                     mkvs.files.push(index::MkvFile {
                         path: output.target.clone(),
@@ -715,7 +730,10 @@ impl Library {
             let missed: Vec<_> = prev
                 .mkvs
                 .iter()
-                .filter(|m| !seen.contains(m.path.as_path()) && !gone(&m.path))
+                .filter(|m| {
+                    !seen.contains(m.path.as_path())
+                        && (checked.get(&m.path) == Some(&Target::Unverified) || !gone(&m.path))
+                })
                 .cloned()
                 .collect();
             mkvs.files.extend(missed);
@@ -731,19 +749,20 @@ impl Library {
             isos.files.extend(missed);
         }
         let mut sigs = HashMap::new();
-        mkvs.files.retain(|m| match std::fs::metadata(&m.path) {
-            Ok(meta) => {
-                sigs.insert(m.path.clone(), FileSig::of(&meta));
-                true
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(_) => {
-                if let Some(s) = prev.sigs.get(&m.path) {
-                    sigs.insert(m.path.clone(), *s);
+        mkvs.files
+            .retain(|m| match stat_unless_unverified(&checked, &m.path) {
+                Ok(meta) => {
+                    sigs.insert(m.path.clone(), FileSig::of(&meta));
+                    true
                 }
-                true
-            }
-        });
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => {
+                    if let Some(s) = prev.sigs.get(&m.path) {
+                        sigs.insert(m.path.clone(), *s);
+                    }
+                    true
+                }
+            });
         let rows = index::classify(&d.library, &mkvs.files, &isos.files, &links);
         let library_empty = std::fs::read_dir(&d.library).is_ok_and(|mut r| r.next().is_none());
         Snapshot {
@@ -1309,22 +1328,65 @@ fn without_raw(mut a: AuditReport) -> AuditReport {
     a
 }
 
-/// How long a link target inside a scanned root may take to stat.
+/// How long all recorded targets together may take to stat in one scan.
 const INJECT_STAT_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-// A recorded target joins the scan when it exists, or lies outside both scanned roots,
-// where the listing says nothing about it.
-fn injectable(d: &Dirs, path: &Path) -> bool {
-    let inside =
-        path.starts_with(&d.library) || d.tv.as_deref().is_some_and(|t| path.starts_with(t));
-    if !inside {
-        return true;
+/// What a bounded look at a recorded target found.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Target {
+    /// It stats, or failed with something other than NotFound: keep its row.
+    Present,
+    Gone,
+    /// The share did not answer in time: keep the row, stat nothing more.
+    Unverified,
+}
+
+// Stat every path under one shared deadline, one probe per folder so a hung folder costs one
+// thread. Only NotFound drops a row.
+fn check_targets(
+    paths: Vec<PathBuf>,
+    limit: std::time::Duration,
+    stat: fn(&Path) -> std::io::Result<()>,
+) -> HashMap<PathBuf, Target> {
+    let mut folders: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for p in paths {
+        let folder = p.parent().map(Path::to_path_buf).unwrap_or_default();
+        folders.entry(folder).or_default().push(p);
     }
-    let owned = path.to_path_buf();
-    matches!(
-        health::bounded(path, INJECT_STAT_LIMIT, move || owned.is_file()),
-        health::Bounded::Done(true)
-    )
+    let items: Vec<_> = folders.into_iter().collect();
+    let answers = health::bounded_each(items.clone(), limit, move |files: Vec<PathBuf>| {
+        files
+            .into_iter()
+            .map(|p| match stat(&p) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (p, Target::Gone),
+                _ => (p, Target::Present),
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut out = HashMap::new();
+    for ((_, files), answer) in items.into_iter().zip(answers) {
+        match answer {
+            health::Bounded::Done(found) => out.extend(found),
+            _ => out.extend(files.into_iter().map(|p| (p, Target::Unverified))),
+        }
+    }
+    out
+}
+
+fn stat_target(p: &Path) -> std::io::Result<()> {
+    std::fs::metadata(p).map(|_| ())
+}
+
+// The stat the scan ends with, except for a path whose bounded look timed out: that one is
+// kept with its earlier signature rather than stat'd again without a limit.
+fn stat_unless_unverified(
+    checked: &HashMap<PathBuf, Target>,
+    p: &Path,
+) -> std::io::Result<std::fs::Metadata> {
+    if checked.get(p) == Some(&Target::Unverified) {
+        return Err(std::io::Error::other("unverified"));
+    }
+    std::fs::metadata(p)
 }
 
 fn gone(p: &Path) -> bool {
