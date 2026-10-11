@@ -99,12 +99,12 @@ fn rename_before_completion_checkpoint_is_verified_not_recopied() {
     Manifest::prepare(&dir, 0, &entry.source).unwrap();
     libfreemkv::io::publish::no_replace(&entry.source, &entry.destination).unwrap();
     assert!(!Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
-    let before = Identity::read(&entry.destination).unwrap();
+    let before = Stamp::read(&entry.destination).unwrap();
     assert!(matches!(
         Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap(),
         super::super::MoveOutcome::Skipped
     ));
-    assert_eq!(Identity::read(&entry.destination).unwrap(), before);
+    assert_eq!(Stamp::read(&entry.destination).unwrap(), before);
     assert!(Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
 }
 
@@ -136,7 +136,7 @@ fn stalled_publication_retries_exact_manifest_before_linked_cleanup() {
     let entry = &manifest.entries[0];
     let candidate = entry.destination.with_extension("part");
     std::fs::copy(&entry.source, &candidate).unwrap();
-    let prepared = Identity::read(&candidate).unwrap();
+    let prepared = Stamp::read(&candidate).unwrap();
     Manifest::prepare(&dir, 0, &candidate).unwrap();
     let lease = crate::server::ripper::staging::job_lease(&dir);
     let owner = lease.clone();
@@ -200,7 +200,7 @@ fn stalled_publication_retries_exact_manifest_before_linked_cleanup() {
         super::super::MoveOutcome::Stalled
     ));
     assert!(entry.source.exists());
-    assert_eq!(Identity::read(&entry.destination).unwrap(), prepared);
+    assert_eq!(Stamp::read(&entry.destination).unwrap(), prepared);
     assert!(!Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
 
     // A corrupt link map blocks cleanup after real retry reconciliation.
@@ -217,7 +217,7 @@ fn stalled_publication_retries_exact_manifest_before_linked_cleanup() {
         "links must be durable before source cleanup"
     );
     assert!(dir.join(FILE).exists());
-    assert_eq!(Identity::read(&entry.destination).unwrap(), prepared);
+    assert_eq!(Stamp::read(&entry.destination).unwrap(), prepared);
     assert_eq!(std::fs::read(&links_path).unwrap(), b"broken");
 
     std::fs::write(&links_path, b"{}").unwrap();
@@ -232,10 +232,10 @@ fn stalled_publication_retries_exact_manifest_before_linked_cleanup() {
             Some(&planned(&manifest.entries[2]))
         );
     }
-    assert_eq!(Identity::read(&entry.destination).unwrap(), prepared);
+    assert_eq!(Stamp::read(&entry.destination).unwrap(), prepared);
     // An additional pass cannot republish, delete the final, or create variants.
     super::super::check_and_move(&cfg);
-    assert_eq!(Identity::read(&entry.destination).unwrap(), prepared);
+    assert_eq!(Stamp::read(&entry.destination).unwrap(), prepared);
     assert_eq!(std::fs::read_dir(&manifest.roots[0]).unwrap().count(), 3);
 }
 
@@ -244,7 +244,15 @@ fn equal_bytes_foreign_destination_cannot_be_adopted_or_linked() {
     let (_temp, dir, _cfg, manifest) = fixture();
     let entry = &manifest.entries[0];
     Manifest::prepare(&dir, 0, &entry.source).unwrap();
-    std::fs::copy(&entry.source, &entry.destination).unwrap();
+    let prepared = Stamp::read(&entry.source).unwrap();
+    // Equal bytes written later carry a later time (std::fs::copy would keep it on macOS).
+    std::fs::write(&entry.destination, std::fs::read(&entry.source).unwrap()).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&entry.destination)
+        .unwrap()
+        .set_modified(prepared.modified + std::time::Duration::from_secs(2))
+        .unwrap();
     assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
     assert!(entry.source.exists());
     assert!(!Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
@@ -335,32 +343,18 @@ fn replacing_a_completed_destination_holds_linkage_and_cleanup() {
     let destination = &manifest.entries[0].destination;
     let retained = destination.with_extension("original");
     std::fs::rename(destination, &retained).unwrap();
-    std::fs::copy(&retained, destination).unwrap();
+    std::fs::write(destination, std::fs::read(&retained).unwrap()).unwrap();
+    let later = Stamp::read(&retained).unwrap().modified + std::time::Duration::from_secs(2);
+    std::fs::File::options()
+        .write(true)
+        .open(destination)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
     super::super::check_and_move(&cfg);
     assert!(dir.join(FILE).exists());
     assert!(destination.exists());
     assert!(crate::server::library::links::load(Path::new(&cfg.autorip_dir)).is_empty());
-}
-
-#[test]
-fn changed_filesystem_identity_is_an_explicit_hold_even_with_unchanged_bytes() {
-    let (_temp, dir, _cfg, _) = fixture();
-    Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap();
-    let mut manifest = Manifest::load(&dir).unwrap().unwrap();
-    let destination = manifest.entries[0].destination.clone();
-    let bytes = std::fs::read(&destination).unwrap();
-    // Simulate the identity discontinuity reported after an SMB remount.
-    let entry = &mut manifest.entries[0];
-    for recorded in [entry.prepared.as_mut(), entry.published.as_mut()]
-        .into_iter()
-        .flatten()
-    {
-        recorded.file_id.0 = recorded.file_id.0.wrapping_add(1);
-    }
-    manifest.save().unwrap();
-    assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
-    assert_eq!(std::fs::read(&destination).unwrap(), bytes);
-    assert!(dir.join(FILE).exists());
 }
 
 #[test]
@@ -440,86 +434,6 @@ fn target_lock_set_excludes_a_cooperating_writer_until_released() {
     drop(locks);
     rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
     drop(other.join().unwrap());
-}
-
-// smbfs against Samba's fruit:zero_file_id=yes derives ids from the name.
-struct NameDerived(PathBuf);
-
-impl NameDerived {
-    fn register(root: &Path) -> Self {
-        let root = root.canonicalize().unwrap();
-        NAME_DERIVED.lock().unwrap().push(root.clone());
-        Self(root)
-    }
-}
-
-impl Drop for NameDerived {
-    fn drop(&mut self) {
-        NAME_DERIVED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|root| root != &self.0);
-    }
-}
-
-#[test]
-fn name_derived_ids_are_rebound_inside_the_publishing_call() {
-    let _guard = super::super::TEST_STATE_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let (_temp, dir, cfg, manifest) = fixture();
-    let _ids = NameDerived::register(Path::new(&manifest.roots[0]));
-    for index in 0..3 {
-        assert!(matches!(
-            Manifest::deliver(&dir, index, &|_, _, _, _| {}).unwrap(),
-            super::super::MoveOutcome::Moved
-        ));
-    }
-    let saved = Manifest::load(&dir).unwrap().unwrap();
-    assert!(
-        saved
-            .entries
-            .iter()
-            .all(|e| e.completed && e.published.is_some())
-    );
-    saved.verify_delivered().unwrap();
-    super::super::check_and_move(&cfg);
-    assert!(!dir.exists(), "a rebound delivery links and cleans up");
-    assert!(manifest.entries.iter().all(|e| e.destination.exists()));
-}
-
-#[test]
-fn a_name_derived_mismatch_found_by_a_later_call_is_held() {
-    let (_temp, dir, _cfg, manifest) = fixture();
-    let _ids = NameDerived::register(Path::new(&manifest.roots[0]));
-    let entry = &manifest.entries[0];
-    let candidate = entry.destination.with_extension("part");
-    std::fs::copy(&entry.source, &candidate).unwrap();
-    Manifest::prepare(&dir, 0, &candidate).unwrap();
-    libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
-    assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
-    assert!(entry.source.exists());
-    assert!(!Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
-}
-
-#[test]
-fn a_publication_reported_as_stalled_is_still_rebound_then_completed_on_retry() {
-    let (_temp, dir, _cfg, manifest) = fixture();
-    let _ids = NameDerived::register(Path::new(&manifest.roots[0]));
-    let entry = &manifest.entries[0];
-    let candidate = entry.destination.with_extension("part");
-    std::fs::copy(&entry.source, &candidate).unwrap();
-    Manifest::prepare(&dir, 0, &candidate).unwrap();
-    libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
-    // The worker published, but the monitor reported a stall.
-    Manifest::settle(&dir, 0, true, false).unwrap();
-    let saved = Manifest::load(&dir).unwrap().unwrap();
-    assert!(saved.entries[0].published.is_some() && !saved.entries[0].completed);
-    assert!(matches!(
-        Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap(),
-        super::super::MoveOutcome::Skipped
-    ));
-    assert!(Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
 }
 
 #[test]
@@ -932,13 +846,10 @@ fn live_smb_publication_and_journaled_delivery() {
     let delivered = Manifest::load(&job).unwrap().unwrap();
     let entry = &delivered.entries[0];
     let (prepared, published) = (
-        entry.prepared.clone().unwrap(),
-        entry.published.clone().unwrap(),
+        entry.prepared.unwrap(),
+        entry.published.unwrap(),
     );
-    eprintln!(
-        "live: delivered {outcome:?}; prepared id {:?} mtime {:?}; published id {:?} mtime {:?}",
-        prepared.file_id, prepared.modified, published.file_id, published.modified
-    );
+    eprintln!("live: delivered {outcome:?}; prepared {prepared:?}; published {published:?}");
     assert!(entry.completed);
     assert_eq!(std::fs::read(&destination).unwrap(), rip);
     delivered.verify_delivered().unwrap();
@@ -976,5 +887,111 @@ fn live_smb_publication_and_journaled_delivery() {
     eprintln!(
         "live: plan onto existing -> {:?}; publish race -> {outcome:?}",
         refused.kind()
+    );
+}
+
+// A one-file delivery into a title folder under the output root, named like its source.
+fn titled_fixture() -> (tempfile::TempDir, PathBuf, Config, PathBuf, Manifest) {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("staging/job");
+    let output = temp.path().join("output");
+    let title = output.join("Show (2024)");
+    let config = temp.path().join("config");
+    for folder in [&dir, &title, &config] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let marker = serde_json::json!({"title":"Show", "year":2024, "media_type":"movie"});
+    std::fs::write(dir.join(".done"), serde_json::to_vec(&marker).unwrap()).unwrap();
+    let source = dir.join("Show.mkv");
+    std::fs::write(&source, b"titled test bytes").unwrap();
+    let destination = title.join("Show.mkv").to_string_lossy().into_owned();
+    let manifest = Manifest::create(
+        &dir,
+        marker,
+        Vec::new(),
+        vec![output.to_string_lossy().into_owned()],
+        &[(source, destination)],
+    )
+    .unwrap();
+    let cfg = Config {
+        staging_dir: temp.path().join("staging").to_string_lossy().into_owned(),
+        autorip_dir: config.to_string_lossy().into_owned(),
+        output_dir: output.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    (temp, dir, cfg, title, manifest)
+}
+
+#[test]
+fn name_derived_inodes_deliver_without_rebind() {
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, manifest) = fixture();
+    for (index, entry) in manifest.entries.iter().enumerate() {
+        let candidate = entry.destination.with_extension("part");
+        std::fs::copy(&entry.source, &candidate).unwrap();
+        Manifest::prepare(&dir, index, &candidate).unwrap();
+        libfreemkv::io::publish::no_replace(&candidate, &entry.destination).unwrap();
+        // smbfs derives inodes from names: the published file answers with another one.
+        let modified = std::fs::metadata(&entry.destination)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let renumbered = entry.destination.with_extension("renumbered");
+        std::fs::copy(&entry.destination, &renumbered).unwrap();
+        std::fs::remove_file(&entry.destination).unwrap();
+        std::fs::rename(&renumbered, &entry.destination).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&entry.destination)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert!(matches!(
+            Manifest::deliver(&dir, index, &|_, _, _, _| {}).unwrap(),
+            super::super::MoveOutcome::Skipped
+        ));
+    }
+    super::super::check_and_move(&cfg);
+    assert!(!dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_title_folder_swapped_for_a_link_to_staging_never_deletes_the_source() {
+    let (_temp, dir, _cfg, title, manifest) = titled_fixture();
+    let source = &manifest.entries[0].source;
+    // A rename was about to publish the staged file itself.
+    Manifest::prepare(&dir, 0, source).unwrap();
+    std::fs::remove_dir(&title).unwrap();
+    std::os::unix::fs::symlink(&dir, &title).unwrap();
+    assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
+    let saved = Manifest::load(&dir).unwrap().unwrap();
+    assert!(!saved.entries[0].completed);
+    assert!(saved.cleanup().is_err());
+    assert_eq!(std::fs::read(source).unwrap(), b"titled test bytes");
+}
+
+#[test]
+fn a_preallocated_destination_with_the_prepared_size_and_time_is_not_adopted() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    let entry = &manifest.entries[0];
+    let candidate = entry.destination.with_extension("part");
+    std::fs::copy(&entry.source, &candidate).unwrap();
+    Manifest::prepare(&dir, 0, &candidate).unwrap();
+    let prepared = std::fs::metadata(&candidate).unwrap();
+    std::fs::remove_file(&candidate).unwrap();
+    // Another writer sized and stamped the name before filling it.
+    let foreign = std::fs::File::create(&entry.destination).unwrap();
+    foreign.set_len(prepared.len()).unwrap();
+    foreign.set_modified(prepared.modified().unwrap()).unwrap();
+    drop(foreign);
+    assert!(Manifest::deliver(&dir, 0, &|_, _, _, _| {}).is_err());
+    assert!(!Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
+    assert!(entry.source.exists());
+    assert_eq!(
+        std::fs::read(&entry.destination).unwrap(),
+        vec![0; prepared.len() as usize]
     );
 }
