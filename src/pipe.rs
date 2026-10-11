@@ -138,7 +138,7 @@ impl CliMuxEvents {
 impl libfreemkv::Events for CliMuxEvents {
     fn event(&self, e: &libfreemkv::Event<'_>) {
         match *e {
-            libfreemkv::Event::OutputOpened { title } => self.on_output_opened(title),
+            libfreemkv::Event::OutputOpened { title, .. } => self.on_output_opened(title),
             libfreemkv::Event::BytesWritten { bytes, total } => {
                 self.on_write_progress(bytes, total)
             }

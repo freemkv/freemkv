@@ -1804,7 +1804,7 @@ impl fe::Sink for UiSink {
     // G4/D4: the pre-mux note at the output opening, the hook the CLI prints it from.
     fn event(&self, e: &fe::Event<'_>) {
         match e {
-            fe::Event::OutputOpened { dest, title } => {
+            fe::Event::OutputOpened { dest, title, .. } => {
                 let note = crate::lossy::excluded_lines(dest, title);
                 self.0
                     .lines

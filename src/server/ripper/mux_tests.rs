@@ -417,6 +417,7 @@ fn autorip_mux_events_feed_watchdog_byte_atomic() {
     assert!(!events.opened.load(Ordering::Relaxed));
     events.event(&libfreemkv::Event::OutputOpened {
         title: &libfreemkv::DiscTitle::empty(),
+        file: None,
     });
     assert!(
         events.opened.load(Ordering::Relaxed),

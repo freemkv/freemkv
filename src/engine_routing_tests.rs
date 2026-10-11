@@ -878,6 +878,7 @@ fn the_gui_note_comes_from_the_output_opening() {
         &fe::Event::OutputOpened {
             dest: "mp4:///out/x.mp4",
             title: &title,
+            file: None,
         },
     );
     let lines = state
