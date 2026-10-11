@@ -255,7 +255,8 @@ fn a_stuck_check_is_never_doubled() {
     .remove(0)
     .unwrap();
     assert!(fine.ok);
-    assert!(!probing(t.path()));
+    // The probe answers before it leaves the in-flight list.
+    eventually("the probe has left", || !probing(t.path()));
 }
 
 #[test]
