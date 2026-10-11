@@ -805,13 +805,6 @@ static SPACE_REFUSED: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<PathBuf, u64>>,
 > = std::sync::LazyLock::new(Default::default);
 
-pub(super) fn reset_after_drain() {
-    SPACE_REFUSED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-}
-
 // True when this refusal is new for the dir (first, or a different requirement).
 fn note_space_refusal(staging_dir: &Path, required: u64) -> bool {
     SPACE_REFUSED

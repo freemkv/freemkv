@@ -101,6 +101,10 @@ existing service's environment and Library settings. Use `--no-start` to only
 write the configuration. An already-running service is never restarted by the
 installer; log out and back in after its jobs finish to apply an update.
 
+**Reboot library** (System page) relies on this service: the server exits and
+launchd's `KeepAlive` starts it again. A server started by hand has nothing to
+start it again, so it refuses the reboot; stop and start it yourself instead.
+
 The LaunchAgent sets `ProcessType` to `Interactive` so macOS gives Library
 app-level resource limits. Leaving this unspecified can throttle SMB moves:
 a same-file, same-destination test measured about 11 MiB/s with the default

@@ -9,16 +9,16 @@
 
 use std::sync::atomic::AtomicBool;
 
-/// Set by SIGTERM/SIGINT or a soft reboot; every worker loop polls it to drain.
+/// Set by SIGTERM/SIGINT or a reboot request; every worker loop polls it to drain.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-/// Set only by SIGTERM/SIGINT: the process must stop. Unlike SHUTDOWN (also set by a
-/// soft reboot), it vetoes any in-process restart.
+/// Set only by SIGTERM/SIGINT: the process must stop. It vetoes the relaunch a
+/// reboot would do.
 pub static TERMINATE: AtomicBool = AtomicBool::new(false);
 
-/// Set by the System-panel soft reboot. The daemon drains the current
-/// instance, then reloads persisted state and starts fresh in-process services.
-/// A timed-out drain defers restart; SHUTDOWN stays set until every worker exits.
+/// Set by the System-panel reboot. After the bounded drain the daemon relaunches
+/// itself: exec of the startup binary on Linux, exit 75 for the service manager
+/// elsewhere.
 pub static REBOOT: AtomicBool = AtomicBool::new(false);
 
 /// Full build label: package version + git short hash (e.g. `1.1.1 (g2014a41)`),

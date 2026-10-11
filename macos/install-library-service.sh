@@ -63,3 +63,7 @@ else
   launchctl bootstrap "gui/$(id -u)" "$plist"
   echo 'Library started. Open http://localhost:8080/drives (or your configured PORT).'
 fi
+keepalive=$(/usr/bin/plutil -extract KeepAlive raw "$plist" 2>/dev/null || true)
+if [[ $keepalive != true && $(/usr/bin/plutil -type KeepAlive "$plist" 2>/dev/null) != dictionary ]]; then
+  echo 'Note: this service does not set KeepAlive to true, so Reboot library may stop Library without starting it again.'
+fi

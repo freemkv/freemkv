@@ -32,15 +32,17 @@ fn open_sse_handler_drains_promptly_on_shutdown() {
     let server = Server::http("127.0.0.1:0").unwrap();
     let addr = server.server_addr().to_ip().unwrap();
     let (done, finished) = std::sync::mpsc::channel();
-    let worker = crate::server::daemon::spawn_background("test-sse-handler", move || {
-        let request = server
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
-        handle_sse(request, &cfg);
-        done.send(()).unwrap();
-    })
-    .unwrap();
+    let worker = std::thread::Builder::new()
+        .name("test-sse-handler".into())
+        .spawn(move || {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            handle_sse(request, &cfg);
+            done.send(()).unwrap();
+        })
+        .unwrap();
     let mut socket = std::net::TcpStream::connect(addr).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -64,112 +66,45 @@ fn open_sse_handler_drains_promptly_on_shutdown() {
     assert!(SSE_STREAMS.lock().unwrap().is_empty());
 }
 
-// A client that sends POST headers and then stalls must not pin its tracked
-// handler (and so the restart drain) once the daemon starts draining. Bodies
-// over 1 KiB reach the handler unread (tiny_http buffers only smaller ones).
+// Shutdown waits for in-flight handlers, but only up to its bound.
 #[test]
-fn stalled_request_body_releases_handler_on_shutdown() {
-    const CHILD: &str = "FREEMKV_TEST_STALLED_BODY_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        assert!(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "server::web::lifecycle_tests::stalled_request_body_releases_handler_on_shutdown",
-                    "--nocapture"
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap()
-                .success()
-        );
-        return;
-    }
+fn wait_for_zero_waits_for_held_handlers_within_its_bound() {
     use std::time::Duration;
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let addr = server.server_addr().to_ip().unwrap();
-    let (entered, reading) = std::sync::mpsc::channel();
-    let (done, finished) = std::sync::mpsc::channel();
-    let worker = crate::server::daemon::spawn_background("test-stalled-body", move || {
-        let request = server
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
-        entered.send(()).unwrap();
-        let read = read_json_body(request);
-        done.send(read.is_err()).unwrap();
-    })
-    .unwrap();
-    let mut socket = std::net::TcpStream::connect(addr).unwrap();
-    socket
-        .write_all(
-            b"POST /api/settings HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5000\r\n\r\n{",
-        )
-        .unwrap();
-    reading.recv_timeout(Duration::from_secs(5)).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    crate::server::SHUTDOWN.store(true, Ordering::Release);
-    let gave_up = finished
-        .recv_timeout(Duration::from_secs(3))
-        .expect("a stalled body read must observe shutdown");
-    assert!(gave_up, "a partial body must never be acted on");
-    worker.join().unwrap();
-    drop(socket);
+    static HANDLERS: AtomicUsize = AtomicUsize::new(0);
+    assert!(wait_for_zero(&HANDLERS, Duration::ZERO));
+    let guard = ConnGuard::try_acquire(&HANDLERS, 1).unwrap();
+    assert!(!wait_for_zero(&HANDLERS, Duration::from_millis(50)));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        drop(guard);
+    });
+    assert!(wait_for_zero(&HANDLERS, Duration::from_secs(5)));
+    release.join().unwrap();
 }
 
-// A write stuck on a half-open client (no write timeout on the upgraded
-// stream) must not keep the tracked SSE handler alive once draining starts.
+// Only a launchd job label means a service manager will start the daemon again.
+#[cfg(target_os = "macos")]
 #[test]
-fn stuck_sse_write_releases_handler_on_shutdown() {
-    const CHILD: &str = "FREEMKV_TEST_STUCK_SSE_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        assert!(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "server::web::lifecycle_tests::stuck_sse_write_releases_handler_on_shutdown",
-                    "--nocapture"
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap()
-                .success()
-        );
-        return;
+fn only_a_launchd_job_label_counts_as_a_service_manager() {
+    use std::ffi::OsStr;
+    assert!(launchd_job(Some(OsStr::new("io.freemkv.library")), 1));
+    for terminal in [
+        None,
+        Some(""),
+        Some("0"),
+        Some("application.com.apple.Terminal.1234"),
+    ] {
+        assert!(!launchd_job(terminal.map(OsStr::new), 1), "{terminal:?}");
     }
-    use std::time::Duration;
-    struct Stuck(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
-    impl std::io::Write for Stuck {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            let _ = self.0.send(());
-            let _ = self.1.recv(); // never released: a kernel send buffer that never drains
-            Err(std::io::ErrorKind::BrokenPipe.into())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let tmp = tempfile::tempdir().unwrap();
-    let cfg = Arc::new(RwLock::new(Config {
-        autorip_dir: tmp.path().display().to_string(),
-        staging_dir: tmp.path().join("staging").display().to_string(),
-        ..Default::default()
-    }));
-    let (writing, blocked) = std::sync::mpsc::channel();
-    let (_release, gate) = std::sync::mpsc::channel();
-    let (done, finished) = std::sync::mpsc::channel();
-    let worker = crate::server::daemon::spawn_background("test-stuck-sse", move || {
-        let stop = AtomicBool::new(false);
-        sse_session(Stuck(writing, gate), &cfg, &stop, std::time::Instant::now());
-        done.send(()).unwrap();
-    })
-    .unwrap();
-    blocked.recv_timeout(Duration::from_secs(5)).unwrap();
-    crate::server::SHUTDOWN.store(true, Ordering::Release);
-    finished
-        .recv_timeout(Duration::from_secs(3))
-        .expect("SSE must observe shutdown while its socket write is stuck");
-    worker.join().unwrap();
+}
+
+// A job label with a non-launchd parent (a script run under another job) is unsupervised,
+// so the reboot route answers 409.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_job_label_without_a_launchd_parent_is_not_supervised() {
+    use std::ffi::OsStr;
+    assert!(!launchd_job(Some(OsStr::new("io.freemkv.library")), 4242));
 }
 
 // tiny_http's accept thread exits after reporting an accept error, so the port

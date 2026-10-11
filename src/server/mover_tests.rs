@@ -3611,9 +3611,35 @@ fn persisted_attempts(disc_dir: &Path) -> Option<u32> {
         .and_then(|m| m.retry().map(|r| r.attempts))
 }
 
+// Run `name` alone in a child test process: it sets the process-wide SHUTDOWN, which
+// would refuse a rip another test in this process starts meanwhile.
+fn in_child(name: &str) -> bool {
+    const CHILD: &str = "FREEMKV_TEST_MOVER_SHUTDOWN_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("server::mover::tests::{name}"),
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "{name} failed in its child process: {status}"
+    );
+    false
+}
+
 // A restart while waiting for the delivery lock must not spend the retry budget.
 #[test]
 fn a_shutdown_while_waiting_for_the_delivery_lock_is_not_a_failed_attempt() {
+    if !in_child("a_shutdown_while_waiting_for_the_delivery_lock_is_not_a_failed_attempt") {
+        return;
+    }
     let _g = errors_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (cfg, disc_dir, movie_dir) = staged_rip(tmp.path(), "Restarted");
@@ -3644,6 +3670,9 @@ fn a_shutdown_while_waiting_for_the_delivery_lock_is_not_a_failed_attempt() {
 // A shutdown-cancelled copy is an interruption; the same error without shutdown is not.
 #[test]
 fn only_a_shutdown_makes_an_interrupted_copy_an_interruption() {
+    if !in_child("only_a_shutdown_makes_an_interrupted_copy_an_interruption") {
+        return;
+    }
     let _g = errors_guard();
     let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled");
     crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);

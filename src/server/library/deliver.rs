@@ -377,10 +377,12 @@ struct RemoteGuard<'a> {
 
 fn bounded_cleanup(cleanup: impl FnOnce() + Send + 'static, limit: Duration) -> io::Result<bool> {
     let (tx, rx) = std::sync::mpsc::channel();
-    match crate::server::daemon::spawn_background("library-cleanup", move || {
-        cleanup();
-        let _ = tx.send(());
-    }) {
+    match std::thread::Builder::new()
+        .name("library-cleanup".into())
+        .spawn(move || {
+            cleanup();
+            let _ = tx.send(());
+        }) {
         Ok(_) => match rx.recv_timeout(limit) {
             Ok(()) => Ok(true),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(false),
@@ -632,11 +634,13 @@ fn copy_to(
     let quit = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
     let (count, give_up) = (copied.clone(), quit.clone());
-    crate::server::daemon::spawn_background("library-deliver-copy", move || {
-        let result = copy_all(&mut src, &mut *dst, &count, &give_up);
-        drop((src, dst));
-        let _ = tx.send(result);
-    })?;
+    std::thread::Builder::new()
+        .name("library-deliver-copy".into())
+        .spawn(move || {
+            let result = copy_all(&mut src, &mut *dst, &count, &give_up);
+            drop((src, dst));
+            let _ = tx.send(result);
+        })?;
     let started = Instant::now();
     let report = |done: u64| {
         let speed = (done as f64 / started.elapsed().as_secs_f64().max(0.001)) as u64;
@@ -784,9 +788,11 @@ fn verify_inner(
         read: read.clone(),
     };
     let (tx, rx) = std::sync::mpsc::channel();
-    crate::server::daemon::spawn_background("library-deliver-verify", move || {
-        let _ = tx.send(libfreemkv::probe_mkv_with_cues(reader));
-    })?;
+    std::thread::Builder::new()
+        .name("library-deliver-verify".into())
+        .spawn(move || {
+            let _ = tx.send(libfreemkv::probe_mkv_with_cues(reader));
+        })?;
     let beat_file = std::fs::OpenOptions::new().write(true).open(path).ok();
     let beat = LockBeat::new(beat_file, timing.lock_beat);
     let report = |done| progress("verify", done, have);

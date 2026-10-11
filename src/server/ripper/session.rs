@@ -100,6 +100,13 @@ pub fn spawn_rip_thread<F>(device: &str, role: &str, f: F) -> std::io::Result<()
 where
     F: FnOnce() + Send + 'static,
 {
+    // Nothing reopens admission once a stop begins, so a late request's rip is refused.
+    if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "the server is stopping",
+        ));
+    }
     let name = format!("{}-{}", role, device);
     // Per-thread span carrying build + device for the worker's whole life;
     // tracing spans are thread-local, so events from this crate AND from
@@ -122,9 +129,7 @@ where
                 .entered();
         f();
     };
-    // Also cover a rip spawned by an already-admitted HTTP handler during
-    // shutdown: the daemon's helper drain must see it before sealing admission.
-    let handle = crate::server::daemon::spawn_background(&name, wrapped)?;
+    let handle = std::thread::Builder::new().name(name).spawn(wrapped)?;
     match register_rip_thread(device, handle) {
         Ok(()) => {
             // Release the worker. A send error is impossible in practice (the
@@ -251,15 +256,6 @@ pub fn join_all_rip_threads(timeout: Duration) -> bool {
         }
     }
     drained
-}
-
-pub(super) fn reset_after_drain() {
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    DISC_IDENTITY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    HALTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 // Per-device cooperative-cancel tokens; the rip thread spawn site allocates one Halt per rip

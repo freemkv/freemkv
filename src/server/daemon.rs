@@ -5,49 +5,37 @@ use super::{
     ripper, web,
 };
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-#[path = "daemon_lifecycle.rs"]
-mod lifecycle;
-static BACKGROUND: std::sync::LazyLock<std::sync::Arc<lifecycle::Background>> =
-    std::sync::LazyLock::new(Default::default);
-
-// Generation drain bounds: all services, the rip threads within it, then the web thread.
-const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-const RIP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-const WEB_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+// Stop bounds: the rip threads, then every other service together, then the web thread.
+const RIP_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
+const WEB_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+// EX_TEMPFAIL: the service manager (launchd KeepAlive) starts the daemon again.
+const RESTART_EXIT_CODE: i32 = 75;
+// Slack past the drain bounds before a stalled reboot tail (a hung log disk) is cut short.
+const RELAUNCH_SLACK: Duration = Duration::from_secs(30);
 // Cadence of the KEYDB refresh and log prune threads, in one-second SHUTDOWN polls.
 const DAILY_SECS: u64 = 24 * 3600;
-
-/// Spawn a service helper which must finish before an internal restart, even
-/// when its caller times out and drops the returned handle.
-pub(crate) fn spawn_background<T: Send + 'static>(
-    name: &str,
-    f: impl FnOnce() -> T + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<T>> {
-    BACKGROUND.spawn(name, f)
-}
-
-/// Spawn a helper the caller may abandon (a probe or lookup that can block forever on a
-/// hung mount or resolver). It holds no restart ticket, so it must not mutate service
-/// state: its only output is a value its caller may already have stopped waiting for.
-pub(crate) fn spawn_abandonable<T: Send + 'static>(
-    name: &str,
-    f: impl FnOnce() -> T + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<T>> {
-    std::thread::Builder::new().name(name.into()).spawn(f)
-}
 
 /// Run the server shell. `argv` is everything after `freemkv server`.
 ///
 /// Every terminal path either exits the process (`--healthcheck`,
 /// `--version`, `--help`, an unknown argument) or returns once the daemon has
-/// drained after SIGTERM/SIGINT.
+/// drained after SIGTERM/SIGINT, or, after a reboot request, replaces itself
+/// (exec, Linux) or exits 75 for the service manager to start it again.
 pub fn run(argv: Vec<String>) {
+    // Before anything else: once a package upgrade replaces the binary, /proc/self/exe
+    // no longer names the path to exec.
+    let relaunch_info = Relaunch::capture();
     // v0.25.7: tiny built-in subcommands so the image doesn't need curl or a
     // separate entrypoint script. Each exits before observe::init so they
     // don't spam the tracing sinks on every 30-second healthcheck.
-    match argv.first().map(String::as_str) {
+    let bootstrap = match argv.first().map(String::as_str) {
         Some("--healthcheck") => {
             std::process::exit(run_healthcheck());
         }
@@ -68,306 +56,375 @@ pub fn run(argv: Vec<String>) {
             );
             std::process::exit(0);
         }
-        Some("--bootstrap") => {
-            // Bootstrap then fall through to the daemon below. Errors are
-            // logged but non-fatal. Container-init is Linux-only; elsewhere
-            // this is a no-op and the daemon runs directly.
-            #[cfg(unix)]
-            run_bootstrap();
-            #[cfg(not(unix))]
-            eprintln!("freemkv server: --bootstrap is Linux-only; running the daemon directly");
-        }
+        Some("--bootstrap") => true,
         // Bare run (no Docker): daemon without container bootstrap, config
         // defaults under ~/.config/autorip. `serve` is an explicit alias.
-        Some("serve") => {}
+        Some("serve") | None => false,
         Some(other) => {
             eprintln!("freemkv server: unknown argument '{other}' (try --help)");
             std::process::exit(2);
         }
-        None => {}
+    };
+
+    // Before bootstrap: as Docker PID 1 a default-disposition SIGTERM is ignored.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+    }
+    if bootstrap {
+        // Errors are logged but non-fatal. Container-init is Linux-only;
+        // elsewhere the daemon runs directly.
+        #[cfg(unix)]
+        run_bootstrap();
+        #[cfg(not(unix))]
+        eprintln!("freemkv server: --bootstrap is Linux-only; running the daemon directly");
     }
 
-    let mut restarting = false;
-    loop {
-        // Panic hook FIRST — before observe::init, so a panic during tracing
-        // setup still hits post-mortem handling. tracing::error! is a no-op
-        // before init, but log::syslog still records, so it's still useful.
-        std::panic::set_hook(Box::new(|info| {
-            let loc = info
-                .location()
-                .map(|l| format!("{}:{}", l.file(), l.line()))
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let msg = info
-                .payload()
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("<non-string panic>");
-            let thread = std::thread::current()
-                .name()
-                .unwrap_or("<unnamed>")
-                .to_string();
-            // Both: structured event for the JSONL stream (greppable post-mortem)
-            // AND the legacy syslog line so the per-device file + UI keep working.
-            tracing::error!(thread = %thread, location = %loc, message = %msg, "panic");
-            log::syslog(&format!("PANIC in thread '{thread}' at {loc}: {msg}"));
-        }));
+    // Panic hook FIRST — before observe::init, so a panic during tracing
+    // setup still hits post-mortem handling. tracing::error! is a no-op
+    // before init, but log::syslog still records, so it's still useful.
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<non-string panic>");
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
+        // Both: structured event for the JSONL stream (greppable post-mortem)
+        // AND the legacy syslog line so the per-device file + UI keep working.
+        tracing::error!(thread = %thread, location = %loc, message = %msg, "panic");
+        log::syslog(&format!("PANIC in thread '{thread}' at {loc}: {msg}"));
+    }));
 
-        // Tracing — sets up stderr + autorip.log + autorip.jsonl sinks. Filter
-        // via AUTORIP_LOG_LEVEL (default `autorip=info,libfreemkv=warn`).
-        observe::init();
+    // Tracing — sets up stderr + autorip.log + autorip.jsonl sinks. Filter
+    // via AUTORIP_LOG_LEVEL (default `autorip=info,libfreemkv=warn`).
+    observe::init();
 
-        // Signal handler for graceful shutdown
-        #[cfg(unix)]
-        unsafe {
-            libc::signal(
-                libc::SIGTERM,
-                handle_signal as *const () as libc::sighandler_t,
-            );
-            libc::signal(
-                libc::SIGINT,
-                handle_signal as *const () as libc::sighandler_t,
-            );
+    // Rotate the system log if it has grown large across restarts. Also
+    // re-checked on the log-prune tick below, bounding a long-uptime daemon too.
+    log::rotate_system_log_if_large();
+
+    log::syslog(&format!(
+        "autorip starting (v{}, edition 2024)",
+        VERSION_LABEL
+    ));
+    tracing::info!(
+        version = VERSION_LABEL,
+        target = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        "autorip starting"
+    );
+
+    // Load config
+    let cfg = config::load();
+
+    // Warn at boot if a configured movie/tv/output dir is missing or not writable
+    // (finished rips stay in staging meanwhile). Own thread: a hung network mount
+    // must never hold startup, and the web server, back.
+    {
+        let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(msg) = keysource::keyserver_url_startup_warning(&c) {
+            log::syslog(&msg);
         }
-
-        // Rotate the system log if it has grown large across restarts. Also
-        // re-checked on the log-prune tick below, bounding a long-uptime daemon too.
-        log::rotate_system_log_if_large();
-
-        log::syslog(&format!(
-            "autorip starting (v{}, edition 2024)",
-            VERSION_LABEL
-        ));
-        tracing::info!(
-            version = VERSION_LABEL,
-            target = std::env::consts::OS,
-            arch = std::env::consts::ARCH,
-            "autorip starting"
-        );
-
-        // Load config
-        let cfg = config::load();
-        if restarting {
-            crate::server::library::reload_after_drain(
-                &cfg.read().unwrap_or_else(|e| e.into_inner()),
-            );
+        if let Err(e) = spawn_destination_check(c, mover::check_configured_destinations) {
+            tracing::warn!(error = %e, "could not start the startup destination check");
         }
+    }
 
-        // Warn at boot if a configured movie/tv/output dir is missing or not writable
-        // (finished rips stay in staging meanwhile). Own thread: a hung network mount
-        // must never hold startup, and the web server, back.
-        {
-            let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(msg) = keysource::keyserver_url_startup_warning(&c) {
-                log::syslog(&msg);
-            }
-            if let Err(e) = spawn_destination_check(c, mover::check_configured_destinations) {
-                tracing::warn!(error = %e, "could not start the startup destination check");
-            }
-        }
+    // The local KEYDB only matters for the `local` key source. In `online`
+    // mode keys come from the key service and a local keydb would only shadow
+    // it (libfreemkv default-search), so skip the download entirely.
+    let online_keys = keysource::uses_online(&cfg.read().unwrap_or_else(|e| e.into_inner()));
 
-        // The local KEYDB only matters for the `local` key source. In `online`
-        // mode keys come from the key service and a local keydb would only shadow
-        // it (libfreemkv default-search), so skip the download entirely.
-        let online_keys = keysource::uses_online(&cfg.read().unwrap_or_else(|e| e.into_inner()));
-
-        // Ensure KEYDB exists — download on first boot if URL is configured
-        if online_keys {
-            log::syslog("Online key source — skipping local KEYDB download");
-        } else if keysource::keydb_exists(&cfg.read().unwrap_or_else(|e| e.into_inner())) {
-            log::syslog("KEYDB found");
-        } else {
-            let url = cfg
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .keydb_url
-                .clone();
-            if !url.is_empty() {
-                log::syslog("KEYDB not found, downloading...");
-                // Route through the address guard (validate_fetch_url + pinned
-                // resolver): LAN hosts are fine, unreachable addresses are refused.
-                fetch_keydb(&cfg, &url, true);
-            }
-        }
-
-        // Start mover thread. Joined by the generation drain (stop_generation) so
-        // an in-flight file move isn't truncated into a partial OUTPUT_DIR file.
-        let mover_handle = std::thread::spawn({
-            let cfg = cfg.clone();
-            move || mover::run(&cfg)
-        });
-
-        // Start mux worker thread — pipelines mux behind the drive so a disc can
-        // rip on one device while a prior title muxes in the background. Joined
-        // on shutdown so an in-flight mux isn't killed mid-write (truncated MKV).
-        let muxer_handle = std::thread::spawn({
-            let cfg = cfg.clone();
-            move || muxer::run(&cfg)
-        });
-
-        // Library remux worker (plus its auditor). It yields the mux slot to any
-        // rip and is joined on shutdown so a cancelled remux cleans its partial.
-        let library_handle = crate::server::library::start(&cfg);
-        crate::server::health::start(&cfg);
-
-        // Start web server thread
-        let web_handle = std::thread::spawn({
-            let cfg = cfg.clone();
-            move || web::run(&cfg)
-        });
-
-        // Start KEYDB auto-update thread — single source of truth for periodic
-        // refresh. Pre-0.13 a cron entry also spawned a second binary that raced
-        // this thread for /dev/sg* and port 8080; that path was removed.
-        let keydb_handle = std::thread::spawn({
-            let cfg2 = cfg.clone();
-            move || {
-                tracing::info!("keydb update thread starting (24h interval)");
-                'outer: loop {
-                    // 24h sleep in 1s chunks so SHUTDOWN is observed within ~1s.
-                    for _ in 0..DAILY_SECS {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        if SHUTDOWN.load(Ordering::Relaxed) {
-                            break 'outer;
-                        }
-                    }
-                    // Online key source resolves out-of-band; no local keydb to keep
-                    // fresh (and refreshing one would only shadow the service).
-                    let (online, url) = {
-                        let c = cfg2.read().unwrap_or_else(|e| e.into_inner());
-                        (keysource::uses_online(&c), c.keydb_url.clone())
-                    };
-                    if online || url.is_empty() {
-                        continue;
-                    }
-                    tracing::info!(url_origin = %crate::server::webhook::webhook_url_origin(&url), "keydb: starting daily update");
-                    // SSRF-guarded fetch (see web::guarded_get) — the daily
-                    // refresh must not bypass the address allow-list that the
-                    // settings save and manual update already enforce.
-                    fetch_keydb(&cfg2, &url, false);
-                }
-                tracing::info!("keydb update thread stopping");
-            }
-        });
-
-        // Log prune thread — replaces the v0.25.5 cron-based cleanup. retention_days
-        // comes from the Settings UI and is re-read each tick so a saved update
-        // takes effect on the next run without a restart.
-        let log_prune_handle = std::thread::spawn({
-            let cfg = cfg.clone();
-            move || {
-                tracing::info!("log prune thread starting (24h interval)");
-                'outer: loop {
-                    // Prune first, then wait: a daemon restarted more often than daily
-                    // would otherwise never reach a tick.
-                    log_prune_tick(&cfg);
-                    for _ in 0..DAILY_SECS {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        if SHUTDOWN.load(Ordering::Relaxed) {
-                            break 'outer;
-                        }
-                    }
-                }
-                tracing::info!("log prune thread stopping");
-            }
-        });
-
-        // Main loop: poll drives (checks SHUTDOWN flag internally)
-        ripper::drive_poll_loop(&cfg);
-
-        SHUTDOWN.store(true, Ordering::Release);
-        let mut workers = vec![
-            ("mover", Some(mover_handle)),
-            ("muxer", Some(muxer_handle)),
-            ("library", library_handle),
-            ("keydb", Some(keydb_handle)),
-            ("log-prune", Some(log_prune_handle)),
-        ];
-        let mut web_handle = Some(web_handle);
-        let staging = cfg
+    // Ensure KEYDB exists — download on first boot if URL is configured
+    if online_keys {
+        log::syslog("Online key source — skipping local KEYDB download");
+    } else if keysource::keydb_exists(&cfg.read().unwrap_or_else(|e| e.into_inner())) {
+        log::syslog("KEYDB found");
+    } else {
+        let url = cfg
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .staging_dir
+            .keydb_url
             .clone();
-        let drained = stop_generation(std::path::Path::new(&staging), || {
-            // HTTP admission is closed by SHUTDOWN. Existing requests may still
-            // spawn rips, so drain their tracked helpers BEFORE the final rip
-            // registry check. No short-circuit: every worker gets a drain attempt.
-            let mut drained = drain_services(
-                &mut workers,
-                &BACKGROUND,
-                ripper::join_all_rip_threads,
-                DRAIN_TIMEOUT,
-            );
-            if drained {
-                web::stop_after_drain();
-                drained &= join_bounded(&mut web_handle, "web", WEB_JOIN_TIMEOUT);
+        if !url.is_empty() {
+            log::syslog("KEYDB not found, downloading...");
+            // Route through the address guard (validate_fetch_url + pinned
+            // resolver): LAN hosts are fine, unreachable addresses are refused.
+            fetch_keydb(&cfg, &url, true);
+        }
+    }
+
+    // Start mover thread. Joined on shutdown so an in-flight file move
+    // isn't truncated into a partial OUTPUT_DIR file.
+    let mover_handle = std::thread::spawn({
+        let cfg = cfg.clone();
+        move || mover::run(&cfg)
+    });
+
+    // Start mux worker thread — pipelines mux behind the drive so a disc can
+    // rip on one device while a prior title muxes in the background. Joined
+    // on shutdown so an in-flight mux isn't killed mid-write (truncated MKV).
+    let muxer_handle = std::thread::spawn({
+        let cfg = cfg.clone();
+        move || muxer::run(&cfg)
+    });
+
+    // Library remux worker (plus its auditor). It yields the mux slot to any
+    // rip and is joined on shutdown so a cancelled remux cleans its partial.
+    let library_handle = crate::server::library::start(&cfg);
+    let health_handle = crate::server::health::start(&cfg);
+
+    // Start web server thread
+    let web_handle = std::thread::spawn({
+        let cfg = cfg.clone();
+        move || web::run(&cfg)
+    });
+
+    // Start KEYDB auto-update thread — single source of truth for periodic
+    // refresh. Pre-0.13 a cron entry also spawned a second binary that raced
+    // this thread for /dev/sg* and port 8080; that path was removed.
+    let keydb_handle = std::thread::spawn({
+        let cfg2 = cfg.clone();
+        move || {
+            tracing::info!("keydb update thread starting (24h interval)");
+            'outer: loop {
+                // 24h sleep in 1s chunks so SHUTDOWN is observed within ~1s.
+                for _ in 0..DAILY_SECS {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    if SHUTDOWN.load(Ordering::Relaxed) {
+                        break 'outer;
+                    }
+                }
+                // Online key source resolves out-of-band; no local keydb to keep
+                // fresh (and refreshing one would only shadow the service).
+                let (online, url) = {
+                    let c = cfg2.read().unwrap_or_else(|e| e.into_inner());
+                    (keysource::uses_online(&c), c.keydb_url.clone())
+                };
+                if online || url.is_empty() {
+                    continue;
+                }
+                tracing::info!(url_origin = %crate::server::webhook::webhook_url_origin(&url), "keydb: starting daily update");
+                // SSRF-guarded fetch (see web::guarded_get) — the daily
+                // refresh must not bypass the address allow-list that the
+                // settings save and manual update already enforce.
+                fetch_keydb(&cfg2, &url, false);
             }
-            drained
-        });
-        if drained && take_restart() {
-            reset_after_drain();
-            BACKGROUND.reopen();
-            reopen_admission();
-            restarting = true;
-            log::syslog("autorip soft reboot: starting fresh instance");
-            continue;
+            tracing::info!("keydb update thread stopping");
         }
-        break;
+    });
+
+    // Log prune thread — replaces the v0.25.5 cron-based cleanup. retention_days
+    // comes from the Settings UI and is re-read each tick so a saved update
+    // takes effect on the next run without a restart.
+    let log_prune_handle = std::thread::spawn({
+        let cfg = cfg.clone();
+        move || {
+            tracing::info!("log prune thread starting (24h interval)");
+            'outer: loop {
+                // Prune first, then wait: a daemon restarted more often than daily
+                // would otherwise never reach a tick.
+                log_prune_tick(&cfg);
+                for _ in 0..DAILY_SECS {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    if SHUTDOWN.load(Ordering::Relaxed) {
+                        break 'outer;
+                    }
+                }
+            }
+            tracing::info!("log prune thread stopping");
+        }
+    });
+
+    // Main loop: poll drives (checks SHUTDOWN flag internally)
+    ripper::drive_poll_loop(&cfg);
+
+    SHUTDOWN.store(true, Ordering::Release);
+    let bound = RIP_DRAIN_TIMEOUT + SERVICE_DRAIN_TIMEOUT + WEB_JOIN_TIMEOUT + RELAUNCH_SLACK;
+    if let Err(e) = spawn_relaunch_deadline(bound, exit_now) {
+        tracing::warn!(error = %e, "could not start the relaunch deadline");
+    }
+    let workers = vec![
+        ("mover", Some(mover_handle)),
+        ("muxer", Some(muxer_handle)),
+        ("library", library_handle),
+        ("health", health_handle),
+        ("keydb", Some(keydb_handle)),
+        ("log-prune", Some(log_prune_handle)),
+    ];
+    let staging = cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .staging_dir
+        .clone();
+    stop_services(
+        Path::new(&staging),
+        ripper::join_all_rip_threads,
+        workers,
+        Some(web_handle),
+        &Bounds {
+            rips: RIP_DRAIN_TIMEOUT,
+            services: SERVICE_DRAIN_TIMEOUT,
+            web: WEB_JOIN_TIMEOUT,
+        },
+    );
+    if relaunch_requested() {
+        relaunch(&relaunch_info);
     }
 }
 
-// Drain this generation's services; false when they did not all finish. A process stop
-// clears in-progress markers first, so a SIGKILL at the stop grace or a timed-out drain
-// still leaves resumable dirs; a reboot clears them only once every old writer is gone.
-fn stop_generation(staging: &std::path::Path, mut drain: impl FnMut() -> bool) -> bool {
-    let mut cleared = false;
-    loop {
-        let reboot = rebooting();
-        if !reboot && !cleared {
-            ripper::staging::clear_inprogress_markers(staging);
-            cleared = true;
-        }
-        if drain() {
-            break;
-        }
-        if !reboot {
-            log::syslog(
-                "autorip stopped before every service drained; unfinished work is interrupted",
-            );
-            return false;
-        }
-        // Internal restart must not detach a survivor and clear its cancellation
-        // underneath it. A stop request instead gets one bounded shutdown attempt.
-        log::syslog(
-            "Restart refused while old services are still draining; cancellation remains set",
-        );
-        if rebooting() {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-    }
+struct Bounds {
+    rips: Duration,
+    services: Duration,
+    web: Duration,
+}
+
+// Graceful stop, bounded; whether everything finished. Markers are cleared first so a
+// SIGKILL mid-drain leaves resumable dirs, and again for a rip a late request started.
+fn stop_services(
+    staging: &Path,
+    join_rips: impl FnOnce(Duration) -> bool,
+    workers: Vec<(&'static str, Option<JoinHandle<()>>)>,
+    web: Option<JoinHandle<()>>,
+    bounds: &Bounds,
+) -> bool {
     ripper::staging::clear_inprogress_markers(staging);
-    log::syslog("autorip stopped");
-    true
+    let mut done = join_rips(bounds.rips);
+    let deadline = Instant::now() + bounds.services;
+    for (name, handle) in workers {
+        done &= join_bounded(
+            handle,
+            name,
+            deadline.saturating_duration_since(Instant::now()),
+        );
+    }
+    let web_deadline = Instant::now() + bounds.web;
+    done &= join_bounded(web, "web", bounds.web);
+    done &= web::wait_idle(web_deadline.saturating_duration_since(Instant::now()));
+    ripper::staging::clear_inprogress_markers(staging);
+    log::syslog(if done {
+        "autorip stopped"
+    } else {
+        "autorip stopped before every service drained; unfinished work is interrupted"
+    });
+    done
 }
 
-// A soft reboot is pending and no stop signal has overridden it.
-fn rebooting() -> bool {
+// A reboot was requested and no stop signal has overridden it.
+fn relaunch_requested() -> bool {
     REBOOT.load(Ordering::Acquire) && !TERMINATE.load(Ordering::Acquire)
 }
 
-// Reopen admission for the fresh generation. A signal that landed while it was being
-// reset re-raises SHUTDOWN, so the new generation stops instead of losing the request.
-fn reopen_admission() {
-    SHUTDOWN.store(false, Ordering::Release);
-    if TERMINATE.load(Ordering::Acquire) {
-        SHUTDOWN.store(true, Ordering::Release);
+// The binary and full argv (argv[0] included) the daemon was started with.
+struct Relaunch {
+    exe: std::io::Result<PathBuf>,
+    argv: Vec<OsString>,
+}
+
+impl Relaunch {
+    fn capture() -> Self {
+        Self {
+            exe: std::env::current_exe(),
+            argv: std::env::args_os().collect(),
+        }
     }
 }
 
-// Whether a drained generation should be replaced in-process.
-fn take_restart() -> bool {
-    REBOOT.swap(false, Ordering::AcqRel) && !TERMINATE.load(Ordering::Acquire)
+// The exit code to use when `exec` did not replace the process: 0 if a stop signal
+// arrived meanwhile, else 75 for the service manager.
+fn relaunch_with(
+    relaunch: &Relaunch,
+    exec: impl FnOnce(&Path, &[OsString]) -> std::io::Error,
+) -> i32 {
+    if TERMINATE.load(Ordering::Acquire) {
+        return 0;
+    }
+    let exe = match (&relaunch.exe, relaunch.argv.is_empty()) {
+        (Ok(exe), false) => exe,
+        _ => {
+            log::syslog(
+                "autorip reboot: startup binary unknown; exiting 75 for the service manager",
+            );
+            return RESTART_EXIT_CODE;
+        }
+    };
+    let e = exec(exe, &relaunch.argv);
+    if e.kind() == std::io::ErrorKind::Unsupported {
+        log::syslog("autorip reboot: exiting 75 for the service manager to restart");
+    } else {
+        log::syslog(&format!(
+            "autorip reboot: not re-executed ({e}); exiting 75 for the service manager to restart"
+        ));
+    }
+    RESTART_EXIT_CODE
+}
+
+// Replace the process image in place; returns only on failure. Every fd is CLOEXEC.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn exec_in_place(exe: &Path, argv: &[OsString]) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let Some((arg0, rest)) = argv.split_first() else {
+        return std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty argv");
+    };
+    std::process::Command::new(exe).arg0(arg0).args(rest).exec()
+}
+
+// macOS: process exit is the sure way to drop the drive's IOKit exclusive access.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn exec_in_place(_: &Path, _: &[OsString]) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "relaunch is left to the service manager on this platform",
+    )
+}
+
+fn relaunch(relaunch: &Relaunch) -> ! {
+    log::syslog("autorip reboot: relaunching");
+    observe::flush_before_exit();
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(relaunch_with(relaunch, exec_in_place))
+}
+
+// Backstop for the reboot tail itself (log writes can hang on a dead /config): past
+// `after`, a still-pending relaunch exits 75 through `exit` regardless.
+fn spawn_relaunch_deadline(
+    after: Duration,
+    exit: impl FnOnce(i32) + Send + 'static,
+) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("relaunch-deadline".into())
+        .spawn(move || {
+            std::thread::sleep(after);
+            if relaunch_requested() {
+                exit(RESTART_EXIT_CODE);
+            }
+        })
+}
+
+// Exit without running atexit handlers or taking any lock a wedged thread may hold.
+fn exit_now(code: i32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::_exit(code)
+    };
+    #[cfg(not(unix))]
+    std::process::exit(code);
 }
 
 // Fetch KEYDB from `url` through the address guard and save it. `boot` picks the
@@ -422,7 +479,7 @@ fn spawn_destination_check<F>(
 where
     F: FnOnce(&config::Config) -> Vec<(String, String)> + Send + 'static,
 {
-    spawn_background("destination-check", move || {
+    std::thread::Builder::new().name("destination-check".into()).spawn(move || {
         for (root, reason) in check(&cfg) {
             log::syslog(&format!(
                 "WARNING: configured destination '{root}' is not usable at startup: {reason}. \
@@ -433,72 +490,31 @@ where
     })
 }
 
-// Join `handle`, giving up after `timeout` so a wedged worker can't pin
-// shutdown. Polls `is_finished` (no join-with-timeout in std); worker is
-// expected to observe SHUTDOWN, with the timeout as a stuck-I/O backstop.
-fn join_bounded(
-    handle: &mut Option<std::thread::JoinHandle<()>>,
-    name: &str,
-    timeout: std::time::Duration,
-) -> bool {
-    let Some(worker) = handle.as_ref() else {
+// Join `handle` (`None` counts as joined), giving up after `timeout` so a wedged
+// worker can't pin shutdown; on timeout it is detached. Polls `is_finished`, as std
+// has no join-with-timeout.
+fn join_bounded(handle: Option<JoinHandle<()>>, name: &str, timeout: Duration) -> bool {
+    let Some(handle) = handle else {
         return true;
     };
-    let deadline = std::time::Instant::now() + timeout;
-    while !worker.is_finished() {
-        if std::time::Instant::now() >= deadline {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
             tracing::warn!(
                 thread = name,
-                "did not drain within timeout; restart is not safe"
+                "did not drain within timeout; stopping without it"
             );
             return false;
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(25));
     }
-    if let Some(worker) = handle.take() {
-        let _ = worker.join();
-    }
+    let _ = handle.join();
     true
-}
-
-fn reset_after_drain() {
-    ripper::reset_after_drain();
-    config::reset_after_drain();
-    crate::server::health::reset_after_drain();
-    keysource::reset_after_drain();
-    mover::reset_after_drain();
-    muxer::reset_after_drain();
-    web::reset_after_drain();
-}
-
-fn drain_services(
-    workers: &mut [(&str, Option<std::thread::JoinHandle<()>>)],
-    background: &lifecycle::Background,
-    mut drain_rips: impl FnMut(std::time::Duration) -> bool,
-    timeout: std::time::Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    let mut drained = drain_rips(timeout.min(RIP_DRAIN_TIMEOUT));
-    for (name, handle) in workers {
-        drained &= join_bounded(
-            handle,
-            name,
-            deadline.saturating_duration_since(std::time::Instant::now()),
-        );
-    }
-    // Keep helper admission available to cancellation cleanup until the primary
-    // workers have finished. Tracked HTTP handlers and their newly spawned rips
-    // then drain together before admission is sealed atomically at zero.
-    if !drained || !background.drain(deadline.saturating_duration_since(std::time::Instant::now()))
-    {
-        return false;
-    }
-    drain_rips(std::time::Duration::ZERO)
 }
 
 #[cfg(unix)]
 extern "C" fn handle_signal(_sig: libc::c_int) {
-    // A soft reboot also sets SHUTDOWN, so only a prior stop signal means "second signal".
+    // A reboot also sets SHUTDOWN, so only a prior stop signal counts as the second signal.
     if TERMINATE.swap(true, Ordering::AcqRel) {
         unsafe { libc::_exit(1) };
     }

@@ -123,6 +123,15 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     ),
 ];
 
+// This process image's id for the UI: a restart (exec keeps the pid) gets a new one.
+static BOOT_ID: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
+        .to_string()
+});
+
 // The app's own paths: each serves the shell, which routes client-side.
 const PAGES: &[&str] = &[
     "/",
@@ -134,33 +143,6 @@ const PAGES: &[&str] = &[
     "/settings",
     "/system",
 ];
-
-static STOP_LISTENER: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn stop_after_drain() {
-    STOP_LISTENER.store(true, std::sync::atomic::Ordering::Release);
-}
-
-pub(crate) fn reset_after_drain() {
-    STOP_LISTENER.store(false, std::sync::atomic::Ordering::Release);
-    QUEUE_VIEW_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    SSE_STREAMS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    *DEBUG_ENABLED.write().unwrap_or_else(|e| e.into_inner()) = false;
-    crate::server::observe::set_debug(false);
-}
-
-fn stop_listener() -> bool {
-    STOP_LISTENER.load(std::sync::atomic::Ordering::Acquire)
-        || (crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
-            && (!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire)
-                || crate::server::TERMINATE.load(std::sync::atomic::Ordering::Acquire)))
-}
 
 pub fn run(cfg: &Arc<RwLock<Config>>) {
     let port = cfg.read().unwrap_or_else(|e| e.into_inner()).port;
@@ -198,7 +180,7 @@ fn serve(
         let request = match recv(std::time::Duration::from_secs(1)) {
             Ok(Some(request)) => request,
             Ok(None) => {
-                if stop_listener() {
+                if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
                     break;
                 }
                 continue;
@@ -214,18 +196,8 @@ fn serve(
                 break;
             }
         };
-        if stop_listener() {
-            break;
-        }
         if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
-            // Keep a status surface while a reboot is refused/deferred. Never
-            // dispatch application handlers or read mutable service state here.
-            json_response(
-                request,
-                503,
-                r#"{"ok":false,"rebooting":true,"status":"draining","message":"Restart is waiting for old services to drain. No replacement services will start until all workers finish."}"#,
-            );
-            continue;
+            break;
         }
         // Bound concurrent handlers so a flood can't fork the container.
         // Body-carrying requests get a lower cap: tiny_http 0.12 has no
@@ -244,12 +216,15 @@ fn serve(
             }
         };
         let cfg = Arc::clone(cfg);
-        if let Err(e) = crate::server::daemon::spawn_background("autorip-http", move || {
-            // Hold the admission token for the handler's lifetime;
-            // dropped here on return/unwind, freeing the slot.
-            let _guard = guard;
-            handle_request(request, &cfg);
-        }) {
+        if let Err(e) = std::thread::Builder::new()
+            .name("autorip-http".into())
+            .spawn(move || {
+                // Hold the admission token for the handler's lifetime;
+                // dropped here on return/unwind, freeing the slot.
+                let _guard = guard;
+                handle_request(request, &cfg);
+            })
+        {
             tracing::error!(error = %e, "failed to spawn request handler thread");
             // guard drops here, freeing the reserved slot.
         }
@@ -390,11 +365,11 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
             .clone();
         json_response(request, 200, &get_state_json(&staging_dir));
     } else if is_get && url == "/api/version" {
-        json_response(
-            request,
-            200,
-            &format!("{{\"version\":\"{}\"}}", crate::server::VERSION_LABEL),
-        );
+        let body = serde_json::json!({
+            "version": crate::server::VERSION_LABEL,
+            "boot": BOOT_ID.as_str(),
+        });
+        json_response(request, 200, &body.to_string());
     } else if is_get && url == "/api/settings" {
         // Snapshot and drop the guard: rendering stats the keydb path, and
         // filesystem I/O (NFS) must not stall config writers.
@@ -423,13 +398,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     } else if is_get && url == "/api/system" {
         handle_system_info(request, cfg);
     } else if is_post && url == "/api/system/reboot" {
-        crate::server::REBOOT.store(true, std::sync::atomic::Ordering::Release);
-        crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
-        json_response(
-            request,
-            202,
-            r#"{"ok":true,"rebooting":true,"message":"Library is restarting; durable jobs and audit state are preserved."}"#,
-        );
+        handle_reboot(request);
     } else if is_post && url == "/api/move-errors/clear-all" {
         crate::server::mover::clear_all_move_errors();
         json_response(request, 200, r#"{"ok":true}"#);
@@ -1140,38 +1109,13 @@ fn read_body_capped(request: &mut tiny_http::Request) -> BodyRead {
     }
 }
 
-// tiny_http 0.12 has no read timeout, so the body is read on an abandonable thread that
-// owns the request; a sender still stalled when the daemon drains is left behind (its
-// request answers 500 when the read ends) instead of pinning this tracked handler.
-fn read_body_cancellable(request: tiny_http::Request) -> Option<(tiny_http::Request, BodyRead)> {
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    crate::server::daemon::spawn_abandonable("autorip-http-body", move || {
-        let mut request = request;
-        let read = read_body_capped(&mut request);
-        let _ = tx.send((request, read));
-    })
-    .ok()?;
-    loop {
-        match rx.recv_timeout(std::time::Duration::from_millis(250)) {
-            Ok(read) => return Some(read),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                if !crate::server::SHUTDOWN.load(Ordering::Acquire) => {}
-            Err(_) => return None,
-        }
-    }
-}
-
 /// Read a JSON POST body with the shared size cap, replying with the
 /// appropriate error status (400 bad body / 413 too large) on failure.
-/// Returns `Err` once a response has been sent, or when the daemon began
-/// draining before the body arrived (the request is then never acted on).
+/// Returns `Err` once a response has been sent.
 pub(crate) fn read_json_body(
-    request: tiny_http::Request,
+    mut request: tiny_http::Request,
 ) -> Result<(tiny_http::Request, String), ()> {
-    let Some((request, read)) = read_body_cancellable(request) else {
-        return Err(());
-    };
-    match read {
+    match read_body_capped(&mut request) {
         BodyRead::Ok(body) => Ok((request, body)),
         BodyRead::Err => {
             json_response(request, 400, r#"{"ok":false,"error":"bad body"}"#);
@@ -1275,14 +1219,17 @@ pub(crate) fn resolve_with_timeout(host: &str, port: u16) -> Result<Vec<SocketAd
     let (tx, rx) = mpsc::sync_channel::<Result<Vec<SocketAddr>, std::io::Error>>(1);
     // A refused thread (pid/thread exhaustion) is a resolve failure, not a
     // panic; the closure, and the guard in it, drop on the Err.
-    if let Err(e) = crate::server::daemon::spawn_abandonable("dns-resolver", move || {
-        let _g = guard;
-        let res = (host.as_str(), port)
-            .to_socket_addrs()
-            .map(|it| it.collect::<Vec<SocketAddr>>());
-        // Receiver may be gone after the timeout — ignore the send error.
-        let _ = tx.send(res);
-    }) {
+    if let Err(e) = std::thread::Builder::new()
+        .name("dns-resolver".into())
+        .spawn(move || {
+            let _g = guard;
+            let res = (host.as_str(), port)
+                .to_socket_addrs()
+                .map(|it| it.collect::<Vec<SocketAddr>>());
+            // Receiver may be gone after the timeout — ignore the send error.
+            let _ = tx.send(res);
+        })
+    {
         return Err(format!("{RESOLVE_FAILED_PREFIX}{e}"));
     }
     match rx.recv_timeout(DNS_TIMEOUT) {
@@ -1739,6 +1686,24 @@ impl Drop for ConnGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// Wait up to `timeout` for every in-flight HTTP handler (a settings save, the
+/// reboot response itself) to finish; whether they all did.
+pub(crate) fn wait_idle(timeout: std::time::Duration) -> bool {
+    wait_for_zero(&INFLIGHT_HANDLERS, timeout)
+}
+
+fn wait_for_zero(counter: &AtomicUsize, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while counter.load(Ordering::SeqCst) != 0 {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!("HTTP handlers still running at shutdown; stopping without them");
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    true
 }
 
 #[cfg(test)]
@@ -2774,6 +2739,79 @@ fn roll_back_settings(
     }
 }
 
+// POST /api/system/reboot: drain, then relaunch (see daemon::run). Refused (409) where
+// nothing would start the daemon again after it exits.
+fn handle_reboot(request: tiny_http::Request) {
+    if !relaunch_supported() {
+        let error = crate::strings::get_or(
+            "server.reboot.no_supervisor",
+            "Reboot is unavailable: this server was not started as a service, so nothing would start it again. Restart it yourself instead.",
+        );
+        let body = serde_json::json!({ "ok": false, "error": error });
+        return json_response(request, 409, &body.to_string());
+    }
+    crate::server::REBOOT.store(true, Ordering::Release);
+    crate::server::SHUTDOWN.store(true, Ordering::Release);
+    let message = crate::strings::get_or(
+        "server.reboot.restarting",
+        "Restarting: running work stops at its next safe point, then the server restarts.",
+    );
+    let body = serde_json::json!({
+        "ok": true,
+        "rebooting": true,
+        "boot": BOOT_ID.as_str(),
+        "message": message,
+    });
+    json_response(request, 202, &body.to_string());
+}
+
+// Linux re-execs itself; elsewhere the daemon exits 75 and needs a service manager.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn relaunch_supported() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn relaunch_supported() -> bool {
+    launchd_job(
+        std::env::var_os("XPC_SERVICE_NAME").as_deref(),
+        parent_pid(),
+    )
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn parent_pid() -> i32 {
+    // SAFETY: getppid has no preconditions and cannot fail.
+    unsafe { libc::getppid() }
+}
+
+// Test seam: the route tests set the parent pid through the environment.
+#[cfg(all(target_os = "macos", test))]
+fn parent_pid() -> i32 {
+    std::env::var("FREEMKV_TEST_PPID")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+}
+
+#[cfg(not(unix))]
+fn relaunch_supported() -> bool {
+    false
+}
+
+// launchd sets XPC_SERVICE_NAME to the job label; a terminal inherits "0" or the label
+// of the app it runs in ("application.…"), and neither restarts a server. The parent
+// must be launchd (pid 1) too, or a script under another job would pass.
+#[cfg(target_os = "macos")]
+fn launchd_job(xpc_service_name: Option<&std::ffi::OsStr>, ppid: i32) -> bool {
+    ppid == 1
+        && xpc_service_name
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| {
+                !name.is_empty() && name != "0" && !name.starts_with("application.")
+            })
+}
+
 fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     if crate::server::SHUTDOWN.load(Ordering::Acquire) {
         return json_response(request, 503, r#"{"ok":false,"status":"draining"}"#);
@@ -2807,8 +2845,8 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     sse_session(stream, cfg, &stop, opened);
 }
 
-fn sse_session<W: std::io::Write + Send + 'static>(
-    stream: W,
+fn sse_session<W: std::io::Write>(
+    mut stream: W,
     cfg: &Arc<RwLock<Config>>,
     stop: &AtomicBool,
     opened: std::time::Instant,
@@ -2825,31 +2863,8 @@ fn sse_session<W: std::io::Write + Send + 'static>(
     if crate::server::SHUTDOWN.load(Ordering::Acquire) {
         return;
     }
-    // The upgraded stream has no write timeout, so an abandonable writer owns it: a
-    // half-open client cannot pin this tracked handler. One frame is in flight at a
-    // time and the next is built only once it is written (the library cursor advances).
-    let (frames, queued) = std::sync::mpsc::sync_channel::<String>(1);
-    let busy = Arc::new(AtomicBool::new(true));
-    let writer = {
-        let busy = busy.clone();
-        move || {
-            let mut stream = stream;
-            for frame in queued {
-                let sent = stream
-                    .write_all(frame.as_bytes())
-                    .and_then(|()| stream.flush());
-                busy.store(false, Ordering::Release);
-                if sent.is_err() {
-                    return;
-                }
-            }
-        }
-    };
-    if crate::server::daemon::spawn_abandonable("autorip-sse-write", writer).is_err() {
-        return;
-    }
     let initial = format!("data: {}\n\n", get_state_json(&staging_dir()));
-    if frames.send(initial).is_err() {
+    if stream.write_all(initial.as_bytes()).is_err() || stream.flush().is_err() {
         return;
     }
 
@@ -2862,17 +2877,12 @@ fn sse_session<W: std::io::Write + Send + 'static>(
         {
             break;
         }
-        if busy.load(Ordering::Acquire) {
-            continue;
-        }
         let mut frame = format!("data: {}\n\n", get_state_json(&staging_dir()));
         let dirs = crate::server::library::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
         if let Some(lib) = crate::server::library::api::sse_frame(&mut library, Some(&dirs)) {
             frame.push_str(&lib);
         }
-        busy.store(true, Ordering::Release);
-        // A failed write ended the writer, so this send reports the dead client.
-        if frames.send(frame).is_err() {
+        if stream.write_all(frame.as_bytes()).is_err() || stream.flush().is_err() {
             break;
         }
     }

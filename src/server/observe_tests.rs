@@ -226,3 +226,44 @@ fn parse_override_rejects_a_bad_directive() {
     assert!(parse_override("autorip=debg").is_err());
     assert!(parse_override("autorip=debug").is_ok());
 }
+
+// Flushing before a relaunch is bounded by the appenders' own timeout, and only the
+// first call does anything.
+#[test]
+fn flush_before_exit_is_bounded_and_idempotent() {
+    const CHILD: &str = "FREEMKV_TEST_OBSERVE_FLUSH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::observe::tests::flush_before_exit_is_bounded_and_idempotent",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("AUTORIP_DIR", dir.path())
+            .env_remove("AUTORIP_LOG_LEVEL")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
+        let jsonl = std::fs::read_to_string(dir.path().join("logs/autorip.jsonl")).unwrap();
+        assert!(jsonl.contains("flush-before-exit-marker"), "{jsonl}");
+        return;
+    }
+    init();
+    tracing::info!("flush-before-exit-marker");
+    let started = std::time::Instant::now();
+    flush_before_exit();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    let started = std::time::Instant::now();
+    flush_before_exit();
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(100),
+        "{:?}",
+        started.elapsed()
+    );
+}

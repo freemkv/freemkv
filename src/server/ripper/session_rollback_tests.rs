@@ -366,3 +366,35 @@ fn join_rip_thread_called_on_its_own_thread_returns_at_once() {
     }
     let _ = super::join_rip_thread(&dev, std::time::Duration::from_secs(5));
 }
+
+// Nothing reopens admission after a stop begins, so a rip a late request asks for
+// must be refused rather than started under a draining daemon.
+#[test]
+fn no_rip_thread_starts_once_the_daemon_is_stopping() {
+    const CHILD: &str = "FREEMKV_TEST_RIP_AFTER_SHUTDOWN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::ripper::session::rollback_tests::no_rip_thread_starts_once_the_daemon_is_stopping",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
+        return;
+    }
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
+    let flag = ran.clone();
+    let spawned = super::spawn_rip_thread("late-rip-test", "rip", move || {
+        flag.store(true, std::sync::atomic::Ordering::Release);
+    });
+    assert!(
+        spawned.is_err(),
+        "a rip spawned during the stop must be refused"
+    );
+    assert!(super::take_rip_thread("late-rip-test").is_none());
+    assert!(!ran.load(std::sync::atomic::Ordering::Acquire));
+}

@@ -478,8 +478,8 @@ fn release(key: &Path) {
 
 /// Run `probe` for the folder `key` on its own thread and wait at most `limit`.
 /// A probe of `key` already running is waited for within the same limit; one past its own
-/// limit means the folder hangs, and the answer is `Busy` at once. The probe thread is
-/// abandonable (no restart ticket): it may touch only its own probe artifacts.
+/// limit means the folder hangs, and the answer is `Busy` at once. A probe that outlives
+/// its caller is left running: it may touch only its own probe artifacts.
 pub fn bounded<T, F>(key: &Path, limit: Duration, probe: F) -> Bounded<T>
 where
     T: Send + 'static,
@@ -503,18 +503,20 @@ where
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let owned = key.to_path_buf();
-    let spawned = crate::server::daemon::spawn_abandonable("folder-probe", move || {
-        struct Release(PathBuf);
-        impl Drop for Release {
-            fn drop(&mut self) {
-                release(&self.0);
+    let spawned = std::thread::Builder::new()
+        .name("folder-probe".into())
+        .spawn(move || {
+            struct Release(PathBuf);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    release(&self.0);
+                }
             }
-        }
-        let guard = Release(owned);
-        let out = probe();
-        drop(guard);
-        let _ = tx.send(out);
-    });
+            let guard = Release(owned);
+            let out = probe();
+            drop(guard);
+            let _ = tx.send(out);
+        });
     if spawned.is_err() {
         release(key);
         return Bounded::Busy;
@@ -543,12 +545,6 @@ impl StaleReports {
     fn renewed(&mut self, mountpoint: &Path) {
         self.generation = self.generation.wrapping_add(1);
         self.paths.retain(|p| !p.starts_with(mountpoint));
-    }
-
-    // Old-generation probes may still report; advancing past them discards those reports.
-    fn after_drain(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        self.paths.clear();
     }
 }
 
@@ -822,8 +818,6 @@ where
 
 /// The least time between two remounts of the network share.
 const REMOUNT_GAP: Duration = Duration::from_secs(60);
-#[cfg(unix)]
-static LAST_REMOUNT: Mutex<Option<Instant>> = Mutex::new(None);
 
 // Whether the share wants mounting afresh: it is not mounted, or a folder under it reports a
 // stale handle; and the last attempt is old enough.
@@ -844,6 +838,7 @@ fn wants_remount(
 // failed mount is retried, so do that.
 #[cfg(unix)]
 fn heal(cfg: &Config) {
+    static LAST_REMOUNT: Mutex<Option<Instant>> = Mutex::new(None);
     let Some(share) = crate::server::daemon::nfs_share() else {
         return;
     };
@@ -876,38 +871,26 @@ fn heal(cfg: &Config) {
     refresh(cfg);
 }
 
-/// Start the health thread.
-pub fn start(cfg: &Arc<RwLock<Config>>) {
+/// Start the health thread; `None` if it could not be spawned.
+pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
     let cfg = cfg.clone();
-    let _ = crate::server::daemon::spawn_background("health", move || {
-        while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-            let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-            refresh(&c);
-            #[cfg(unix)]
-            heal(&c);
-            let until = Instant::now() + Duration::from_secs(INTERVAL_SECS);
-            while Instant::now() < until
-                && !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
-            {
-                std::thread::sleep(Duration::from_millis(500));
+    std::thread::Builder::new()
+        .name("health".into())
+        .spawn(move || {
+            while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+                refresh(&c);
+                #[cfg(unix)]
+                heal(&c);
+                let until = Instant::now() + Duration::from_secs(INTERVAL_SECS);
+                while Instant::now() < until
+                    && !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
-        }
-    });
-}
-
-/// Called only after the daemon has drained all services. Abandoned folder probes may
-/// still be running; their late reports carry an older generation and are ignored.
-pub(crate) fn reset_after_drain() {
-    LAST.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    GENERATION.store(0, Ordering::SeqCst);
-    STALE_REPORTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .after_drain();
-    #[cfg(unix)]
-    {
-        *LAST_REMOUNT.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    }
+        })
+        .ok()
 }
 
 #[cfg(test)]
