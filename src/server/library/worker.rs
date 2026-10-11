@@ -295,10 +295,9 @@ fn attach_corrected_plan(
     job: &mut Job,
     media: &crate::server::planner::MediaMetadata,
 ) -> std::io::Result<()> {
-    use crate::server::planner::MediaKind;
-    let Some(kind) = media.kind else {
+    if media.kind.is_none() {
         return Err(std::io::Error::other("saved match has no media type"));
-    };
+    }
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     let media = &with_label_numbers(
@@ -307,31 +306,7 @@ fn attach_corrected_plan(
         disc.meta_title.as_deref(),
         &job.title,
     );
-    let metadata = Some(crate::server::tmdb::TmdbResult {
-        title: media.title.clone(),
-        year: media.year,
-        tmdb_id: media.tmdb_id,
-        media_type: match kind {
-            MediaKind::Movie => "movie",
-            MediaKind::Tv => "tv",
-        }
-        .into(),
-        poster_url: String::new(),
-        overview: String::new(),
-    });
-    let target = std::path::PathBuf::from(crate::server::mover::build_destination(
-        cfg,
-        &metadata,
-        "feature.mkv",
-        media.season,
-    ));
-    let mut explicit = cfg.clone();
-    explicit.tv_auto = kind == MediaKind::Tv;
-    let plan = crate::server::planner::plan(&explicit, &disc.titles, media, &target)
-        .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
-    let targets = tv_destinations(cfg, &plan)
-        .map(|(_, paths)| paths)
-        .unwrap_or_else(|| vec![target]);
+    let (plan, targets) = corrected_plan(cfg, &disc.titles, media)?;
     validate_corrected_targets_with_authorization(
         &job.iso,
         &targets,
@@ -351,6 +326,45 @@ fn attach_corrected_plan(
         .find(|j| j.id == job.id)
         .ok_or_else(|| std::io::Error::other("corrected remux job disappeared"))?;
     Ok(())
+}
+
+// The plan and library paths a confirmed match produces from the disc's titles.
+fn corrected_plan(
+    cfg: &Config,
+    titles: &[libfreemkv::DiscTitle],
+    media: &crate::server::planner::MediaMetadata,
+) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
+    use crate::server::planner::MediaKind;
+    let Some(kind) = media.kind else {
+        return Err(std::io::Error::other("saved match has no media type"));
+    };
+    let metadata = Some(crate::server::tmdb::TmdbResult {
+        title: media.title.clone(),
+        year: media.year,
+        tmdb_id: media.tmdb_id,
+        media_type: match kind {
+            MediaKind::Movie => "movie",
+            MediaKind::Tv => "tv",
+        }
+        .into(),
+        poster_url: String::new(),
+        overview: String::new(),
+    });
+    // Named as the ripper names a single output; a later disc takes the mover's `_N`.
+    let disc = u32::from(media.disc.unwrap_or(1));
+    let name = crate::server::util::disc_variant_name(&media.title, disc);
+    let target = std::path::PathBuf::from(crate::server::mover::build_destination(
+        cfg,
+        &metadata,
+        &crate::server::ripper::staged_output_name(&name, "mkv"),
+        media.season,
+    ));
+    let plan = crate::server::planner::plan(cfg, titles, media, &target)
+        .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
+    let targets = tv_destinations(cfg, &plan)
+        .map(|(_, paths)| paths)
+        .unwrap_or_else(|| vec![target]);
+    Ok((plan, targets))
 }
 
 #[cfg(test)]
@@ -412,6 +426,17 @@ fn after_tv_planning(planning: std::io::Result<()>, remux: impl FnOnce() -> Endi
     }
 }
 
+fn tv_metadata(media: &crate::server::planner::MediaMetadata) -> crate::server::tmdb::TmdbResult {
+    crate::server::tmdb::TmdbResult {
+        title: media.title.clone(),
+        year: media.year,
+        media_type: "tv".into(),
+        tmdb_id: media.tmdb_id,
+        poster_url: String::new(),
+        overview: String::new(),
+    }
+}
+
 fn tv_destinations(
     cfg: &Config,
     plan: &crate::server::planner::RemuxPlan,
@@ -422,14 +447,7 @@ fn tv_destinations(
     {
         return None;
     }
-    let metadata = Some(crate::server::tmdb::TmdbResult {
-        title: plan.media.title.clone(),
-        year: plan.media.year,
-        media_type: "tv".into(),
-        tmdb_id: plan.media.tmdb_id,
-        poster_url: String::new(),
-        overview: String::new(),
-    });
+    let metadata = Some(tv_metadata(&plan.media));
     let outputs: Vec<_> = plan
         .outputs
         .iter()
@@ -608,10 +626,7 @@ fn remux_planned_with(
             "TV destinations changed; preserve this plan and queue a new job with the current TV folder",
         ));
     }
-    let validate = |target: &Path| match &tv {
-        Some((root, _)) => safe_destination(root, target, true),
-        None => safe_to_create(&super::dirs(cfg), target),
-    };
+    let validate = |target: &Path| planned_target_ok(cfg, plan, target);
     let saved = sink.lib.queue.snapshot();
     let Some(current) = saved.jobs.iter().find(|j| j.id == job.id) else {
         return Ending::Failed(std::io::Error::other("remux job no longer exists"));
@@ -720,6 +735,25 @@ fn remux_planned_with(
         }
     }
     Ending::Done { writing_app }
+}
+
+// A planned output must sit under the root its plan files into.
+fn planned_target_ok(
+    cfg: &Config,
+    plan: &crate::server::planner::RemuxPlan,
+    target: &Path,
+) -> Result<(), String> {
+    if plan.media.kind == Some(crate::server::planner::MediaKind::Tv) {
+        let root = std::path::PathBuf::from(crate::server::mover::destination_root(
+            cfg,
+            &Some(tv_metadata(&plan.media)),
+        ));
+        // A TV plan files under the TV root, or the library for a legacy single output.
+        if target.starts_with(&root) {
+            return safe_destination(&root, target, true);
+        }
+    }
+    safe_to_create(&super::dirs(cfg), target)
 }
 
 fn remux_stage_dir() -> Option<std::path::PathBuf> {

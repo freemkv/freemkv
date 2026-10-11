@@ -5560,7 +5560,7 @@ pub(super) fn mux_reserve_for(
 
 // The staged leaf of a movie output (and the stem of its episodes): the title,
 // sanitized, with no `_2` disc suffix. A replan names it the same way.
-pub(super) fn staged_output_name(display_name: &str, ext: &str) -> String {
+pub(crate) fn staged_output_name(display_name: &str, ext: &str) -> String {
     format!(
         "{}.{ext}",
         crate::server::util::sanitize_path_compact(display_name)

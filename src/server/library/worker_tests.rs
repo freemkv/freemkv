@@ -1653,3 +1653,88 @@ fn a_share_fault_during_the_planning_scan_stays_a_storage_fault() {
     let error = planning_scan_error(libfreemkv::Error::from(stale));
     assert_eq!(storage_fault(&error), Some(Fault::Stale));
 }
+
+// Two authored 45-minute episodes and a short extra, as a TV disc's scan lists them.
+fn episodes_disc() -> Vec<libfreemkv::DiscTitle> {
+    let mut titles: Vec<_> = [2700.0, 2700.0, 90.0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, secs)| {
+            let mut title = libfreemkv::DiscTitle::empty();
+            title.playlist_id = index as u16;
+            title.duration_secs = secs;
+            title.extents = vec![libfreemkv::disc::Extent {
+                start_lba: 1000 * (index as u32 + 1),
+                sector_count: 1000,
+            }];
+            title
+        })
+        .collect();
+    for (index, title) in titles.iter_mut().enumerate() {
+        title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
+            roster: "test-menu".into(),
+            title_count: 3,
+            member: index < 2,
+            ordinal: (index < 2).then_some(index),
+        };
+    }
+    titles
+}
+
+#[test]
+fn a_wrong_title_iso_corrected_to_tv_honours_tv_auto_and_takes_the_shows_name() {
+    use crate::server::planner::{MediaKind, MediaMetadata};
+    let t = tempfile::tempdir().unwrap();
+    let output = t.path().join("output");
+    let tv_root = output.join("tv");
+    std::fs::create_dir_all(output.join("movies")).unwrap();
+    std::fs::write(output.join("movies/keep.mkv"), b"x").unwrap();
+    std::fs::create_dir_all(&tv_root).unwrap();
+    let cfg = Config {
+        output_dir: output.to_string_lossy().into_owned(),
+        movie_dir: "movies".into(),
+        tv_dir: "tv".into(),
+        tv_auto: false,
+        ..Default::default()
+    };
+    // The ISO was filed as "Wrong_Title.iso"; the correction names the file after the show.
+    let media = MediaMetadata {
+        title: "Right Show".into(),
+        year: 2004,
+        tmdb_id: 7,
+        season: Some(1),
+        kind: Some(MediaKind::Tv),
+        ..Default::default()
+    };
+    let (plan, targets) = corrected_plan(&cfg, &episodes_disc(), &media).unwrap();
+    assert_eq!(plan.outputs.len(), 1, "tv_auto off is one output");
+    assert_eq!(
+        targets,
+        vec![tv_root.join("Right Show (2004)/Season 01/Right_Show.mkv")]
+    );
+    planned_target_ok(&cfg, &plan, &targets[0]).unwrap();
+    // A later disc of the season takes the ripper's variant name, not disc 1's file.
+    let disc2 = MediaMetadata {
+        disc: Some(2),
+        ..media.clone()
+    };
+    let (_, targets) = corrected_plan(&cfg, &episodes_disc(), &disc2).unwrap();
+    assert_eq!(
+        targets,
+        vec![tv_root.join("Right Show (2004)/Season 01/Right_Show_2.mkv")]
+    );
+    let on = Config {
+        tv_auto: true,
+        ..cfg.clone()
+    };
+    let (plan, targets) = corrected_plan(&on, &episodes_disc(), &media).unwrap();
+    assert_eq!(
+        plan.outputs.len(),
+        2,
+        "tv_auto on is one output per episode"
+    );
+    for target in &targets {
+        assert!(target.starts_with(tv_root.join("Right Show (2004)/Season 01")));
+        planned_target_ok(&on, &plan, target).unwrap();
+    }
+}
