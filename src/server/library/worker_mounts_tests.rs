@@ -166,3 +166,18 @@ fn a_change_match_check_hung_on_the_tv_folder_does_not_hold_the_library_folders_
     );
     assert!(waited < std::time::Duration::from_secs(1), "{waited:?}");
 }
+
+#[test]
+fn an_empty_or_unreadable_root_is_named_as_the_folder_it_is() {
+    let t = tempfile::tempdir().unwrap();
+    let tv = t.path().join("tv");
+    std::fs::create_dir_all(&tv).unwrap();
+    let target = tv.join("Show/Show S01E01.mkv");
+    let error = safe_destination(&tv, &target, true).unwrap_err();
+    assert!(error.starts_with("the TV folder"), "{error}");
+    let error = safe_destination(&tv, &target, false).unwrap_err();
+    assert!(error.starts_with("the library folder"), "{error}");
+    let missing = t.path().join("gone");
+    let error = safe_destination(&missing, &missing.join("x.mkv"), true).unwrap_err();
+    assert!(error.starts_with("the TV folder"), "{error}");
+}

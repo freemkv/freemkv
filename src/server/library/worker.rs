@@ -1048,7 +1048,7 @@ fn planned_target_ok(
     if plan.media.kind == Some(crate::server::planner::MediaKind::Tv)
         && let Some(tv) = d.tv.as_ref().filter(|tv| target.starts_with(tv))
     {
-        return safe_destination(tv, target);
+        return safe_destination(tv, target, true);
     }
     safe_to_create(&d, target)
 }
@@ -1193,12 +1193,13 @@ mod staged_cleanup_tests;
 /// the library folder, and that folder must be listable and not empty (an
 /// unmounted share is an empty mountpoint on the local disk).
 pub(crate) fn safe_to_create(d: &super::Dirs, target: &std::path::Path) -> Result<(), String> {
-    safe_destination(&d.library, target)
+    safe_destination(&d.library, target, false)
 }
 
 /// [`safe_to_create`] under any configured `root` (the library or the TV folder): it must
 /// be listable and not empty, so an unmounted share's mountpoint is never written into.
-pub(super) fn safe_destination(root: &Path, target: &Path) -> Result<(), String> {
+/// `tv` says `root` is the TV folder, for the refusal's wording.
+pub(super) fn safe_destination(root: &Path, target: &Path, tv: bool) -> Result<(), String> {
     if !target.starts_with(root)
         || target
             .components()
@@ -1231,15 +1232,28 @@ pub(super) fn safe_destination(root: &Path, target: &Path) -> Result<(), String>
             }
         }
     }
+    let path = root.display().to_string();
     match std::fs::read_dir(root).map(|mut r| r.next().is_some()) {
         Ok(true) => Ok(()),
-        Ok(false) => Err(format!(
-            "the library folder {} is empty (is the share mounted?); nothing was written",
-            root.display()
+        Ok(false) if tv => Err(crate::strings::fmt_or(
+            "server.library.tv_folder_empty",
+            "the TV folder {path} is empty (is the share mounted?); nothing was written",
+            &[("path", &path)],
         )),
-        Err(e) => Err(format!(
-            "the library folder {} cannot be read ({e}); nothing was written",
-            root.display()
+        Ok(false) => Err(crate::strings::fmt_or(
+            "server.library.library_folder_empty",
+            "the library folder {path} is empty (is the share mounted?); nothing was written",
+            &[("path", &path)],
+        )),
+        Err(e) if tv => Err(crate::strings::fmt_or(
+            "server.library.tv_folder_unreadable",
+            "the TV folder {path} cannot be read ({error}); nothing was written",
+            &[("path", &path), ("error", &e.to_string())],
+        )),
+        Err(e) => Err(crate::strings::fmt_or(
+            "server.library.library_folder_unreadable",
+            "the library folder {path} cannot be read ({error}); nothing was written",
+            &[("path", &path), ("error", &e.to_string())],
         )),
     }
 }

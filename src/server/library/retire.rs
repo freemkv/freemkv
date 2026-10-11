@@ -60,7 +60,8 @@ pub(super) fn run(
             .iter()
             .find(|root| old.path.starts_with(root))
             .ok_or_else(|| outside(&old.path))?;
-        super::worker::safe_destination(root, &old.path).map_err(io::Error::other)?;
+        let tv = r.roots.first() != Some(root);
+        super::worker::safe_destination(root, &old.path, tv).map_err(io::Error::other)?;
         // A missing folder is a share that went away, not a file someone removed.
         if old
             .path
