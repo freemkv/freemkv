@@ -2719,7 +2719,8 @@ impl RootChecks {
         }
         #[cfg(test)]
         test_hooks::preflighted(root);
-        let result = crate::server::health::preflight_with("output", root, self.limit, self.probe);
+        let role = crate::server::health::watched_role(root).unwrap_or("output");
+        let result = crate::server::health::preflight_with(role, root, self.limit, self.probe);
         if result.is_ok()
             && let Some(id) = std::fs::metadata(root)
                 .ok()

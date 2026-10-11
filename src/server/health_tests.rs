@@ -719,8 +719,9 @@ fn a_late_answer_is_the_verdict() {
     set_mounts(Vec::new());
 }
 
-// A preflight that waits to the hang bound counts it from its probe's own start, so running
-// out means hung: published, and worded as a hang, never "still checking".
+// A preflight that waits to the hang bound counts it from the call, waiting for an earlier
+// probe included: it never waits two bounds. Its own probe, out less than the bound when the
+// wait runs out, is "still checking", not hung; its answer, when it comes, is the verdict.
 #[test]
 fn a_preflight_waiting_to_the_hang_bound_publishes_the_hang() {
     let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -728,10 +729,10 @@ fn a_preflight_waiting_to_the_hang_bound_publishes_the_hang() {
     let dir = t.path().to_path_buf();
     publish(vec![ok_mount("Movies", &dir)], false);
     let hang = Duration::from_secs(2);
-    // Someone else's probe answers part-way through the wait: our own probe starts late, and
-    // still gets the whole hang bound before it counts as hung.
+    // Someone else's probe answers part-way through the wait: our own probe starts late.
     let earlier = stuck_probe(&dir, mount_key(&dir), Some(Instant::now()));
     let (probe, open) = gated();
+    let called = Instant::now();
     let caller = {
         let dir = dir.clone();
         std::thread::spawn(move || preflight_hanging_after("output", &dir, hang, hang, probe))
@@ -739,17 +740,14 @@ fn a_preflight_waiting_to_the_hang_bound_publishes_the_hang() {
     eventually("the caller waits on the earlier probe", || {
         someone_waited_on(&dir)
     });
-    // Well into the wait (far from the earlier probe's own hang bound), it answers.
     std::thread::sleep(hang / 4);
     drop(earlier);
     let p = caller.join().unwrap().unwrap_err();
+    assert!(called.elapsed() < hang + hang / 4, "{:?}", called.elapsed());
     assert_eq!(p.fault, Fault::Unresponsive);
-    assert!(p.detail.starts_with("no answer for"), "{}", p.detail);
-    assert_eq!(status_for(&dir).unwrap().state, State::Unresponsive);
+    assert!(p.detail.contains(STILL_CHECKING), "{}", p.detail);
     open.send(()).unwrap();
-    eventually("the answer clears the hang", || {
-        status_for(&dir).unwrap().ok
-    });
+    eventually("the answer is the verdict", || status_for(&dir).unwrap().ok);
     set_mounts(Vec::new());
 }
 
@@ -759,7 +757,12 @@ fn a_preflight_waiting_to_the_hang_bound_publishes_the_hang() {
 fn a_slow_check_reads_checking_until_it_hangs() {
     let p = PathBuf::from("/test/slow-not-hung");
     let row = vec![("Movies", p.clone(), false)];
-    let young = stuck_probe(&p, mount_key(&p), Some(Instant::now()));
+    // Out longer than the health thread's wait, far from the hang bound.
+    let young = stuck_probe(
+        &p,
+        mount_key(&p),
+        Some(Instant::now() - Duration::from_millis(50)),
+    );
     let m = check_folders(
         row.clone(),
         Duration::from_millis(30),
@@ -986,5 +989,163 @@ fn mountinfo_names_the_mount_holding_a_path() {
     assert_eq!(
         mount_id_in(&remounted, Path::new("/mnt/my share/movies")),
         Some(140)
+    );
+}
+
+// A stop requested during a round's checks skips its remount: umount plus mount.nfs4 can
+// take 45 s, which the stop's drain budget does not have.
+#[test]
+fn a_round_that_sees_a_stop_does_not_heal() {
+    let healed = std::cell::Cell::new(false);
+    round(|| STOPPING.with(|s| s.set(true)), || healed.set(true));
+    STOPPING.with(|s| s.set(false));
+    assert!(!healed.get());
+    round(|| {}, || healed.set(true));
+    assert!(healed.get(), "a normal round heals");
+}
+
+// One folder whose probe is still out (another caller's) does not hold up starting the
+// others: it reads as not answered, and every other folder is checked within the limit.
+#[test]
+fn a_busy_folder_does_not_hold_up_the_rest_of_the_batch() {
+    let busy = PathBuf::from("/test/batch-queue-busy");
+    let free = PathBuf::from("/test/batch-queue-free");
+    let running = begin(&busy, Duration::from_secs(5), || {
+        std::thread::sleep(Duration::from_millis(1500));
+    });
+    let t = Instant::now();
+    let out = bounded_each(
+        vec![(busy.clone(), 1), (free.clone(), 2)],
+        Duration::from_millis(600),
+        |n| n,
+    );
+    let took = t.elapsed();
+    let _ = running.wait();
+    assert_ne!(
+        out[0],
+        Bounded::Done(1),
+        "the busy folder is not probed twice"
+    );
+    assert_eq!(out[1], Bounded::Done(2), "the free folder is checked");
+    assert!(took < Duration::from_millis(500), "took {took:?}");
+}
+
+// A preflight waits at most one hang bound in all, from the call: waiting for another
+// caller's probe and then for its own never adds up to two.
+#[test]
+fn a_preflight_waits_one_hang_bound_in_all() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().to_path_buf();
+    let hang = Duration::from_millis(1000);
+    let earlier = begin(&dir, Duration::from_secs(5), || {
+        std::thread::sleep(Duration::from_millis(800));
+    });
+    let started = Instant::now();
+    let result = preflight_hanging_after("Output", &dir, hang, hang, |_| {
+        std::thread::sleep(Duration::from_millis(900));
+        Ok(())
+    });
+    let took = started.elapsed();
+    let _ = earlier.wait();
+    assert!(
+        took < Duration::from_millis(1400),
+        "took {took:?}: {result:?}"
+    );
+}
+
+// A writability probe left behind (its removal failed) is ours to sweep: a later
+// successful preflight removes our stale markers, and nothing else.
+#[test]
+fn leftover_probe_files_are_swept_by_a_later_preflight() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path();
+    let old = std::time::SystemTime::now() - Duration::from_secs(2 * 3600);
+    let stale = dir.join(".freemkv-probe-123-456");
+    let fresh = dir.join(".freemkv-probe-124-457");
+    let foreign = dir.join(".freemkv-probe-notes");
+    let folder = dir.join(".freemkv-probe-125-458");
+    for f in [&stale, &fresh, &foreign] {
+        std::fs::write(f, b"").unwrap();
+    }
+    std::fs::create_dir(&folder).unwrap();
+    for f in [&stale, &foreign] {
+        std::fs::File::options()
+            .write(true)
+            .open(f)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    // Our own marker whose removal failed just now.
+    probe_write_with(dir, |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    })
+    .unwrap();
+    let ours: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!(".freemkv-probe-{}-", std::process::id()))
+        })
+        .collect();
+    assert_eq!(ours.len(), 1, "fixture: a marker left behind");
+    probe_write(dir).unwrap();
+    assert!(!stale.exists(), "a stale marker is swept");
+    assert!(!ours[0].exists(), "our own leftover is swept");
+    assert!(
+        fresh.exists(),
+        "a recent marker may be another server's live probe"
+    );
+    assert!(foreign.exists() && folder.exists(), "only our marker files");
+}
+
+// The mover's preflight of a watched root is published under that folder's own name, not
+// as "the output folder".
+#[test]
+fn a_preflight_answer_is_worded_for_the_folder_it_is_about() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = PathBuf::from("/test/role-worded/Movies");
+    WATCHED.lock().unwrap().push(("Movies", path.clone()));
+    publish_answer(Problem::new("output", &path, Fault::Missing, "missing".into()).mount());
+    let shown = status_for(&path);
+    WATCHED.lock().unwrap().retain(|(_, p)| *p != path);
+    LAST.lock().unwrap().retain(|m| m.path != path);
+    let shown = shown.expect("published");
+    let message = shown.message.unwrap_or_default();
+    assert!(message.contains("movies folder"), "{message}");
+}
+
+// One rule for writability: once a real write test (a preflight) has failed for a folder,
+// the health check's access() verdict cannot clear it; the health check runs the same
+// write test for that folder until it passes. Otherwise it writes nothing.
+#[test]
+fn a_failed_write_test_is_not_overridden_by_access() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t = tempfile::tempdir().unwrap();
+    let path = t.path().to_path_buf();
+    WATCHED.lock().unwrap().push(("Movies", path.clone()));
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    fn quota(_: &Path) -> std::io::Result<()> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Err(std::io::Error::from_raw_os_error(libc::EDQUOT))
+    }
+    let healthy = check_with("Movies", &path, true, quota);
+    let calls_while_healthy = CALLS.load(Ordering::SeqCst);
+    let failed = preflight_with("Movies", &path, Duration::from_secs(5), quota);
+    let checked = check_with("Movies", &path, true, quota);
+    WATCHED.lock().unwrap().retain(|(_, p)| *p != path);
+    LAST.lock().unwrap().retain(|m| m.path != path);
+    assert!(healthy.ok, "{healthy:?}");
+    assert_eq!(
+        calls_while_healthy, 0,
+        "no write test while access() agrees"
+    );
+    assert!(failed.is_err());
+    assert!(
+        !checked.ok,
+        "access() overrode the failed write test: {checked:?}"
     );
 }
