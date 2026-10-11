@@ -2156,6 +2156,21 @@ fn copy_counting_sees_a_shutdown_raised_mid_copy() {
 
 /// Repo-local, gitignored scratch dir (never /tmp). Each call makes a
 /// unique subdir so parallel test threads don't collide.
+// Puts each path's mode back when dropped, a failed assertion included: a read-only
+// folder left in target/test-scratch blocks removing it.
+#[cfg(unix)]
+struct RestoreModes(Vec<(std::path::PathBuf, u32)>);
+
+#[cfg(unix)]
+impl Drop for RestoreModes {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        for (path, mode) in &self.0 {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(*mode));
+        }
+    }
+}
+
 fn scratch_dir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -2514,6 +2529,7 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
     // src unreadable → the copy fails at `File::open(src)`, before any temp
     // exists. src's DIRECTORY unwritable → `rename(2)` fails first (it must
     // unlink the source name), so we reach the copy branch at all.
+    let restore = RestoreModes(vec![(src_dir.clone(), 0o755), (src.clone(), 0o644)]);
     std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o000)).unwrap();
     std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -2538,8 +2554,7 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
         o
     };
 
-    std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(restore);
     if readable_anyway {
         eprintln!(
             "SKIP move_file_copy_failure_with_no_dest_records_no_partial_error: \
@@ -2575,6 +2590,7 @@ fn move_file_copy_failure_keeps_pre_existing_dest() {
     write_minimal_mkv(&dest, b"the complete library copy from an earlier tick");
     let good_bytes = std::fs::read(&dest).unwrap();
 
+    let restore = RestoreModes(vec![(src_dir.clone(), 0o755), (src.clone(), 0o644)]);
     std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o000)).unwrap();
     std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -2600,8 +2616,7 @@ fn move_file_copy_failure_keeps_pre_existing_dest() {
         o
     };
 
-    std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(restore);
     if readable_anyway {
         eprintln!(
             "SKIP move_file_copy_failure_keeps_pre_existing_dest: \
@@ -2636,6 +2651,7 @@ fn move_file_copy_failure_removes_this_attempts_dest() {
     write_minimal_mkv(&src, b"staging source bytes that cannot be read");
     assert!(!dest.exists(), "dest must not pre-date the attempt");
 
+    let restore = RestoreModes(vec![(src_dir.clone(), 0o755), (src.clone(), 0o644)]);
     std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o000)).unwrap();
     std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -2663,8 +2679,7 @@ fn move_file_copy_failure_removes_this_attempts_dest() {
         o
     };
 
-    std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(restore);
     if readable_anyway {
         eprintln!(
             "SKIP move_file_copy_failure_removes_this_attempts_dest: \
