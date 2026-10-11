@@ -220,11 +220,16 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     if job.plan.is_some() || job.staged.is_some() {
         return Ok(());
     }
-    let episode = linked_episode(&lib.config_dir, job)?;
-    if let Some(saved) = lib.match_store()?.get(&job.iso) {
-        let now = super::links::iso_stamp(&job.iso);
-        if saved.is_for(now) {
-            let row = (episode && !job.retire).then(|| job.target.clone());
+    let saved = lib.match_store()?.get(&job.iso);
+    let now = saved.as_ref().map(|_| super::links::iso_stamp(&job.iso));
+    let current = saved
+        .as_ref()
+        .zip(now)
+        .is_some_and(|(s, now)| s.is_for(now));
+    let episode = linked_episode(&lib.config_dir, job, job.replace || current)?;
+    if let Some((saved, now)) = saved.zip(now) {
+        if current {
+            let row = episode.then(|| job.target.clone());
             return attach_corrected_plan(lib, cfg, job, &saved.media, row.as_deref());
         }
         // Confirmed for an earlier disc filed at this ISO path: not this disc's identity.
@@ -256,13 +261,19 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     attach_from_lookup(lib, cfg, job, looked_up)
 }
 
-// Whether links.json records the job's target as one episode of its ISO's split disc. Links
-// that cannot be read fail a replace: a guess could plan a whole-disc movie over an episode.
-fn linked_episode(config_dir: &Path, job: &Job) -> std::io::Result<bool> {
-    if !job.replace {
+// Whether the job's row is an episode links.json records for its ISO's split disc; a Change
+// match plans the whole disc. Unreadable links fail a job that may overwrite (`strict`): a
+// guess could plan a whole-disc movie over an episode.
+fn linked_episode(config_dir: &Path, job: &Job, strict: bool) -> std::io::Result<bool> {
+    if job.retire {
         return Ok(false);
     }
-    Ok(links_for_job(config_dir)?
+    let links = match links_for_job(config_dir) {
+        Ok(links) => links,
+        Err(e) if strict => return Err(e),
+        Err(_) => return Ok(false),
+    };
+    Ok(links
         .get(&job.target)
         .is_some_and(|l| l.episode && l.iso == job.iso))
 }
@@ -327,7 +338,7 @@ fn attach_from_lookup(
             "TMDB could not be reached to plan this disc; retry once it is back",
         ))
     })?;
-    let episode = linked_episode(&lib.config_dir, job)?;
+    let episode = linked_episode(&lib.config_dir, job, job.replace)?;
     let label = lookup_label(job, episode);
     let tv_match = found.filter(|m| {
         m.media_type.is_tv() && crate::server::tmdb::is_confident_match(&label, &m.title, m.year)
