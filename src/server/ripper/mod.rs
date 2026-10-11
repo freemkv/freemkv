@@ -361,18 +361,6 @@ pub fn plan_line(p: &freemkv_engine::Plan) -> String {
     )
 }
 
-// Whether the rip's set covers `scope` for `disc`, forensic keys aside (a multipass rip asks
-// for Pending ones once, from its image). `covers` holds for any non-AACS set, so an AACS
-// disc's titles also need an AACS set.
-fn keys_cover(
-    disc: &libfreemkv::Disc,
-    set: &libfreemkv::keys::KeyRing,
-    scope: &libfreemkv::keys::KeyScope,
-) -> bool {
-    let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
-    set.is_for(&disc.media_id()) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
-}
-
 // Whether the rip can decrypt what it produces: no scope needs no key; otherwise the set's
 // status (CSS and clear discs as the library reads them).
 fn rip_keyed(
@@ -3231,8 +3219,10 @@ fn rip_disc_inner(
     let key_scope = rip_key_scope(&disc, &cfg_read, &tmdb_media_type, &disc_name);
     // The scan's key reads: every resolve below is served what the scan already read.
     let mut key_reads = std::mem::take(&mut session.key_reads);
+    // The scan's set when it covers the rip, forensic keys aside (a multipass rip asks for
+    // Pending ones once, from its image).
     let mut rip_keys: KeyResult = match (session.keys.take(), session.key_error.take()) {
-        (Some(set), _) if keys_cover(&disc, &set, &key_scope) => Ok(set),
+        (Some(set), _) if freemkv_engine::keys::covers_scope(&set, &disc, &key_scope) => Ok(set),
         (Some(set), _) => resolve_rip_keys(
             device,
             &cfg_read,

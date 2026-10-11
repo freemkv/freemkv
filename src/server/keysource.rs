@@ -174,11 +174,8 @@ pub fn drive_scan_opts(cfg: &Config) -> libfreemkv::ScanOptions {
 /// sourced from a specific keydb path — the handshake's only keydb dependency
 /// (an unlocked / firmware-unlocked drive ignores them).
 pub fn drive_scan_opts_for_keydb(keydb: &Path) -> libfreemkv::ScanOptions {
-    let host_certs = KeydbSource::new(keydb).host_certs();
-    let credentials =
-        (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs });
     libfreemkv::ScanOptions {
-        credentials,
+        credentials: freemkv_engine::keys::drive_credentials(keydb),
         ..Default::default()
     }
 }
@@ -258,7 +255,7 @@ fn resolve_with(
     let _ = take_online_decode_reachability();
     let (set, trace) =
         freemkv_engine::keys::resolve_for_rip_traced(disc, reader, scope, factory, seed, halt);
-    let hash = disc.aacs.as_ref().map_or("", |a| a.disc_hash.as_str());
+    let hash = disc.intrinsic_id().unwrap_or_default();
     log_key_walk(&trace, hash);
     let set = set?;
     let st = set.status();
@@ -461,8 +458,8 @@ pub(crate) fn open_staged(
 fn disc_hash_of(opts: &freemkv_engine::OpenImageOptions) -> String {
     opts.disc
         .as_ref()
-        .and_then(|d| d.aacs.as_ref())
-        .map_or_else(String::new, |a| a.disc_hash.clone())
+        .and_then(|d| d.intrinsic_id())
+        .map_or_else(String::new, str::to_string)
 }
 
 // The per-source key walk, always (success or refusal): the operator's only view of why a
