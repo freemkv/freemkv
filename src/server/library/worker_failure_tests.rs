@@ -52,9 +52,9 @@ fn links_that_cannot_be_saved_after_landing_say_the_file_is_in_place() {
         .join("config")
         .join(super::super::super::links::LINKS_FILE);
     std::fs::write(&links, b"{}").unwrap();
-    std::fs::set_permissions(&links, std::fs::Permissions::from_mode(0o000)).unwrap();
-    if std::fs::read(&links).is_ok() {
-        return; // running as a user that ignores modes
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root ignores modes
     }
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
@@ -69,6 +69,8 @@ fn links_that_cannot_be_saved_after_landing_say_the_file_is_in_place() {
         &cfg,
         &sink,
         |request, _, _| {
+            // The links file becomes unreadable once the owned files were captured.
+            std::fs::set_permissions(&links, std::fs::Permissions::from_mode(0o000))?;
             std::fs::write(&request.target, movie())?;
             Ok(Some(current_stamp()))
         },

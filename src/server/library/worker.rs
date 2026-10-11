@@ -184,10 +184,12 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     if job.plan.is_some() || job.staged.is_some() {
         return Ok(());
     }
+    let episode = linked_episode(&lib.config_dir, job)?;
     if let Some(saved) = lib.match_store()?.get(&job.iso) {
         let now = super::links::iso_stamp(&job.iso);
         if saved.is_for(now) {
-            return attach_corrected_plan(lib, cfg, job, &saved.media);
+            let row = (episode && !job.retire).then(|| job.target.clone());
+            return attach_corrected_plan(lib, cfg, job, &saved.media, row.as_deref());
         }
         // Confirmed for an earlier disc filed at this ISO path: not this disc's identity.
         // At the same size only the time moved, so it may be the same disc: never guess.
@@ -205,42 +207,62 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
         tracing::info!(iso = %job.iso.display(), "saved match is for an earlier disc at this path; ignored");
     }
     if !cfg.tv_auto {
-        if linked_episode(&lib.config_dir, job) {
-            return Err(episode_alone(job));
+        if episode {
+            return Err(episode_alone(&job.target));
         }
         return attach_automatic_movie_plan(lib, cfg, job);
     }
     let looked_up = if cfg.tmdb_api_key.is_empty() {
         Ok(None)
     } else {
-        crate::server::tmdb::lookup(&lookup_label(lib, job), &cfg.tmdb_api_key)
+        crate::server::tmdb::lookup(&lookup_label(job, episode), &cfg.tmdb_api_key)
     };
     attach_from_lookup(lib, cfg, job, looked_up)
 }
 
-// Whether links.json records the job's target as one episode of its ISO's split disc.
-fn linked_episode(config_dir: &Path, job: &Job) -> bool {
-    super::links::entries(config_dir)
+// Whether links.json records the job's target as one episode of its ISO's split disc. Links
+// that cannot be read fail a replace: a guess could plan a whole-disc movie over an episode.
+fn linked_episode(config_dir: &Path, job: &Job) -> std::io::Result<bool> {
+    if !job.replace {
+        return Ok(false);
+    }
+    Ok(links_for_job(config_dir)?
         .get(&job.target)
-        .is_some_and(|l| l.episode && l.iso == job.iso)
+        .is_some_and(|l| l.episode && l.iso == job.iso))
+}
+
+// Every link, or the error a job fails with when links.json cannot be read.
+fn links_for_job(
+    config_dir: &Path,
+) -> std::io::Result<std::collections::HashMap<std::path::PathBuf, super::links::Link>> {
+    super::links::read_entries(config_dir).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            crate::strings::fmt_or(
+                "server.library.links_unreadable",
+                "{file} in the config folder could not be read ({error}), so which files this ISO made is unknown; nothing was written. Fix that file or its folder's permissions, then Retry.",
+                &[("file", super::links::LINKS_FILE), ("error", &e.to_string())],
+            ),
+        )
+    })
 }
 
 // What the disc is looked up by: an episode row is named after one episode, its ISO after the disc.
-fn lookup_label(lib: &Library, job: &Job) -> String {
+fn lookup_label(job: &Job, episode: bool) -> String {
     match job.iso.file_stem() {
-        Some(stem) if linked_episode(&lib.config_dir, job) => stem.to_string_lossy().into_owned(),
+        Some(stem) if episode => stem.to_string_lossy().into_owned(),
         _ => job.title.clone(),
     }
 }
 
 // An episode row remuxes only the planned output that lands on it, never a whole-disc movie.
-fn episode_alone(job: &Job) -> std::io::Error {
+fn episode_alone(row: &Path) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         crate::strings::fmt_or(
             "server.library.episode_unplanned",
             "{path} is one episode of a disc that was split into several files, and this remux could not find which of the disc's titles it is, so nothing was written. Use Change match on its ISO to remux the whole disc.",
-            &[("path", &job.target.display().to_string())],
+            &[("path", &row.display().to_string())],
         ),
     )
 }
@@ -269,11 +291,11 @@ fn attach_from_lookup(
             "TMDB could not be reached to plan this disc; retry once it is back",
         ))
     })?;
-    let label = lookup_label(lib, job);
+    let episode = linked_episode(&lib.config_dir, job)?;
+    let label = lookup_label(job, episode);
     let tv_match = found.filter(|m| {
         m.media_type.is_tv() && crate::server::tmdb::is_confident_match(&label, &m.title, m.year)
     });
-    let episode = linked_episode(&lib.config_dir, job);
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     // TV as the ripper decides it: a TMDB TV match, or a disc label that names a season.
@@ -291,7 +313,7 @@ fn attach_from_lookup(
     .any(|l| crate::server::ripper::plan_kind(kind, l).is_some());
     if !tv {
         if episode {
-            return Err(episode_alone(job));
+            return Err(episode_alone(&job.target));
         }
         return persist_movie_plan(lib, cfg, job, &disc.titles);
     }
@@ -319,7 +341,7 @@ fn attach_from_lookup(
         let row = tv_destinations(cfg, &plan)
             .and_then(|(_, targets)| only_the_row(plan, targets, &job.target));
         let Some((plan, targets)) = row else {
-            return Err(episode_alone(job));
+            return Err(episode_alone(&job.target));
         };
         return persist_plan(lib, job, plan, Some(targets));
     }
@@ -435,11 +457,13 @@ fn with_label_numbers(
     media
 }
 
+// `row`: the episode row a plain Remux was asked for; only its output is planned.
 fn attach_corrected_plan(
     lib: &Library,
     cfg: &Config,
     job: &mut Job,
     media: &crate::server::planner::MediaMetadata,
+    row: Option<&Path>,
 ) -> std::io::Result<()> {
     if media.kind.is_none() {
         return Err(std::io::Error::other("saved match has no media type"));
@@ -452,7 +476,7 @@ fn attach_corrected_plan(
         disc.meta_title.as_deref(),
         &job.title,
     );
-    let (plan, targets) = corrected_plan(cfg, &disc.titles, media)?;
+    let (plan, targets) = corrected_plan_for(cfg, &disc.titles, media, row)?;
     if !lib
         .queue
         .set_plan_targets(job.id, plan, Some(targets))
@@ -470,6 +494,20 @@ fn attach_corrected_plan(
         .find(|j| j.id == job.id)
         .ok_or_else(|| std::io::Error::other("corrected remux job disappeared"))?;
     Ok(())
+}
+
+// The corrected plan, or for an episode `row` only the output that lands on it.
+fn corrected_plan_for(
+    cfg: &Config,
+    titles: &[libfreemkv::DiscTitle],
+    media: &crate::server::planner::MediaMetadata,
+    row: Option<&Path>,
+) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
+    let (plan, targets) = corrected_plan(cfg, titles, media)?;
+    match row {
+        None => Ok((plan, targets)),
+        Some(row) => only_the_row(plan, targets, row).ok_or_else(|| episode_alone(row)),
+    }
 }
 
 // The plan and library paths a confirmed match produces from the disc's titles.
@@ -1005,12 +1043,13 @@ fn landed_by_this_job(config_dir: &Path, iso: &Path, target: &Path) -> bool {
 
 // The files a job may overwrite: links for its ISO under the output folders, plus the
 // row's own MKV when queued to replace it, unless a link says that file is no longer the
-// one this ISO made. Links that cannot be read stop a correction.
+// one this ISO made. Links that cannot be read stop a correction or a replace; without
+// them a new file's job owns nothing.
 fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<Vec<Owned>> {
-    let links = if job.retire {
-        super::links::read_entries(config_dir)?
-    } else {
-        super::links::entries(config_dir)
+    let links = match links_for_job(config_dir) {
+        Ok(links) => links,
+        Err(e) if job.retire || job.replace => return Err(e),
+        Err(_) => Default::default(),
     };
     let roots = super::owned::roots(&super::dirs(cfg));
     let targets = job.output_targets();
