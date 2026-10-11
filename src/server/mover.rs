@@ -593,16 +593,22 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
 
 /// Operator-initiated Retry: clear this error and its retry budget. The next
 /// mover tick may attempt delivery again; no media is removed by this action.
+/// A destination row retries the delivery that owns it (and only that row's own
+/// missing-folder wait consents to recreating the folder).
 /// False when nothing was scheduled: no such row, or its copy worker is still blocked.
 pub fn clear_move_error(path: &str) -> bool {
     with_retry_maps(|errors, requests| {
-        if errors.get(path).is_some_and(|e| !e.worker_active)
-            && let Some(row) = errors.remove(path)
-        {
-            *requests.entry(path.to_string()).or_insert(false) |= row.missing_folder;
-            return true;
+        let Some(row) = errors.get(path) else {
+            return false;
+        };
+        let delivery = row.owner.clone().unwrap_or_else(|| path.to_string());
+        if row.worker_active || errors.get(&delivery).is_some_and(|e| e.worker_active) {
+            return false;
         }
-        false
+        let consents = errors.remove(path).is_some_and(|r| r.missing_folder);
+        errors.remove(&delivery);
+        *requests.entry(delivery).or_insert(false) |= consents;
+        true
     })
 }
 
@@ -1282,6 +1288,31 @@ fn finish_filed_elsewhere(dir: &Path, display_name: &str) {
 #[cfg(test)]
 pub(crate) fn record_test_error(path: &str) {
     record_error_with(path, "test failure", "test hint", |_| {});
+}
+
+// A held delivery row for `owner` and a destination row it raised for `dest`.
+#[cfg(test)]
+pub(crate) fn record_test_dest_error(dest: &str, owner: &str) {
+    record_error_with(owner, "test failure", "test hint", |_| {});
+    record_error_with(dest, "publication failed: test", "test hint", |_| {});
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(row) = errors.get_mut(owner) {
+        row.retry_after = None;
+        row.retry_held = true;
+    }
+    if let Some(row) = errors.get_mut(dest) {
+        row.owner = Some(owner.to_string());
+    }
+}
+
+// Whether an operator Retry for `path` was waiting for the next pass; it is taken.
+#[cfg(test)]
+pub(crate) fn take_retry_request(path: &str) -> bool {
+    RETRY_REQUESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(path)
+        .is_some()
 }
 
 // Forget in-memory mover state, as a process restart would.

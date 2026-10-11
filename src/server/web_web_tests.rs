@@ -4679,6 +4679,35 @@ mod http {
         assert!(b5.contains("\"scheduled\":true"), "{b5}");
     }
 
+    // Retry on a row naming a destination step's error retries the delivery that owns it.
+    #[test]
+    fn retry_on_a_destination_row_retries_its_delivery() {
+        let _g = crate::server::mover::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let owner = "/test-web-dest-retry/staging/job";
+        let dest = "/test-web-dest-retry/lib/X (2020)/X (2020).mkv";
+        crate::server::mover::record_test_dest_error(dest, owner);
+        let url = "/api/move-errors/clear?path=%2Ftest-web-dest-retry%2Flib%2FX%20(2020)%2FX%20(2020).mkv";
+        let (code, body) = roundtrip(&cfg, "POST", url, None, &[]);
+        let errors = {
+            let mut errors = crate::server::mover::MOVE_ERRORS.lock().unwrap();
+            let seen = errors.clone();
+            errors.retain(|key, _| key != owner && key != dest);
+            seen
+        };
+        let requested = crate::server::mover::take_retry_request(owner);
+        assert_eq!(code, 200, "{body}");
+        assert!(body.contains("\"scheduled\":true"), "{body}");
+        assert!(requested, "the owning delivery's Retry is requested");
+        assert!(
+            !errors.contains_key(owner),
+            "the delivery is no longer held"
+        );
+        assert!(!errors.contains_key(dest));
+    }
+
     // ── SSE first frame (GET /events): it loops forever, so roundtrip
     // (reads to EOF) would hang. Run the handler on its own thread, read
     // the first SSE frame, then drop the socket so the next write fails.
