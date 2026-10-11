@@ -119,6 +119,52 @@ pub fn pinned_mtime(t: std::time::SystemTime) -> std::time::SystemTime {
     }
 }
 
+/// What a journal proves about a file it wrote: its size and the modification time
+/// pinned before close (see [`pin_mtime`]). Never a device or inode: SMB mounts
+/// number devices per mount and derive inodes from names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stamp {
+    pub size: u64,
+    pub modified: std::time::SystemTime,
+}
+
+impl Stamp {
+    /// The stamp of the regular file at `path`; a symlink or directory is an error.
+    pub fn read(path: &std::path::Path) -> std::io::Result<Self> {
+        if !std::fs::symlink_metadata(path)?.is_file() {
+            return Err(std::io::Error::other(format!(
+                "not a regular file: {}",
+                path.display()
+            )));
+        }
+        // Read through an open handle: SMB clients refresh cached attributes on open.
+        let metadata = std::fs::File::open(path)?.metadata()?;
+        Ok(Self {
+            size: metadata.len(),
+            modified: metadata.modified()?,
+        })
+    }
+
+    /// Whether `path` still carries this stamp. A missing file stays `NotFound`.
+    pub fn verify(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if Self::read(path)? != *self {
+            return Err(std::io::Error::other(format!(
+                "file changed since it was recorded: {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Set the file's modification time to [`pinned_mtime`] of its own, before the
+/// writer closes it, so a deferred SMB close cannot restamp it.
+pub fn pin_mtime(path: &std::path::Path) -> std::io::Result<()> {
+    let file = std::fs::File::options().write(true).open(path)?;
+    let modified = file.metadata()?.modified()?;
+    file.set_modified(pinned_mtime(modified))
+}
+
 /// How many discs may hide behind one title before we stop trying. A title
 /// with 64 distinct discs behind it is a bug, not a boxset.
 pub const MAX_DISC_VARIANTS: u32 = 64;

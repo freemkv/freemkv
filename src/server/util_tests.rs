@@ -209,3 +209,105 @@ fn format_duration_hm_pads_minutes() {
 fn format_duration_hm_two_hours() {
     assert_eq!(format_duration_hm(2.0 * 3600.0 + 30.0 * 60.0), "2h 30m");
 }
+
+#[test]
+fn a_stamp_is_read_from_regular_files_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"bytes").unwrap();
+    let stamp = Stamp::read(&file).unwrap();
+    assert_eq!(stamp.size, 5);
+    assert_eq!(
+        stamp.modified,
+        std::fs::metadata(&file).unwrap().modified().unwrap()
+    );
+    assert!(Stamp::read(temp.path()).is_err(), "a directory");
+    #[cfg(unix)]
+    {
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(Stamp::read(&link).is_err(), "a symlink");
+    }
+}
+
+#[test]
+fn a_stamp_verifies_size_and_time_and_passes_not_found_through() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"bytes").unwrap();
+    pin_mtime(&file).unwrap();
+    let stamp = Stamp::read(&file).unwrap();
+    stamp.verify(&file).unwrap();
+    // Equal bytes under a new inode keep the stamp: names, not ids, identify files.
+    let copy = temp.path().join("copy");
+    std::fs::write(&copy, b"bytes").unwrap();
+    std::fs::rename(&copy, &file).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(stamp.modified)
+        .unwrap();
+    stamp.verify(&file).unwrap();
+    let later = stamp.modified + std::time::Duration::from_secs(2);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    assert!(stamp.verify(&file).is_err(), "time changed");
+    std::fs::write(&file, b"longer bytes").unwrap();
+    assert!(
+        Stamp {
+            modified: Stamp::read(&file).unwrap().modified,
+            ..stamp
+        }
+        .verify(&file)
+        .is_err(),
+        "size changed"
+    );
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(
+        stamp.verify(&file).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn pin_mtime_rounds_down_to_an_even_second() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"bytes").unwrap();
+    let odd = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_001, 500);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(odd)
+        .unwrap();
+    pin_mtime(&file).unwrap();
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
+    );
+}
+
+#[test]
+fn an_older_journal_identity_reads_as_a_stamp() {
+    let old = serde_json::json!({
+        "file_id": [16777232, 4242],
+        "size": 19,
+        "modified": {"secs_since_epoch": 1_700_000_000u64, "nanos_since_epoch": 0},
+    });
+    let stamp: Stamp = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        stamp,
+        Stamp {
+            size: 19,
+            modified: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+        }
+    );
+    let saved = serde_json::to_value(stamp).unwrap();
+    assert_eq!(saved.as_object().unwrap().len(), 2, "{saved}");
+}
