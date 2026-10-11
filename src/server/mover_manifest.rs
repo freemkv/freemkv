@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-pub(super) const FILE: &str = ".delivery.json";
+pub(super) const FILE: &str = crate::server::ripper::staging::DELIVERY_JOURNAL;
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

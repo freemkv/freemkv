@@ -448,3 +448,83 @@ fn a_resume_with_the_unit_key_delivers_to_the_move_queue_only() {
     );
     assert!(crate::server::muxer::pending_queue(staging.parent().unwrap()).is_empty());
 }
+
+// A correction's replan names the movie output from the corrected title, as a fresh rip
+// does: the mover files a movie with no TMDB folder under that leaf.
+#[test]
+fn a_replanned_movie_output_is_named_from_its_title() {
+    let (staging, outcome, _t, ..) = resume_ripped(Keys::UnitKey, |dir, _, _| {
+        staging::mutate_state_if_present(dir, |state| {
+            state.user_metadata = Some(staging::UserMetadata {
+                title: "Cast Away".into(),
+                year: 2000,
+                media_type: "movie".into(),
+                tmdb_id: 0,
+                episode_start: None,
+                poster_url: String::new(),
+                overview: String::new(),
+            });
+            state.replan_required = true;
+        });
+    });
+    assert!(outcome.success, "{:?}", outcome.failure_reason);
+    let leaf = format!(
+        "{}.mkv",
+        crate::server::util::sanitize_path_compact("Cast Away")
+    );
+    let outputs = staging::read_state(&staging).unwrap().outputs;
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].filename, leaf);
+    assert!(staging.join(&leaf).exists(), "{leaf}");
+}
+
+// Outputs of the superseded plan are dropped once the replan is committed: they are
+// never delivered, and the space preflight counts only the new plan.
+#[test]
+fn a_replan_drops_the_superseded_outputs() {
+    let (staging, outcome, _t, ..) = resume_ripped(Keys::UnitKey, |dir, _, _| {
+        std::fs::write(dir.join("KU_Disc.mkv"), b"superseded movie output").unwrap();
+        staging::mutate_state_if_present(dir, |state| {
+            state.user_metadata = Some(staging::UserMetadata {
+                title: "Cast Away".into(),
+                year: 2000,
+                media_type: "movie".into(),
+                tmdb_id: 0,
+                episode_start: None,
+                poster_url: String::new(),
+                overview: String::new(),
+            });
+            state.replan_required = true;
+        });
+    });
+    assert!(outcome.success, "{:?}", outcome.failure_reason);
+    assert!(!staging.join("KU_Disc.mkv").exists());
+    assert!(staging.join("Cast_Away.mkv").exists());
+}
+
+// Only sectors the capture never read make a replan wait for the disc. An unreadable
+// recovery map is a staging fault: reported as such, never as "insert the disc".
+#[test]
+fn a_replan_with_an_unreadable_map_is_not_held_for_the_disc() {
+    let (staging, outcome, _t, ..) = resume_ripped(Keys::UnitKey, |dir, _, _| {
+        std::fs::write(dir.join("KU_Disc.iso.mapfile"), b"not a mapfile").unwrap();
+        staging::mutate_state_if_present(dir, |state| {
+            state.user_metadata = Some(staging::UserMetadata {
+                title: "Cast Away".into(),
+                year: 2000,
+                media_type: "movie".into(),
+                tmdb_id: 0,
+                episode_start: None,
+                poster_url: String::new(),
+                overview: String::new(),
+            });
+            state.replan_required = true;
+        });
+    });
+    assert!(!outcome.success);
+    let state = staging::read_state(&staging).unwrap();
+    assert!(!state.needs_disc, "a damaged map is not fixed by the disc");
+    assert!(!outcome.failure_needs_disc);
+    let reason = outcome.failure_reason.unwrap_or_default();
+    assert!(reason.contains("recovery map"), "{reason}");
+}

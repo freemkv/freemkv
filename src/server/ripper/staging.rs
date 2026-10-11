@@ -11,11 +11,13 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-// Serializes operator metadata commits with worker state writes. Kept separate
 type JobMutex = std::sync::Arc<std::sync::Mutex<()>>;
 type LockPool =
     std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<std::sync::Mutex<()>>>>;
 
+// Two per-job pools: state locks serialize state.json commits (operator metadata vs
+// worker writes) and are held briefly; job leases span a whole rip, mux or delivery.
+// Kept separate so a long lease never blocks a state write. Order: lease, then state.
 static STATE_LOCKS: std::sync::LazyLock<LockPool> = std::sync::LazyLock::new(Default::default);
 static JOB_LEASES: std::sync::LazyLock<LockPool> = std::sync::LazyLock::new(Default::default);
 
@@ -52,6 +54,19 @@ pub struct UserMetadata {
 }
 
 impl UserMetadata {
+    /// The metadata a job currently shows (scan or corrected), as a selection.
+    pub(super) fn shown_by(st: &DiscState) -> Self {
+        UserMetadata {
+            title: st.title.clone(),
+            year: st.year,
+            media_type: st.media_type.clone(),
+            episode_start: st.episode_start,
+            tmdb_id: st.tmdb_id,
+            poster_url: st.tmdb_poster.clone(),
+            overview: st.tmdb_overview.clone(),
+        }
+    }
+
     fn apply(&self, st: &mut DiscState) {
         st.title = self.title.clone();
         st.year = self.year;
@@ -620,6 +635,7 @@ fn save_user_metadata_inner(
             "delivery has started; the staged job can no longer be retitled",
         ));
     }
+    let mut needs_replan = false;
     if st.title_identity_review {
         if st.iso_path.is_empty() {
             return Err(io::Error::other(
@@ -628,6 +644,7 @@ fn save_user_metadata_inner(
         }
         st.title_identity_review = false;
         st.replan_required = true;
+        needs_replan = true;
     }
     // Use the persisted execution mode, not settings which may have changed
     // since capture began.
@@ -645,6 +662,14 @@ fn save_user_metadata_inner(
         || (st.state == StagingState::Review && st.outputs.is_empty() && !st.iso_path.is_empty())
     {
         st.replan_required = true;
+        needs_replan = true;
+    }
+    // A replan rebuilds outputs from the saved image; once it was pruned after the
+    // mux (checked under the lock the prune holds), refuse rather than flag one.
+    if needs_replan && !saved_image_present(dir, &st) {
+        return Err(io::Error::other(
+            "this rip's saved disc image is no longer in staging (it is removed after muxing unless Keep ISO is on), so its title plan cannot be rebuilt. The correction was not saved; keep the current plan, or rip the disc again to change it",
+        ));
     }
     st.metadata_revision = st
         .metadata_revision
@@ -667,6 +692,15 @@ fn save_user_metadata_inner(
     // Return this commit's revision while still holding the state lock: a
     // subsequent read could instead observe another request's commit.
     Ok(st.metadata_revision)
+}
+
+// Whether the capture's ISO is still in staging. A stat error reads as absent
+// (the save is refused and can be retried); legacy jobs find it by listing.
+fn saved_image_present(dir: &Path, st: &DiscState) -> bool {
+    if st.iso_path.is_empty() {
+        return super::resume::find_iso_and_mapfile(dir).is_some();
+    }
+    std::fs::metadata(dir.join(&st.iso_path)).is_ok_and(|m| m.is_file())
 }
 
 /// Commit a rebuilt plan only if its metadata is still current.
@@ -2324,36 +2358,135 @@ fn quarantine_restart_loop(path: &Path, reason: &str) {
     );
 }
 
+// Files the ripper itself writes that carry no capture or delivery (lifecycle
+// state, markers, label, counters); their `.tmp` siblings count too.
+const RIPPER_BOOKKEEPING: &[&str] = &[
+    STATE_FILE,
+    UNREADABLE_STATE_ASIDE,
+    DONE_MARKER,
+    REVIEW_MARKER,
+    COMPLETED_MARKER,
+    FAILED_MARKER,
+    ABORTED_LOSS_MARKER,
+    RIPPED_MARKER,
+    SWEEPING_MARKER,
+    MUXING_MARKER,
+    ACCEPT_LOSS_MARKER,
+    RESTART_COUNT_FILE,
+    DISC_LABEL_FILE,
+];
+
+fn is_ripper_bookkeeping(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    RIPPER_BOOKKEEPING.contains(&name.strip_suffix(".tmp").unwrap_or(&name))
+}
+
 // Whether every entry in `dir` is a file the ripper itself writes with no
-// artifact (lifecycle state, markers, label, counters, and their `.tmp`s).
-// A listing error reads as `false`, so the caller keeps the dir.
+// artifact. A listing error reads as `false`, so the caller keeps the dir.
 fn holds_only_ripper_bookkeeping(dir: &Path) -> bool {
-    const OWN: &[&str] = &[
-        STATE_FILE,
-        UNREADABLE_STATE_ASIDE,
-        DONE_MARKER,
-        REVIEW_MARKER,
-        COMPLETED_MARKER,
-        FAILED_MARKER,
-        ABORTED_LOSS_MARKER,
-        RIPPED_MARKER,
-        SWEEPING_MARKER,
-        MUXING_MARKER,
-        ACCEPT_LOSS_MARKER,
-        RESTART_COUNT_FILE,
-        DISC_LABEL_FILE,
-    ];
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
-    entries.into_iter().all(|e| {
-        e.is_ok_and(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            let name = name.strip_suffix(".tmp").unwrap_or(&name);
-            OWN.contains(&name)
-        })
-    })
+    entries
+        .into_iter()
+        .all(|e| e.is_ok_and(|e| is_ripper_bookkeeping(&e.file_name())))
+}
+
+/// The mover's delivery journal. It exists from the moment a delivery is frozen
+/// until verified cleanup removes the whole job, so its presence means a delivery
+/// is in flight, held, or partly published.
+pub const DELIVERY_JOURNAL: &str = ".delivery.json";
+
+// Absent is the only answer that permits deleting the job; a probe error keeps it.
+fn delivery_journal_absent(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(DELIVERY_JOURNAL))
+        .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+}
+
+/// Clear staging: delete only per-disc jobs that hold nothing undelivered. That is a
+/// terminal `Failed` capture (clearing is the operator abandoning it) or a leftover of
+/// ripper bookkeeping only. Owned, unreadable, journaled, corrected, resumable and
+/// finished-but-undelivered jobs are kept. Returns `(removed, failed)`.
+pub(crate) fn clear_abandoned_staging(root: &Path) -> (usize, usize) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(path = %root.display(), error = %e, "staging root could not be listed");
+            return (0, 1);
+        }
+    };
+    let (mut removed, mut failed) = (0, 0);
+    for entry in entries {
+        let Ok(entry) = entry else {
+            failed += 1;
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let dir = entry.path();
+        let lease = job_lease(&dir);
+        let Ok(_idle) = lease.try_lock() else {
+            continue;
+        };
+        match clear_if_abandoned(&dir) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(path = %dir.display(), error = %e, "abandoned staging entry could not be cleared");
+            }
+        }
+    }
+    (removed, failed)
+}
+
+// Caller owns the job lease. The decision and the deletion share the state lock,
+// so a concurrent correction or Accept damage either lands first (kept) or fails.
+fn clear_if_abandoned(dir: &Path) -> io::Result<bool> {
+    // Snapshot first: it may upgrade a legacy dir, which takes the state lock itself.
+    let Some(snap) = snapshot_staging_disc(dir) else {
+        return Ok(false);
+    };
+    if snap.had_entry_error || snap.state_unreadable.is_some() {
+        return Ok(false);
+    }
+    let lock = state_lock(dir);
+    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if !delivery_journal_absent(dir) {
+        return Ok(false);
+    }
+    let st = match read_state_checked(dir) {
+        StateRead::Valid(st) if st.reset_in_progress || st.muxing => return Ok(false),
+        StateRead::Valid(st) => Some(*st),
+        StateRead::Absent => None,
+        StateRead::Unreadable(_) => return Ok(false),
+    };
+    if st.as_ref().is_some_and(|s| s.state == StagingState::Failed) {
+        std::fs::remove_dir_all(dir)?;
+        return Ok(true);
+    }
+    let idle = st.as_ref().is_none_or(|s| {
+        matches!(s.state, StagingState::Stopped | StagingState::Completed)
+            && s.user_metadata.is_none()
+    });
+    if !idle || snap.has_partial_state() || !holds_only_ripper_bookkeeping(dir) {
+        return Ok(false);
+    }
+    // Name by name, state last, then a non-recursive rmdir: a listing that hid a
+    // capture file leaves the dir (and that file) in place.
+    let mut names: Vec<_> = std::fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<io::Result<_>>()?;
+    names.sort_by_key(|name| name == STATE_FILE);
+    for name in names {
+        if !is_ripper_bookkeeping(&name) {
+            return Err(io::Error::other("staging entry changed while clearing"));
+        }
+        std::fs::remove_file(dir.join(name))?;
+    }
+    std::fs::remove_dir(dir)?;
+    Ok(true)
 }
 
 /// Outcome of inspecting a single per-disc staging directory at
@@ -2426,7 +2559,7 @@ fn reset_capture_with(
     after_prepare: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     let lock = state_lock(dir);
-    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     match std::fs::symlink_metadata(dir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
@@ -2434,6 +2567,12 @@ fn reset_capture_with(
             return Err(io::Error::other("staging reset requires a real directory"));
         }
         Ok(_) => {}
+    }
+    // Published files are owned through this journal; its sources must survive.
+    if !delivery_journal_absent(dir) {
+        return Err(io::Error::other(
+            "a delivery of this job is in progress or held; finish or resolve it before starting over",
+        ));
     }
     let old = match read_state_checked(dir) {
         StateRead::Valid(st) => Some(*st),
@@ -2454,16 +2593,7 @@ fn reset_capture_with(
         ));
     }
     let mut fresh = DiscState::new(StagingState::Stopped);
-    UserMetadata {
-        title: old.title,
-        year: old.year,
-        media_type: old.media_type,
-        episode_start: old.episode_start,
-        tmdb_id: old.tmdb_id,
-        poster_url: old.tmdb_poster,
-        overview: old.tmdb_overview,
-    }
-    .apply(&mut fresh);
+    UserMetadata::shown_by(&old).apply(&mut fresh);
     fresh.title_confident = old.title_confident;
     fresh.user_metadata = old.user_metadata;
     fresh.metadata_revision = old.metadata_revision;
@@ -2484,6 +2614,9 @@ fn reset_capture_with(
     // Persist the reset state first: interruption cannot expose half-deleted
     // outputs as completed, and never loses an acknowledged title correction.
     write_state_unlocked(dir, &fresh)?;
+    // `reset_in_progress` now makes every other writer refuse, so deletion runs
+    // without the state lock and never blocks a request on a multi-GB unlink.
+    drop(state_owner);
     after_prepare()?;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -2497,6 +2630,7 @@ fn reset_capture_with(
         }
     }
     fresh.reset_in_progress = false;
+    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     if keep {
         write_state_unlocked(dir, &fresh)
     } else {
@@ -2505,12 +2639,39 @@ fn reset_capture_with(
     }
 }
 
-/// Freeze execution mode and read planning metadata in one state transaction.
-/// The caller owns the job lease and clears Sweeping when capture exits.
-pub(super) fn begin_capture(dir: &Path, max_retries: u8) -> io::Result<DiscState> {
+/// Run `prune` (deleting a finished capture's ISO/mapfile) unless a correction has
+/// asked for a replan from them. Returns whether it ran.
+/// The check and the deletion share the state lock that commits corrections.
+pub(super) fn prune_unless_replan_required(dir: &Path, prune: impl FnOnce()) -> bool {
+    let lock = state_lock(dir);
+    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if read_state(dir).is_some_and(|s| s.replan_required) {
+        return false;
+    }
+    prune();
+    true
+}
+
+/// Freeze execution mode, stamp the scan's verified identity and read planning
+/// metadata in one state transaction. The caller owns the job lease and clears
+/// Sweeping when capture exits.
+pub(super) fn begin_capture(
+    dir: &Path,
+    max_retries: u8,
+    verified_identity: &str,
+) -> io::Result<DiscState> {
     let lock = state_lock(dir);
     let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut st = state_for_write(dir, StagingState::Sweeping)?;
+    if !verified_identity.is_empty() {
+        if st.disc_identity.is_empty() {
+            st.disc_identity = verified_identity.to_owned();
+        } else if st.disc_identity != verified_identity {
+            return Err(io::Error::other(
+                "staging identity changed; nothing was captured",
+            ));
+        }
+    }
     st.state = StagingState::Sweeping;
     st.max_retries = max_retries;
     apply_user_metadata(&mut st);

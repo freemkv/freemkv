@@ -15,17 +15,10 @@ pub(super) fn metadata(root: &Path, job: &str) -> Option<crate::server::tmdb::Tm
 pub(super) fn metadata_from_state(
     st: staging::DiscState,
 ) -> Option<crate::server::tmdb::TmdbResult> {
-    let m = st.user_metadata.or_else(|| {
-        (!st.title.is_empty()).then_some(staging::UserMetadata {
-            title: st.title,
-            year: st.year,
-            media_type: st.media_type,
-            episode_start: st.episode_start,
-            tmdb_id: st.tmdb_id,
-            poster_url: st.tmdb_poster,
-            overview: st.tmdb_overview,
-        })
-    })?;
+    let m = st
+        .user_metadata
+        .clone()
+        .or_else(|| (!st.title.is_empty()).then(|| staging::UserMetadata::shown_by(&st)))?;
     Some(crate::server::tmdb::TmdbResult {
         title: m.title,
         year: m.year,
@@ -42,13 +35,28 @@ pub(super) fn fingerprint(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
 ) -> Result<String, String> {
-    if let Some(aacs) = &disc.aacs {
-        let hash = libfreemkv::hex::strip_hex_prefix(&aacs.disc_hash).to_ascii_lowercase();
-        if hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Ok(hash);
-        }
+    if let Some(hash) = disc.aacs.as_ref().and_then(|a| aacs_identity(&a.disc_hash)) {
+        return Ok(hash);
     }
     sample_fingerprint(disc.capacity_bytes, reader)
+}
+
+/// The AACS disc hash as a staging identity: 40 hex digits, lowercased.
+pub(super) fn aacs_identity(disc_hash: &str) -> Option<String> {
+    let hash = libfreemkv::hex::strip_hex_prefix(disc_hash).to_ascii_lowercase();
+    (hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hash)
+}
+
+/// Whether staging job `dir` belongs to the disc with `identity`. A saved identity
+/// decides; only an identity-less (legacy) job falls back to its mapfile's hash.
+pub(super) fn dir_matches_identity(dir: &Path, identity: &str) -> bool {
+    match staging::read_state(dir).filter(|s| !s.disc_identity.is_empty()) {
+        Some(saved) => saved.disc_identity == identity,
+        None => super::resume::find_iso_and_mapfile(dir)
+            .and_then(|(_, map)| freemkv_engine::Mapfile::load(&map).ok())
+            .and_then(|map| map.disc_hash().map(str::to_owned))
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(identity)),
+    }
 }
 
 /// Allocate a fresh staging namespace when a non-AACS fingerprint cannot be
@@ -114,17 +122,7 @@ pub(super) fn locate(root: &Path, identity: &str) -> Result<String, String> {
         if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
             continue;
         }
-        let path = entry.path();
-        let saved = staging::read_state(&path);
-        let matches = if let Some(saved) = saved.filter(|s| !s.disc_identity.is_empty()) {
-            saved.disc_identity == identity
-        } else {
-            super::resume::find_iso_and_mapfile(&path)
-                .and_then(|(_, map)| freemkv_engine::Mapfile::load(&map).ok())
-                .and_then(|map| map.disc_hash().map(str::to_owned))
-                .is_some_and(|hash| hash.eq_ignore_ascii_case(identity))
-        };
-        if matches {
+        if dir_matches_identity(&entry.path(), identity) {
             if found.is_some() {
                 return Err("more than one staging entry matches this disc; keep both and resolve the duplicate before continuing".into());
             }

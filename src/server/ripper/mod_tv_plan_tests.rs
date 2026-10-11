@@ -16,7 +16,7 @@ fn presentation_preference_capture_holds_and_freezes_single_output() {
             Some(crate::title_identity::TitleIdentity::of(&titles[expected]))
         );
         assert_eq!(
-            capture_title_index(&titles, &cfg, "movie").unwrap(),
+            capture_title_index(&titles, &cfg, "movie", "").unwrap(),
             expected
         );
     }
@@ -25,13 +25,13 @@ fn presentation_preference_capture_holds_and_freezes_single_output() {
             presentation_language: language.into(),
             ..Default::default()
         };
-        assert!(check_capture_selection(&titles, &cfg, "movie").is_err());
+        assert!(check_capture_selection(&titles, &cfg, "movie", "").is_err());
         assert!(plan_mux_outputs(&titles, &cfg, "movie", "Movie", 0, "movie.mkv", None).is_err());
         let iso = Config {
             output_format: "iso".into(),
             ..cfg
         };
-        assert!(check_capture_selection(&titles, &iso, "movie").is_ok());
+        assert!(check_capture_selection(&titles, &iso, "movie", "").is_ok());
     }
 }
 
@@ -121,10 +121,13 @@ fn movie_yields_a_single_untouched_output() {
     assert!(plan[0].episode.is_none());
 }
 
+// 1.7.7 tv_auto: a disc whose label names a season is TV even when TMDB did not
+// match it as TV (no key, a miss, or a movie match). Off: one output, never held.
 #[test]
-fn movie_or_unknown_metadata_does_not_fan_out_from_a_season_like_label() {
+fn a_season_label_is_tv_for_fan_out_without_a_tmdb_tv_match() {
+    let mut titles = vec![title(2640.0, 100), title(2650.0, 200)];
+    authored_roster(&mut titles, 0..2);
     let cfg = Config::default();
-    let titles = vec![title(2640.0, 100), title(2650.0, 200)];
     for media_type in ["movie", ""] {
         let plan = plan_mux_outputs(
             &titles,
@@ -136,9 +139,51 @@ fn movie_or_unknown_metadata_does_not_fan_out_from_a_season_like_label() {
             None,
         )
         .unwrap();
-        assert_eq!(plan.len(), 1, "{media_type:?}");
-        assert_eq!(plan[0].filename, "Show.mkv");
+        assert_eq!(plan.len(), 2, "{media_type:?}");
+        assert!(plan[0].filename.contains("S01E01"), "{}", plan[0].filename);
+        assert!(plan[1].filename.contains("S01E02"), "{}", plan[1].filename);
+        assert!(check_capture_selection(&titles, &cfg, media_type, "Show Season 1").is_ok());
     }
+    let off = Config {
+        tv_auto: false,
+        ..Config::default()
+    };
+    let plan = plan_mux_outputs(&titles, &off, "", "Show Season 1", 0, "Show.mkv", None).unwrap();
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].filename, "Show.mkv");
+}
+
+// A season-labelled disc with no authored episode evidence is held for review on
+// capture and on resume reselection, never silently ripped as one title.
+#[test]
+fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
+    let titles = vec![title(2640.0, 100), title(2650.0, 200)];
+    let cfg = Config::default();
+    for media_type in ["movie", ""] {
+        assert!(matches!(
+            check_capture_selection(&titles, &cfg, media_type, "Show Season 1"),
+            Err(crate::server::planner::PlanError::SelectionNeedsReview(_))
+        ));
+        assert!(matches!(
+            resume::check_resume_selection(
+                &titles,
+                &cfg,
+                media_type,
+                "Show Season 1",
+                false,
+                false
+            ),
+            Err(crate::server::planner::PlanError::SelectionNeedsReview(_))
+        ));
+    }
+    let off = Config {
+        tv_auto: false,
+        ..Config::default()
+    };
+    assert!(check_capture_selection(&titles, &off, "", "Show Season 1").is_ok());
+    assert!(
+        resume::check_resume_selection(&titles, &off, "", "Show Season 1", false, false).is_ok()
+    );
 }
 
 #[test]
@@ -367,4 +412,28 @@ fn tv_auto_off_does_not_fan_out() {
     let plan = plan.unwrap();
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].filename, "Endeavour.mkv");
+}
+
+#[test]
+fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
+    use crate::server::planner::PlanError;
+    let ambiguous = selection_review_message(&PlanError::SelectionNeedsReview(
+        "ambiguous-presentation-language".into(),
+    ));
+    assert_eq!(
+        ambiguous,
+        "Title selection needs review before muxing: more than one presentation matches the presentation language. No fallback title was selected."
+    );
+    let numbering = selection_review_message(&PlanError::SelectionNeedsReview(
+        "Episode numbering is outside the supported range.".into(),
+    ));
+    assert!(!numbering.contains(".."), "{numbering}");
+    for error in [
+        PlanError::NoTitles,
+        PlanError::NoOutputs,
+        PlanError::DuplicateOutput("Show_S01E01.mkv".into()),
+    ] {
+        let text = selection_review_message(&error);
+        assert!(!text.contains(&format!("{error:?}")), "{text}");
+    }
 }

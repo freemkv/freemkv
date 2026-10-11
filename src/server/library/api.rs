@@ -420,53 +420,9 @@ pub fn handle(
     None
 }
 
-/// Remove only per-disc staging directories that are not owned by a live rip
-/// or mux worker. Unknown/unreadable entries are left in place.
+// Clear staging deletes only what holds nothing undelivered; staging owns the rule.
 fn clear_idle_staging(root: &std::path::Path) -> (usize, usize) {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(e) => {
-            tracing::warn!(path = %root.display(), error = %e, "staging root could not be listed");
-            return (0, 1);
-        }
-    };
-    let mut removed = 0;
-    let mut failed = 0;
-    for entry in entries {
-        let Ok(entry) = entry else {
-            failed += 1;
-            continue;
-        };
-        let path = entry.path();
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        let job_lease = crate::server::ripper::staging::job_lease(&path);
-        let Ok(_idle) = job_lease.try_lock() else {
-            continue;
-        };
-        let Some(snapshot) = crate::server::ripper::staging::snapshot_staging_disc(&path) else {
-            continue;
-        };
-        if snapshot.has_sweeping
-            || snapshot.has_ripped
-            || snapshot.has_muxing
-            || snapshot.has_done
-            || snapshot.had_entry_error
-            || snapshot.state_unreadable.is_some()
-            || crate::server::ripper::staging::read_state(&path).is_none()
-        {
-            continue;
-        }
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => removed += 1,
-            Err(e) => {
-                failed += 1;
-                tracing::warn!(path = %path.display(), error = %e, "idle staging entry could not be cleared");
-            }
-        }
-    }
-    (removed, failed)
+    crate::server::ripper::staging::clear_abandoned_staging(root)
 }
 
 // Delete the finished file kept for `target`. Only a kept pair directly in the staging folder

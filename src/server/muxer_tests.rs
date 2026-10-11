@@ -1385,3 +1385,54 @@ fn pending_queue_does_not_flatten_away_a_per_entry_error() {
         "the per-entry failure must be reported — an absent log is the bug"
     );
 }
+
+// A `.ripped` job whose lease another owner still holds (the rip thread finishing its
+// post-hand-off work) is skipped this tick, never waited on with the mux slot claimed.
+#[test]
+fn a_leased_ripped_job_is_skipped_not_waited_on() {
+    let _guard = crate::server::log::env_guard();
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    // SAFETY: env access in tests, serialized by env_guard.
+    unsafe {
+        std::env::set_var("AUTORIP_DIR", tmp.path());
+    }
+    let root = tmp.path().join("staging");
+    let dir = root.join("Border_Town");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut st = crate::server::ripper::staging::DiscState::new(
+        crate::server::ripper::staging::StagingState::Ripped,
+    );
+    st.iso_path = dir.join("Border_Town.iso").to_string_lossy().into_owned();
+    st.mapfile_path = dir
+        .join("Border_Town.iso.mapfile")
+        .to_string_lossy()
+        .into_owned();
+    st.title = "Border Town".into();
+    crate::server::ripper::staging::try_write_state(&dir, &st).unwrap();
+    let lease = crate::server::ripper::staging::job_lease(&dir);
+    let owner = lease.lock().unwrap();
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: root.to_string_lossy().to_string(),
+        ..Config::default()
+    }));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        check_and_mux(&cfg);
+        let _ = tx.send(());
+    });
+    let finished = rx.recv_timeout(std::time::Duration::from_secs(10));
+    let state = crate::server::ripper::staging::read_state(&dir).unwrap();
+    drop(owner);
+    assert!(
+        finished.is_ok(),
+        "the mux tick must not block on a held job lease"
+    );
+    assert!(!state.muxing, "a skipped job is not stamped as muxing");
+    assert_eq!(
+        state.state,
+        crate::server::ripper::staging::StagingState::Ripped
+    );
+}

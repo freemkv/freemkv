@@ -313,7 +313,7 @@ fn rip_key_scope(
         return libfreemkv::keys::KeyScope::None;
     }
     let mut titles = fanout_episode_indices(&disc.titles, cfg, media_type, disc_name);
-    if let Ok(index) = capture_title_index(&disc.titles, cfg, media_type) {
+    if let Ok(index) = capture_title_index(&disc.titles, cfg, media_type, disc_name) {
         titles.push(index);
     }
     titles.sort_unstable();
@@ -1951,8 +1951,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
 
     // Does this disc have resumable partial staging? Drives the dashboard's
     // Resume-vs-Rip choice. Computed before `display_name` moves into the state.
-    let resumable =
-        resumable_for_disc_with_hash(&cfg_read, &display_name, &id_name, disc_hash.as_deref());
+    let resumable = resumable_for_disc_with_hash(&cfg_read, &job_id, disc_hash.as_deref());
 
     update_state(
         device,
@@ -2552,6 +2551,13 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
             if !snap.has_iso || !snap.has_mapfile {
                 continue;
             }
+            let matched = match disc_hash.as_deref() {
+                Some(identity) => jobs::dir_matches_identity(&path, identity),
+                None => staging_dir_matches_disc(&basename, &sanitized),
+            };
+            if !matched {
+                continue;
+            }
             let Some((iso_path, mapfile_path)) = resume::find_iso_and_mapfile(&path) else {
                 continue;
             };
@@ -2559,18 +2565,6 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            let hash_match = disc_hash.as_deref().is_some_and(|expected| {
-                staging::read_state(&path).is_some_and(|s| s.disc_identity == expected)
-                    || map
-                        .disc_hash()
-                        .map(|found| found.eq_ignore_ascii_case(expected))
-                        .unwrap_or(false)
-            });
-            if (disc_hash.is_some() && !hash_match)
-                || (disc_hash.is_none() && !staging_dir_matches_disc(&basename, &sanitized))
-            {
-                continue;
-            }
             let stats = map.stats();
             if stats.bytes_pending != 0 {
                 continue;
@@ -2626,15 +2620,6 @@ fn is_safe_staging_segment(seg: &str) -> bool {
 // only when the mapfile is 100% Finished (no pending, no unreadable bytes), else Sweep.
 #[cfg(test)]
 fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Option<Resumable> {
-    resumable_for_disc_with_hash(cfg, display_name, disc_label, None)
-}
-
-fn resumable_for_disc_with_hash(
-    cfg: &Config,
-    display_name: &str,
-    disc_label: &str,
-    disc_hash: Option<&str>,
-) -> Option<Resumable> {
     if display_name.is_empty() {
         return None;
     }
@@ -2645,6 +2630,14 @@ fn resumable_for_disc_with_hash(
         display_name,
         disc_label,
     );
+    resumable_for_disc_with_hash(cfg, &sanitized, None)
+}
+
+fn resumable_for_disc_with_hash(
+    cfg: &Config,
+    sanitized: &str,
+    disc_hash: Option<&str>,
+) -> Option<Resumable> {
     // NFS-resilient listing, not `read_dir(...).flatten()`, which could hide
     // an existing resumable dir and make the operator re-sweep instead of
     // resuming. Mirrors disc_staging_hold.
@@ -2655,17 +2648,11 @@ fn resumable_for_disc_with_hash(
         // A title may have been corrected between runs, so the basename is
         // only a fallback. When the live scan has a disc hash, let the
         // mapfile identity decide below.
-        let name_match = basename == sanitized;
-        let identity_match = disc_hash.is_some_and(|expected| {
-            staging::read_state(&path).is_some_and(|s| s.disc_identity == expected)
-                || resume::find_iso_and_mapfile(&path)
-                    .and_then(|(_, p)| freemkv_engine::Mapfile::load(&p).ok())
-                    .is_some_and(|m| {
-                        m.disc_hash()
-                            .is_some_and(|h| h.eq_ignore_ascii_case(expected))
-                    })
-        });
-        if (disc_hash.is_some() && !identity_match) || (disc_hash.is_none() && !name_match) {
+        let matched = match disc_hash {
+            Some(identity) => jobs::dir_matches_identity(&path, identity),
+            None => basename == sanitized,
+        };
+        if !matched {
             continue;
         }
         if staging::read_state(&path).is_some_and(|s| s.reset_in_progress) {
@@ -2716,17 +2703,9 @@ fn resumable_for_disc_with_hash(
 /// action (the disc has been scanned, so its name is in STATE).
 fn resumable_for_device(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<Resumable> {
     let cfg_read = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let (display_name, disc_label) = {
-        let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let rs = s.get(device)?;
-        (rs.disc_name.clone(), rs.disc_label.clone())
-    };
-    resumable_for_disc_with_hash(
-        &cfg_read,
-        &display_name,
-        &disc_label,
-        session_disc_hash(device).as_deref(),
-    )
+    // The scan's job (an unverified disc's isolated one included), else the legacy name.
+    let sanitized = staging_basename_for_device(&cfg_read, device)?;
+    resumable_for_disc_with_hash(&cfg_read, &sanitized, session_disc_hash(device).as_deref())
 }
 
 // RAII guard that unregisters a device's halt-map entry on drop, so
@@ -3130,15 +3109,24 @@ fn rip_disc_inner(
         disc.titles.first().map(|t| t.size_bytes).unwrap_or(0)
     };
 
-    // Freeze actual execution mode before a correction can alter the plan.
+    // Freeze actual execution mode before a correction can alter the plan. The
+    // scan's verified identity lands in the same first write, so an early return
+    // never leaves an identity-less job that location refuses for good.
+    let verified_identity = STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .map(|s| s.disc_identity.clone())
+        .unwrap_or_default();
     let saved_state = if let Some(path) = &known_path {
         let started = if crate::server::health::share_unmounted(path) {
             Err(std::io::Error::other(
                 "staging network share is not mounted",
             ))
         } else {
-            std::fs::create_dir_all(path)
-                .and_then(|()| staging::begin_capture(path, cfg_read.max_retries))
+            std::fs::create_dir_all(path).and_then(|()| {
+                staging::begin_capture(path, cfg_read.max_retries, &verified_identity)
+            })
         };
         match started {
             Ok(st) => Some(st),
@@ -3225,7 +3213,9 @@ fn rip_disc_inner(
 
     // Missing authored episode evidence must not turn a TV capture into one
     // movie-style output. Whole-disc ISO capture does not select mux titles.
-    if let Err(error) = check_capture_selection(&disc.titles, &cfg_read, &tmdb_media_type) {
+    if let Err(error) =
+        check_capture_selection(&disc.titles, &cfg_read, &tmdb_media_type, &disc_name)
+    {
         let reason = selection_review_message(&error);
         crate::server::log::device_log(device, &reason);
         update_state_with(device, |s| {
@@ -3236,7 +3226,8 @@ fn rip_disc_inner(
     }
 
     // The main movie, picked by the engine exactly as the CLI and GUI pick it.
-    let main_idx = match capture_title_index(&disc.titles, &cfg_read, &tmdb_media_type) {
+    let main_idx = match capture_title_index(&disc.titles, &cfg_read, &tmdb_media_type, &disc_name)
+    {
         Ok(index) => index,
         Err(error) => {
             let reason = selection_review_message(&error);
@@ -3535,11 +3526,7 @@ fn rip_disc_inner(
     // FILE names, NOT the dir basename — plain sanitize(display_name), no
     // `_2` disc suffix (the dir already separates discs). delete_partial_output
     // and the mover's TV/fallback delivery both key off this exact form.
-    let filename = format!(
-        "{}.{}",
-        crate::server::util::sanitize_path_compact(&display_name),
-        ext
-    );
+    let filename = staged_output_name(&display_name, ext);
     let output_path = format!("{}/{}", staging, filename);
     // Intermediate-ISO + mapfile paths for multipass, derived once here
     // (previously rebuilt at ~5 scattered sites). Plain title, no disc
@@ -5453,24 +5440,25 @@ fn check_capture_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
+    disc_name: &str,
 ) -> Result<(), crate::server::planner::PlanError> {
     if output_is_iso_image(&cfg.output_format) {
         return Ok(());
     }
-    let kind = (media_type == "tv").then_some(crate::server::planner::MediaKind::Tv);
-    crate::server::planner::check_episode_selection(titles, cfg, kind)?;
-    capture_title_index(titles, cfg, media_type).map(|_| ())
+    crate::server::planner::check_episode_selection(titles, cfg, plan_kind(media_type, disc_name))?;
+    capture_title_index(titles, cfg, media_type, disc_name).map(|_| ())
 }
 
 fn capture_title_index(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
+    disc_name: &str,
 ) -> Result<usize, crate::server::planner::PlanError> {
     if output_is_iso_image(&cfg.output_format) && !titles.is_empty() {
         return Ok(0); // Whole-disc capture makes no presentation choice.
     }
-    if let Some(index) = fanout_episode_indices(titles, cfg, media_type, "").first() {
+    if let Some(index) = fanout_episode_indices(titles, cfg, media_type, disc_name).first() {
         return Ok(*index);
     }
     crate::server::planner::MoviePlanner::from_config(cfg).title_index(titles)
@@ -5486,10 +5474,19 @@ fn fanout_episode_indices(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
-    _disc_name: &str,
+    disc_name: &str,
 ) -> Vec<usize> {
-    let kind = (media_type == "tv").then_some(crate::server::planner::MediaKind::Tv);
-    crate::server::planner::episode_indices(titles, cfg, kind)
+    crate::server::planner::episode_indices(titles, cfg, plan_kind(media_type, disc_name))
+}
+
+// Whether a disc is TV for `tv_auto` planning (1.7.7): TMDB says tv, or its label
+// names a season even without a TMDB tv match. Evidence gates still apply.
+pub(super) fn plan_kind(
+    media_type: &str,
+    disc_name: &str,
+) -> Option<crate::server::planner::MediaKind> {
+    (media_type == "tv" || crate::server::tmdb::season_from_label(disc_name).is_some())
+        .then_some(crate::server::planner::MediaKind::Tv)
 }
 
 // The titles a fresh rip's staged image must hold for its mux: the main feature, the TV plan's
@@ -5565,6 +5562,15 @@ pub(super) fn mux_reserve_for(
         .iter()
         .filter_map(|&i| titles.get(i))
         .fold(0u64, |acc, t| acc.saturating_add(t.size_bytes))
+}
+
+// The staged leaf of a movie output (and the stem of its episodes): the title,
+// sanitized, with no `_2` disc suffix. A replan names it the same way.
+pub(super) fn staged_output_name(display_name: &str, ext: &str) -> String {
+    format!(
+        "{}.{ext}",
+        crate::server::util::sanitize_path_compact(display_name)
+    )
 }
 
 // Decide the deliverables a captured disc produces: titles to mux out of the ISO + staging
@@ -5731,26 +5737,26 @@ fn prune_intermediate_iso(
     if !uses_multipass(max_retries) || keep_iso {
         return;
     }
-    if iso_path
-        .parent()
-        .and_then(staging::read_state)
-        .is_some_and(|s| s.replan_required)
-    {
+    let Some(staging_dir) = iso_path.parent() else {
         return;
-    }
-    match std::fs::remove_file(iso_path) {
-        Ok(_) => crate::server::log::device_log(device, "Pruned intermediate ISO"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => crate::server::log::device_log(device, &format!("ISO prune warning: {e}")),
-    }
-    // Mirror the ISO arm: a lingering mapfile in staging could be misread as a
-    // partial rip by the resume classifier on next startup, so surface any
-    // unexpected removal error instead of swallowing it.
-    match std::fs::remove_file(mapfile_path) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => crate::server::log::device_log(device, &format!("mapfile prune warning: {e}")),
-    }
+    };
+    staging::prune_unless_replan_required(staging_dir, || {
+        match std::fs::remove_file(iso_path) {
+            Ok(_) => crate::server::log::device_log(device, "Pruned intermediate ISO"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => crate::server::log::device_log(device, &format!("ISO prune warning: {e}")),
+        }
+        // Mirror the ISO arm: a lingering mapfile in staging could be misread as a
+        // partial rip by the resume classifier on next startup, so surface any
+        // unexpected removal error instead of swallowing it.
+        match std::fs::remove_file(mapfile_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                crate::server::log::device_log(device, &format!("mapfile prune warning: {e}"))
+            }
+        }
+    });
 }
 
 /// What the orchestrator must do with a mux outcome, decided from the header

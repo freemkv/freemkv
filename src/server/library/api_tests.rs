@@ -18,34 +18,91 @@ fn match_request_requires_revision_and_typed_media_kind() {
 }
 
 #[test]
-fn clear_staging_preserves_owned_unknown_corrupt_and_delivery_entries() {
-    use crate::server::ripper::staging::{self, DiscState, StagingState};
+fn clear_staging_removes_only_abandoned_failures_and_empty_leftovers() {
+    use crate::server::ripper::staging::{self, DiscState, StagingState, UserMetadata};
     let root = tempfile::tempdir().unwrap();
-    for (name, state) in [
-        ("idle", StagingState::Stopped),
-        ("sweep", StagingState::Sweeping),
-        ("mux", StagingState::Ripped),
-        ("move", StagingState::Done),
-        ("leased", StagingState::Stopped),
-    ] {
+    let job = |name: &str, state: StagingState, files: &[&str]| {
         let dir = root.path().join(name);
         std::fs::create_dir(&dir).unwrap();
         staging::try_write_state(&dir, &DiscState::new(state)).unwrap();
-        std::fs::write(dir.join("source.iso"), b"capture").unwrap();
-    }
+        for file in files {
+            std::fs::write(dir.join(file), b"data").unwrap();
+        }
+        dir
+    };
+    // Undelivered or resumable output, live owners and operator choices are kept.
+    job("review", StagingState::Review, &["Title.iso", "Title.mkv"]);
+    job(
+        "aborted",
+        StagingState::AbortedLoss,
+        &["Title.iso", "Title.iso.mapfile"],
+    );
+    job(
+        "stopped",
+        StagingState::Stopped,
+        &["Title.iso", "Title.iso.mapfile"],
+    );
+    job("completed", StagingState::Completed, &["Title.mkv"]);
+    job("done", StagingState::Done, &["Title.mkv"]);
+    job("sweep", StagingState::Sweeping, &["Title.iso"]);
+    job("mux", StagingState::Ripped, &["Title.iso"]);
+    job(
+        "journal",
+        StagingState::Failed,
+        &["Title.mkv", ".delivery.json"],
+    );
+    job("leased", StagingState::Failed, &["Title.iso"]);
+    let corrected = root.path().join("corrected");
+    std::fs::create_dir(&corrected).unwrap();
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.user_metadata = Some(UserMetadata {
+        title: "Cast Away".into(),
+        year: 2000,
+        media_type: "movie".into(),
+        episode_start: None,
+        tmdb_id: 8358,
+        poster_url: String::new(),
+        overview: String::new(),
+    });
+    staging::try_write_state(&corrected, &st).unwrap();
     for name in ["unknown", "corrupt"] {
         let dir = root.path().join(name);
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("important"), b"keep").unwrap();
     }
     std::fs::write(root.path().join("corrupt/state.json"), b"{bad").unwrap();
+    // Abandoned terminal failures and leftovers with nothing to deliver go.
+    job(
+        "failed",
+        StagingState::Failed,
+        &["Title.iso", "Title.iso.mapfile"],
+    );
+    job("leftover", StagingState::Stopped, &[".disc-label"]);
+    std::fs::create_dir(root.path().join("empty")).unwrap();
     let lease = staging::job_lease(&root.path().join("leased"));
     let _owner = lease.lock().unwrap();
-    assert_eq!(clear_idle_staging(root.path()), (1, 0));
-    assert!(!root.path().join("idle").exists());
-    for name in ["sweep", "mux", "move", "leased", "unknown", "corrupt"] {
-        assert!(root.path().join(name).exists(), "{name}");
+    assert_eq!(clear_idle_staging(root.path()), (3, 0));
+    for name in ["failed", "leftover", "empty"] {
+        assert!(!root.path().join(name).exists(), "{name} should be cleared");
     }
+    for name in [
+        "review",
+        "aborted",
+        "stopped",
+        "completed",
+        "done",
+        "sweep",
+        "mux",
+        "journal",
+        "leased",
+        "corrected",
+        "unknown",
+        "corrupt",
+    ] {
+        assert!(root.path().join(name).exists(), "{name} must be kept");
+    }
+    assert!(root.path().join("review/Title.iso").exists());
+    assert!(root.path().join("journal/.delivery.json").exists());
 }
 
 #[cfg(unix)]

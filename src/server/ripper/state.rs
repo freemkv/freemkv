@@ -269,14 +269,20 @@ impl RipState {
             return;
         }
         self.metadata_revision = revision;
-        self.disc_name = metadata.title.clone();
-        self.tmdb_title = metadata.title.clone();
-        self.tmdb_year = metadata.year;
-        self.tmdb_poster = metadata.poster_url.clone();
-        self.tmdb_overview = metadata.overview.clone();
-        self.tmdb_media_type = metadata.media_type.clone();
+        self.show_user_metadata(&metadata);
         self.episode_start = metadata.episode_start;
         self.user_metadata = Some(metadata);
+    }
+
+    // The card's display fields for a correction; the one projection both
+    // publication and progress updates use.
+    fn show_user_metadata(&mut self, m: &super::staging::UserMetadata) {
+        self.disc_name = m.title.clone();
+        self.tmdb_title = m.title.clone();
+        self.tmdb_year = m.year;
+        self.tmdb_poster = m.poster_url.clone();
+        self.tmdb_overview = m.overview.clone();
+        self.tmdb_media_type = m.media_type.clone();
     }
 }
 
@@ -521,14 +527,9 @@ pub fn update_state(device: &str, mut state: RipState) {
             state.user_metadata = prev.user_metadata.clone();
             state.metadata_revision = prev.metadata_revision;
             state.episode_start = prev.episode_start;
-            if let Some(m) = &state.user_metadata {
+            if let Some(m) = state.user_metadata.clone() {
                 state.disc_label = prev.disc_label.clone();
-                state.disc_name = m.title.clone();
-                state.tmdb_title = m.title.clone();
-                state.tmdb_year = m.year;
-                state.tmdb_poster = m.poster_url.clone();
-                state.tmdb_overview = m.overview.clone();
-                state.tmdb_media_type = m.media_type.clone();
+                state.show_user_metadata(&m);
             }
         }
     }

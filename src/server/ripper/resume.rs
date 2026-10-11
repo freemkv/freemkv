@@ -372,7 +372,6 @@ fn defer_status_after_ripping(
 // Missing proof never authorizes title zero, even for legacy single outputs.
 pub(super) fn resume_titles(
     disc: &libfreemkv::Disc,
-    _is_fanout: bool,
     plan: &[staging::Output],
 ) -> Result<Vec<usize>, String> {
     let mut titles: Vec<usize> = rebind_resume_outputs(&disc.titles, plan)?
@@ -444,18 +443,29 @@ fn rebind_resume_outputs(
     }).collect()
 }
 
+// Why a replanned capture cannot be muxed yet. Only sectors the capture never read
+// are fixed by inserting the disc; anything else is a staging fault to report.
+#[derive(Debug)]
+enum ReplanRefusal {
+    NeedsDisc(String),
+    Unusable(String),
+}
+
 fn validate_replanned_capture(
     disc: &libfreemkv::Disc,
     outputs: &[staging::Output],
     iso: &Path,
     mapfile: &Path,
-) -> Result<(), String> {
-    let map = freemkv_engine::Mapfile::load(mapfile).map_err(|e| e.to_string())?;
-    let mut reader = libfreemkv::FileSectorSource::open(iso).map_err(|e| e.to_string())?;
-    let titles = resume_titles(disc, outputs.len() > 1, outputs)?;
+) -> Result<(), ReplanRefusal> {
+    use ReplanRefusal::{NeedsDisc, Unusable};
+    let map = freemkv_engine::Mapfile::load(mapfile)
+        .map_err(|e| Unusable(format!("the saved recovery map could not be read: {e}")))?;
+    let mut reader = libfreemkv::FileSectorSource::open(iso)
+        .map_err(|e| Unusable(format!("the saved disc image could not be opened: {e}")))?;
+    let titles = resume_titles(disc, outputs).map_err(Unusable)?;
     let ranges = disc
         .mkv_staging_ranges(&mut reader, &titles)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Unusable(format!("the saved disc image could not be read: {e}")))?;
     let missing = map.ranges_with(&[freemkv_engine::SectorStatus::NonTried]);
     if ranges.iter().any(|&(start, count)| {
         let start = u64::from(start) * 2048;
@@ -465,7 +475,7 @@ fn validate_replanned_capture(
                 .iter()
                 .any(|&(p, n)| p < end && p.saturating_add(n) > start)
     }) {
-        return Err("the corrected episode plan needs sectors not captured yet; insert the same disc and resume to read them".into());
+        return Err(NeedsDisc("the corrected episode plan needs sectors not captured yet; insert the same disc and resume to read them".into()));
     }
     Ok(())
 }
@@ -829,6 +839,7 @@ pub(super) fn check_resume_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
     media_type: &str,
+    disc_label: &str,
     has_plan: bool,
     replan_required: bool,
 ) -> Result<(), crate::server::planner::PlanError> {
@@ -837,7 +848,7 @@ pub(super) fn check_resume_selection(
     if has_plan && !replan_required {
         return Ok(());
     }
-    let kind = (media_type == "tv").then_some(crate::server::planner::MediaKind::Tv);
+    let kind = super::plan_kind(media_type, disc_label);
     crate::server::planner::check_episode_selection(titles, cfg, kind)
 }
 
@@ -998,10 +1009,24 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     if let Some(saved) = &saved_state {
         plan_outputs = saved.outputs.clone();
     }
+    // The raw label the replan plans from (plan_mux_outputs), else the scan's.
+    let disc_label = saved_state
+        .as_ref()
+        .map(|s| s.disc_label.clone())
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| {
+            super::STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(device)
+                .map(|s| s.disc_label.clone())
+                .unwrap_or_default()
+        });
     if let Err(error) = check_resume_selection(
         &disc.titles,
         &cfg_read,
         &media_type,
+        &disc_label,
         !plan_outputs.is_empty(),
         replan_required,
     ) {
@@ -1017,9 +1042,14 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     }
 
     if let Some(saved) = saved_state.filter(|s| s.replan_required) {
-        let filename = format!(
-            "output-main.{}",
-            super::output_extension_for(&cfg_read.output_format, &disc)
+        let title = if saved.title.is_empty() {
+            &display_name
+        } else {
+            &saved.title
+        };
+        let filename = super::staged_output_name(
+            title,
+            super::output_extension_for(&cfg_read.output_format, &disc),
         );
         let outputs = match super::plan_mux_outputs(
             &disc.titles,
@@ -1037,16 +1067,44 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 return;
             }
         };
-        if let Err(e) = validate_replanned_capture(&disc, &outputs, &iso_path, &mapfile_path) {
-            staging::mutate_state_if_present(&staging_dir, |s| s.needs_disc = true);
-            reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e));
-            return;
+        match validate_replanned_capture(&disc, &outputs, &iso_path, &mapfile_path) {
+            Ok(()) => {}
+            Err(ReplanRefusal::NeedsDisc(e)) => {
+                staging::mutate_state_if_present(&staging_dir, |s| s.needs_disc = true);
+                reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e));
+                return;
+            }
+            Err(ReplanRefusal::Unusable(e)) => {
+                crate::server::log::device_log(device, &format!("Auto-resume aborted: {e}"));
+                crate::server::muxer::record_error(
+                    &staging_dir.to_string_lossy(),
+                    &e,
+                    "The saved ISO, recovery map and outputs are retained; repair staging storage, then retry.",
+                );
+                reset_status_after_ripping(device, "error", &display_name, "", "", Some(e));
+                return;
+            }
         }
         if let Err(e) =
             staging::save_replanned_outputs(&staging_dir, saved.metadata_revision, outputs.clone())
         {
             reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e.to_string()));
             return;
+        }
+        // The superseded plan is never delivered; drop its outputs (plain leaves in
+        // this job only) so they do not hold staging space beside the new plan.
+        for old in &plan_outputs {
+            if is_plain_leaf(&old.filename) && !outputs.iter().any(|o| o.filename == old.filename) {
+                match std::fs::remove_file(staging_dir.join(&old.filename)) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        crate::server::log::device_log(
+                            device,
+                            &format!("superseded output {} was not removed: {e}", old.filename),
+                        );
+                    }
+                    _ => {}
+                }
+            }
         }
         plan_outputs = outputs;
     }
@@ -1125,7 +1183,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     let titles = if super::output_is_iso_image(&cfg_read.output_format) {
         vec![0] // Whole-disc delivery, not a remux selection.
     } else {
-        match resume_titles(&disc, is_fanout, &plan_outputs) {
+        match resume_titles(&disc, &plan_outputs) {
             Ok(titles) => titles,
             Err(reason) => {
                 reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
@@ -1158,7 +1216,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
 
     // Loss re-validation against the primary title (the classifier checks no loss).
     // `.get` guards a stale/out-of-range plan index.
-    let primary_index = resume_primary_output(&plan_outputs, String::new()).title_index;
+    let primary_index = plan_outputs.first().map_or(0, |o| o.title_index);
     let title = match disc.titles.get(primary_index) {
         Some(t) => t.clone(),
         None => {

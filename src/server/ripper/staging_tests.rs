@@ -31,7 +31,7 @@ fn capture_reset_keeps_corrected_identity_but_discards_old_artifacts() {
     assert_eq!(saved.title, "Cast Away");
     assert_eq!(saved.state, StagingState::Stopped);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
-    let started = begin_capture(dir.path(), 0).unwrap();
+    let started = begin_capture(dir.path(), 0, "").unwrap();
     assert_eq!(started.title, "Cast Away");
     assert_eq!(started.tmdb_id, 8358);
     assert_eq!(started.metadata_revision, revision);
@@ -68,7 +68,7 @@ fn interrupted_capture_reset_cannot_resume_old_capture_with_an_empty_plan() {
     assert!(read_state(dir.path()).unwrap().reset_in_progress);
     assert!(dir.path().join("old.iso").exists());
     assert!(snapshot_staging_disc(dir.path()).is_none());
-    assert!(begin_capture(dir.path(), 1).is_err());
+    assert!(begin_capture(dir.path(), 1, "").is_err());
     assert!(try_write_state(dir.path(), &old).is_err());
     mutate_state_if_present(dir.path(), |st| st.reset_in_progress = false);
     assert!(read_state(dir.path()).unwrap().reset_in_progress);
@@ -77,7 +77,7 @@ fn interrupted_capture_reset_cannot_resume_old_capture_with_an_empty_plan() {
     assert!(!ready.reset_in_progress);
     assert_eq!(ready.disc_identity, "same-disc");
     assert!(!dir.path().join("old.iso").exists());
-    assert!(begin_capture(dir.path(), 1).is_ok());
+    assert!(begin_capture(dir.path(), 1, "").is_ok());
 }
 
 #[test]
@@ -133,6 +133,63 @@ fn interrupted_legacy_reset_is_rediscovered_after_mapfile_removal() {
     );
     assert!(!read_state(&dir).unwrap().reset_in_progress);
     assert!(!dir.join("OldMovie.iso").exists());
+}
+
+#[test]
+fn capture_reset_refuses_a_job_whose_delivery_is_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut done = DiscState::new(StagingState::Done);
+    done.disc_identity = "same-disc".into();
+    try_write_state(dir.path(), &done).unwrap();
+    fs::write(dir.path().join("Show_S01E03.mkv"), b"unpublished").unwrap();
+    fs::write(dir.path().join(DELIVERY_JOURNAL), b"{}").unwrap();
+    let lease = job_lease(dir.path());
+    let _owner = lease.lock().unwrap();
+    let refused = reset_capture_preserving_metadata(dir.path(), "same-disc").unwrap_err();
+    assert!(refused.to_string().contains("delivery"), "{refused}");
+    assert_eq!(
+        fs::read(dir.path().join("Show_S01E03.mkv")).unwrap(),
+        b"unpublished"
+    );
+    assert!(dir.path().join(DELIVERY_JOURNAL).exists());
+    let kept = read_state(dir.path()).unwrap();
+    assert_eq!(kept.state, StagingState::Done);
+    assert!(!kept.reset_in_progress);
+}
+
+#[test]
+fn capture_reset_does_not_hold_the_state_lock_while_deleting() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut old = DiscState::new(StagingState::Stopped);
+    old.disc_identity = "same-disc".into();
+    try_write_state(dir.path(), &old).unwrap();
+    fs::write(dir.path().join("old.iso"), b"old capture").unwrap();
+    let lease = job_lease(dir.path());
+    let _owner = lease.lock().unwrap();
+    let path = dir.path().to_path_buf();
+    reset_capture_with(dir.path(), "same-disc", || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let correction = UserMetadata {
+                episode_start: None,
+                title: "Cast Away".into(),
+                year: 2000,
+                media_type: "movie".into(),
+                tmdb_id: 8358,
+                poster_url: String::new(),
+                overview: String::new(),
+            };
+            let _ = tx.send(save_user_metadata(&path, correction).is_err());
+        });
+        let refused = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a metadata save must not wait on the reset's deletion");
+        assert!(refused, "the interrupted reset refuses the save");
+        Ok(())
+    })
+    .unwrap();
+    assert!(!dir.path().join("old.iso").exists());
+    assert!(!read_state(dir.path()).unwrap().reset_in_progress);
 }
 
 #[test]
@@ -2203,6 +2260,8 @@ fn a_metadata_edit_while_mux_finishes_holds_the_old_plan() {
     initial.media_type = "tv".into();
     initial.tmdb_id = 1;
     initial.max_retries = 3;
+    initial.iso_path = dir.join("show.iso").to_string_lossy().into_owned();
+    fs::write(&initial.iso_path, b"retained capture").unwrap();
     initial.outputs.push(super::Output {
         filename: "old-episode.mkv".into(),
         episode: Some(1),
@@ -2244,4 +2303,94 @@ fn a_metadata_edit_while_mux_finishes_holds_the_old_plan() {
     assert_eq!(saved.tmdb_id, 2);
     assert_eq!(saved.title, "Correct show");
     assert_eq!(saved.metadata_revision, 1);
+}
+
+#[test]
+fn a_correction_committed_during_the_iso_prune_check_keeps_the_iso() {
+    let dir = tempfile::tempdir().unwrap();
+    try_write_state(dir.path(), &DiscState::new(StagingState::Review)).unwrap();
+    let lock = state_lock(dir.path());
+    let held = lock.lock().unwrap();
+    let path = dir.path().to_path_buf();
+    let pruner = std::thread::spawn(move || prune_unless_replan_required(&path, || {}));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // A correction lands (under the state lock) while the prune is deciding.
+    let mut st = read_state(dir.path()).unwrap();
+    st.replan_required = true;
+    write_state_unlocked(dir.path(), &st).unwrap();
+    drop(held);
+    assert!(
+        !pruner.join().unwrap(),
+        "the replan's ISO must not be pruned"
+    );
+}
+
+// After the intermediate ISO was pruned, a correction that needs a replan cannot be
+// honoured: it is refused with the reason (job stays held), never flagged for a
+// replan from an image that no longer exists.
+#[test]
+fn a_correction_needing_a_pruned_iso_is_refused_and_the_job_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = DiscState::new(StagingState::Review);
+    st.media_type = "movie".into();
+    st.title = "Castaway".into();
+    st.max_retries = 1;
+    st.iso_path = dir
+        .path()
+        .join("Castaway.iso")
+        .to_string_lossy()
+        .into_owned();
+    st.mapfile_path = dir
+        .path()
+        .join("Castaway.iso.mapfile")
+        .to_string_lossy()
+        .into_owned();
+    st.outputs = vec![Output {
+        filename: "Castaway.mkv".into(),
+        ..Default::default()
+    }];
+    try_write_state(dir.path(), &st).unwrap();
+    fs::write(dir.path().join("Castaway.mkv"), b"muxed").unwrap();
+    let as_tv = UserMetadata {
+        episode_start: None,
+        title: "Castaway Show".into(),
+        year: 2000,
+        media_type: "tv".into(),
+        tmdb_id: 77,
+        poster_url: String::new(),
+        overview: String::new(),
+    };
+    let refused = save_review_metadata(dir.path(), as_tv.clone()).unwrap_err();
+    assert!(refused.to_string().contains("disc image"), "{refused}");
+    let held = read_state(dir.path()).unwrap();
+    assert_eq!(held.state, StagingState::Review);
+    assert!(!held.replan_required);
+    assert!(held.user_metadata.is_none());
+    assert_eq!(held.metadata_revision, 0);
+    // A correction that keeps the plan needs no image and is accepted.
+    let same_plan = UserMetadata {
+        title: "Cast Away".into(),
+        media_type: "movie".into(),
+        ..as_tv.clone()
+    };
+    save_review_metadata(dir.path(), same_plan).unwrap();
+    assert!(!read_state(dir.path()).unwrap().replan_required);
+    // With the image retained the replan is accepted as before.
+    let kept = tempfile::tempdir().unwrap();
+    let mut st = st.clone();
+    st.iso_path = kept
+        .path()
+        .join("Castaway.iso")
+        .to_string_lossy()
+        .into_owned();
+    st.mapfile_path = kept
+        .path()
+        .join("Castaway.iso.mapfile")
+        .to_string_lossy()
+        .into_owned();
+    try_write_state(kept.path(), &st).unwrap();
+    fs::write(&st.iso_path, b"image").unwrap();
+    fs::write(&st.mapfile_path, b"map").unwrap();
+    save_review_metadata(kept.path(), as_tv).unwrap();
+    assert!(read_state(kept.path()).unwrap().replan_required);
 }

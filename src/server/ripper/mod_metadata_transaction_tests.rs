@@ -33,6 +33,10 @@ fn retitle_fixture(
     let path = dir.join(staging::STATE_FILE);
     let before = serde_json::to_vec(state).unwrap();
     std::fs::write(&path, &before).unwrap();
+    // A named capture image is retained in staging, as a real held job's is.
+    if !state.iso_path.is_empty() {
+        std::fs::write(dir.join(&state.iso_path), b"retained capture").unwrap();
+    }
     let cfg = Arc::new(RwLock::new(Config {
         staging_dir: temp.path().to_string_lossy().into_owned(),
         ..Default::default()
