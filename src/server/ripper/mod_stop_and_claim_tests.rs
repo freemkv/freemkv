@@ -225,3 +225,40 @@ fn threshold_text_names_a_perfect_rip_at_zero() {
     assert_eq!(fmt_threshold(0), "perfect rip required");
     assert_eq!(fmt_threshold(30), "threshold 30s");
 }
+
+// An operator Rip on a job that needs sectors for its corrected plan, while another drive
+// or the mux worker holds the job, shows the busy error instead of going silently idle.
+#[test]
+fn an_operator_rip_for_a_needed_capture_reports_a_busy_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let job = "disc-needscapture";
+    let dir = staging.join(job);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut st = staging::DiscState::new(staging::StagingState::Ripped);
+    st.disc_identity = "needscapture".into();
+    st.replan_required = true;
+    st.needs_disc = true;
+    staging::try_write_state(&dir, &st).unwrap();
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        ..Config::default()
+    }));
+    let dev = format!("fa_needscap_{}", std::process::id());
+    update_state_with(&dev, |s| {
+        s.job_id = job.into();
+        s.disc_identity = "needscapture".into();
+        s.disc_present = true;
+    });
+    let lease = staging::job_lease(&dir);
+    let _other = lease.lock().unwrap();
+    dispatch_rip_request(
+        &cfg,
+        &dev,
+        "/nonexistent/needscap",
+        crate::server::web::ResumeMode::Default,
+    );
+    let row = STATE.lock().unwrap().remove(&dev).unwrap();
+    assert_eq!(row.status, "error");
+    assert_eq!(row.last_error, JOB_BUSY_REFUSED);
+}

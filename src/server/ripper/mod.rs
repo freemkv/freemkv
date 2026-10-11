@@ -1986,7 +1986,12 @@ fn dispatch_rip_request(
         .and_then(|job| staging::read_state(&std::path::Path::new(&c.staging_dir).join(job)))
         .is_some_and(|s| s.replan_required && s.needs_disc && !s.muxing);
     if mode != crate::server::web::ResumeMode::Wipe && needs_capture {
-        rip_disc(cfg, device, device_path, true);
+        // Rip and Resume are the operator's; the on-insert modes are not.
+        let operator = matches!(
+            mode,
+            crate::server::web::ResumeMode::Default | crate::server::web::ResumeMode::Require
+        );
+        rip_disc_inner(cfg, device, device_path, true, false, operator);
         return;
     }
     // E7034: this disc is what its staged image waits for; finish that mux, never re-rip.
