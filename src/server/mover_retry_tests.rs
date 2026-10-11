@@ -258,6 +258,7 @@ fn a_restored_backoff_is_clamped_to_the_longest_real_one() {
             copy_stalled: false,
             retry_after: None,
             owner: None,
+            missing_folder: false,
         };
         let state = super::manifest::RetryState {
             attempts: 2,
@@ -373,4 +374,111 @@ fn the_incomplete_listing_skip_backs_off_too() {
         skip.is_some(),
         "the listing skip must record a backed-off row"
     );
+}
+
+// A journaled delivery into `output/<title> (2024)/`, whose folder the test may remove.
+fn journaled_in_folder(
+    tmp: &Path,
+    title: &str,
+) -> (Config, std::path::PathBuf, std::path::PathBuf) {
+    let staging = tmp.join("staging");
+    let job = staging.join(title);
+    let output = tmp.join("output");
+    let folder = output.join(format!("{title} (2024)"));
+    for d in [&job, &folder, &tmp.join("config")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let marker = serde_json::json!({"title": title, "year": 2024, "media_type": "movie"});
+    std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+    let src = job.join(format!("{title}.mkv"));
+    std::fs::write(&src, [0x1A, 0x45, 0xDF, 0xA3, 1, 2, 3, 4, 5, 6]).unwrap();
+    let dest = folder.join(format!("{title}.mkv"));
+    super::manifest::Manifest::create(
+        &job,
+        marker,
+        Vec::new(),
+        vec![output.to_string_lossy().into_owned()],
+        &[(src, dest.to_string_lossy().into_owned())],
+    )
+    .unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        output_dir: output.to_string_lossy().into_owned(),
+        autorip_dir: tmp.join("config").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    (cfg, job, folder)
+}
+
+// Retry on a row waiting for the output ROOT (not responding, stale, unmounted...) only
+// retries: the root may come back as an empty local folder, so it never consents to
+// recreating the delivery's missing title folder. Only the missing-folder row does.
+#[test]
+fn retry_on_a_root_wait_never_recreates_a_missing_title_folder() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, folder) = journaled_in_folder(tmp.path(), "Remounted");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    std::fs::remove_dir(&folder).unwrap();
+    let root = Path::new(&cfg.output_dir);
+    record_error_at_stage(
+        &key,
+        "waiting for the output folder: The output folder is not responding",
+        "Remount the share",
+        Some(root),
+        |_| {},
+    );
+    clear_move_error(&key);
+    check_and_move(&cfg);
+    let waiting = row(&key);
+    assert!(
+        !folder.exists(),
+        "a root-wait Retry recreated the folder: {waiting:?}"
+    );
+    let waiting = waiting.expect("the missing folder is shown");
+    assert!(waiting.reason.contains("missing"), "{waiting:?}");
+    // Retry on the missing-folder row itself is the consent.
+    clear_move_error(&key);
+    check_and_move(&cfg);
+    clear_error(&key);
+    assert!(folder.exists() && !job.exists(), "recreated and delivered");
+}
+
+// A Retry on a dir with no journal yet is spent on its next pass, never kept for a later
+// journal (where it would read as consent to recreate folders).
+#[test]
+fn a_retry_on_an_unjournaled_dir_is_spent_on_its_next_pass() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let job = staging.join("Early");
+    std::fs::create_dir_all(&job).unwrap();
+    let marker = serde_json::json!({"title": "Early", "year": 2024, "media_type": "movie"});
+    std::fs::write(job.join(".done"), marker.to_string()).unwrap();
+    std::fs::write(job.join("Early.mkv"), [0x1A, 0x45, 0xDF, 0xA3, 0, 0]).unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().into_owned(),
+        // Never created: the destination root is missing, so nothing is frozen.
+        output_dir: tmp.path().join("absent").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let key = job.to_string_lossy().into_owned();
+    record_error_at_stage(
+        &key,
+        "waiting for the output folder",
+        "",
+        Some(Path::new(&cfg.output_dir)),
+        |_| {},
+    );
+    clear_move_error(&key);
+    assert!(requested(&key), "fixture: Retry recorded");
+    check_and_move(&cfg);
+    let left = requested(&key);
+    clear_error(&key);
+    assert!(
+        !job.join(super::manifest::FILE).exists(),
+        "fixture: no journal"
+    );
+    assert!(!left, "the request outlived the pass");
 }

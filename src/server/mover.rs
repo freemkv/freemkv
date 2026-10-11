@@ -147,6 +147,10 @@ pub struct MoverError {
     // The staging dir whose delivery raised this destination-keyed row; it goes with that dir.
     #[serde(skip)]
     owner: Option<String>,
+    // The journaled wait for a missing title folder: the one row whose Retry consents to
+    // recreating it. A root wait (unresponsive, stale, unmounted...) never does.
+    #[serde(skip)]
+    missing_folder: bool,
 }
 
 fn retry_delay(attempts: u32) -> Option<std::time::Duration> {
@@ -215,7 +219,7 @@ fn hold_for_operator(path: &str) {
 }
 
 // Operator Retry requests not yet applied to a delivery journal's retry state. The flag
-// records that the retried row was the missing-folder wait.
+// records that the retried row was the journaled missing-title-folder wait.
 static RETRY_REQUESTS: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(Default::default);
 
@@ -348,6 +352,7 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             copy_stalled: false,
             retry_after: None,
             owner: None,
+            missing_folder: false,
         });
     apply_retry_at(row, state, now);
     drop(errors);
@@ -397,6 +402,7 @@ fn record_error_at_stage(
                 copy_stalled: false,
                 retry_after,
                 owner: None,
+                missing_folder: false,
             },
         );
         same_reason
@@ -479,7 +485,7 @@ pub fn clear_move_error(path: &str) {
         if errors.get(path).is_some_and(|e| !e.worker_active)
             && let Some(row) = errors.remove(path)
         {
-            *requests.entry(path.to_string()).or_insert(false) |= row.waiting_for_folder;
+            *requests.entry(path.to_string()).or_insert(false) |= row.missing_folder;
         }
     });
 }
@@ -489,7 +495,7 @@ pub fn clear_all_move_errors() {
     with_retry_maps(|errors, requests| {
         errors.retain(|path, e| {
             if !e.worker_active {
-                *requests.entry(path.clone()).or_insert(false) |= e.waiting_for_folder;
+                *requests.entry(path.clone()).or_insert(false) |= e.missing_folder;
             }
             e.worker_active
         });
@@ -1292,7 +1298,14 @@ fn check_and_move(cfg: &Config) {
         };
         let attempt = match &delivery {
             Some(saved) => restore_retry(&dir.to_string_lossy(), saved),
-            None => Attempt::Due,
+            None => {
+                // Nothing to reset without a journal: the Retry is spent on this pass.
+                RETRY_REQUESTS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(dir.to_string_lossy().as_ref());
+                Attempt::Due
+            }
         };
         if attempt == Attempt::Wait {
             continue;
@@ -1532,16 +1545,21 @@ fn check_and_move(cfg: &Config) {
         // a stale or hung share holds the move (output kept in staging) and never blocks here.
         // Each root is tested once per attempt.
         let mut root_checks = RootChecks::default();
+        let mut folder_missing = false;
         let unavailable = if let Some(saved) = &delivery {
-            saved
+            match saved
                 .roots
                 .iter()
                 .find_map(|root| root_checks.check(Path::new(root)).err())
-                .or_else(|| {
-                    (attempt != Attempt::Recreate)
-                        .then(|| missing_folder(&planned_moves))
-                        .flatten()
-                })
+            {
+                Some(problem) => Some(problem),
+                None if attempt != Attempt::Recreate => {
+                    let missing = missing_folder(&planned_moves);
+                    folder_missing = missing.is_some();
+                    missing
+                }
+                None => None,
+            }
         } else {
             unreachable_root(cfg, &tmdb_result, &planned_moves, &mut root_checks)
         };
@@ -1562,6 +1580,14 @@ fn check_and_move(cfg: &Config) {
                 Some(&p.path),
                 crate::server::log::syslog,
             );
+            if folder_missing
+                && let Some(row) = MOVE_ERRORS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_mut(&dir_str)
+            {
+                row.missing_folder = true;
+            }
             continue;
         }
         clear_recovered_folder_wait(&dir_str);
