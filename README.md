@@ -220,7 +220,9 @@ Titles
 
 ## Presentation language and retained audio
 
-To request the German authored presentation while retaining all of its audio:
+Some discs carry the main movie more than once, for example a German and an English
+version that share most of their content. To rip the German version while retaining
+all of its audio:
 
 ```sh
 freemkv iso://disc.iso mkv://movie.mkv --presentation-language de --audio all
@@ -230,14 +232,18 @@ The desktop **Presentation language** preference and server/Library
 `presentation_language` setting express the same content preference. Set the desktop
 preference before opening the disc. It is independent of **Audio All** and of the
 interface-language setting (`--language`); UI locale never chooses disc content.
-With no explicit presentation preference, requested audio languages remain the
-selection fallback. Audio All keeps every track in the selected title, not tracks
-from other presentations. Explicit title choices take precedence.
+With no explicit presentation preference, requested audio languages (`-a de`) are the
+fallback. Audio All keeps every track in the selected title, not tracks from other
+versions. Explicit title choices take precedence.
 
-Supported DVD root menus provide bounded, register-aware full-title launch evidence,
-including logical-to-physical audio routing. Missing, unmatched or ambiguous proof
-requires review and explicit title selection; duration similarity is not proof.
-This does not establish a universal TV episode roster or support every DVD menu VM.
+The main movie is the disc's first title unless another version of it carries more of
+the wanted languages. Another version qualifies only when the content it shares with
+the first title plays in the same order in both and is more than half of each. This is
+the same rule for DVD, Blu-ray, UHD and HD DVD. An extended cut built from the same
+scenes qualifies. Trailers that share a logo, single episodes of a play-all, reordered
+decoy playlists and separate full copies do not, so the first title is kept. A language
+the disc doesn't match also keeps the first title; a tag that is not a language is
+refused when you enter it.
 
 ## Stream Labels
 

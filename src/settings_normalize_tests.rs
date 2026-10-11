@@ -404,3 +404,17 @@ fn update_check_url_names_the_repo_releases_are_actually_published_to() {
              the update check is pointed at the wrong repo"
     );
 }
+
+// A presentation language selection cannot match keeps no preference rather than silently
+// meaning title 0; a real one survives.
+#[test]
+fn normalize_drops_a_presentation_language_that_is_not_a_language() {
+    for (saved, kept) in [("xx", ""), ("de", "de"), ("German", "German"), ("", "")] {
+        let mut s = Settings {
+            presentation_language: saved.into(),
+            ..Settings::default()
+        };
+        s.normalize();
+        assert_eq!(s.presentation_language, kept, "{saved:?}");
+    }
+}

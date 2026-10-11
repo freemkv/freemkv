@@ -28,7 +28,7 @@ fn presentation_preference_frozen_movie_and_single_tv_execute_audio_all_after_pr
         )
         .plan(
             &job.iso,
-            &crate::selection_test_fixtures::launch_titles(),
+            &crate::selection_test_fixtures::variant_titles(),
             &MediaMetadata {
                 kind: Some(kind),
                 ..Default::default()

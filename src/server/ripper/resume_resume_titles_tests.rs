@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn saved_identity_rebinds_reordered_titles_before_key_selection() {
     let mut disc = crate::ku_fixture::bd_image().disc;
-    disc.titles = crate::selection_test_fixtures::launch_titles();
+    disc.titles = crate::selection_test_fixtures::separate_titles();
     let mut saved = plan(&[1]);
     saved[0].title_identity = Some(crate::title_identity::TitleIdentity::of(&disc.titles[1]));
     let encoded = serde_json::to_vec(&saved).unwrap();
@@ -25,7 +25,7 @@ fn saved_identity_rebinds_reordered_titles_before_key_selection() {
 
 #[test]
 fn saved_identity_missing_duplicate_and_legacy_require_review() {
-    let titles = crate::selection_test_fixtures::launch_titles();
+    let titles = crate::selection_test_fixtures::separate_titles();
     let mut saved = plan(&[0]);
     saved[0].title_identity = Some(crate::title_identity::TitleIdentity::of(&titles[0]));
     assert!(rebind_resume_outputs(&titles[1..], &saved).is_err());
@@ -47,7 +47,7 @@ fn saved_identity_missing_duplicate_and_legacy_require_review() {
 
 #[test]
 fn saved_identity_fanout_rebind_is_atomic_and_keeps_episode_order() {
-    let mut titles = crate::selection_test_fixtures::launch_titles();
+    let mut titles = crate::selection_test_fixtures::separate_titles();
     let mut saved = plan(&[0, 1]);
     for (i, output) in saved.iter_mut().enumerate() {
         output.title_identity = Some(crate::title_identity::TitleIdentity::of(&titles[i]));

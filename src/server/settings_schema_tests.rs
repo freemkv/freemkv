@@ -306,3 +306,27 @@ fn numbers_clamp_ports_validate_and_bad_loads_keep_the_default() {
     assert_eq!(c.on_insert, Config::default().on_insert);
     assert_eq!(c.log_retention_days, 7);
 }
+
+// The presentation language is checked where it is entered: title selection keeps title 0
+// for a tag it cannot match and never says why.
+#[test]
+fn presentation_language_must_be_a_language() {
+    let c = Config::default();
+    for ok in ["", "de", "ger", "German", "en"] {
+        let p = parse_patch(&json!({ "presentation_language": ok }), &c);
+        assert!(p.is_ok(), "{ok:?} must be accepted");
+    }
+    for bad in ["xx", "de,en", "invalid-language"] {
+        let p = parse_patch(&json!({ "presentation_language": bad }), &c);
+        assert!(p.is_err(), "{bad:?} must be refused");
+    }
+    let mut c = Config {
+        presentation_language: "de".into(),
+        ..Config::default()
+    };
+    load_into(&mut c, &json!({"presentation_language": "xx"}));
+    assert_eq!(
+        c.presentation_language, "de",
+        "a bad saved value is ignored"
+    );
+}

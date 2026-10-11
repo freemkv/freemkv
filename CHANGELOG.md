@@ -8,6 +8,11 @@
 - **A delivery whose destination folder disappeared waits instead of recreating it** (server only: the mover): the share may have fallen off its mount point, and the folder would have landed on local disk. The row shows the missing folder; choose Retry to recreate it if it was removed on purpose.
 - **A file found at a destination after a crash is adopted only if its content matches** (server only: the mover's delivery journal): its first and last 64 KiB must match the staged rip, not just its size and time.
 
+- **The main movie follows your language again on discs that carry it in more than one language** (CLI, app, server): with a presentation language, or audio languages such as `-a de`, the version in that language is chosen when it is another cut of the first title (most of its content shared, in the same order). Trailers, single episodes, decoy playlists and separate copies are never chosen this way. The same rule applies to DVD, Blu-ray, UHD and HD DVD.
+- **A language preference no longer stops a rip for review** (CLI, app, server): on most DVDs the CLI exited, the app ticked no title and the server held the disc whenever an audio or presentation language was set. A language the disc doesn't match now keeps the first title.
+- **A presentation language that isn't a language is refused where you enter it** (CLI, app, server): `--presentation-language xx` is an error (E9083), the app's Settings keep the previous value and say why, and the server's Settings page refuses the save. It used to be ignored silently.
+- **`--presentation-language` no longer fails on a source the CLI can't pre-scan** (CLI only: the app and server always scan first); such a source has one title, so the flag changes nothing.
+
 ### Changed
 
 - **Reboot library restarts the server process** (server only: System page): running work stops at its next safe point (rips within 60 s, other services within 120 s), then the server starts again. On Linux and in the container it replaces itself in place (same process, so Docker's restart count is unchanged) and picks up an upgraded binary; on macOS it exits for launchd to start it again. A stop signal during the reboot still stops the server. The page waits for the new server and reconnects by itself.

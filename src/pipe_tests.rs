@@ -8,9 +8,20 @@ use super::{
 };
 
 #[test]
+fn a_scanned_disc_with_no_titles_is_an_early_error() {
+    let msg = super::no_titles_error(&[]).expect("empty scan must fail");
+    assert!(
+        msg.contains(&crate::strings::get("error.no_titles")),
+        "{msg}"
+    );
+    let titles = crate::selection_test_fixtures::variant_titles();
+    assert_eq!(super::no_titles_error(&titles), None);
+}
+
+#[test]
 fn presentation_language_cli_is_independent_of_audio_all() {
-    let titles = crate::selection_test_fixtures::launch_titles();
-    for (language, expected) in [("de", 1), ("en", 0)] {
+    let titles = crate::selection_test_fixtures::variant_titles();
+    for (language, expected) in [("de", 1), ("en", 0), ("fr", 0)] {
         let flags = parse_flags(&[
             "--presentation-language".into(),
             language.into(),
@@ -19,24 +30,30 @@ fn presentation_language_cli_is_independent_of_audio_all() {
         ])
         .unwrap();
         assert!(flags.streams.is_all());
-        assert_eq!(
-            super::automatic_presentation_title(
-                &titles,
-                &flags.streams.audio,
-                flags.presentation_language
-            )
-            .unwrap(),
-            expected
-        );
+        let main = super::main_title(&titles, &flags.streams.audio, flags.presentation_language);
+        assert_eq!(main, Some(expected), "{language}");
     }
-    assert!(
-        super::automatic_presentation_title(
-            &titles,
-            &freemkv_engine::StreamFilter::All,
-            Some("fr".into())
-        )
-        .is_err()
-    );
+    // `-a de` alone picks the German cut; a separate German programme is never the movie.
+    let de = parse_flags(&["-a".into(), "de".into()])
+        .unwrap()
+        .streams
+        .audio;
+    assert_eq!(super::main_title(&titles, &de, None), Some(1));
+    let separate = crate::selection_test_fixtures::separate_titles();
+    assert_eq!(super::main_title(&separate, &de, None), Some(0));
+    assert_eq!(super::main_title(&[], &de, None), None);
+}
+
+// A tag selection cannot match is refused as the flag is read, not silently ripped as title 0.
+#[test]
+fn presentation_language_flag_rejects_a_tag_that_is_not_a_language() {
+    for bad in ["xx", "de,en"] {
+        let err = parse_flags(&["--presentation-language".into(), bad.into()]).unwrap_err();
+        assert!(err.contains("E9083") && err.contains(bad), "{bad}: {err}");
+    }
+    for ok in ["de", "ger", "German"] {
+        assert!(parse_flags(&["--presentation-language".into(), ok.into()]).is_ok());
+    }
 }
 
 #[test]
@@ -2357,12 +2374,4 @@ fn windows_sanitize_name_drops_reserved_punctuation() {
     // catches a regression even if this later becomes cfg-specific.
     let s = sanitize_name(r"C:\Movie");
     assert!(!s.contains(':') && !s.contains('\\'), "got {s}");
-}
-
-#[test]
-fn title_review_message_shows_prose_not_the_engine_key() {
-    let text = super::title_review_message("missing-episode-roster");
-    assert!(!text.contains("missing-episode-roster"), "{text}");
-    assert!(text.contains("authored episode list"), "{text}");
-    assert!(text.contains("--title"), "{text}");
 }

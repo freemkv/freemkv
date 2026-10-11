@@ -448,41 +448,36 @@ mod tests {
     }
 
     #[test]
-    fn presentation_language_library_freezes_authored_choice_or_requires_review() {
-        let titles = crate::selection_test_fixtures::launch_titles();
+    fn presentation_language_picks_a_cut_of_title_zero_and_never_holds() {
         let media = MediaMetadata {
             kind: Some(MediaKind::Movie),
             ..Default::default()
         };
-        for (language, expected) in [("de", 1), ("en", 0)] {
+        let cases = [
+            ("de", 1, 0),
+            ("en", 0, 0),
+            ("", 0, 0),
+            ("fr", 0, 0),
+            ("invalid-language", 0, 0),
+        ];
+        for (language, variant, separate) in cases {
             let cfg = Config {
                 presentation_language: language.into(),
                 ..Default::default()
             };
-            let plan = planner_for(&cfg, &media)
-                .plan(
+            for (titles, expected) in [
+                (crate::selection_test_fixtures::variant_titles(), variant),
+                (crate::selection_test_fixtures::separate_titles(), separate),
+            ] {
+                let plan = planner_for(&cfg, &media).plan(
                     Path::new("disc.iso"),
                     &titles,
                     &media,
                     Path::new("movie.mkv"),
-                )
-                .unwrap();
-            assert_eq!(plan.outputs[0].title_index, expected);
-        }
-        for language in ["", "fr", "invalid-language"] {
-            let cfg = Config {
-                presentation_language: language.into(),
-                ..Default::default()
-            };
-            assert!(matches!(
-                planner_for(&cfg, &media).plan(
-                    Path::new("disc.iso"),
-                    &titles,
-                    &media,
-                    Path::new("movie.mkv")
-                ),
-                Err(PlanError::SelectionNeedsReview(_))
-            ));
+                );
+                let index = plan.map(|plan| plan.outputs[0].title_index);
+                assert_eq!(index.ok(), Some(expected), "{language:?}");
+            }
         }
     }
 
@@ -563,6 +558,8 @@ mod tests {
                     source_packets: 0,
                     feed_span: None,
                 }];
+                t.selection_evidence.segments =
+                    libfreemkv::disc::ContentSegment::from_clips(&t.clips);
                 titles.push(t);
             }
         }

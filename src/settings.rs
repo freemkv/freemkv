@@ -411,6 +411,10 @@ impl Settings {
         // Language persists as a locale code (or "auto"); fold any legacy
         // endonym / unknown value to a clean code.
         self.language = crate::ui::locale_code(&self.language).to_string();
+        // A presentation language selection cannot match means no preference.
+        if !crate::ui::valid_presentation_language(&self.presentation_language) {
+            self.presentation_language.clear();
+        }
         // A destination that isn't absolute (empty, or a stale "..." placeholder) can't be
         // written to — fall back to the default folder; `~/` is expanded first, as for
         // `keydb_path`. The test is per-OS: `starts_with('/')` reset every Windows path.

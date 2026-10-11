@@ -567,8 +567,8 @@ fn image_title_index_follows_the_drive_titles_playlist() {
 #[test]
 fn presentation_preference_key_scope_tracks_selected_title_not_index_zero() {
     let mut disc = disc_with_main_streams(vec![]);
-    disc.titles = crate::selection_test_fixtures::launch_titles();
-    for (language, expected) in [("de", vec![1]), ("en", vec![0]), ("fr", vec![])] {
+    disc.titles = crate::selection_test_fixtures::variant_titles();
+    for (language, expected) in [("de", vec![1]), ("en", vec![0]), ("fr", vec![0])] {
         let cfg = super::Config {
             presentation_language: language.into(),
             ..Default::default()
