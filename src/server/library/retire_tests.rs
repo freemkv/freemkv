@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::util::Stamp;
 
 struct Quiet;
 impl freemkv_engine::Sink for Quiet {}
@@ -150,13 +151,6 @@ fn an_old_path_outside_the_roots_is_never_removed() {
 }
 
 #[test]
-fn a_folder_on_another_device_than_its_root_is_not_the_same_storage() {
-    let f = fixture();
-    assert!(same_device(&f.root, &f.root.join("Show")).unwrap());
-    assert!(!same_device(&f.root, Path::new("/dev")).unwrap());
-}
-
-#[test]
 fn a_missing_new_file_does_not_fail_when_there_is_nothing_to_retire() {
     let f = fixture();
     let own = Owned {
@@ -170,4 +164,88 @@ fn a_missing_new_file_does_not_fail_when_there_is_nothing_to_retire() {
     let e = f.run(std::slice::from_ref(&old)).unwrap_err();
     assert_eq!(e.kind(), io::ErrorKind::NotConnected);
     assert!(old.path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_owned_file_swapped_for_a_symlink_is_kept_and_disowned_not_a_failed_pass() {
+    let f = fixture();
+    let swapped = f.old("Old E01.mkv", Some(&f.iso));
+    let after = f.old("Old E02.mkv", Some(&f.iso));
+    let elsewhere = f.root.join("Show/copy.mkv");
+    std::fs::write(&elsewhere, b"a copy").unwrap();
+    std::fs::remove_file(&swapped.path).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &swapped.path).unwrap();
+    let kept = f.run(&[swapped.clone(), after.clone()]).unwrap();
+    assert_eq!(kept, vec![swapped.path.clone()]);
+    assert!(std::fs::symlink_metadata(&swapped.path).is_ok());
+    assert_eq!(f.linked(&swapped.path), None, "disowned");
+    assert!(!after.path.exists(), "the pass went on past it");
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"a copy");
+}
+
+// Amendment 4: no device comparison. A child dataset, subvolume or crossmnt export below
+// the root has its own device id and is still the root's storage.
+#[test]
+fn an_old_file_on_a_nested_filesystem_below_its_root_is_retired() {
+    use std::os::unix::fs::MetadataExt;
+    let f = fixture();
+    let dev = |p: &Path| std::fs::metadata(p).unwrap().dev();
+    let Some(root) = f
+        .root
+        .ancestors()
+        .find(|a| dev(a) != dev(&f.root))
+        .map(Path::to_path_buf)
+    else {
+        return; // every ancestor is on one filesystem here
+    };
+    let old = f.old("Old.mkv", Some(&f.iso));
+    let roots = [root];
+    let r = Retire {
+        iso: &f.iso,
+        config_dir: &f.config,
+        roots: &roots,
+        sink: &Quiet,
+        stopping: &|| false,
+    };
+    let kept = run(
+        &r,
+        std::slice::from_ref(&old),
+        std::slice::from_ref(&f.target),
+    )
+    .unwrap();
+    assert!(kept.is_empty());
+    assert!(!old.path.exists());
+}
+
+#[test]
+fn emptied_folders_are_removed_up_to_any_configured_root_never_past_it() {
+    let f = fixture();
+    let tv = f.root.join("tv");
+    let path = tv.join("Old Show/Old Show.mkv");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"old").unwrap();
+    links::record(&f.config, &path, &f.iso).unwrap();
+    let old = Owned {
+        stamp: Stamp::read(&path).unwrap(),
+        path,
+    };
+    let roots = [f.root.clone(), tv.clone()];
+    let r = Retire {
+        iso: &f.iso,
+        config_dir: &f.config,
+        roots: &roots,
+        sink: &Quiet,
+        stopping: &|| false,
+    };
+    assert!(
+        run(&r, &[old], std::slice::from_ref(&f.target))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !tv.join("Old Show").exists(),
+        "the emptied title folder goes"
+    );
+    assert!(tv.is_dir(), "the TV root stays though it is empty");
 }

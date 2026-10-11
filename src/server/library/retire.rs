@@ -2,8 +2,7 @@
 //! each run re-reads the files and links.json, so a resumed job redoes only what is left.
 
 use super::links;
-use super::owned::Owned;
-use crate::server::util::Stamp;
+use super::owned::{Owned, Present, present};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -32,17 +31,19 @@ pub(super) fn run(
         match std::fs::symlink_metadata(target) {
             Ok(meta) if meta.is_file() => {}
             Ok(_) => {
-                return Err(io::Error::other(format!(
-                    "the new file {} is no longer a regular file; no old file was removed",
-                    target.display()
+                return Err(io::Error::other(crate::strings::fmt_or(
+                    "server.library.retire.new_not_regular",
+                    "the new file {path} is no longer a regular file; no old file was removed",
+                    &[("path", &target.display().to_string())],
                 )));
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotConnected,
-                    format!(
-                        "the new file {} cannot be found (is the share mounted?); no old file was removed",
-                        target.display()
+                    crate::strings::fmt_or(
+                        "server.library.retire.new_missing",
+                        "the new file {path} cannot be found (is the share mounted?); no old file was removed",
+                        &[("path", &target.display().to_string())],
                     ),
                 ));
             }
@@ -59,7 +60,8 @@ pub(super) fn run(
             .iter()
             .find(|root| old.path.starts_with(root))
             .ok_or_else(|| outside(&old.path))?;
-        super::worker::safe_destination(root, &old.path, true).map_err(io::Error::other)?;
+        let tv = r.roots.first() != Some(root);
+        super::worker::safe_destination(root, &old.path, tv).map_err(io::Error::other)?;
         // A missing folder is a share that went away, not a file someone removed.
         if old
             .path
@@ -68,20 +70,10 @@ pub(super) fn run(
         {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                format!(
-                    "the folder of {} cannot be found (is the share mounted?); it was not removed",
-                    old.path.display()
-                ),
-            ));
-        }
-        // A folder on another device than its root is a dropped share with a local stand-in.
-        let dir = old.path.parent().ok_or_else(|| outside(&old.path))?;
-        if !same_device(root, dir)? {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                format!(
-                    "the folder of {} is not on the same storage as its library folder (is the share mounted?); it was not removed",
-                    old.path.display()
+                crate::strings::fmt_or(
+                    "server.library.retire.folder_missing",
+                    "the folder of {path} cannot be found (is the share mounted?); it was not removed",
+                    &[("path", &old.path.display().to_string())],
                 ),
             ));
         }
@@ -93,22 +85,37 @@ pub(super) fn run(
         if let Err(e) = lock.delete() {
             tracing::warn!(path = %old.path.display(), error = %e, "retire lock could not be removed");
         }
-        if !removed? {
+        if removed? {
+            remove_emptied_folders(&old.path, root, r.roots);
+        } else {
             kept.push(old.path.clone());
         }
     }
     Ok(kept)
 }
 
-fn same_device(root: &Path, dir: &Path) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(std::fs::metadata(root)?.dev() == std::fs::metadata(dir)?.dev())
+// The title folder (and a show folder above a season folder) a removed file leaves empty;
+// never a configured root (`roots`; a TV root may sit inside `root`), and never a folder
+// with anything left in it (remove_dir refuses those).
+fn remove_emptied_folders(removed: &Path, root: &Path, roots: &[PathBuf]) {
+    for dir in removed.ancestors().skip(1).take(2) {
+        if !dir.starts_with(root)
+            || roots.iter().any(|r| r == dir)
+            || std::fs::remove_dir(dir).is_err()
+        {
+            return;
+        }
+        if let Some(parent) = dir.parent() {
+            libfreemkv::io::fsync::dir(parent);
+        }
+    }
 }
 
 fn outside(path: &Path) -> io::Error {
-    io::Error::other(format!(
-        "{} is not under the library folders; it was not removed",
-        path.display()
+    io::Error::other(crate::strings::fmt_or(
+        "server.library.retire.outside",
+        "{path} is not under the library folders; it was not removed",
+        &[("path", &path.display().to_string())],
     ))
 }
 
@@ -118,12 +125,11 @@ fn retire_one(r: &Retire<'_>, old: &Owned) -> io::Result<bool> {
         .get(&old.path)
         .map(PathBuf::as_path)
         == Some(r.iso);
-    let unchanged = match Stamp::read(&old.path) {
-        Ok(stamp) => Some(stamp == old.stamp),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+    let unchanged = match present(&old.path)? {
+        Present::File(stamp) => Some(stamp == old.stamp),
+        Present::Gone => None,
         // Not a regular file any more: someone else's.
-        Err(e) if e.kind() == io::ErrorKind::Other => Some(false),
-        Err(e) => return Err(e),
+        Present::Other => Some(false),
     };
     match (unchanged, linked) {
         (None, true) => links::forget(r.config_dir, &old.path, r.iso).map(|()| true),
@@ -145,15 +151,29 @@ fn retire_one(r: &Retire<'_>, old: &Owned) -> io::Result<bool> {
     }
 }
 
+/// A retire that kept old files: every new file landed, and nothing is left to finish.
+#[derive(Debug)]
+pub(super) struct KeptOld(pub String);
+
+impl std::fmt::Display for KeptOld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for KeptOld {}
+
 /// The failure a retire with kept files ends in: every new file landed, these old ones stay.
 pub(super) fn kept_message(new: usize, kept: &[PathBuf]) -> String {
     let paths: Vec<String> = kept.iter().map(|p| p.display().to_string()).collect();
-    format!(
-        "All {new} new files are in place. {} old file(s) made from this ISO were kept because \
-         they changed after this correction started, or are no longer recorded as made from it: \
-         {}. They are no longer tracked; delete them yourself if they are not wanted.",
-        kept.len(),
-        paths.join(", ")
+    crate::strings::fmt_or(
+        "server.library.retire.kept",
+        "All {new} new files are in place. {count} old file(s) made from this ISO were kept because they changed after this correction started, or are no longer recorded as made from it: {paths}. They are no longer tracked; delete them yourself if they are not wanted.",
+        &[
+            ("new", &new.to_string()),
+            ("count", &kept.len().to_string()),
+            ("paths", &paths.join(", ")),
+        ],
     )
 }
 

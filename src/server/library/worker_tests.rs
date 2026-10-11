@@ -81,8 +81,7 @@ fn explicit_remux_match_is_not_skipped_by_disabled_auto_lookup() {
         let t = tempfile::tempdir().unwrap();
         let lib = Library::open(t.path(), &t.path().join("logs"));
         let iso = t.path().join("missing.iso");
-        lib.source_matches
-            .as_ref()
+        lib.match_store()
             .unwrap()
             .save(
                 &iso,
@@ -247,6 +246,7 @@ fn test_sink<'a>(lib: &'a Library, arbiter: &'a Arbiter) -> JobSink<'a> {
         iso_url: "iso:///i/A.iso".into(),
         last_activity: AtomicU64::new(0),
         term: Mutex::new(Term::default()),
+        landing: Mutex::new(None),
     }
 }
 
@@ -270,11 +270,12 @@ fn replace_keeping_sig(path: &Path, bytes: &[u8]) {
 
 #[test]
 fn enqueue_reports_unavailable_matches_instead_of_silent_zero() {
-    let (_dir, mut lib, dirs) = library_with(&["A"]);
+    let (dir, lib, dirs) = library_with(&["A"]);
     lib.index_now(&dirs);
-    lib.source_matches = Err("damaged match store".into());
+    std::fs::write(dir.path().join("config/library-matches.json"), b"damaged").unwrap();
+    *lib.source_matches.lock().unwrap() = None;
     let error = lib.enqueue_checked(&dirs, |_| true).unwrap_err();
-    assert!(error.contains("damaged match store"));
+    assert!(error.contains("library-matches.json"), "{error}");
     assert!(error.contains("0 jobs queued"));
     assert!(lib.queue.snapshot().jobs.is_empty());
 }
@@ -465,13 +466,14 @@ fn a_remux_needing_the_disc_says_insert_it_and_is_not_retried() {
     let old_mkv = std::fs::read(&mkv_path).unwrap();
     lib.index_now(&dirs);
     lib.enqueue(&dirs, |_| true);
-    let job = lib.queue.claim_next().expect("the stale MKV is queued");
+    let mut job = lib.queue.claim_next().expect("the stale MKV is queued");
     assert_eq!(job.iso, iso);
     let cfg = Config {
         keydb_path: Some(keydb.to_string_lossy().into_owned()),
         library_dir: dirs.library.to_string_lossy().into_owned(),
         ..Config::default()
     };
+    maybe_attach_tv_plan(&lib, &cfg, &mut job).unwrap();
     let arbiter = Arbiter::new();
     let ending = remux(&job, &cfg, &test_sink(&lib, &arbiter));
     let lines = Lines(Mutex::new(Vec::new()));
@@ -1607,7 +1609,8 @@ fn a_wrong_title_iso_corrected_to_tv_honours_tv_auto_and_takes_the_shows_name() 
     let tv_root = output.join("tv");
     std::fs::create_dir_all(output.join("movies")).unwrap();
     std::fs::write(output.join("movies/keep.mkv"), b"x").unwrap();
-    std::fs::create_dir_all(&tv_root).unwrap();
+    // A configured root is written into only once it is not empty.
+    std::fs::create_dir_all(tv_root.join("Other Show")).unwrap();
     let cfg = Config {
         output_dir: output.to_string_lossy().into_owned(),
         movie_dir: "movies".into(),
@@ -1680,3 +1683,21 @@ fn a_folder_still_being_checked_holds_new_jobs() {
     assert!(next_job(&lib, &arbiter, &dirs, &ok, 2).is_some());
     set_mounts(Vec::new());
 }
+
+#[path = "worker_ownership_tests.rs"]
+mod ownership;
+
+#[path = "worker_episode_tests.rs"]
+mod episode;
+
+#[path = "worker_landing_tests.rs"]
+mod landing;
+
+#[path = "worker_mounts_tests.rs"]
+mod mounts;
+
+#[path = "worker_failure_tests.rs"]
+mod failures;
+
+#[path = "worker_low_tests.rs"]
+mod low;

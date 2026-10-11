@@ -264,7 +264,7 @@ pub fn handle(
             }
             let n = targets
                 .iter()
-                .map(|t| lib.queue.remove_queued(t))
+                .map(|t| lib.remove_queued(&d, t))
                 .sum::<usize>();
             json_response(request, 200, &json!({"ok": true, "removed": n}).to_string());
         }
@@ -393,7 +393,7 @@ fn discard_kept(
         .jobs
         .iter()
         .rev()
-        .find(|j| j.target == target && j.staged.is_some())
+        .find(|j| j.owns_target(target) && j.staged.is_some())
         .and_then(|j| j.staged.clone());
     let Some(kept) = kept else {
         return Err((404, "no finished file is kept for that title".into()));

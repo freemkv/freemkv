@@ -385,12 +385,7 @@ fn source_match_survives_library_reopen() {
         kind: Some(crate::server::planner::MediaKind::Movie),
         ..Default::default()
     };
-    let saved = lib
-        .source_matches
-        .as_ref()
-        .unwrap()
-        .save(&iso, 0, media)
-        .unwrap();
+    let saved = lib.match_store().unwrap().save(&iso, 0, media).unwrap();
     drop(lib);
     let reopened = Library::open(t.path(), &t.path().join("logs"));
     assert_eq!(reopened.source_match(&iso).unwrap(), Some(saved));
@@ -519,4 +514,127 @@ fn recorded_targets_are_checked_under_one_deadline_and_only_not_found_drops() {
     let mut checked = HashMap::new();
     checked.insert(PathBuf::from("/h1/a.mkv"), Target::Unverified);
     assert!(stat_unless_unverified(&checked, Path::new("/h1/a.mkv")).is_err());
+}
+
+#[test]
+fn a_scan_forgets_links_to_files_gone_from_a_populated_library_only() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    let gone = d.library.join("Gone/Gone.mkv");
+    std::fs::create_dir_all(gone.parent().unwrap()).unwrap();
+    std::fs::write(&gone, b"x").unwrap();
+    std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+    let cfg = t.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    links::record(&cfg, &gone, &d.isos.as_ref().unwrap().join("Gone.iso")).unwrap();
+    std::fs::remove_dir_all(gone.parent().unwrap()).unwrap();
+    let lib = Library::open(&cfg, &t.path().join("logs"));
+    // An empty library may be an unmounted share: nothing is forgotten.
+    lib.index_now(&d);
+    assert!(links::load(&cfg).contains_key(&gone));
+    // Its folder is gone too: a nested mount or pool disk may be offline.
+    std::fs::create_dir_all(d.library.join("Other")).unwrap();
+    lib.index_now(&d);
+    assert!(links::load(&cfg).contains_key(&gone));
+    // The folder is back without the file: it was deleted.
+    std::fs::create_dir_all(gone.parent().unwrap()).unwrap();
+    lib.index_now(&d);
+    assert!(!links::load(&cfg).contains_key(&gone));
+}
+
+#[test]
+fn a_scan_keeps_links_under_a_subfolder_that_disappears() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs_in(t.path());
+    let mount = d.library.join("Nested");
+    let kept = mount.join("Kept (2001)/Kept (2001).mkv");
+    let deleted = d.library.join("Here (2002)/Here (2002).mkv");
+    for f in [&kept, &deleted] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, b"x").unwrap();
+    }
+    let isos = d.isos.clone().unwrap();
+    std::fs::create_dir_all(&isos).unwrap();
+    let cfg = t.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    links::record(&cfg, &kept, &isos.join("Kept (2001).iso")).unwrap();
+    links::record(&cfg, &deleted, &isos.join("Here (2002).iso")).unwrap();
+    std::fs::remove_dir_all(&mount).unwrap();
+    std::fs::remove_file(&deleted).unwrap();
+    let lib = Library::open(&cfg, &t.path().join("logs"));
+    lib.index_now(&d);
+    let now = links::load(&cfg);
+    assert!(
+        now.contains_key(&kept),
+        "a vanished subfolder keeps its links"
+    );
+    assert!(
+        !now.contains_key(&deleted),
+        "a file deleted from its folder is forgotten"
+    );
+}
+
+static IN_STAT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static MOST_IN_STAT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn slow_stat(_: &Path) -> std::io::Result<()> {
+    let now = IN_STAT.fetch_add(1, Ordering::SeqCst) + 1;
+    MOST_IN_STAT.fetch_max(now, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(30));
+    IN_STAT.fetch_sub(1, Ordering::SeqCst);
+    Ok(())
+}
+
+#[test]
+fn recorded_targets_are_checked_a_bounded_number_of_folders_at_a_time() {
+    let paths: Vec<PathBuf> = (0..64)
+        .map(|n| PathBuf::from(format!("/bounded-check/{n}/x.mkv")))
+        .collect();
+    let checked = check_targets(paths, Duration::from_secs(20), slow_stat);
+    assert_eq!(checked.len(), 64);
+    assert!(checked.values().all(|t| *t == Target::Present));
+    let most = MOST_IN_STAT.load(Ordering::SeqCst);
+    assert!(most <= TARGET_PROBES, "{most} folders checked at once");
+}
+
+#[test]
+fn tv_folder_partials_no_job_owns_are_swept() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let mut d = dirs_in(t.path());
+    let tv = t.path().join("tv");
+    d.tv = Some(tv.clone());
+    let season = tv.join("Show (2001)/Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    let orphan = season.join("Show S01E04.mkv.partial");
+    std::fs::write(&orphan, b"half an episode").unwrap();
+    std::fs::write(season.join("Show S01E03.mkv"), b"whole").unwrap();
+    std::fs::create_dir_all(&d.library).unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    assert_eq!(lib.sweep_partials(&d), 1);
+    assert!(!orphan.exists());
+    assert!(season.join("Show S01E03.mkv").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_unreadable_queue_hold_clears_once_the_file_reads() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let cfg = t.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let file = cfg.join(queue::QUEUE_FILE);
+    std::fs::write(&file, br#"{"schema":2,"next_id":4,"jobs":[]}"#).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        return; // running as a user that ignores modes
+    }
+    let lib = Library::open(&cfg, &t.path().join("logs"));
+    let now = crate::server::util::epoch_secs();
+    assert!(lib.hold_for_unreadable_queue(now));
+    assert!(lib.hold().is_some());
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!lib.hold_for_unreadable_queue(now + 120));
+    assert!(lib.hold().is_none());
+    assert!(lib.queue.unreadable().is_none());
 }

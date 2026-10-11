@@ -116,10 +116,10 @@ fn a_busy_source_refuses_the_match_and_leaves_it_unchanged() {
 }
 
 #[test]
-fn a_match_whose_remux_cannot_be_queued_stays_saved_and_reports_none_queued() {
+fn another_isos_job_at_the_same_title_does_not_block_a_correction() {
     let (_t, cfg, lib, sources) = corrected_library(&["Show Disc 1"]);
     let d = dirs(&cfg);
-    // Another ISO's job already holds this source's destination.
+    // Another ISO's job holds the default destination of this title.
     lib.queue.add(vec![NewJob {
         title: "Other".into(),
         iso: d.isos.as_ref().unwrap().join("elsewhere.iso"),
@@ -129,9 +129,9 @@ fn a_match_whose_remux_cannot_be_queued_stays_saved_and_reports_none_queued() {
     let (saved, queued) = lib
         .confirm_match_and_queue(&cfg, &sources[0], 0, show())
         .unwrap();
-    assert_eq!(queued, 0);
+    assert_eq!(queued, 1);
     assert_eq!(lib.source_match(&sources[0]).unwrap(), Some(saved));
-    assert_eq!(lib.queue.snapshot().jobs.len(), 1);
+    assert_eq!(lib.queue.snapshot().jobs.len(), 2);
 }
 
 #[test]
@@ -167,7 +167,7 @@ fn the_dialog_lists_exactly_the_files_a_change_match_captures() {
     let (_, linked, checked) = lib.match_view(&cfg, &sources[0]).unwrap();
     assert!(checked);
     let captured: Vec<_> = owned::capture(
-        &links::read(&lib.config_dir).unwrap(),
+        &links::read_entries(&lib.config_dir).unwrap(),
         &sources[0],
         &owned::roots(&d),
     )
@@ -184,6 +184,8 @@ fn a_hung_share_gives_the_rule_filtered_list_and_a_flag() {
     let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
     let d = dirs(&cfg);
     let movie = d.library.join("Cast Away (2000)/Cast Away (2000).mkv");
+    std::fs::create_dir_all(movie.parent().unwrap()).unwrap();
+    std::fs::write(&movie, b"mkv").unwrap();
     links::record(&lib.config_dir, &movie, &sources[0]).unwrap();
     links::record(&lib.config_dir, Path::new("/elsewhere/X.mkv"), &sources[0]).unwrap();
     let (_, linked, checked) = lib
@@ -217,8 +219,7 @@ fn remux_of_an_iso_with_a_saved_match_replans_but_never_retires() {
     let (_t, cfg, lib, sources) = corrected_library(&["Castaway", "Other"]);
     // Remux, Retry and Remux all on an ISO with a saved match replan, but never delete.
     let d = dirs(&cfg);
-    lib.source_matches
-        .as_ref()
+    lib.match_store()
         .unwrap()
         .save(&sources[1], 0, show())
         .unwrap();
@@ -231,4 +232,92 @@ fn remux_of_an_iso_with_a_saved_match_replans_but_never_retires() {
     assert!(job.get("retire").is_none(), "{job}");
     assert!(job.get("replacement").is_none(), "{job}");
     assert!(job.get("plan").is_none(), "planned afresh at claim: {job}");
+}
+
+#[test]
+fn two_isos_with_one_name_in_different_folders_each_get_their_own_correction() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        output_dir: temp.path().join("media").to_string_lossy().into_owned(),
+        movie_dir: "movies".into(),
+        library_iso_dir: temp.path().join("isos").to_string_lossy().into_owned(),
+        library_iso_subfolders: true,
+        ..Default::default()
+    };
+    let d = dirs(&cfg);
+    std::fs::create_dir_all(&d.library).unwrap();
+    std::fs::write(d.library.join(".keep"), b"x").unwrap();
+    let sources: Vec<PathBuf> = ["Season 1", "Season 2"]
+        .iter()
+        .map(|folder| {
+            let source = d.isos.as_ref().unwrap().join(folder).join("Disc 1.iso");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(&source, folder.as_bytes()).unwrap();
+            source
+        })
+        .collect();
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    let lib = Library::open(&temp.path().join("config"), &temp.path().join("logs"));
+    lib.rescan(&d);
+    for source in &sources {
+        let (_, queued) = lib
+            .confirm_match_and_queue(&cfg, source, 0, show())
+            .unwrap();
+        assert_eq!(queued, 1, "{}", source.display());
+    }
+    let jobs = lib.queue.snapshot().jobs;
+    assert_eq!(jobs.len(), 2);
+    assert_ne!(jobs[0].target, jobs[1].target);
+}
+
+#[test]
+fn the_listing_does_not_present_a_match_saved_for_an_earlier_disc_at_the_path() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    lib.match_store()
+        .unwrap()
+        .save(&sources[0], 0, show())
+        .unwrap();
+    let row_match = |lib: &Library| {
+        lib.listing(&d)
+            .rows
+            .into_iter()
+            .find(|r| r.iso.as_deref() == Some(sources[0].as_path()))
+            .unwrap()
+            .source_match
+    };
+    lib.index_now(&d);
+    assert!(row_match(&lib).is_some());
+    let later =
+        links::iso_stamp(&sources[0]).unwrap().modified + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&sources[0])
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    lib.index_now(&d);
+    assert_eq!(row_match(&lib), None);
+}
+
+#[test]
+fn a_change_match_job_shows_on_its_iso_only_row_and_unqueues_from_it() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    lib.confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .unwrap();
+    let row = lib
+        .listing(&d)
+        .rows
+        .into_iter()
+        .find(|r| r.iso.as_deref() == Some(sources[0].as_path()))
+        .unwrap();
+    assert_eq!(row.kind, RowKind::IsoOnly);
+    let job = row
+        .job
+        .expect("the Change match job shows on its ISO-only row");
+    assert_eq!(job.state, queue::JobState::Queued);
+    assert_ne!(Some(&job.target), row.target.as_ref());
+    assert_eq!(lib.remove_queued(&d, row.target.as_ref().unwrap()), 1);
+    assert!(lib.queue.snapshot().jobs.is_empty());
 }

@@ -17,20 +17,42 @@ fn forget_drops_only_a_link_to_the_named_iso() {
 }
 
 #[test]
-fn unreadable_links_refuse_writes_without_erasing_provenance_or_prior_backup() {
+fn a_damaged_links_file_is_set_aside_under_a_new_name_and_recording_continues() {
     let t = tempfile::tempdir().unwrap();
     std::fs::write(t.path().join(LINKS_FILE), b"{ not json").unwrap();
     let backup = t.path().join("library-links.json.unreadable");
     std::fs::write(&backup, b"previous recovery evidence").unwrap();
-    assert!(record(t.path(), Path::new("/m/A.mkv"), Path::new("/i/A.iso")).is_err());
+    record(t.path(), Path::new("/m/A.mkv"), Path::new("/i/A.iso")).unwrap();
     assert_eq!(
-        std::fs::read(t.path().join(LINKS_FILE)).unwrap(),
+        std::fs::read(&backup).unwrap(),
+        b"previous recovery evidence"
+    );
+    assert_eq!(
+        std::fs::read(t.path().join("library-links.json.unreadable.1")).unwrap(),
         b"{ not json"
     );
     assert_eq!(
-        std::fs::read(backup).unwrap(),
-        b"previous recovery evidence"
+        load(t.path()).get(Path::new("/m/A.mkv")),
+        Some(&PathBuf::from("/i/A.iso"))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_links_file_that_cannot_be_read_is_left_in_place() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join(LINKS_FILE);
+    std::fs::write(&file, b"{}").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        return; // running as a user that ignores modes
+    }
+    let result = record(t.path(), Path::new("/m/A.mkv"), Path::new("/i/A.iso"));
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), b"{}");
+    assert!(!t.path().join("library-links.json.unreadable").exists());
 }
 
 #[test]
@@ -110,4 +132,43 @@ fn recording_the_same_links_again_writes_nothing() {
         before,
         "a change is saved"
     );
+}
+
+#[test]
+fn a_link_records_the_file_and_the_iso_as_they_were_and_1_8_3_entries_stay_readable() {
+    let t = tempfile::tempdir().unwrap();
+    let (mkv, iso) = (t.path().join("A.mkv"), t.path().join("A.iso"));
+    std::fs::write(&mkv, b"movie").unwrap();
+    std::fs::write(&iso, b"image").unwrap();
+    let legacy = serde_json::json!({ "/m/Old.mkv": "/i/Old.iso" });
+    std::fs::write(
+        t.path().join(LINKS_FILE),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    record(t.path(), &mkv, &iso).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(t.path().join(LINKS_FILE)).unwrap()).unwrap();
+    assert_eq!(json["/m/Old.mkv"], "/i/Old.iso", "{json}");
+    let entry = &json[mkv.to_str().unwrap()];
+    assert_eq!(entry["iso"], iso.to_str().unwrap(), "{json}");
+    assert_eq!(entry["stamp"]["size"], 5, "{json}");
+    assert_eq!(entry["iso_stamp"]["size"], 5, "{json}");
+}
+
+#[test]
+fn recording_from_a_disc_refiled_at_the_same_iso_path_drops_the_earlier_discs_links() {
+    let t = tempfile::tempdir().unwrap();
+    let iso = t.path().join("Show.iso");
+    let (s1, s2) = (t.path().join("S1.mkv"), t.path().join("S2.mkv"));
+    std::fs::write(&iso, b"season 1").unwrap();
+    std::fs::write(&s1, b"episode").unwrap();
+    std::fs::write(&s2, b"episode").unwrap();
+    record(t.path(), &s1, &iso).unwrap();
+    std::fs::remove_file(&iso).unwrap();
+    std::fs::write(&iso, b"season 2 disc").unwrap();
+    record(t.path(), &s2, &iso).unwrap();
+    let links = load(t.path());
+    assert_eq!(links.len(), 1, "{links:?}");
+    assert!(links.contains_key(&s2));
 }

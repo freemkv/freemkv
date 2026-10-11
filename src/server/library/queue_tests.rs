@@ -385,23 +385,6 @@ fn frozen_plan_write_failure_leaves_job_unplanned() {
     assert_eq!(q.snapshot(), before);
 }
 
-#[cfg(unix)]
-#[test]
-fn a_queue_file_that_cannot_be_read_is_kept() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let t = tempfile::tempdir().unwrap();
-    let file = t.path().join(QUEUE_FILE);
-    std::fs::write(&file, br#"{"jobs":[]}"#).unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o0)).unwrap();
-    if std::fs::read(&file).is_ok() {
-        return; // root reads anything
-    }
-    Queue::open(t.path());
-    let kept = t.path().join("library-queue.json.unreadable");
-    std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert_eq!(std::fs::read(&kept).unwrap(), br#"{"jobs":[]}"#);
-}
-
 #[test]
 fn has_work_is_a_running_job_or_a_waiting_one_unpaused() {
     let t = tempfile::tempdir().unwrap();
@@ -565,11 +548,11 @@ fn removing_and_dropping_touch_only_what_they_name() {
     ]);
     let a = q.claim_next().unwrap();
     assert_eq!(
-        q.remove_queued(&a.target),
+        q.remove_queued(&a.target, None),
         0,
         "a running job is not removable"
     );
-    assert_eq!(q.remove_queued(&job(t.path(), "b").target), 1);
+    assert_eq!(q.remove_queued(&job(t.path(), "b").target, None), 1);
     q.note_running(a.id, JobNote::Stalled);
     assert_eq!(q.snapshot().running().unwrap().note, Some(JobNote::Stalled));
     q.note_running(a.id + 100, JobNote::Cancelled);
@@ -764,7 +747,7 @@ fn stop_all_and_unqueue_keep_a_kept_file_offered() {
             .contains("still kept")
     );
     assert!(q.retry_staged_now(&a.target));
-    assert_eq!(q.remove_queued(&a.target), 1);
+    assert_eq!(q.remove_queued(&a.target, None), 1);
     assert_eq!(q.snapshot().jobs.len(), 1, "unqueued, still listed");
     assert_eq!(q.take_staged(&a.target), Ok("/stage/a.staged.mkv".into()));
     assert_eq!(q.take_staged(&a.target), Err(false));
@@ -841,4 +824,113 @@ fn a_dev_queue_file_with_the_old_replacement_fields_loads_as_a_plain_job() {
     for gone in ["replacement", "selected_match", "source_iso", "\"version\""] {
         assert!(!back.contains(gone), "{gone}: {back}");
     }
+}
+
+// A job of `iso` planned into two outputs beside `target`.
+fn planned_two(q: &Queue, dir: &Path) -> (Job, Vec<PathBuf>) {
+    q.add(vec![job(dir, "Show")]);
+    let claimed = q.claim_next().unwrap();
+    let plan = RemuxPlan {
+        media: crate::server::planner::MediaMetadata::default(),
+        outputs: (1..=2)
+            .map(|n| crate::server::planner::PlannedOutput {
+                id: format!("episode-{n}"),
+                title_index: n,
+                episode: Some(n as u16),
+                episode_name: String::new(),
+                filename: format!("Show_S01E0{n}.mkv"),
+            })
+            .collect(),
+    };
+    assert!(q.set_plan(claimed.id, plan));
+    let job = q.snapshot().jobs[0].clone();
+    let targets = job.output_targets();
+    (job, targets)
+}
+
+#[test]
+fn remove_finds_a_planned_job_by_any_of_its_output_targets() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (job, targets) = planned_two(&q, t.path());
+    q.requeue(job.id, JobNote::Interrupted);
+    assert_eq!(q.remove_queued(&targets[1], None), 1);
+    assert!(q.snapshot().jobs.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_queue_file_that_cannot_be_read_is_left_in_place() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join(QUEUE_FILE);
+    std::fs::write(&file, br#"{"schema":2,"next_id":4,"jobs":[]}"#).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        return; // running as a user that ignores modes
+    }
+    let q = Queue::open(t.path());
+    q.add(vec![job(t.path(), "A")]);
+    assert!(
+        q.unreadable()
+            .is_some_and(|why| why.contains("cannot be read"))
+    );
+    assert!(
+        q.claim_next().is_none(),
+        "nothing runs from a queue that was not loaded"
+    );
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        br#"{"schema":2,"next_id":4,"jobs":[]}"#
+    );
+    assert!(!t.path().join("library-queue.json.unreadable").exists());
+}
+
+#[test]
+fn every_damaged_queue_file_is_set_aside_under_its_own_name() {
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join(QUEUE_FILE);
+    std::fs::write(&file, b"first damage").unwrap();
+    drop(Queue::open(t.path()));
+    std::fs::write(&file, b"second damage").unwrap();
+    drop(Queue::open(t.path()));
+    assert_eq!(
+        std::fs::read(t.path().join("library-queue.json.unreadable")).unwrap(),
+        b"first damage"
+    );
+    assert_eq!(
+        std::fs::read(t.path().join("library-queue.json.unreadable.1")).unwrap(),
+        b"second damage"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_queue_file_that_could_not_be_read_is_loaded_once_it_reads_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join(QUEUE_FILE);
+    let first = Queue::open(t.path());
+    first.add(vec![job(t.path(), "A")]);
+    drop(first);
+    let written = std::fs::read(&file).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        return; // running as a user that ignores modes
+    }
+    let q = Queue::open(t.path());
+    let opened = crate::server::util::epoch_secs();
+    assert!(q.unreadable().is_some());
+    // Still unreadable: held, and the file is never written over.
+    assert!(!q.retry_unreadable(opened + 60));
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), written);
+    // At most one try a minute.
+    assert!(!q.retry_unreadable(opened + 61));
+    assert!(q.unreadable().is_some());
+    assert!(q.retry_unreadable(opened + 120));
+    assert!(q.unreadable().is_none());
+    assert_eq!(q.snapshot().jobs.len(), 1);
+    assert!(q.claim_next().is_some(), "the loaded queue runs");
 }

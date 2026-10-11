@@ -1,5 +1,15 @@
 use super::*;
 
+// A link as freemkv records it: the file's stamp when it exists.
+fn link(path: &Path, iso: &Path) -> Link {
+    Link {
+        iso: iso.to_path_buf(),
+        stamp: Stamp::read(path).ok(),
+        iso_stamp: None,
+        episode: false,
+    }
+}
+
 #[test]
 fn capture_keeps_only_this_isos_regular_mkvs_under_the_roots_sorted() {
     let t = tempfile::tempdir().unwrap();
@@ -12,7 +22,7 @@ fn capture_keeps_only_this_isos_regular_mkvs_under_the_roots_sorted() {
             std::fs::create_dir_all(name.parent().unwrap()).unwrap();
             std::fs::write(name, bytes).unwrap();
         }
-        links.insert(name.to_path_buf(), owner.to_path_buf());
+        links.insert(name.to_path_buf(), link(name, owner));
     };
     let b = root.join("Show/B.mkv");
     let a = root.join("Show/A.mkv");
@@ -26,7 +36,7 @@ fn capture_keeps_only_this_isos_regular_mkvs_under_the_roots_sorted() {
         Some(b"o"),
     );
     link(&t.path().join("elsewhere/E.mkv"), &iso, Some(b"e"));
-    link(&root.join("Show/../Show/A.mkv"), &iso, Some(b"a"));
+    link(&root.join("Show/../Show/A.mkv"), &iso, None);
     #[cfg(unix)]
     {
         let alias = root.join("Show/alias.mkv");
@@ -67,7 +77,7 @@ fn an_unreadable_sibling_is_skipped_unless_required() {
     let iso = t.path().join("A.iso");
     let links: HashMap<_, _> = [&good, &locked]
         .into_iter()
-        .map(|p| (p.clone(), iso.clone()))
+        .map(|p| (p.clone(), link(p, &iso)))
         .collect();
     let dir = locked.parent().unwrap();
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -89,11 +99,22 @@ fn eligible_paths_filters_by_rules_without_touching_disk() {
     let iso = PathBuf::from("/i/A.iso");
     let root = PathBuf::from("/nonexistent/movies");
     let mine = root.join("A.mkv");
+    let stamped = |iso: &Path| Link {
+        stamp: Some(Stamp {
+            size: 1,
+            modified: std::time::UNIX_EPOCH,
+        }),
+        ..link(Path::new("/nonexistent"), iso)
+    };
     let links: HashMap<_, _> = [
-        (mine.clone(), iso.clone()),
-        (root.join("n.txt"), iso.clone()),
-        (PathBuf::from("/else/B.mkv"), iso.clone()),
-        (root.join("C.mkv"), PathBuf::from("/i/other.iso")),
+        (mine.clone(), stamped(&iso)),
+        (root.join("n.txt"), stamped(&iso)),
+        (PathBuf::from("/else/B.mkv"), stamped(&iso)),
+        (root.join("C.mkv"), stamped(Path::new("/i/other.iso"))),
+        (
+            root.join("Legacy.mkv"),
+            link(Path::new("/nonexistent"), &iso),
+        ),
     ]
     .into();
     assert_eq!(eligible_paths(&links, &iso, &[root]), vec![mine]);

@@ -21,6 +21,7 @@ fn sink<'a>(lib: &'a Library, arbiter: &'a Arbiter, job: &Job) -> JobSink<'a> {
         iso_url: format!("iso://{}", job.iso.display()),
         last_activity: AtomicU64::new(0),
         term: Mutex::new(Term::default()),
+        landing: Mutex::new(None),
     }
 }
 
@@ -88,7 +89,8 @@ fn v1_8_3_library_lists_the_same_rows_with_no_phantoms() {
     let (_cfg, lib, d) = upgraded(&root);
     assert!(lib.source_match(Path::new("/x.iso")).is_ok());
     same_as_v1_8_3(&root, &listed(&lib, &d));
-    // The link to an MKV removed since (Zulu) is kept but makes no row.
+    // The link to an MKV removed since (Zulu) makes no row. Its folder went too, which is
+    // how an offline nested mount looks, so the scan keeps the link.
     let links = super::super::links::load(&root.join("config"));
     assert_eq!(links.len(), 2);
 }

@@ -1,6 +1,7 @@
 //! Durable, explicit source identity; automatic lookup must not override it.
 
 use crate::server::planner::{MediaKind, MediaMetadata};
+use crate::server::util::Stamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
@@ -11,11 +12,23 @@ use std::sync::Mutex;
 pub struct SavedMatch {
     pub revision: u64,
     pub media: MediaMetadata,
+    /// The ISO the match was confirmed for; another disc later filed at the path differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iso_stamp: Option<Stamp>,
+}
+
+impl SavedMatch {
+    /// Whether the match was confirmed for the disc now at its path (`now`, its stamp).
+    pub fn is_for(&self, now: Option<Stamp>) -> bool {
+        self.iso_stamp.is_none_or(|then| Some(then) == now)
+    }
 }
 
 pub struct MatchStore {
     path: PathBuf,
     entries: Mutex<BTreeMap<PathBuf, SavedMatch>>,
+    // Held across a save's durable write, so readers wait only for the swap.
+    writer: Mutex<()>,
 }
 
 impl MatchStore {
@@ -39,6 +52,7 @@ impl MatchStore {
         Ok(Self {
             path,
             entries: Mutex::new(entries),
+            writer: Mutex::new(()),
         })
     }
 
@@ -50,34 +64,58 @@ impl MatchStore {
             .cloned()
     }
 
-    /// Compare-and-save prevents an old dialog overwriting a newer correction.
-    /// Publish only after durable persistence succeeds; never erase corrupt state.
+    /// [`Self::save_for`] with the ISO as it is on disk now.
+    #[cfg(test)]
     pub fn save(
         &self,
         source: &Path,
         expected_revision: u64,
         media: MediaMetadata,
     ) -> io::Result<SavedMatch> {
-        validate(source, &media)?;
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let revision = entries.get(source).map_or(0, |m| m.revision);
-        if revision != expected_revision {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "source match changed; refresh before saving",
-            ));
-        }
-        let saved = SavedMatch {
-            revision: revision
-                .checked_add(1)
-                .ok_or_else(|| io::Error::other("match revision exhausted"))?,
+        self.save_for(
+            source,
+            expected_revision,
             media,
+            super::links::iso_stamp(source),
+        )
+    }
+
+    /// Compare-and-save prevents an old dialog overwriting a newer correction.
+    /// Publish only after durable persistence succeeds; never erase corrupt state.
+    /// `iso_stamp` is the disc the match is confirmed for.
+    pub fn save_for(
+        &self,
+        source: &Path,
+        expected_revision: u64,
+        media: MediaMetadata,
+        iso_stamp: Option<Stamp>,
+    ) -> io::Result<SavedMatch> {
+        validate(source, &media)?;
+        let _writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let (saved, next) = {
+            let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let revision = entries.get(source).map_or(0, |m| m.revision);
+            if revision != expected_revision {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "source match changed; refresh before saving",
+                ));
+            }
+            let saved = SavedMatch {
+                revision: revision
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("match revision exhausted"))?,
+                media,
+                iso_stamp,
+            };
+            let mut next = entries.clone();
+            next.insert(source.to_path_buf(), saved.clone());
+            (saved, next)
         };
-        let mut next = entries.clone();
-        next.insert(source.to_path_buf(), saved.clone());
         let bytes = serde_json::to_vec_pretty(&next).map_err(io::Error::other)?;
+        // Only savers change the entries, and they wait on `writer`: nothing moved meanwhile.
         crate::server::ripper::staging::write_marker_durable(&self.path, &bytes)?;
-        *entries = next;
+        *self.entries.lock().unwrap_or_else(|e| e.into_inner()) = next;
         Ok(saved)
     }
 }
@@ -191,6 +229,7 @@ mod tests {
                 SavedMatch {
                     revision,
                     media: identity,
+                    iso_stamp: None,
                 },
             )]))
             .unwrap();

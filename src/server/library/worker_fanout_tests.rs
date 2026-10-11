@@ -146,6 +146,7 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
     assert!(
         lib.queue
             .set_plan_targets(claimed.id, plan, Some(targets.clone()))
+            .unwrap()
     );
     let job = lib.queue.snapshot().jobs[0].clone();
     for target in &targets {
@@ -523,13 +524,14 @@ fn planned_and_legacy_targets_both_obey_current_library_root() {
     });
     assert!(matches!(ending, Ending::Failed(_)));
     assert!(!job.target.parent().unwrap().exists());
+    // Without a plan only a kept file is copied in, and only under the current library.
     job.plan = None;
     for replace in [false, true] {
         job.replace = replace;
-        let Ending::Failed(e) = remux(&job, &cfg, &sink) else {
+        let Ending::Failed(_) = remux(&job, &cfg, &sink) else {
             panic!("foreign target accepted")
         };
-        assert!(e.to_string().contains("library folder"));
+        assert!(!job.target.parent().unwrap().exists());
     }
 }
 

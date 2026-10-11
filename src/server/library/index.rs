@@ -230,6 +230,16 @@ pub fn safe_segment(name: &str) -> String {
     }
 }
 
+/// A stable hash of a whole path (FNV-1a): the same across builds and restarts.
+pub(crate) fn path_hash(path: &Path) -> u64 {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
 /// Where an ISO-only title's MKV goes: `<library>/<Title>/<Title>.mkv`.
 pub fn new_mkv_target(library: &Path, iso_title: &str) -> PathBuf {
     let name = safe_segment(iso_title);
