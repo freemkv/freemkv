@@ -144,6 +144,9 @@ pub struct MoverError {
     copy_stalled: bool,
     #[serde(skip)]
     retry_after: Option<std::time::Instant>,
+    // The staging dir whose delivery raised this destination-keyed row; it goes with that dir.
+    #[serde(skip)]
+    owner: Option<String>,
 }
 
 fn retry_delay(attempts: u32) -> Option<std::time::Duration> {
@@ -306,6 +309,7 @@ fn restore_retry(path: &str, saved: &manifest::Manifest) -> Attempt {
             retrying: false,
             copy_stalled: false,
             retry_after: None,
+            owner: None,
         });
     apply_retry(row, state);
     drop(errors);
@@ -354,6 +358,7 @@ fn record_error_at_stage(
                 retrying: false,
                 copy_stalled: false,
                 retry_after,
+                owner: None,
             },
         );
         same_reason
@@ -380,11 +385,12 @@ fn clear_recovered_folder_waits_for(root: &Path) {
     errors.retain(|_, e| !(e.attempts == 0 && e.waiting_root.as_deref() == Some(root)));
 }
 
+// Drop the row for `path` and every destination row its delivery raised.
 fn clear_error(path: &str) {
     MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(path);
+        .retain(|key, e| key != path && e.owner.as_deref() != Some(path));
 }
 
 // Drop any MOVE_ERRORS row keyed by this DESTINATION path, on every exit from move_file that
@@ -393,43 +399,63 @@ fn clear_stale_dest_error(dest: &Path) {
     clear_error(&dest.to_string_lossy());
 }
 
-// Drop MOVE_ERRORS rows whose staging dir is gone. `seen` is every staging child this pass
-// listed; a key is dropped only if it is a direct child of staging_root AND was absent.
-fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String>) {
-    let root = Path::new(staging_root);
-    // Recover-and-proceed on poison, matching record_error's peers: leaving
-    // the map untouched is the unbounded growth this exists to stop.
-    let mut m = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-    m.retain(|key, _| Path::new(key).parent() != Some(root) || seen.contains(key));
-    RETRY_REQUESTS
+// A row keyed by a delivery's destination, owned by its staging dir `job`.
+fn record_dest_error(dest: &Path, job: &Path, reason: &str, hint: &str) {
+    let key = dest.to_string_lossy();
+    record_error(&key, reason, hint);
+    if let Some(row) = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|key, _| Path::new(key).parent() != Some(root) || seen.contains(key));
+        .get_mut(key.as_ref())
+    {
+        row.owner = Some(job.to_string_lossy().into_owned());
+    }
+}
+
+// Both retry maps, always locked MOVE_ERRORS first: one order everywhere, so Retry, Retry
+// all and the mover's prune can never deadlock.
+fn with_retry_maps<R>(
+    f: impl FnOnce(&mut BTreeMap<String, MoverError>, &mut std::collections::HashMap<String, bool>) -> R,
+) -> R {
+    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut errors, &mut requests)
+}
+
+// Drop MOVE_ERRORS rows whose staging dir is gone. `seen` is every staging child this pass
+// listed; a key (or a destination row's owner) is dropped only if it is a direct child of
+// staging_root AND was absent. A Retry request survives only for a listed staging child.
+fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String>) {
+    let root = Path::new(staging_root);
+    let live = |key: &str| Path::new(key).parent() != Some(root) || seen.contains(key);
+    with_retry_maps(|errors, requests| {
+        errors.retain(|key, e| live(key) && e.owner.as_deref().is_none_or(live));
+        requests.retain(|key, _| Path::new(key).parent() == Some(root) && seen.contains(key));
+    });
 }
 
 /// Operator-initiated Retry: clear this error and its retry budget. The next
 /// mover tick may attempt delivery again; no media is removed by this action.
 pub fn clear_move_error(path: &str) {
-    let mut errors = MOVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
-    if errors.get(path).is_none_or(|e| !e.worker_active) {
-        let folder_wait = errors.remove(path).is_some_and(|e| e.waiting_for_folder);
-        let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
-        *requests.entry(path.to_string()).or_insert(false) |= folder_wait;
-    }
+    with_retry_maps(|errors, requests| {
+        if errors.get(path).is_some_and(|e| !e.worker_active)
+            && let Some(row) = errors.remove(path)
+        {
+            *requests.entry(path.to_string()).or_insert(false) |= row.waiting_for_folder;
+        }
+    });
 }
 
 /// Operator-initiated Retry all: reset errors and their retry budgets.
 pub fn clear_all_move_errors() {
-    let mut requests = RETRY_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
-    MOVE_ERRORS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain(|path, e| {
+    with_retry_maps(|errors, requests| {
+        errors.retain(|path, e| {
             if !e.worker_active {
                 *requests.entry(path.clone()).or_insert(false) |= e.waiting_for_folder;
             }
             e.worker_active
         });
+    });
 }
 
 /// Outcome of moving a single file. Distinguishes between an active move
@@ -2659,11 +2685,7 @@ fn move_file(
     let src_meta = fresh_metadata(src);
 
     if let Err(e) = before_publish(src) {
-        record_error(
-            &dest.to_string_lossy(),
-            "publication checkpoint failed",
-            &e.to_string(),
-        );
+        record_dest_error(dest, job, "publication checkpoint failed", &e.to_string());
         return MoveOutcome::Failed;
     }
     match publish_rename(src, dest, job) {
@@ -2671,8 +2693,9 @@ fn move_file(
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
-                record_error(
-                    &dest.to_string_lossy(),
+                record_dest_error(
+                    dest,
+                    job,
                     "publication directory sync failed",
                     &e.to_string(),
                 );
@@ -2684,11 +2707,7 @@ fn move_file(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return MoveOutcome::Collision,
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {}
         Err(e) => {
-            record_error(
-                &dest.to_string_lossy(),
-                "publication failed",
-                &e.to_string(),
-            );
+            record_dest_error(dest, job, "publication failed", &e.to_string());
             return if e.kind() == std::io::ErrorKind::Unsupported {
                 MoveOutcome::Unsupported
             } else {
@@ -2760,8 +2779,9 @@ fn move_file(
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
-                record_error(
-                    &dest.to_string_lossy(),
+                record_dest_error(
+                    dest,
+                    job,
                     "publication directory sync failed",
                     &e.to_string(),
                 );
@@ -2932,3 +2952,7 @@ mod tests;
 #[cfg(test)]
 #[path = "mover_upgrade_tests.rs"]
 mod upgrade_tests;
+
+#[cfg(test)]
+#[path = "mover_retry_tests.rs"]
+mod retry_tests;
