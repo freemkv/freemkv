@@ -65,12 +65,13 @@ fn title(id: u16, program: &str, secs: f64, language: &str) -> DiscTitle {
 
 fn authored(titles: &mut [DiscTitle], members: &[usize]) {
     let title_count = titles.len();
-    let model = SelectionModel::from_titles(titles);
     let mut identities = std::collections::HashMap::new();
     let mut orders = std::collections::HashMap::new();
     let mut next = 0;
     for &index in members {
-        let identity = model.titles()[index].presentation.clone();
+        // The engine's presentation identity: the title's segments, when it has any.
+        let segments = &titles[index].selection_evidence.segments;
+        let identity = (!segments.is_empty()).then(|| segments.clone());
         let ordinal = identity
             .as_ref()
             .and_then(|id| identities.get(id))
@@ -115,9 +116,8 @@ fn authored_order_survives_canonical_duration_sort_in_cli_and_gui() {
             StreamFilter::Langs(prefs.audio.clone())
         };
         assert_eq!(
-            freemkv_engine::resolve_selection_with_audio(&disc, &Selection::Episodes, &audio)
-                .unwrap(),
-            expected
+            freemkv_engine::resolve_selection(&disc, &Selection::Episodes, &audio, None),
+            Ok(expected.clone())
         );
         let tree = Tree::from_scan(&scan, "Episodes", 0.0, &prefs);
         assert_eq!(tree.ticked_titles(), expected);
@@ -132,13 +132,13 @@ fn authored_order_survives_canonical_duration_sort_in_cli_and_gui() {
         );
         // The selected canonical indices also remain ordered when submitted explicitly.
         assert_eq!(
-            freemkv_engine::resolve_selection_with_audio(
+            freemkv_engine::resolve_selection(
                 &disc,
                 &Selection::Titles(tree.ticked_titles()),
-                &audio
-            )
-            .unwrap(),
-            expected
+                &audio,
+                None
+            ),
+            Ok(expected)
         );
     }
 }
@@ -157,7 +157,7 @@ fn gui_modes_match_the_disc_model_with_language_alternates_and_authored_episodes
     ];
     authored(&mut disc.titles, &[2, 3, 4, 5]);
     let scan = scanned_from_disc(&disc, "none".into());
-    let model = SelectionModel::from_disc(&disc);
+    let model = SelectionModel::from_titles(&disc.titles);
     assert_eq!(
         scan.selection_model, model,
         "the bridge must preserve evidence"
@@ -181,7 +181,7 @@ fn gui_modes_match_the_disc_model_with_language_alternates_and_authored_episodes
             ("All titles", Selection::All, (0..7).collect()),
             ("No titles", Selection::Titles(vec![]), vec![]),
         ] {
-            assert_eq!(model.select(&selection, &audio).indices, expected);
+            assert_eq!(model.select(&selection, &audio, None), Ok(expected.clone()));
             assert_eq!(
                 Tree::from_scan(&scan, mode, 0.0, &prefs).ticked_titles(),
                 expected,
@@ -234,12 +234,11 @@ fn unknown_or_partial_episode_evidence_leaves_candidates_for_explicit_selection(
         for row in scan.rows.iter_mut().filter(|r| r.type_s == "Title") {
             row.notes = "Episode".into();
         }
-        let report = scan
+        let review = scan
             .selection_model
-            .select(&Selection::Episodes, &StreamFilter::All);
-        assert!(report.requires_review());
-        assert!(report.indices.is_empty());
-        assert_eq!(report.candidates, vec![0, 1]);
+            .select(&Selection::Episodes, &StreamFilter::All, None)
+            .unwrap_err();
+        assert_eq!(review.candidates, vec![0, 1]);
         let tree = Tree::from_scan(&scan, "Episodes", 0.0, &LangPrefs::default());
         assert!(tree.ticked_titles().is_empty());
         assert_eq!(tree.title_count(), 2);
@@ -274,9 +273,8 @@ fn visible_episode_subset_keeps_canonical_indices_and_longest_ties_match_engine(
     );
     assert_eq!(
         scan.selection_model
-            .select(&Selection::Longest, &StreamFilter::Langs(prefs.audio))
-            .indices,
-        vec![1]
+            .select(&Selection::Longest, &StreamFilter::Langs(prefs.audio), None),
+        Ok(vec![1])
     );
 }
 
@@ -289,24 +287,17 @@ fn open_scopes_keys_to_the_main_title() {
 }
 
 // A title rip of a selection that needs review (Episodes with no roster) refuses with E9086
-// and the reason, never as "nothing selected"; a whole-disc copy measures the candidates.
+// and the reason, never as "nothing selected".
 #[test]
-fn a_rip_needing_review_is_e9086_unless_it_copies_the_whole_disc() {
+fn a_rip_needing_review_is_e9086() {
     let mut disc = disc(false);
     disc.titles = crate::selection_test_fixtures::separate_titles();
-    let err = super::rip_titles(&disc, &Selection::Episodes, false).unwrap_err();
+    let err = super::rip_titles(&disc, &Selection::Episodes).unwrap_err();
     assert!(err.starts_with("E9086 "), "{err}");
     assert!(err.contains("missing-episode-roster"), "{err}");
+    assert_eq!(super::rip_titles(&disc, &Selection::MainMovie), Ok(vec![0]));
     assert_eq!(
-        super::rip_titles(&disc, &Selection::Episodes, true),
-        Ok(vec![0, 1])
-    );
-    assert_eq!(
-        super::rip_titles(&disc, &Selection::MainMovie, false),
-        Ok(vec![0])
-    );
-    assert_eq!(
-        super::rip_titles(&disc, &Selection::Titles(vec![1]), false),
+        super::rip_titles(&disc, &Selection::Titles(vec![1])),
         Ok(vec![1])
     );
 }

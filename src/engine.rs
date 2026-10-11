@@ -601,23 +601,22 @@ fn stopped_open<T>(
     }
 }
 
-// The titles Open resolves keys for: the main title. MainMovie never needs review today; were
-// it to, Open would scope to the candidates rather than fail.
+// The titles Open resolves keys for: the main title (MainMovie never needs review).
 pub(crate) fn open_titles(disc: &libfreemkv::Disc) -> Vec<usize> {
-    fe::resolve_selection(disc, &fe::Selection::MainMovie)
-        .unwrap_or_else(|review| review.candidates)
+    fe::SelectionModel::from_titles(&disc.titles)
+        .main_title(&fe::StreamFilter::All, None)
+        .into_iter()
+        .collect()
 }
 
-// The titles a rip runs. Automatic selection that needs review refuses as E9086 with the
-// reason; a whole-disc copy needs no title choice and measures its loss over the candidates.
+// The titles a rip runs. Automatic selection that needs review (only Episodes) refuses as
+// E9086 with the reason.
 pub(crate) fn rip_titles(
     disc: &libfreemkv::Disc,
     sel: &fe::Selection,
-    whole: bool,
 ) -> Result<Vec<usize>, String> {
-    match fe::resolve_selection(disc, sel) {
+    match fe::resolve_selection(disc, sel, &fe::StreamFilter::All, None) {
         Ok(indices) => Ok(indices),
-        Err(review) if whole => Ok(review.candidates),
         Err(review) => {
             let e = libfreemkv::Error::from(review.clone());
             let msg = crate::strings::error_message_with(u32::from(e.code()), review.reason.key());
@@ -774,7 +773,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
 
     let details = disc_details(disc, &summary);
     Scanned {
-        selection_model: fe::SelectionModel::from_disc(disc),
+        selection_model: fe::SelectionModel::from_titles(&disc.titles),
         label,
         volume_id: disc.volume_id.clone(),
         title_count: disc.titles.len(),
@@ -2937,7 +2936,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         } else {
             fe::Selection::Titles(req.titles.clone())
         };
-        let indices = rip_titles(&disc, &sel, false)?;
+        let indices = rip_titles(&disc, &sel)?;
         // A staged image holds only the titles it was staged for (checked by extents, so the
         // staging mux's re-mapped selection passes); anything else would mux zero-fill.
         fe::ensure_titles_staged(src_path, &disc, &indices).map_err(|e| gui_error(&e, src_path))?;
@@ -3490,7 +3489,7 @@ fn run_disc_scanning(
         fe::Selection::Titles(req.titles.clone())
     };
     let whole = matches!(kind, OutKind::DecryptedFolder | OutKind::IsoImage);
-    let indices = rip_titles(&disc, &sel, whole)?;
+    let indices = rip_titles(&disc, &sel)?;
     require_selection(whole, &indices)?;
     let scope = if whole {
         disc_copy_scope(kind, req.raw)

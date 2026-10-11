@@ -143,12 +143,6 @@ impl LangPrefs {
             && !self.no_subtitles
             && !self.no_forced
     }
-
-    pub fn selection_preferences(&self) -> freemkv_engine::SelectionPreferences {
-        freemkv_engine::SelectionPreferences {
-            presentation_language: self.presentation_language.clone(),
-        }
-    }
 }
 
 /// The selection bar's subtitle choices.
@@ -382,18 +376,20 @@ impl Tree {
         // Select against the full evidence snapshot before applying visibility. Hiding the
         // main feature must not promote an unrelated title. Review candidates remain
         // available for manual ticking, but never become automatic executable choices.
-        let report = sc.selection_model.select_with_preferences(
-            &selection,
-            &lang_filter(&prefs.audio),
-            &prefs.selection_preferences(),
-        );
+        let automatic = sc
+            .selection_model
+            .select(
+                &selection,
+                &lang_filter(&prefs.audio),
+                prefs.presentation_language.as_deref(),
+            )
+            .unwrap_or_default();
         let episode_order = if matches!(selection, freemkv_engine::Selection::Episodes) {
-            report.indices.clone()
+            automatic.clone()
         } else {
             Vec::new()
         };
-        let selected: std::collections::HashSet<usize> = report
-            .indices
+        let selected: std::collections::HashSet<usize> = automatic
             .into_iter()
             .filter(|i| visible.contains(i))
             .collect();
@@ -3775,15 +3771,14 @@ impl App {
                 (c, on)
             })
             .collect();
-        let has_episodes = !sc
+        let has_episodes = sc
             .selection_model
-            .select_with_preferences(
+            .select(
                 &freemkv_engine::Selection::Episodes,
                 &lang_filter(&p.audio),
-                &p.selection_preferences(),
+                p.presentation_language.as_deref(),
             )
-            .indices
-            .is_empty();
+            .is_ok_and(|indices| !indices.is_empty());
         let titles = PICK_TITLES
             .iter()
             .filter(|mode| **mode != "Episodes" || has_episodes)

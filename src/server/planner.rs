@@ -107,17 +107,11 @@ pub fn plan(
     })
 }
 
-/// The main feature under `cfg`'s presentation language; a review reason holds it.
+/// The main feature under `cfg`'s presentation language (never a review).
 pub(crate) fn main_title(cfg: &Config, titles: &[DiscTitle]) -> Result<usize, PlanError> {
-    let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
-        &freemkv_engine::Selection::MainMovie,
-        &freemkv_engine::StreamFilter::All,
-        &selection_preferences(cfg),
-    );
-    if let Some(reason) = report.review_reason {
-        return Err(PlanError::SelectionNeedsReview(reason.key().into()));
-    }
-    report.indices.first().copied().ok_or(PlanError::NoTitles)
+    freemkv_engine::SelectionModel::from_titles(titles)
+        .main_title(&freemkv_engine::StreamFilter::All, presentation(cfg))
+        .ok_or(PlanError::NoTitles)
 }
 
 /// Automatic fan-out is a TV-only policy shared by capture and remux.
@@ -129,15 +123,14 @@ pub(crate) fn check_episode_selection(
     if !cfg.tv_auto || kind != Some(MediaKind::Tv) || titles.len() <= 1 {
         return Ok(());
     }
-    let report = freemkv_engine::SelectionModel::from_titles(titles).select_with_preferences(
-        &freemkv_engine::Selection::Episodes,
-        &freemkv_engine::StreamFilter::All,
-        &selection_preferences(cfg),
-    );
-    if let Some(reason) = report.review_reason {
-        return Err(PlanError::SelectionNeedsReview(reason.key().into()));
-    }
-    Ok(())
+    freemkv_engine::SelectionModel::from_titles(titles)
+        .select(
+            &freemkv_engine::Selection::Episodes,
+            &freemkv_engine::StreamFilter::All,
+            presentation(cfg),
+        )
+        .map(|_| ())
+        .map_err(|review| PlanError::SelectionNeedsReview(review.reason.key().into()))
 }
 
 pub(crate) fn episode_indices(
@@ -149,12 +142,12 @@ pub(crate) fn episode_indices(
         return Vec::new();
     }
     let indices = freemkv_engine::SelectionModel::from_titles(titles)
-        .select_with_preferences(
+        .select(
             &freemkv_engine::Selection::Episodes,
             &freemkv_engine::StreamFilter::All,
-            &selection_preferences(cfg),
+            presentation(cfg),
         )
-        .indices;
+        .unwrap_or_default();
     if indices.len() > 1 {
         indices
     } else {
@@ -162,11 +155,8 @@ pub(crate) fn episode_indices(
     }
 }
 
-fn selection_preferences(cfg: &Config) -> freemkv_engine::SelectionPreferences {
-    freemkv_engine::SelectionPreferences {
-        presentation_language: (!cfg.presentation_language.trim().is_empty())
-            .then(|| cfg.presentation_language.clone()),
-    }
+fn presentation(cfg: &Config) -> Option<&str> {
+    Some(cfg.presentation_language.as_str()).filter(|language| !language.trim().is_empty())
 }
 
 /// One episode assignment and staging-name policy for capture and remux.
@@ -390,20 +380,17 @@ mod tests {
     #[test]
     fn movie_planner_preserves_shared_selection_and_empty_source_error() {
         for titles in [vec![], vec![title(120.0, 5), title(5000.0, 100)]] {
-            let selected = freemkv_engine::SelectionModel::from_titles(&titles).select(
-                &freemkv_engine::Selection::MainMovie,
-                &freemkv_engine::StreamFilter::All,
-            );
+            let selected = freemkv_engine::SelectionModel::from_titles(&titles)
+                .main_title(&freemkv_engine::StreamFilter::All, None);
             let planned = plan(
                 &Config::default(),
                 &titles,
                 &MediaMetadata::default(),
                 Path::new("film.mkv"),
             );
-            if selected.indices.is_empty() {
-                assert_eq!(planned, Err(PlanError::NoTitles));
-            } else {
-                assert_eq!(planned.unwrap().outputs[0].title_index, selected.indices[0]);
+            match selected {
+                None => assert_eq!(planned, Err(PlanError::NoTitles)),
+                Some(index) => assert_eq!(planned.unwrap().outputs[0].title_index, index),
             }
         }
     }
