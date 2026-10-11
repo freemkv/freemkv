@@ -761,3 +761,58 @@ fn a_refused_publication_names_its_error_on_the_delivery_row() {
         assert!(r.reason.contains("ermission denied"), "{r:?}");
     }
 }
+
+// A hand-off this build wrote (its state.json has `disc_identity`, empty for an unverified
+// disc or not) is never read as a 1.8.3 one: a listed output that is missing holds the rip
+// instead of being taken as "already filed by the earlier version".
+#[test]
+fn a_current_hand_off_with_a_missing_output_is_held_not_taken_as_legacy() {
+    let _g = guard();
+    for identity in ["", "a1b2c3"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let output = tmp.path().join("output");
+        let job = staging.join("Current");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        let mut st = crate::server::ripper::staging::DiscState::new(
+            crate::server::ripper::staging::StagingState::Done,
+        );
+        st.title = "Current".into();
+        st.disc_name = "Current".into();
+        st.year = 2024;
+        st.media_type = "movie".into();
+        st.disc_identity = identity.into();
+        st.outputs = vec![crate::server::ripper::staging::Output {
+            filename: "Current.mkv".into(),
+            ..Default::default()
+        }];
+        crate::server::ripper::staging::write_state(&job, &st);
+        let written = std::fs::read_to_string(job.join("state.json")).unwrap();
+        assert!(written.contains("\"disc_identity\""), "{written}");
+        std::fs::write(job.join("Current.iso"), vec![0u8; 4096]).unwrap();
+        let cfg = Config {
+            staging_dir: staging.to_string_lossy().into_owned(),
+            output_dir: output.to_string_lossy().into_owned(),
+            autorip_dir: tmp.path().join("config").to_string_lossy().into_owned(),
+            keep_iso: true,
+            ..Config::default()
+        };
+        let key = job.to_string_lossy().into_owned();
+        check_and_move(&cfg);
+        let left = row(&key);
+        clear_error(&key);
+        let left = left.unwrap_or_else(|| panic!("identity {identity:?}: not held"));
+        assert!(
+            left.reason
+                .contains("a planned output is missing before delivery"),
+            "identity {identity:?}: {left:?}"
+        );
+        assert!(job.join("Current.iso").exists(), "identity {identity:?}");
+        assert_eq!(
+            std::fs::read_dir(&output).unwrap().count(),
+            0,
+            "nothing filed"
+        );
+    }
+}

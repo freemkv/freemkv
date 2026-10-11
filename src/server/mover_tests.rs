@@ -3626,15 +3626,7 @@ fn in_child(name: &str) -> bool {
     if std::env::var_os(CHILD).is_some() {
         return true;
     }
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            &format!("server::mover::tests::{name}"),
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .status()
-        .unwrap();
+    let status = crate::server::util::child_test(&format!("server::mover::tests::{name}"), CHILD);
     assert!(
         status.success(),
         "{name} failed in its child process: {status}"

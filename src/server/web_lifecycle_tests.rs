@@ -8,16 +8,11 @@ fn open_sse_handler_drains_promptly_on_shutdown() {
     const CHILD: &str = "FREEMKV_TEST_SSE_DRAIN_CHILD";
     if std::env::var_os(CHILD).is_none() {
         assert!(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "server::web::lifecycle_tests::open_sse_handler_drains_promptly_on_shutdown",
-                    "--nocapture"
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap()
-                .success()
+            crate::server::util::child_test(
+                "server::web::lifecycle_tests::open_sse_handler_drains_promptly_on_shutdown",
+                CHILD
+            )
+            .success()
         );
         return;
     }
@@ -115,16 +110,11 @@ fn dead_listener_signals_shutdown() {
     const CHILD: &str = "FREEMKV_TEST_DEAD_LISTENER_CHILD";
     if std::env::var_os(CHILD).is_none() {
         assert!(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "server::web::lifecycle_tests::dead_listener_signals_shutdown",
-                    "--nocapture"
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap()
-                .success()
+            crate::server::util::child_test(
+                "server::web::lifecycle_tests::dead_listener_signals_shutdown",
+                CHILD
+            )
+            .success()
         );
         return;
     }

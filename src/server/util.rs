@@ -258,6 +258,28 @@ pub fn source_lf(src: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Run the test `path` alone in a child process with `env` set, returning its exit status.
+/// Panics unless the child ran exactly that one test: a filter matching nothing exits 0.
+#[cfg(test)]
+pub(crate) fn child_test(path: &str, env: &str) -> std::process::ExitStatus {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", path, "--nocapture"])
+        .env(env, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("running 1 test\n"),
+        "{path}: the child process did not run exactly this test:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.code() != Some(0) || stdout.contains("test result: ok. 1 passed"),
+        "{path}: the child exited 0 without passing it:\n{stdout}"
+    );
+    out.status
+}
+
 #[cfg(test)]
 #[path = "util_tests.rs"]
 mod tests;
