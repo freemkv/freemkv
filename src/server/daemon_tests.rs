@@ -1048,5 +1048,46 @@ fn the_stop_deadline_covers_every_stop_bound() {
     let bounds =
         RIP_DRAIN_TIMEOUT + SERVICE_DRAIN_TIMEOUT + WEB_JOIN_TIMEOUT + MARKER_CLEAR_TIMEOUT * 2;
     assert!(STOP_DEADLINE > bounds);
-    assert!(STOP_DEADLINE <= Duration::from_secs(300));
+    assert!(STOP_DEADLINE <= Duration::from_secs(120));
+    // The shipped service files quote it.
+    assert_eq!(STOP_DEADLINE.as_secs(), 116);
+}
+
+// Every service definition we ship gives a stop more time than the daemon's own deadline
+// (plus its last log line), so the daemon's deadline governs, not a SIGKILL.
+#[test]
+fn shipped_stop_grace_outlasts_the_stop_deadline() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let need = (STOP_DEADLINE + STOP_LOG_GRACE).as_secs() + 5;
+    let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap();
+    // The number right after `key` in `text`.
+    let after = |text: &str, key: &str| -> u64 {
+        let at = text.find(key).unwrap_or_else(|| panic!("{key} not set")) + key.len();
+        text[at..]
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or_else(|_| panic!("{key} has no number"))
+    };
+    let launchd = after(
+        &read("macos/install-library-service.sh"),
+        "-insert ExitTimeOut -integer",
+    );
+    let compose = after(
+        &read("docker/docker-compose.example.yml"),
+        "stop_grace_period:",
+    );
+    assert!(launchd >= need, "launchd ExitTimeOut {launchd} < {need}");
+    assert!(
+        compose >= need,
+        "compose stop_grace_period {compose} < {need}"
+    );
+    let dockerfile = read("docker/Dockerfile");
+    let hinted = after(&dockerfile, "--stop-timeout");
+    assert!(
+        hinted >= need,
+        "Dockerfile --stop-timeout hint {hinted} < {need}"
+    );
 }

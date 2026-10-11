@@ -13,17 +13,22 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 // Stop bounds: the rip threads, then every other service together, then the web thread.
+// Every step is a cancel whose work resumes on the next start (markers are cleared first), so
+// a bound only has to let the cancel land: a rip gets one drive recovery read (60 s) so its
+// ISO is not cut mid-write; the services, cancelling since the stop request, 30 s more.
 const RIP_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
-const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
-const WEB_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const WEB_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 // Each of the two in-progress marker sweeps (staging may sit on a share that stopped answering).
-const MARKER_CLEAR_TIMEOUT: Duration = Duration::from_secs(5);
+const MARKER_CLEAR_TIMEOUT: Duration = Duration::from_secs(3);
 // EX_TEMPFAIL: the service manager (launchd KeepAlive) starts the daemon again.
 const RESTART_EXIT_CODE: i32 = 75;
 // Slack past the drain bounds for the stop's own tail (log writes, the relaunch).
-const RELAUNCH_SLACK: Duration = Duration::from_secs(30);
+const RELAUNCH_SLACK: Duration = Duration::from_secs(15);
 // Hard bound on any stop, counted from the stop request: past it the process exits, whatever
-// is still running (a thread blocked in the kernel on a dead share is never joined).
+// is still running (a thread blocked in the kernel on a dead share is never joined). 116 s.
+// The service managers we ship give a stop longer than this plus STOP_LOG_GRACE (pinned by
+// a test), so this deadline, not their SIGKILL, governs.
 const STOP_DEADLINE: Duration = Duration::from_secs(
     RIP_DRAIN_TIMEOUT.as_secs()
         + SERVICE_DRAIN_TIMEOUT.as_secs()

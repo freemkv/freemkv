@@ -112,6 +112,11 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/usr/local/bin/freemkv", "server", "--healthcheck"]
 
+# SIGTERM stops the daemon, which ends any stop itself within 116 s. `docker
+# stop` waits only 10 s by default: run with `--stop-timeout 130` (the compose
+# example sets stop_grace_period: 130s) so a rip drains instead of being killed.
+STOPSIGNAL SIGTERM
+
 # --bootstrap mounts NFS / installs the udev rule, then runs the daemon.
 ENTRYPOINT ["/usr/local/bin/freemkv", "server", "--bootstrap"]
 

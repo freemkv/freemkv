@@ -18,10 +18,11 @@ services:
     privileged: true                    # required for optical SCSI access; also enables in-container NFS mount (see below)
     # Give a rip time to cancel + drain on SIGTERM (redeploy/reboot/Watchtower)
     # so it shuts down cleanly instead of being SIGKILLed mid-read. The default
-    # 10 s is too short for a drive mid-recovery (up to ~60 s). The server also
-    # clears its in-progress markers on shutdown, so a stop is never miscounted
-    # as a crash regardless — but a clean drain still avoids a partial ISO write.
-    stop_grace_period: 75s
+    # 10 s is too short for a drive mid-recovery (up to ~60 s). The server ends
+    # any stop itself within 116 s (logging what did not stop, e.g. a thread
+    # stuck on a hung share), so allow longer than that. It also clears its
+    # in-progress markers on shutdown, so a stop is never miscounted as a crash.
+    stop_grace_period: 130s
     environment:
       # v0.25.7 cleanup: only bootstrap-only knobs live in env now.
       # Everything else (output dirs, TMDB key, AUTO_EJECT, MAX_RETRIES,
