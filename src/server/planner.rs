@@ -110,8 +110,8 @@ impl PlanError {
         use crate::strings::get_or;
         match self {
             PlanError::Selection(_) => Some(get_or(
-                "error.plan.action.roster_match",
-                "If it is a film, use Change match to pick the movie; to rip it as one title, turn off automatic TV season ripping in Settings.",
+                "error.plan.action.roster",
+                "If it is a film, correct its match to the movie; to rip it as one title, turn off \"Rip TV seasons automatically\" in Settings.",
             )),
             PlanError::LaterDiscStart | PlanError::EpisodeRange => Some(get_or(
                 "error.plan.action.first_episode",

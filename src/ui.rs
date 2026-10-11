@@ -222,7 +222,6 @@ fn open_picks(settings: &crate::settings::Settings) -> (String, LangPrefs, f64) 
     (mode, LangPrefs::from_settings(settings), min_secs)
 }
 
-/// An empty list means "no preference", which the engine spells `All`.
 // The titles an opened source's tree ticks under the settings' picks: what the preflight
 // checks (none ticked: the main title).
 fn open_preflight_titles(sc: &Scanned, settings: &crate::settings::Settings) -> Vec<usize> {
@@ -230,6 +229,7 @@ fn open_preflight_titles(sc: &Scanned, settings: &crate::settings::Settings) -> 
     Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles()
 }
 
+/// An empty list means "no preference", which the engine spells `All`.
 fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
     if tags.is_empty() {
         freemkv_engine::StreamFilter::All
