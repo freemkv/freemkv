@@ -613,6 +613,9 @@ fn remux_planned_with(
         if progress.is_some_and(|p| p.state == OutputState::Done || p.staged.is_some()) {
             continue;
         }
+        if landed_by_this_job(&sink.lib.config_dir, &job.iso, target) {
+            continue;
+        }
         if let Err(e) = refuse_unowned(target, &owned) {
             return Ending::Failed(e);
         }
@@ -630,6 +633,16 @@ fn remux_planned_with(
             continue;
         }
         let target = targets[ordinal].clone();
+        let unowned = !owned.iter().any(|o| o.path == target);
+        if unowned
+            && target.is_file()
+            && landed_by_this_job(&sink.lib.config_dir, &job.iso, &target)
+        {
+            sink.lib
+                .queue
+                .finish_output(job.id, &output.id, OutputState::Done);
+            continue;
+        }
         if let Err(why) = validate(&target) {
             return Ending::Failed(std::io::Error::other(why));
         }
@@ -690,6 +703,11 @@ fn remux_planned_with(
         }
     }
     if job.retire {
+        if !outputs_all_done(&sink.lib.queue.snapshot(), job.id) {
+            return Ending::Failed(std::io::Error::other(
+                "not every new file is recorded as done; no old file was removed",
+            ));
+        }
         let roots = super::owned::roots(&super::dirs(cfg));
         let retire = super::retire::Retire {
             iso: &job.iso,
@@ -710,6 +728,24 @@ fn remux_planned_with(
     Ending::Done { writing_app }
 }
 
+// True when the queue shows every output of job `id` as Done (and the job exists).
+fn outputs_all_done(queue: &super::queue::QueueFile, id: u64) -> bool {
+    queue
+        .jobs
+        .iter()
+        .find(|j| j.id == id)
+        .is_some_and(|j| j.outputs.iter().all(|o| o.state == OutputState::Done))
+}
+
+// True when links.json already maps `target` to the job's ISO: an earlier run of this job
+// landed it after the owned files were captured.
+fn landed_by_this_job(config_dir: &Path, iso: &Path, target: &Path) -> bool {
+    super::links::load(config_dir)
+        .get(target)
+        .map(|p| p.as_path())
+        == Some(iso)
+}
+
 // The files a job may overwrite: links for its ISO under the output folders, plus the
 // row's own MKV when queued to replace it. Links that cannot be read stop a correction.
 fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<Vec<Owned>> {
@@ -719,7 +755,11 @@ fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<
         super::links::load(config_dir)
     };
     let roots = super::owned::roots(&super::dirs(cfg));
-    let mut owned = super::owned::capture(&links, &job.iso, &roots)?;
+    let targets = job.output_targets();
+    // A retire job needs every linked file; a plain remux only its own targets.
+    let mut owned = super::owned::capture_with(&links, &job.iso, &roots, |p| {
+        job.retire || p == job.target || targets.iter().any(|t| t == p)
+    })?;
     if job.replace && !owned.iter().any(|o| o.path == job.target) {
         match std::fs::symlink_metadata(&job.target) {
             Ok(meta) if meta.is_file() => owned.push(Owned {

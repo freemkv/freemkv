@@ -307,3 +307,31 @@ fn a_correction_with_unreadable_links_writes_and_removes_nothing() {
     assert_eq!(std::fs::read(&file).unwrap(), b"{ not json");
     assert!(c.old.iter().all(|p| p.exists()));
 }
+
+#[test]
+fn retire_waits_for_every_output_to_be_recorded_done() {
+    let c = Correction::new(2);
+    let queue = &c.lib.queue;
+    assert!(!outputs_all_done(&queue.snapshot(), c.job.id));
+    for o in &c.job.outputs {
+        queue.finish_output(c.job.id, &o.id, OutputState::Done);
+    }
+    assert!(outputs_all_done(&queue.snapshot(), c.job.id));
+    assert!(!outputs_all_done(&queue.snapshot(), c.job.id + 99));
+}
+
+#[test]
+fn a_target_this_job_already_landed_is_done_not_reported_as_foreign() {
+    let c = Correction::new(1);
+    let target = c.job.output_targets().remove(0);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, movie()).unwrap();
+    links::record(&c.t.path().join("config"), &target, Path::new(ISO)).unwrap();
+    c.lib.queue.set_owned(c.job.id, Vec::new()).unwrap();
+    let ending = c.run(|_, _, _| panic!("the landed output must not be remuxed again"));
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert!(
+        c.old.iter().all(|p| p.exists()),
+        "nothing was captured to retire"
+    );
+}

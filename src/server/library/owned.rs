@@ -29,6 +29,17 @@ pub(crate) fn capture(
     iso: &Path,
     roots: &[PathBuf],
 ) -> io::Result<Vec<Owned>> {
+    capture_with(links, iso, roots, |_| true)
+}
+
+/// [`capture`], but a file that cannot be read is skipped with a warning unless
+/// `required` says the caller needs it.
+pub(crate) fn capture_with(
+    links: &HashMap<PathBuf, PathBuf>,
+    iso: &Path,
+    roots: &[PathBuf],
+    required: impl Fn(&Path) -> bool,
+) -> io::Result<Vec<Owned>> {
     let mut owned = Vec::new();
     for path in links
         .iter()
@@ -46,15 +57,41 @@ pub(crate) fn capture(
                 continue;
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) if !required(path) => {
+                tracing::warn!(path = %path.display(), error = %e, "linked output cannot be read; skipped");
+                continue;
+            }
             Err(e) => return Err(e),
         }
-        owned.push(Owned {
-            path: path.clone(),
-            stamp: Stamp::read(path)?,
-        });
+        match Stamp::read(path) {
+            Ok(stamp) => owned.push(Owned {
+                path: path.clone(),
+                stamp,
+            }),
+            Err(e) if !required(path) => {
+                tracing::warn!(path = %path.display(), error = %e, "linked output cannot be read; skipped");
+            }
+            Err(e) => return Err(e),
+        }
     }
     owned.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(owned)
+}
+
+/// The paths `links` records as made from `iso` that pass the folder rules, sorted.
+/// Touches no disk, so unlike [`capture`] it cannot hang on a dead share.
+pub(crate) fn eligible_paths(
+    links: &HashMap<PathBuf, PathBuf>,
+    iso: &Path,
+    roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = links
+        .iter()
+        .filter(|(path, owner)| owner.as_path() == iso && eligible(path, roots))
+        .map(|(path, _)| path.clone())
+        .collect();
+    paths.sort();
+    paths
 }
 
 fn eligible(path: &Path, roots: &[PathBuf]) -> bool {

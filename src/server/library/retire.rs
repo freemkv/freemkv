@@ -24,6 +24,10 @@ pub(super) fn run(
     owned: &[Owned],
     targets: &[PathBuf],
 ) -> io::Result<Vec<PathBuf>> {
+    // Nothing to retire: a missing new file is then not this pass's concern.
+    if owned.iter().all(|o| targets.contains(&o.path)) {
+        return Ok(Vec::new());
+    }
     for target in targets {
         match std::fs::symlink_metadata(target) {
             Ok(meta) if meta.is_file() => {}
@@ -70,6 +74,17 @@ pub(super) fn run(
                 ),
             ));
         }
+        // A folder on another device than its root is a dropped share with a local stand-in.
+        let dir = old.path.parent().ok_or_else(|| outside(&old.path))?;
+        if !same_device(root, dir)? {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                format!(
+                    "the folder of {} is not on the same storage as its library folder (is the share mounted?); it was not removed",
+                    old.path.display()
+                ),
+            ));
+        }
         let lock = super::deliver::with_halt(r.sink, |halt| {
             libfreemkv::io::ArtifactLock::acquire(&old.path, &[], halt)
         })
@@ -83,6 +98,11 @@ pub(super) fn run(
         }
     }
     Ok(kept)
+}
+
+fn same_device(root: &Path, dir: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(std::fs::metadata(root)?.dev() == std::fs::metadata(dir)?.dev())
 }
 
 fn outside(path: &Path) -> io::Error {

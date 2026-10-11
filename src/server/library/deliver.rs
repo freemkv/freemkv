@@ -865,7 +865,8 @@ fn refuse_changed(target: &Path, before: TargetStamp) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    if before != TargetStamp::Unknown && now != before {
+    // An unreadable start state cannot vouch for the file now there: not ours to replace.
+    if before == TargetStamp::Unknown || now != before {
         return Err(target_exists(target));
     }
     Ok(())

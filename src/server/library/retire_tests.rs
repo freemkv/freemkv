@@ -148,3 +148,26 @@ fn an_old_path_outside_the_roots_is_never_removed() {
     assert!(f.run(&[old]).is_err());
     assert!(outside.exists());
 }
+
+#[test]
+fn a_folder_on_another_device_than_its_root_is_not_the_same_storage() {
+    let f = fixture();
+    assert!(same_device(&f.root, &f.root.join("Show")).unwrap());
+    assert!(!same_device(&f.root, Path::new("/dev")).unwrap());
+}
+
+#[test]
+fn a_missing_new_file_does_not_fail_when_there_is_nothing_to_retire() {
+    let f = fixture();
+    let own = Owned {
+        path: f.target.clone(),
+        stamp: Stamp::read(&f.target).unwrap(),
+    };
+    std::fs::remove_file(&f.target).unwrap();
+    assert!(f.run(&[own]).unwrap().is_empty());
+    assert!(f.run(&[]).unwrap().is_empty());
+    let old = f.old("Old.mkv", Some(&f.iso));
+    let e = f.run(std::slice::from_ref(&old)).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::NotConnected);
+    assert!(old.path.exists());
+}

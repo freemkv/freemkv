@@ -96,10 +96,10 @@ pub fn handle(
                 err(request, 404, "source ISO is not in the current library");
             } else {
                 match lib.match_view(&c, &source) {
-                    Ok((saved, linked)) => json_response(
+                    Ok((saved, linked, checked)) => json_response(
                         request,
                         200,
-                        &json!({"source": source, "saved": saved, "linked": linked}).to_string(),
+                        &json!({"source": source, "saved": saved, "linked": linked, "unchecked": !checked}).to_string(),
                     ),
                     Err(error) => err(request, 409, &error.to_string()),
                 }

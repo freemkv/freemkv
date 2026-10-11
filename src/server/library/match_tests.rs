@@ -164,7 +164,8 @@ fn the_dialog_lists_exactly_the_files_a_change_match_captures() {
     links::record(&lib.config_dir, &episode, &sources[0]).unwrap();
     links::record(&lib.config_dir, &d.library.join("Gone.mkv"), &sources[0]).unwrap();
     links::record(&lib.config_dir, &other, &sources[1]).unwrap();
-    let (_, linked) = lib.match_view(&cfg, &sources[0]).unwrap();
+    let (_, linked, checked) = lib.match_view(&cfg, &sources[0]).unwrap();
+    assert!(checked);
     let captured: Vec<_> = owned::capture(
         &links::read(&lib.config_dir).unwrap(),
         &sources[0],
@@ -176,6 +177,28 @@ fn the_dialog_lists_exactly_the_files_a_change_match_captures() {
     .collect();
     assert_eq!(linked, captured);
     assert_eq!(linked, vec![movie, episode]);
+}
+
+#[test]
+fn a_hung_share_gives_the_rule_filtered_list_and_a_flag() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    let movie = d.library.join("Cast Away (2000)/Cast Away (2000).mkv");
+    links::record(&lib.config_dir, &movie, &sources[0]).unwrap();
+    links::record(&lib.config_dir, Path::new("/elsewhere/X.mkv"), &sources[0]).unwrap();
+    let (_, linked, checked) = lib
+        .match_view_with(
+            &cfg,
+            &sources[0],
+            std::time::Duration::from_millis(50),
+            |_, _, _| {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                Ok(Vec::new())
+            },
+        )
+        .unwrap();
+    assert!(!checked);
+    assert_eq!(linked, vec![movie]);
 }
 
 #[test]

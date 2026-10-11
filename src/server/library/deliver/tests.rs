@@ -773,3 +773,26 @@ fn a_replace_whose_target_changed_before_landing_is_refused_and_untouched() {
     assert_eq!(std::fs::read(&s.target).unwrap(), b"edited by the user");
     assert_nothing_kept(&s);
 }
+
+#[test]
+fn a_replace_whose_start_state_was_unreadable_is_refused_and_untouched() {
+    let s = setup();
+    std::fs::write(&s.target, b"old").unwrap();
+    let f = Finished {
+        file: &s.mkv,
+        target: &s.target,
+        replace: true,
+        iso: &s.iso,
+        title: Some(2),
+        expected_secs: Some(60.0),
+        verified: &s.probe,
+        target_before: TargetStamp::Unknown,
+    };
+    let e = deliver_finished(&f, &Events::default(), &Halt::new(), &OsIo).unwrap_err();
+    assert_eq!(
+        libfreemkv::error_code(&e),
+        Some(libfreemkv::error::E_REMUX_TARGET_EXISTS),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&s.target).unwrap(), b"old");
+}

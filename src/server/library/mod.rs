@@ -140,6 +140,8 @@ pub struct Running {
 }
 
 const CONSOLE_LINES: usize = 2000;
+/// How long the Change match dialog waits on the share before listing from the links alone.
+const MATCH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Default)]
 struct Live {
@@ -474,16 +476,48 @@ impl Library {
     }
 
     /// The saved match for `source` and the files recorded as made from it: exactly
-    /// the old files a Change match would replace or remove.
+    /// the old files a Change match would replace or remove. The flag is false when the
+    /// share did not answer in time and the list is from the links alone.
     pub(crate) fn match_view(
         &self,
         cfg: &Config,
         source: &Path,
-    ) -> std::io::Result<(Option<matches::SavedMatch>, Vec<PathBuf>)> {
+    ) -> std::io::Result<(Option<matches::SavedMatch>, Vec<PathBuf>, bool)> {
+        self.match_view_with(cfg, source, MATCH_CHECK_TIMEOUT, |links, iso, roots| {
+            owned::capture(&links, &iso, &roots)
+        })
+    }
+
+    pub(crate) fn match_view_with<F>(
+        &self,
+        cfg: &Config,
+        source: &Path,
+        limit: std::time::Duration,
+        capture: F,
+    ) -> std::io::Result<(Option<matches::SavedMatch>, Vec<PathBuf>, bool)>
+    where
+        F: FnOnce(
+                HashMap<PathBuf, PathBuf>,
+                PathBuf,
+                Vec<PathBuf>,
+            ) -> std::io::Result<Vec<owned::Owned>>
+            + Send
+            + 'static,
+    {
         let saved = self.source_match(source).map_err(std::io::Error::other)?;
         let links = links::read(&self.config_dir)?;
-        let linked = owned::capture(&links, source, &owned::roots(&dirs(cfg)))?;
-        Ok((saved, linked.into_iter().map(|o| o.path).collect()))
+        let d = dirs(cfg);
+        let roots = owned::roots(&d);
+        let (by_rules, iso) = (
+            owned::eligible_paths(&links, source, &roots),
+            source.to_path_buf(),
+        );
+        match health::bounded(&d.library, limit, move || capture(links, iso, roots)) {
+            health::Bounded::Done(found) => {
+                Ok((saved, found?.into_iter().map(|o| o.path).collect(), true))
+            }
+            _ => Ok((saved, by_rules, false)),
+        }
     }
 
     /// Save `media` as the identity of an indexed, idle `source`, then queue its remux.
