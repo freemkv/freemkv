@@ -1074,9 +1074,8 @@ fn landed_by_this_job(config_dir: &Path, iso: &Path, target: &Path) -> bool {
 }
 
 // The files a job may overwrite: links for its ISO under the output folders, plus the
-// row's own MKV when queued to replace it, unless a link says that file is no longer the
-// one this ISO made. Links that cannot be read stop a correction or a replace; without
-// them a new file's job owns nothing.
+// row's own MKV when queued to replace it unless a link disowns it. Unreadable links stop a
+// correction or a replace; a new file's job then owns nothing.
 fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<Vec<Owned>> {
     let links = match links_for_job(config_dir) {
         Ok(links) => links,

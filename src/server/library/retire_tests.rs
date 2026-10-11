@@ -206,8 +206,10 @@ fn an_old_file_on_a_nested_filesystem_below_its_root_is_retired() {
         .ancestors()
         .find(|a| dev(a) != dev(&f.root))
         .map(Path::to_path_buf);
+    #[cfg(target_os = "linux")]
+    let root = nested.expect("a nested filesystem on Linux");
+    #[cfg(not(target_os = "linux"))]
     let Some(root) = nested else {
-        assert!(!cfg!(target_os = "linux"), "no nested filesystem on Linux");
         return; // no writable nested filesystem on this host
     };
     let old = f.old("Old.mkv", Some(&f.iso));
