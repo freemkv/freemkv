@@ -12,13 +12,14 @@ pub(super) fn metadata(root: &Path, job: &str) -> Option<crate::server::tmdb::Tm
     metadata_from_state(st)
 }
 
+/// The saved metadata a scan or rip uses instead of a lookup: an operator correction,
+/// or a confident TMDB match. A raw-label fallback or a guess is looked up again.
 pub(super) fn metadata_from_state(
     st: staging::DiscState,
 ) -> Option<crate::server::tmdb::TmdbResult> {
-    let m = st
-        .user_metadata
-        .clone()
-        .or_else(|| (!st.title.is_empty()).then(|| staging::UserMetadata::shown_by(&st)))?;
+    let m = st.user_metadata.clone().or_else(|| {
+        (st.tmdb_confident && !st.title.is_empty()).then(|| staging::UserMetadata::shown_by(&st))
+    })?;
     Some(crate::server::tmdb::TmdbResult {
         title: m.title,
         year: m.year,
@@ -27,6 +28,14 @@ pub(super) fn metadata_from_state(
         poster_url: m.poster_url,
         overview: m.overview,
     })
+}
+
+/// Whether `lookup` is a confident TMDB answer for the disc `label`.
+pub(super) fn lookup_confident(
+    label: &str,
+    lookup: Option<&crate::server::tmdb::TmdbResult>,
+) -> bool {
+    lookup.is_some_and(|t| crate::server::tmdb::is_confident_match(label, &t.title, t.year))
 }
 
 /// AACS supplies the disc hash. Other media use a versioned, content-sampled
@@ -62,14 +71,20 @@ pub(super) fn dir_matches_identity(dir: &Path, identity: &str) -> bool {
 /// Allocate a fresh staging namespace when a non-AACS fingerprint cannot be
 /// verified. This is deliberately not an identity: callers must not persist
 /// the returned value as `disc_identity` or use it to adopt an existing job.
-pub(super) fn fresh_unverified_job(root: &Path) -> Result<String, String> {
-    std::fs::create_dir_all(root).map_err(|e| format!("cannot create staging: {e}"))?;
+pub(super) fn fresh_unverified_job(cfg: &crate::server::config::Config) -> Result<String, String> {
+    let root = Path::new(&cfg.staging_dir);
+    if crate::server::health::share_unmounted(root) {
+        return Err("cannot create staging: its network share is not mounted".into());
+    }
+    crate::server::config::create_staging_root(cfg)
+        .map_err(|e| format!("cannot create staging: {e}"))?;
     let stamp = crate::server::util::epoch_secs();
     for n in 0..1000u32 {
+        let prefix = staging::UNVERIFIED_JOB_PREFIX;
         let job = if n == 0 {
-            format!("unverified-{stamp}")
+            format!("{prefix}{stamp}")
         } else {
-            format!("unverified-{stamp}-{n}")
+            format!("{prefix}{stamp}-{n}")
         };
         match std::fs::create_dir(root.join(&job)) {
             Ok(()) => return Ok(job),
@@ -109,37 +124,84 @@ fn sample_fingerprint(
 /// Adopt one existing matching job in place. Multiple matches are a hold,
 /// never permission to pick arbitrarily or delete another partial capture.
 pub(super) fn locate(root: &Path, identity: &str) -> Result<String, String> {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    // The retrying listing: a cold NFS cache can list an existing job as absent.
+    locate_listed(root, identity, super::read_staging_listing(root))
+}
+
+// `locate` over `listing`. A partial listing or an entry that cannot be inspected may
+// hide this disc's job, so either is a hold, never a fresh job beside it.
+fn locate_listed(
+    root: &Path,
+    identity: &str,
+    listing: Option<super::StagingListing>,
+) -> Result<String, String> {
+    let names = match listing {
+        Some(listing) if listing.complete => listing.names,
+        Some(_) => {
+            return Err(crate::strings::get_or(
+                "error.staging.listing_incomplete",
+                "cannot inspect staging: some entries in the staging folder could not be read",
+            ));
+        }
+        None if std::fs::symlink_metadata(root)
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
             return Ok(format!("disc-{identity}"));
         }
-        Err(e) => return Err(format!("cannot inspect staging: {e}")),
+        None => {
+            return Err("cannot inspect staging: the staging folder could not be listed".into());
+        }
     };
     let mut found = None;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("cannot inspect staging entry: {e}"))?;
-        if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+    for name in names {
+        let dir = root.join(&name);
+        let meta = std::fs::symlink_metadata(&dir).map_err(|e| {
+            crate::strings::fmt_or(
+                "error.staging.entry_unreadable",
+                "cannot inspect staging entry {name}: {error}",
+                &[("name", &name), ("error", &e.to_string())],
+            )
+        })?;
+        if !meta.is_dir() {
             continue;
         }
-        if dir_matches_identity(&entry.path(), identity) {
+        if dir_matches_identity(&dir, identity) {
             if found.is_some() {
                 return Err("more than one staging entry matches this disc; keep both and resolve the duplicate before continuing".into());
             }
-            found = Some(entry.file_name().to_string_lossy().into_owned());
+            found = Some(name);
         }
     }
     if let Some(found) = found {
         return Ok(found);
     }
     let job = format!("disc-{identity}");
-    if std::fs::symlink_metadata(root.join(&job)).is_ok() {
+    let dir = root.join(&job);
+    if std::fs::symlink_metadata(&dir).is_ok() && !own_unstamped_job(&dir, identity) {
         return Err(
             "the staging job exists but its identity cannot be verified; preserve it for review"
                 .into(),
         );
     }
     Ok(job)
+}
+
+// This disc's own job dir before its first identity write landed (another drive's
+// capture start, or a first write that failed): stamped within a short grace, or
+// holding nothing but ripper bookkeeping and no other identity. Adopted, not refused.
+fn own_unstamped_job(dir: &Path, identity: &str) -> bool {
+    for _ in 0..3 {
+        if dir_matches_identity(dir, identity) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let unclaimed = match staging::read_state_checked(dir) {
+        staging::StateRead::Absent => true,
+        staging::StateRead::Valid(st) => st.disc_identity.is_empty(),
+        staging::StateRead::Unreadable(_) => false,
+    };
+    unclaimed && staging::holds_only_ripper_bookkeeping(dir)
 }
 
 pub(super) fn path(root: &Path, job: &str) -> Result<PathBuf, String> {

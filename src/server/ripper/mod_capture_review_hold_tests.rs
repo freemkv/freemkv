@@ -1,0 +1,115 @@
+//! A finished capture whose plan the operator must settle is held in Review with
+//! its keys kept; a hold that cannot be written is surfaced, never swallowed.
+use super::*;
+
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-scratch")
+        .join(format!("capture-hold-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+#[test]
+fn a_plan_hold_keeps_the_rip_keys_for_the_corrected_remux() {
+    let dir = scratch("keys");
+    staging::try_write_state(
+        &dir,
+        &staging::DiscState::new(staging::StagingState::Sweeping),
+    )
+    .unwrap();
+    let iso = dir.join("Show.iso");
+    let map = dir.join("Show.iso.mapfile");
+    hold_capture_for_review(
+        "dev-hold",
+        &dir,
+        (&iso.to_string_lossy(), &map.to_string_lossy()),
+        Some(&libfreemkv::keys::KeyRing::none()),
+        "held",
+    );
+    let st = staging::read_state(&dir).unwrap();
+    assert_eq!(st.state, staging::StagingState::Review);
+    assert_eq!(st.failure_reason.as_deref(), Some("held"));
+    assert!(crate::server::keysource::rip_keys_for(&iso).is_some());
+    crate::server::keysource::forget_rip_keys(&iso);
+}
+
+#[test]
+fn a_hold_that_cannot_be_written_raises_a_card() {
+    let dir = scratch("unwritable");
+    std::fs::write(dir.join(staging::STATE_FILE), b"{not json").unwrap();
+    hold_capture_for_review(
+        "dev-hold-2",
+        &dir,
+        ("/x/Show.iso", "/x/Show.iso.mapfile"),
+        None,
+        "held",
+    );
+    let cards = crate::server::muxer::MUX_ERRORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let card = cards.get(dir.to_string_lossy().as_ref());
+    assert!(
+        card.is_some_and(|c| c.reason == "held"),
+        "no card for the lost hold"
+    );
+}
+
+// The rip-time hold as a capture leaves it: Sweeping, its failed plan's outputs cleared,
+// no hand-off. A correction in Review then hands the saved image to the mux worker.
+#[test]
+fn a_rip_time_hold_is_dispatched_by_the_mux_worker_once_corrected() {
+    let dir = scratch("rip-time");
+    let iso = dir.join("Show.iso");
+    let map = dir.join("Show.iso.mapfile");
+    std::fs::write(&iso, b"image").unwrap();
+    std::fs::write(&map, b"map").unwrap();
+    staging::begin_capture(&dir, 2, "hash").unwrap();
+    let failed = crate::server::planner::check_episode_range(Some(u16::MAX), 2).map(|()| vec![]);
+    staging::start_sweep(&dir, |s| {
+        s.outputs = vec![staging::Output {
+            filename: "Old.mkv".into(),
+            ..Default::default()
+        }];
+        staging::stamp_capture_plan(s, Some(&failed));
+        s.iso_path = iso.to_string_lossy().into_owned();
+        s.mapfile_path = map.to_string_lossy().into_owned();
+    })
+    .unwrap();
+    let st = staging::read_state(&dir).unwrap();
+    assert_eq!(st.state, staging::StagingState::Sweeping);
+    assert!(st.outputs.is_empty());
+    hold_capture_for_review(
+        "dev-hold-rip-time",
+        &dir,
+        (&iso.to_string_lossy(), &map.to_string_lossy()),
+        None,
+        "held",
+    );
+    let verdict = || {
+        crate::server::muxer::mux_dispatch_verdict(staging::snapshot_staging_disc(&dir).as_ref())
+    };
+    assert_ne!(verdict(), crate::server::muxer::MuxVerdict::Dispatch);
+    staging::save_review_metadata(
+        &dir,
+        staging::UserMetadata {
+            title: "Show".into(),
+            year: 2001,
+            media_type: crate::server::planner::MediaKind::Movie,
+            episode_start: None,
+            tmdb_id: 1,
+            poster_url: String::new(),
+            overview: String::new(),
+        },
+    )
+    .unwrap();
+    let st = staging::read_state(&dir).unwrap();
+    assert_eq!(st.state, staging::StagingState::Ripped);
+    assert!(st.replan_required && !st.title_identity_review);
+    assert_eq!(verdict(), crate::server::muxer::MuxVerdict::Dispatch);
+    let marker = crate::server::muxer::read_marker(&dir).unwrap();
+    assert_eq!(marker.iso_path, iso.to_string_lossy());
+    assert_eq!(marker.mapfile_path, map.to_string_lossy());
+}

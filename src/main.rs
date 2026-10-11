@@ -51,6 +51,8 @@ mod strings;
 // Also declared in `lib.rs`: `pipe` (here) and `engine` (GUI) both re-scan
 // between picking a title and muxing it, and need ONE shared answer type.
 mod title_identity;
+// Also declared in `lib.rs`: the CLI's report and the server's log name one unlocker.
+mod unlocker;
 
 // ── GUI shell — macOS ───────────────────────────────────────────────────────
 // Compiles into the app build only where AppKit is; Windows' shell lives in

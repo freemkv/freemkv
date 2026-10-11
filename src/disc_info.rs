@@ -3,6 +3,7 @@
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
+use crate::unlocker::matched_unlocker;
 use libfreemkv::disc::{BdRegion, DiscRegion};
 use libfreemkv::{
     AudioStream, Codec, ColorSpace, Disc, HdrFormat, LabelPurpose, LabelQualifier, ScanOptions,
@@ -293,13 +294,6 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
     out.blank(Normal);
 
     print_titles(&out, &disc, full, verbose, basic);
-}
-
-/// The unlocker that handled the disc: the first match in the registry-derived
-/// runtime results (the matrix stays with diagnostics). The server's log line
-/// applies the same rule in its own code (`server::ripper`).
-pub(crate) fn matched_unlocker(matrix: &[(&'static str, bool)]) -> Option<&'static str> {
-    matrix.iter().find_map(|(name, ok)| ok.then_some(*name))
 }
 
 /// The report's `Unlocker:` line, in the active locale.

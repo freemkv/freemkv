@@ -1021,3 +1021,16 @@ fn mux_iso_honours_a_stop_pressed_before_it_starts() {
     assert!(super::super::is_halt_error(&err), "{err}");
     super::super::session::unregister_halt(device);
 }
+
+// A watchdog that could not start leaves the mux without stall detection: it is logged.
+#[test]
+fn a_failed_watchdog_spawn_is_reported() {
+    let device = "watchdog_spawn_fail_device";
+    report_watchdog_spawn_failure(device, &std::io::Error::other("no threads"));
+    let log = crate::server::log::get_device_log(device, 10);
+    assert!(
+        log.iter()
+            .any(|l| l.contains("stall watchdog") && l.contains("no threads")),
+        "{log:?}"
+    );
+}

@@ -1078,6 +1078,10 @@ pub(super) fn set_pass_progress(
         s.pass_eta = String::new();
         s.eta = String::new();
         s.speed_mbs = 0.0;
+        // A correction published mid-rip outranks the rip-start values, as in update_state.
+        if let Some(m) = s.user_metadata.clone() {
+            s.show_user_metadata(&m);
+        }
     });
 }
 

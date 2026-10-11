@@ -68,6 +68,9 @@ pub mod strings;
 /// is exactly how they came to disagree.
 pub mod title_identity;
 pub mod ui;
+/// The unlocker that claims a drive. Declared here as well as in `main.rs`: the CLI's
+/// report and the server's log name it by one rule.
+pub mod unlocker;
 // The Windows shell's DPI→geometry arithmetic. Not `cfg(windows)` on purpose:
 // gating it would make its unit tests unrunnable anywhere but Windows.
 pub mod win_layout;

@@ -1,7 +1,6 @@
-// Upgrade from v1.8.3: captures it left unmuxed. A BD/AACS capture is found again by
-// its disc hash and resumes; a DVD's (no AACS) is left untouched and a fresh capture
-// starts beside it, because v1.8.3 recorded no identity for it (documented upgrade
-// behaviour).
+// Upgrade from v1.8.3: captures it left unmuxed. A BD/AACS capture is found again by its
+// disc hash and resumes; a DVD's (no AACS) is left untouched and a fresh capture starts
+// beside it, as v1.8.3 recorded no identity for it (documented upgrade behaviour).
 use super::*;
 use crate::server::ripper::{jobs, staging};
 use crate::server::upgrade_fixture as fx;

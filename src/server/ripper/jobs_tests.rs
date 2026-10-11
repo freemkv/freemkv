@@ -217,12 +217,12 @@ fn unreadable_identity_gets_an_isolated_namespace_without_claiming_identity() {
     let existing = job(root.path(), "existing", "known");
     assert!(existing.exists());
 
-    let first = fresh_unverified_job(root.path()).unwrap();
+    let first = fresh_unverified_job(&staging_cfg(root.path())).unwrap();
     assert!(first.starts_with("unverified-"));
     assert_ne!(first, "known");
     assert!(root.path().join(&first).is_dir());
 
-    let second = fresh_unverified_job(root.path()).unwrap();
+    let second = fresh_unverified_job(&staging_cfg(root.path())).unwrap();
     assert_ne!(second, first);
     assert!(second.starts_with("unverified-"));
 }
@@ -236,7 +236,7 @@ fn concurrent_unverified_scans_reserve_distinct_jobs() {
             .map(|_| {
                 scope.spawn(|| {
                     barrier.wait();
-                    fresh_unverified_job(root.path()).unwrap()
+                    fresh_unverified_job(&staging_cfg(root.path())).unwrap()
                 })
             })
             .collect();
@@ -376,6 +376,13 @@ fn seed_job(device: &str, job: &str, identity: &str) {
     );
 }
 
+fn staging_cfg(root: &Path) -> crate::server::config::Config {
+    crate::server::config::Config {
+        staging_dir: root.to_string_lossy().into_owned(),
+        ..Default::default()
+    }
+}
+
 fn shared_cfg(root: &Path) -> std::sync::Arc<std::sync::RwLock<crate::server::config::Config>> {
     std::sync::Arc::new(std::sync::RwLock::new(crate::server::config::Config {
         staging_dir: root.to_string_lossy().into_owned(),
@@ -391,7 +398,7 @@ fn an_unverified_disc_is_never_offered_another_jobs_capture() {
     let legacy = root.path().join("Same_Title");
     std::fs::create_dir(&legacy).unwrap();
     partial_capture(&legacy, "Same_Title", Some(hash));
-    let job = fresh_unverified_job(root.path()).unwrap();
+    let job = fresh_unverified_job(&staging_cfg(root.path())).unwrap();
     let cfg = shared_cfg(root.path());
     let device = "job-unverified-resume";
     seed_job(device, &job, "");
@@ -521,4 +528,109 @@ fn a_scan_that_read_disk_before_a_correction_published_keeps_the_correction() {
     // A different job's scan resets it.
     row.restore_job_metadata("other", "hash2", None, 0);
     assert!(row.user_metadata.is_none());
+}
+
+// A title saved from a raw-label fallback (TMDB down, no key) or a guess is not an
+// operator choice: a later scan or rip looks the disc up again.
+#[test]
+fn only_a_correction_or_a_confident_lookup_skips_the_next_lookup() {
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.title = "THE_OFFICE".into();
+    assert!(
+        metadata_from_state(st.clone()).is_none(),
+        "raw label reused as metadata"
+    );
+
+    let mut confident = st.clone();
+    confident.title = "The Office".into();
+    confident.year = 2005;
+    confident.tmdb_confident = true;
+    assert_eq!(metadata_from_state(confident).unwrap().title, "The Office");
+
+    let mut corrected = st;
+    corrected.user_metadata = Some(selection("The Office"));
+    assert_eq!(metadata_from_state(corrected).unwrap().title, "The Office");
+}
+
+#[test]
+fn a_lookup_is_confident_only_when_it_matches_the_label_with_a_year() {
+    let found = |title: &str, year| crate::server::tmdb::TmdbResult {
+        title: title.into(),
+        year,
+        poster_url: String::new(),
+        overview: String::new(),
+        media_type: crate::server::planner::MediaKind::Movie,
+        tmdb_id: 949,
+    };
+    let hit = found("Heat", 1995);
+    assert!(lookup_confident("HEAT", Some(&hit)));
+    assert!(!lookup_confident("HEAT", None));
+    let guess = found("Heat Wave", 1990);
+    assert!(!lookup_confident("HEAT", Some(&guess)));
+}
+
+// A `disc-<identity>` dir made just before its first state write (another drive's
+// capture start, or a first write that failed) is adopted, never a permanent error.
+#[test]
+fn locate_adopts_its_own_job_dir_before_the_identity_is_written() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef01234567";
+    let dir = root.path().join(format!("disc-{id}"));
+    std::fs::create_dir(&dir).unwrap();
+    assert_eq!(locate(root.path(), id).unwrap(), format!("disc-{id}"));
+    std::fs::write(dir.join("state.json.tmp"), b"{").unwrap();
+    assert_eq!(locate(root.path(), id).unwrap(), format!("disc-{id}"));
+}
+
+#[test]
+fn locate_still_refuses_a_job_dir_holding_another_identity_or_unproved_data() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef01234567";
+    let dir = root.path().join(format!("disc-{id}"));
+    std::fs::create_dir(&dir).unwrap();
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.disc_identity = "another-disc".into();
+    staging::try_write_state(&dir, &st).unwrap();
+    assert!(locate(root.path(), id).is_err());
+    std::fs::remove_file(dir.join(staging::STATE_FILE)).unwrap();
+    std::fs::write(dir.join("Movie.iso"), b"capture").unwrap();
+    assert!(locate(root.path(), id).is_err());
+}
+
+// A partial listing or an entry that cannot be inspected may hide this disc's job:
+// locate holds instead of starting a fresh job beside it.
+#[test]
+fn locate_refuses_a_partial_listing_or_an_uninspectable_entry() {
+    let root = tempfile::tempdir().unwrap();
+    job(root.path(), "Other", "other-hash");
+    let listing = |names: &[&str], complete| {
+        Some(super::super::StagingListing {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            complete,
+        })
+    };
+    assert_eq!(
+        locate_listed(root.path(), "hash", listing(&["Other"], true)).unwrap(),
+        "disc-hash"
+    );
+    assert!(locate_listed(root.path(), "hash", listing(&["Other"], false)).is_err());
+    let gone = locate_listed(root.path(), "hash", listing(&["Other", "Vanished"], true));
+    assert!(gone.unwrap_err().contains("Vanished"));
+}
+
+// A configured staging folder whose share is not mounted (its mount point is an empty
+// folder) is not made on the local disk; nor is the isolated job inside it.
+#[test]
+fn an_unverified_job_is_not_made_under_an_unmounted_shares_mount_point() {
+    let base = tempfile::tempdir().unwrap();
+    let mount_point = base.path().join("nas");
+    std::fs::create_dir(&mount_point).unwrap();
+    let root = mount_point.join("staging");
+    let error = fresh_unverified_job(&staging_cfg(&root)).unwrap_err();
+    assert!(error.contains("empty"), "{error}");
+    assert!(!root.exists());
+    // Mounted (the share holds folders): made, one level.
+    std::fs::create_dir(mount_point.join("Movies")).unwrap();
+    let job = fresh_unverified_job(&staging_cfg(&root)).unwrap();
+    assert!(root.join(job).is_dir());
 }

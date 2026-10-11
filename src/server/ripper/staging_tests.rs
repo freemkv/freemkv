@@ -2206,7 +2206,7 @@ fn a_correction_committed_during_the_iso_prune_check_keeps_the_iso() {
     let lock = state_lock(dir.path());
     let held = lock.lock().unwrap();
     let path = dir.path().to_path_buf();
-    let pruner = std::thread::spawn(move || prune_unless_replan_required(&path, || {}));
+    let pruner = std::thread::spawn(move || prune_unless_replan_required(&path, &[]).is_some());
     std::thread::sleep(std::time::Duration::from_millis(200));
     // A correction lands (under the state lock) while the prune is deciding.
     let mut st = read_state(dir.path()).unwrap();
@@ -2311,4 +2311,211 @@ fn state_json_media_type_round_trips_old_values() {
     let mut st = DiscState::new(StagingState::Stopped);
     st.media_type = MediaKind::Tv;
     assert_eq!(serde_json::to_value(&st).unwrap()["media_type"], "tv");
+}
+
+// A Start over interrupted by a restart is finished at startup (and by Clear staging or a
+// drive's access), instead of leaving the job invisible to every guard and the mux queue.
+#[test]
+fn startup_finishes_an_interrupted_start_over() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("disc-abc");
+    fs::create_dir(&dir).unwrap();
+    let mut old = DiscState::new(StagingState::Stopped);
+    old.disc_identity = "abc".into();
+    old.title = "Heat".into();
+    try_write_state(&dir, &old).unwrap();
+    fs::write(dir.join("Heat.iso"), b"old capture").unwrap();
+    fs::write(dir.join("Heat.iso.mapfile"), b"old map").unwrap();
+    {
+        let lease = job_lease(&dir);
+        let _owner = lease.lock().unwrap();
+        assert!(reset_capture_with(&dir, "abc", || Err(io::Error::other("restart"))).is_err());
+    }
+    assert!(snapshot_staging_disc(&dir).is_none());
+    resume_or_quarantine_staging(&root.path().to_string_lossy());
+    let st = read_state(&dir).unwrap();
+    assert!(
+        !st.reset_in_progress,
+        "the interrupted reset was left pending"
+    );
+    assert_eq!(st.disc_identity, "abc");
+    assert_eq!(st.title, "Heat");
+    assert!(!dir.join("Heat.iso").exists());
+    assert!(!dir.join("Heat.iso.mapfile").exists());
+    assert!(snapshot_staging_disc(&dir).is_some());
+}
+
+#[test]
+fn a_live_start_over_is_not_finished_by_another_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.reset_in_progress = true;
+    st.disc_identity = "abc".into();
+    try_write_state(dir.path(), &DiscState::new(StagingState::Stopped)).unwrap();
+    mutate_state(dir.path(), StagingState::Stopped, |s| *s = st.clone()).unwrap();
+    fs::write(dir.path().join("Heat.iso"), b"capture").unwrap();
+    let lease = job_lease(dir.path());
+    let _resetting = lease.lock().unwrap();
+    assert!(!finish_interrupted_reset(dir.path()).unwrap());
+    assert!(dir.path().join("Heat.iso").exists());
+}
+
+// An unverified-<epoch> job is never adopted by a later scan, so once Stopped and no
+// drive shows it any more, Clear staging reclaims it (with its partial capture).
+#[test]
+fn clear_staging_reclaims_stopped_unverified_jobs_no_drive_shows() {
+    let root = tempfile::tempdir().unwrap();
+    let job = |name: &str| {
+        let dir = root.path().join(name);
+        fs::create_dir(&dir).unwrap();
+        let mut st = DiscState::new(StagingState::Stopped);
+        st.user_metadata = Some(UserMetadata {
+            title: "Scratched".into(),
+            year: 2001,
+            media_type: crate::server::planner::MediaKind::Movie,
+            episode_start: None,
+            tmdb_id: 1,
+            poster_url: String::new(),
+            overview: String::new(),
+        });
+        try_write_state(&dir, &st).unwrap();
+        fs::write(dir.join("Scratched.iso"), b"partial").unwrap();
+        fs::write(dir.join("Scratched.iso.mapfile"), b"map").unwrap();
+        dir
+    };
+    let orphan = job("unverified-1760000000");
+    let shown = job("unverified-1760000001");
+    let verified = job("disc-0123");
+    super::super::update_state_with("dev-unverified-shown", |s| {
+        s.job_id = "unverified-1760000001".into();
+    });
+    let (removed, failed) = clear_abandoned_staging(root.path());
+    super::super::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove("dev-unverified-shown");
+    assert_eq!((removed, failed), (1, 0));
+    assert!(!orphan.exists(), "an unadoptable capture was kept for good");
+    assert!(shown.exists(), "the drive still shows this job");
+    assert!(
+        verified.exists(),
+        "a verified job can be resumed by its disc"
+    );
+}
+
+// A 1.8.3 title-named folder no disc can match again is listed for the operator, not
+// deleted (its owner might still want the partial).
+#[test]
+fn clear_staging_lists_unmatchable_1_8_3_folders_without_deleting_them() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("Heat");
+    fs::create_dir(&legacy).unwrap();
+    fs::write(legacy.join("Heat.mkv"), b"partial").unwrap();
+    fs::write(legacy.join(".disc-label"), b"HEAT").unwrap();
+    let job = root.path().join("disc-0123");
+    fs::create_dir(&job).unwrap();
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.disc_identity = "0123".into();
+    try_write_state(&job, &st).unwrap();
+    fs::write(job.join("Heat.mkv"), b"partial").unwrap();
+    for system in [".snapshot", "@eaDir", "#recycle"] {
+        fs::create_dir(root.path().join(system)).unwrap();
+        fs::write(root.path().join(system).join("Thumbs.db"), b"nas").unwrap();
+    }
+    assert_eq!(unmatchable_legacy_jobs(root.path()), ["Heat"]);
+    clear_abandoned_staging(root.path());
+    assert!(legacy.join("Heat.mkv").exists());
+}
+
+// The multi-GB unlinks of a prune run without the state lock, so a correction request
+// is not held behind them; the files are already renamed aside, so it is refused.
+#[test]
+fn a_prune_unlinks_outside_the_state_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = DiscState::new(StagingState::Done);
+    let iso = dir.path().join("Heat.iso");
+    let map = dir.path().join("Heat.iso.mapfile");
+    st.iso_path = iso.to_string_lossy().into_owned();
+    try_write_state(dir.path(), &st).unwrap();
+    fs::write(&iso, b"image").unwrap();
+    fs::write(&map, b"map").unwrap();
+    let path = dir.path().to_path_buf();
+    let pruned = prune_with(dir.path(), &[&iso, &map], |aside| {
+        let lock = state_lock(&path);
+        assert!(lock.try_lock().is_ok(), "unlink ran under the state lock");
+        assert!(!saved_image_present(&path, &read_state(&path).unwrap()));
+        fs::remove_file(aside)
+    })
+    .unwrap();
+    assert!(pruned.iter().all(|(_, r)| r.is_ok()));
+    assert!(!iso.exists() && !map.exists());
+    assert_eq!(
+        fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "only state.json is left"
+    );
+}
+
+// An unreadable state.json is a storage failure, not a conflict with the job's state:
+// the error keeps its own kind so the web layer does not answer 409.
+#[test]
+fn an_unreadable_state_keeps_its_error_kind() {
+    let corrupt = tempfile::tempdir().unwrap();
+    fs::write(state_path(corrupt.path()), b"{ torn").unwrap();
+    let io_fault = tempfile::tempdir().unwrap();
+    fs::create_dir(state_path(io_fault.path())).unwrap();
+    let selection = UserMetadata {
+        title: "Heat".into(),
+        year: 1995,
+        media_type: crate::server::planner::MediaKind::Movie,
+        episode_start: None,
+        tmdb_id: 949,
+        poster_url: String::new(),
+        overview: String::new(),
+    };
+    for dir in [corrupt.path(), io_fault.path()] {
+        let saved = save_user_metadata(dir, selection.clone()).unwrap_err();
+        assert_ne!(saved.kind(), io::ErrorKind::Other, "{saved}");
+        let written = try_write_state(dir, &DiscState::new(StagingState::Stopped)).unwrap_err();
+        assert_ne!(written.kind(), io::ErrorKind::Other, "{written}");
+    }
+    assert_eq!(
+        save_user_metadata(corrupt.path(), selection)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+// A crash between a prune's rename and its unlink leaves `<iso>.pruning`: startup removes
+// it from a job nobody holds, and nothing but the prune's own leftovers.
+#[test]
+fn startup_removes_an_interrupted_prunes_leftovers_from_unheld_jobs() {
+    let root = tmpdir();
+    let mut leftovers = Vec::new();
+    for name in ["Heat", "Held"] {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        try_write_state(&dir, &DiscState::new(StagingState::Stopped)).unwrap();
+        let iso = dir.join(format!("{name}.iso"));
+        let map = dir.join(format!("{name}.iso.mapfile"));
+        fs::write(&iso, b"image").unwrap();
+        fs::write(&map, b"map").unwrap();
+        fs::write(dir.join("notes.pruning"), b"operator file").unwrap();
+        fs::write(dir.join(format!("{name}.mkv")), b"muxed").unwrap();
+        let crashed = prune_with(&dir, &[&iso, &map], |_| Err(io::Error::other("crash")));
+        assert!(crashed.unwrap().iter().all(|(_, r)| r.is_err()));
+        leftovers.push(dir.join(format!("{name}.iso.pruning")));
+        leftovers.push(dir.join(format!("{name}.iso.mapfile.pruning")));
+    }
+    let held = job_lease(&root.join("Held"));
+    let _owner = held.try_lock().unwrap();
+    resume_or_quarantine_staging(&root.to_string_lossy());
+    assert!(!leftovers[0].exists() && !leftovers[1].exists());
+    assert!(
+        leftovers[2].exists() && leftovers[3].exists(),
+        "a held job is left alone"
+    );
+    assert!(root.join("Heat/notes.pruning").exists());
+    assert!(root.join("Heat/Heat.mkv").exists());
 }

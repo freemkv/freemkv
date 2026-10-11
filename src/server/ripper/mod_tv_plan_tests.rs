@@ -212,7 +212,7 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
 }
 
 #[test]
-fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
+fn capture_and_remux_number_a_later_disc_as_1_8_3_did() {
     use crate::server::planner::{MediaKind, MediaMetadata, plan};
     use std::path::Path;
     let cfg = Config::default();
@@ -242,15 +242,17 @@ fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
                 "Show.mkv",
                 None,
             );
-            let remux = plan(&cfg, &titles, &media, Path::new("Show.mkv"));
-            assert!(matches!(
-                capture,
-                Err(crate::server::planner::PlanError::LaterDiscStart)
-            ));
-            assert!(matches!(
-                remux,
-                Err(crate::server::planner::PlanError::LaterDiscStart)
-            ));
+            let remux = plan(&cfg, &titles, &media, Path::new("Show.mkv")).unwrap();
+            // 1.8.3: disc 2 of two-episode discs starts at (2-1)*2+1 = E03.
+            let numbers = |e: Vec<Option<u16>>| e;
+            assert_eq!(
+                numbers(capture.unwrap().iter().map(|o| o.episode).collect()),
+                [Some(3), Some(4)]
+            );
+            assert_eq!(
+                numbers(remux.outputs.iter().map(|o| o.episode).collect()),
+                [Some(3), Some(4)]
+            );
         }
     }
 }
@@ -394,9 +396,9 @@ fn mux_reserve_sums_every_planned_episode() {
     );
 }
 
-// A disc number does not establish the episode count on preceding discs.
+// 1.8.3 (and autorip 1.7.7): disc N of a season starts at (N-1)*count+1.
 #[test]
-fn multi_disc_season_requires_confirmed_episode_numbers() {
+fn disc_two_of_four_episode_discs_is_e05_to_e08() {
     let cfg = Config::default();
     let ep = 44.0 * 60.0;
     // 4 episode titles on disc 2 (label carries "Disc 2").
@@ -413,10 +415,24 @@ fn multi_disc_season_requires_confirmed_episode_numbers() {
         "Endeavour.mkv",
         None,
     );
-    assert!(
-        matches!(plan, Err(crate::server::planner::PlanError::LaterDiscStart)),
-        "disc number does not establish how many episodes earlier discs held"
+    let plan = plan.unwrap();
+    assert_eq!(
+        plan.iter().map(|o| o.episode).collect::<Vec<_>>(),
+        [Some(5), Some(6), Some(7), Some(8)]
     );
+    assert_eq!(plan[0].filename, "Endeavour_S05E05.mkv");
+    // An operator First episode still wins.
+    let first = plan_mux_outputs(
+        &titles,
+        &cfg,
+        crate::server::planner::MediaKind::Tv,
+        "Endeavour Season 5 Disc 2",
+        44264,
+        "Endeavour.mkv",
+        Some(9),
+    )
+    .unwrap();
+    assert_eq!(first[0].episode, Some(9));
 }
 
 // A single feature carrying a TV label (a TV movie) is one movie-style output, not E01.
@@ -439,9 +455,9 @@ fn a_single_feature_tv_disc_stays_one_output() {
     assert!(plan[0].episode.is_none());
 }
 
-// Distinctive runtimes are still not proof of season episode identity.
+// 1.8.3: TMDB runtimes move a later disc off the uniform guess when they clearly fit better.
 #[test]
-fn tmdb_runtimes_do_not_authorize_episode_numbering() {
+fn tmdb_runtimes_align_a_later_disc_on_an_uneven_split() {
     let ep = |number: u16, runtime_min: u16| crate::server::tmdb::Episode {
         number,
         name: format!("Ep {number}"),
@@ -458,10 +474,12 @@ fn tmdb_runtimes_do_not_authorize_episode_numbering() {
         "Show.mkv",
         None,
     );
-    assert!(matches!(
-        plan,
-        Err(crate::server::planner::PlanError::LaterDiscStart)
-    ));
+    let plan = plan.unwrap();
+    assert_eq!(
+        plan.iter().map(|o| o.episode).collect::<Vec<_>>(),
+        [Some(4), Some(5)]
+    );
+    assert_eq!(plan[1].episode_name, "Ep 5");
 }
 
 // tv_auto=false holds a TV disc on the single-output path (no auto fan-out).
@@ -511,4 +529,113 @@ fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
         let text = selection_review_message(&error);
         assert!(!text.contains(&format!("{error:?}")), "{text}");
     }
+}
+
+// 1.8.3: a single-pass rip muxes the main title as one output and never fans out, so
+// it must not pick the first episode and deliver it as the show.
+#[test]
+fn a_single_pass_tv_rip_muxes_the_main_title_not_the_first_episode() {
+    // The play-all first, as a scan lists it, then the two authored episodes.
+    let mut titles = vec![title(5290.0, 300), title(2640.0, 100), title(2650.0, 200)];
+    authored_roster(&mut titles, 1..3);
+    let single = Config {
+        max_retries: 0,
+        ..Default::default()
+    };
+    let kind = crate::server::planner::MediaKind::Tv;
+    let main = crate::server::planner::main_title(&single, &titles).unwrap();
+    assert_ne!(
+        main,
+        fanout_episode_indices(&titles, &single, kind, "Show Season 1")[0]
+    );
+    assert_eq!(
+        capture_title_index(&titles, &single, kind, "Show Season 1").unwrap(),
+        main
+    );
+    assert!(check_capture_selection(&titles, &single, kind, "Show Season 1").is_ok());
+    // Multipass still captures the episode set for its fan-out.
+    let multi = Config::default();
+    assert_eq!(
+        capture_title_index(&titles, &multi, kind, "Show Season 1").unwrap(),
+        fanout_episode_indices(&titles, &multi, kind, "Show Season 1")[0]
+    );
+}
+
+// A failed hand-off falls back to the inline mux of one title only for a one-output plan.
+#[test]
+fn an_episode_fan_out_never_falls_back_to_the_one_title_inline_mux() {
+    let out = |name: &str| staging::Output {
+        filename: name.into(),
+        ..Default::default()
+    };
+    assert!(inline_mux_delivers(&[out("Movie.mkv")]));
+    assert!(!inline_mux_delivers(&[
+        out("Show_S01E01.mkv"),
+        out("Show_S01E02.mkv")
+    ]));
+}
+
+// The single-pass log names the title the rip muxes, not the engine's MainMovie pick.
+#[test]
+fn the_single_pass_plan_line_names_the_muxed_title() {
+    let cfg = Config {
+        max_retries: 0,
+        ..Default::default()
+    };
+    let line = plan_line(&single_pass_plan(&cfg, "/dev/sr0", "mkv:///s/Show.mkv", 2));
+    assert!(line.contains("Titles([2])"), "{line}");
+}
+
+// TMDB down at capture start: the hand-off plans again once it answers, as 1.8.3 fetched
+// the season there; while it is still down, or the replan fails, the start plan stands.
+#[test]
+fn the_hand_off_replans_a_start_plan_made_without_tmdb() {
+    let ep = |number: u16, runtime_min: u16| crate::server::tmdb::Episode {
+        number,
+        name: format!("Ep {number}"),
+        runtime_min,
+    };
+    let season = vec![ep(1, 30), ep(2, 30), ep(3, 30), ep(4, 60), ep(5, 90)];
+    let mut titles = vec![title(60.0 * 60.0, 1000), title(90.0 * 60.0, 2000)];
+    authored_roster(&mut titles, 0..2);
+    let cfg = Config::default();
+    let plan_for = |episodes: Vec<crate::server::tmdb::Episode>, first: Option<u16>| {
+        plan_with_season(
+            &titles,
+            &cfg,
+            (
+                crate::server::planner::MediaKind::Tv,
+                "Show Season 1 Disc 2",
+                7,
+            ),
+            "Show.mkv",
+            first,
+            move |_, _, _| episodes,
+        )
+    };
+    let numbers = |plan: PlanResult| {
+        plan.unwrap()
+            .iter()
+            .map(|o| (o.episode, o.episode_name.clone()))
+            .collect::<Vec<_>>()
+    };
+    let disc_order = vec![(Some(3), String::new()), (Some(4), String::new())];
+    let start = plan_for(Vec::new(), None);
+    assert!(start.without_tmdb);
+    assert_eq!(
+        numbers(handoff_plan(start, || plan_for(season.clone(), None))),
+        [(Some(4), "Ep 4".into()), (Some(5), "Ep 5".into())]
+    );
+    let still_down = handoff_plan(plan_for(Vec::new(), None), || plan_for(Vec::new(), None));
+    assert_eq!(numbers(still_down), disc_order);
+    let failed = handoff_plan(plan_for(Vec::new(), None), || {
+        plan_for(season.clone(), Some(u16::MAX))
+    });
+    assert_eq!(numbers(failed), disc_order);
+    let named = plan_for(season.clone(), None);
+    assert!(!named.without_tmdb);
+    let kept = handoff_plan(named, || {
+        unreachable!("a TMDB-numbered plan is not refetched")
+    });
+    assert_eq!(numbers(kept)[1].1, "Ep 5");
 }

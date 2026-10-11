@@ -1533,3 +1533,28 @@ fn an_unresolved_tmdb_media_type_is_absent_from_the_broadcast_not_movie() {
     rs.tmdb_media_type = Some(crate::server::planner::MediaKind::Tv);
     assert_eq!(serde_json::to_value(&rs).unwrap()["tmdb_media_type"], "tv");
 }
+
+// A title corrected on the card mid-rip stays shown at the next pass boundary.
+#[test]
+fn set_pass_progress_keeps_an_operator_correction_on_the_card() {
+    let dev = format!("test-spp-correction-{}", std::process::id());
+    update_state_with(&dev, |s| {
+        s.status = "ripping".to_string();
+        s.job_id = "disc-x".into();
+    });
+    let corrected = crate::server::ripper::staging::UserMetadata {
+        title: "Cast Away".into(),
+        year: 2000,
+        media_type: crate::server::planner::MediaKind::Movie,
+        episode_start: None,
+        tmdb_id: 8358,
+        poster_url: "p".into(),
+        overview: "o".into(),
+    };
+    update_state_with(&dev, |s| s.publish_user_metadata("disc-x", 1, corrected));
+    set_pass_progress(&minimal_pass_ctx(&dev), 2, 3, 0, 0, 0);
+    let snap = STATE.lock().unwrap().remove(&dev).unwrap();
+    assert_eq!(snap.disc_name, "Cast Away");
+    assert_eq!(snap.tmdb_title, "Cast Away");
+    assert_eq!(snap.tmdb_year, 2000);
+}

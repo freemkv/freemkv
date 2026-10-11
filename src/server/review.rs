@@ -177,14 +177,14 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
         return Err("not a held rip".into());
     }
     let action = match (unified, action) {
-        (Some(mut st), Resolve::Cancel) => {
-            // Terminal (so it isn't retried); a failed write keeps the hold.
-            st.state = crate::server::ripper::staging::StagingState::Failed;
-            st.failure_reason = Some("cancelled by operator".to_string());
-            st.muxing = false;
-            st.title_identity_review = false;
-            return crate::server::ripper::staging::try_write_state_abandoning_hold(&d, &st)
-                .map_err(|e| e.to_string());
+        (Some(_), Resolve::Cancel) => {
+            // Terminal (so it isn't retried); a failed write keeps the hold, and a
+            // confirmation that committed first wins.
+            return match crate::server::ripper::staging::cancel_held(&d) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err("not a held rip".into()),
+                Err(e) => Err(e.to_string()),
+            };
         }
         // web.rs commits a unified proceed/retitle as a metadata correction.
         (Some(_), _) => return Err("held rip changed; refresh and retry".into()),

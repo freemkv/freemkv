@@ -4530,3 +4530,23 @@ fn hot_unplug_teardown_defers_while_the_rip_thread_is_still_unwinding() {
 
     forget_device(device);
 }
+
+// A Start over interrupted by a restart, with nothing to keep, is finished by the scan's
+// staging check, which removes the job: that is no staging, not unreadable staging.
+#[test]
+fn a_finished_interrupted_reset_that_removed_the_job_is_no_hold() {
+    let device = "sg_finished_reset_gone_test";
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = seed_scanned_disc(device, "Reset Disc", tmp.path());
+    let dir = tmp
+        .path()
+        .join(crate::server::util::sanitize_path_compact("Reset Disc"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut st = staging::DiscState::new(staging::StagingState::Stopped);
+    st.reset_in_progress = true;
+    staging::write_state(&dir, &st);
+    std::fs::write(dir.join("Reset_Disc.iso"), b"old capture").unwrap();
+    assert_eq!(super::disc_staging_hold(&cfg, device, false), None);
+    assert!(!dir.exists());
+    forget_device(device);
+}

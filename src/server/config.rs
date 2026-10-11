@@ -174,9 +174,11 @@ pub struct Config {
     /// Content presentation language; empty leaves selection policy unspecified.
     #[serde(default)]
     pub presentation_language: String,
-    /// Plan automatic TV fan-out from authored title evidence and confirmed numbering.
-    /// Missing proof requires review; metadata alone does not identify disc episodes.
-    /// False uses the single-output path, without preventing explicitly reviewed TV plans.
+    /// Fan a TV disc out to one output per episode (multi-pass rips) from its authored title
+    /// evidence; missing proof requires review. Disc N of a season starts at episode
+    /// (N-1)×(episodes on the disc)+1, as in 1.8.3, moved to where TMDB's runtimes clearly
+    /// fit; an operator First episode wins. False uses the single-output path, without
+    /// preventing explicitly reviewed TV plans.
     #[serde(default = "default_true")]
     pub tv_auto: bool,
     pub auto_eject: bool,
@@ -513,19 +515,35 @@ fn boot_dirs(cfg: &Config, output_relocated: bool) -> Vec<String> {
     dirs
 }
 
-// How startup creates one of `boot_dirs`. A configured staging folder is made only on a live
-// parent (`create_dir_on_live_parent`): on a share not mounted yet it would land on local
-// disk. The relocated default under the config folder is ours, and made in full.
+// How startup creates one of `boot_dirs`; the staging folder as `create_staging_root` does.
 fn boot_create(
     cfg: &Config,
 ) -> impl Fn(&std::path::Path) -> std::io::Result<()> + Send + Sync + 'static {
     let staging = std::path::PathBuf::from(&cfg.staging_dir);
     let default = std::path::Path::new(&cfg.autorip_dir).join("staging");
     move |p: &std::path::Path| {
-        if p != staging || staging == default {
+        if p != staging {
             return std::fs::create_dir_all(p);
         }
-        crate::server::util::create_dir_on_live_parent(p)
+        make_staging_root(p, &default)
+    }
+}
+
+/// Create the staging folder: a configured one only on a live parent
+/// (`create_dir_on_live_parent`), as on a share not mounted yet it would land on local
+/// disk; the default under the config folder is ours, and made in full.
+pub(crate) fn create_staging_root(cfg: &Config) -> std::io::Result<()> {
+    make_staging_root(
+        std::path::Path::new(&cfg.staging_dir),
+        &std::path::Path::new(&cfg.autorip_dir).join("staging"),
+    )
+}
+
+fn make_staging_root(staging: &std::path::Path, default: &std::path::Path) -> std::io::Result<()> {
+    if staging == default {
+        std::fs::create_dir_all(staging)
+    } else {
+        crate::server::util::create_dir_on_live_parent(staging)
     }
 }
 

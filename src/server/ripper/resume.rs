@@ -681,6 +681,132 @@ fn hold_unreadable_plan(
     reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
 }
 
+// How long a resume waits for another rip, mux or delivery to release its job.
+const LEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+// The outcome of waiting for a job's lease.
+pub(super) enum LeaseWait<'a> {
+    /// Owned; `waited` when another owner held it first (its classification may be stale).
+    Acquired {
+        guard: std::sync::MutexGuard<'a, ()>,
+        waited: bool,
+    },
+    /// Stop or shutdown landed while waiting.
+    Stopped,
+    /// Still held after `max`.
+    Busy,
+}
+
+// Wait up to `max` for `lease`, giving up at once on the device's Stop or shutdown.
+pub(super) fn wait_for_job_lease<'a>(
+    device: &str,
+    lease: &'a std::sync::Mutex<()>,
+    max: std::time::Duration,
+) -> LeaseWait<'a> {
+    let deadline = std::time::Instant::now() + max;
+    let mut waited = false;
+    loop {
+        match lease.try_lock() {
+            Ok(guard) => return LeaseWait::Acquired { guard, waited },
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                return LeaseWait::Acquired {
+                    guard: e.into_inner(),
+                    waited,
+                };
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        let stopped = super::device_halt(device).is_some_and(|h| h.is_cancelled())
+            || crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed);
+        if stopped {
+            return LeaseWait::Stopped;
+        }
+        if std::time::Instant::now() >= deadline {
+            return LeaseWait::Busy;
+        }
+        waited = true;
+        std::thread::sleep(libfreemkv::halt::WAIT_SLICE);
+    }
+}
+
+// Why a resume gave up waiting for its job: the mux worker's own wording on `_mux`.
+fn lease_busy_message(device: &str) -> String {
+    if device == "_mux" {
+        crate::strings::get_or(
+            "error.staging.mux_job_busy",
+            "A drive is using this rip's staging job right now; it was not muxed and stays staged.",
+        )
+    } else {
+        super::JOB_BUSY_REFUSED.to_string()
+    }
+}
+
+// Whether a job a resume waited for changed lifecycle meanwhile (e.g. the other
+// drive's mux finished it), so the resume's classification no longer holds.
+pub(super) fn changed_while_waiting(
+    before: Option<staging::StagingState>,
+    after: Option<staging::StagingState>,
+) -> bool {
+    before != after
+}
+
+// A plan only the operator can settle (E9086, numbering): hold it in Review with the
+// ISO and outputs kept, so the mux worker stops re-dispatching it until a correction.
+fn hold_plan_for_review(
+    device: &str,
+    (staging_dir, iso, mapfile): (&Path, &Path, &Path),
+    display_name: &str,
+    mut reason: String,
+) {
+    if let Err(error) = staging::hold_title_identity_review(staging_dir, iso, mapfile, &reason) {
+        reason.push_str(&format!(" Could not save the review hold: {error}"));
+    }
+    crate::server::log::device_log(device, &reason);
+    crate::server::muxer::record_error(
+        &staging_dir.to_string_lossy(),
+        &reason,
+        &crate::strings::get_or(
+            "error.plan.review_retained",
+            "The saved ISO and plan are retained.",
+        ),
+    );
+    reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
+}
+
+// The superseded plan is never delivered; drop its outputs (plain leaves in this job
+// only) so they do not hold staging space. `sources` (the capture image and its map,
+// an ISO output's only file) are never deleted.
+pub(super) fn remove_superseded_outputs(
+    device: &str,
+    staging_dir: &Path,
+    old: &[staging::Output],
+    new: &[staging::Output],
+    sources: &[&Path],
+) {
+    let is_source = |leaf: &str| {
+        sources.iter().any(|p| {
+            p.file_name()
+                .is_some_and(|n| n == std::ffi::OsStr::new(leaf))
+        })
+    };
+    for old in old {
+        if is_plain_leaf(&old.filename)
+            && !is_source(&old.filename)
+            && !new.iter().any(|o| o.filename == old.filename)
+        {
+            match std::fs::remove_file(staging_dir.join(&old.filename)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    crate::server::log::device_log(
+                        device,
+                        &format!("superseded output {} was not removed: {e}", old.filename),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 // Whether `name` is a bare file name: no directory part, not `.`/`..`, not empty.
 fn is_plain_leaf(name: &str) -> bool {
     Path::new(name).file_name().is_some_and(|n| n == name)
@@ -811,6 +937,15 @@ fn forget_space_refusal(staging_dir: &Path) {
         .remove(staging_dir);
 }
 
+/// The raw volume label a job's plan is made from (season, disc number, label-only TV).
+pub(super) fn planning_label(st: &staging::DiscState) -> &str {
+    if st.disc_label.is_empty() {
+        &st.disc_name
+    } else {
+        &st.disc_label
+    }
+}
+
 pub(super) fn check_resume_state(saved: &staging::DiscState) -> Result<(), String> {
     if saved.reset_in_progress {
         return Err("Capture reset is incomplete; finish Start over before resuming. Staging is held unchanged.".into());
@@ -836,7 +971,24 @@ pub(super) fn check_resume_selection(
 }
 
 pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: ResumeClass) {
-    let _mux_slot = crate::server::library::arbiter::claim_for_rip();
+    resume_remux_within(
+        cfg,
+        device,
+        classification,
+        LEASE_WAIT,
+        crate::server::library::arbiter::claim_for_rip,
+    );
+}
+
+// `resume_remux` waiting at most `lease_wait` for the job; the mux slot (`claim_slot`,
+// which stops a Library remux) is taken only once the job is this resume's to mux.
+fn resume_remux_within<S>(
+    cfg: &Arc<RwLock<Config>>,
+    device: &str,
+    classification: ResumeClass,
+    lease_wait: std::time::Duration,
+    claim_slot: impl FnOnce() -> S,
+) {
     let ResumeClass::Remux {
         iso_path,
         mapfile_path,
@@ -879,7 +1031,34 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from(&cfg_read.staging_dir));
     let job_lease = staging::job_lease(&staging_dir);
-    let _job_owner = job_lease.lock().unwrap_or_else(|e| e.into_inner());
+    let lifecycle = || staging::read_state(&staging_dir).map(|s| s.state);
+    let before = lifecycle();
+    let _job_owner = match wait_for_job_lease(device, &job_lease, lease_wait) {
+        LeaseWait::Acquired { guard, waited } => {
+            if waited && changed_while_waiting(before, lifecycle()) {
+                let msg = "this rip changed while another drive or the mux worker finished with it; nothing was re-muxed".to_string();
+                crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
+                reset_status_after_ripping(device, "idle", &display_name, "", "", Some(msg));
+                return;
+            }
+            guard
+        }
+        LeaseWait::Stopped => {
+            crate::server::log::device_log(
+                device,
+                "Auto-resume stopped while waiting for this disc's staging job; staging preserved.",
+            );
+            reset_status_after_ripping(device, "idle", &display_name, "", "", None);
+            return;
+        }
+        LeaseWait::Busy => {
+            let msg = lease_busy_message(device);
+            crate::server::log::device_log(device, &msg);
+            reset_status_after_ripping(device, "error", &display_name, "", "", Some(msg));
+            return;
+        }
+    };
+    let _mux_slot = claim_slot();
 
     // The deliverable plan the rip recorded in `state.json` (movie = 1 output;
     // TV = one per episode). Absent = legacy/movie; present-but-unreadable is
@@ -995,7 +1174,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // The raw label the replan plans from (plan_mux_outputs), else the scan's.
     let disc_label = saved_state
         .as_ref()
-        .map(|s| s.disc_label.clone())
+        .map(|s| planning_label(s).to_string())
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| {
             super::STATE
@@ -1005,25 +1184,27 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 .map(|s| s.disc_label.clone())
                 .unwrap_or_default()
         });
+    // An operator's Movie correction overrides a season-marked label.
+    let operator_kind = saved_state
+        .as_ref()
+        .and_then(|s| s.user_metadata.as_ref())
+        .map(|m| m.media_type);
+    let plan_label = super::planning_label(&disc_label, operator_kind).to_string();
     if let Err(error) = check_resume_selection(
         &disc.titles,
         &cfg_read,
         media_type,
-        &disc_label,
+        &plan_label,
         !plan_outputs.is_empty(),
         replan_required,
     ) {
         let reason = super::selection_review_message(&error);
-        crate::server::log::device_log(device, &reason);
-        crate::server::muxer::record_error(
-            &staging_dir.to_string_lossy(),
-            &reason,
-            &crate::strings::get_or(
-                "error.plan.review_retained",
-                "The saved ISO and plan are retained.",
-            ),
+        hold_plan_for_review(
+            device,
+            (&staging_dir, &iso_path, &mapfile_path),
+            &display_name,
+            reason,
         );
-        reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
         return;
     }
 
@@ -1041,7 +1222,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             &disc.titles,
             &cfg_read,
             saved.media_type,
-            &saved.disc_label,
+            &plan_label,
             saved.tmdb_id,
             &filename,
             saved.episode_start,
@@ -1049,7 +1230,12 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             Ok(outputs) => outputs,
             Err(error) => {
                 let reason = super::selection_review_message(&error);
-                reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
+                hold_plan_for_review(
+                    device,
+                    (&staging_dir, &iso_path, &mapfile_path),
+                    &display_name,
+                    reason,
+                );
                 return;
             }
         };
@@ -1077,21 +1263,13 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e.to_string()));
             return;
         }
-        // The superseded plan is never delivered; drop its outputs (plain leaves in
-        // this job only) so they do not hold staging space beside the new plan.
-        for old in &plan_outputs {
-            if is_plain_leaf(&old.filename) && !outputs.iter().any(|o| o.filename == old.filename) {
-                match std::fs::remove_file(staging_dir.join(&old.filename)) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        crate::server::log::device_log(
-                            device,
-                            &format!("superseded output {} was not removed: {e}", old.filename),
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
+        remove_superseded_outputs(
+            device,
+            &staging_dir,
+            &plan_outputs,
+            &outputs,
+            &[&iso_path, &mapfile_path],
+        );
         plan_outputs = outputs;
     }
     // Numeric indices belong to the original drive scan. Rebind the entire plan
@@ -2414,3 +2592,23 @@ mod vid_needs_disc_tests;
 #[cfg(test)]
 #[path = "resume_upgrade_tests.rs"]
 mod upgrade_tests;
+
+#[cfg(test)]
+#[path = "resume_superseded_outputs_tests.rs"]
+mod superseded_outputs_tests;
+
+#[cfg(test)]
+#[path = "resume_plan_review_hold_tests.rs"]
+mod plan_review_hold_tests;
+
+#[cfg(test)]
+#[path = "resume_planning_label_tests.rs"]
+mod planning_label_tests;
+
+#[cfg(test)]
+#[path = "resume_capture_plan_tests.rs"]
+mod capture_plan_tests;
+
+#[cfg(test)]
+#[path = "resume_lease_wait_tests.rs"]
+mod lease_wait_tests;

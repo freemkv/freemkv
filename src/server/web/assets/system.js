@@ -26,6 +26,13 @@ function storageFolderRow(m) {
     + '<td class="num"><span class="muted small">' + (m.latency_ms != null ? m.latency_ms + ' ms' : '') + '</span></td></tr>';
 }
 
+// Clear staging keeps 1.8.3 folders no disc can resume again; name them for removal by hand.
+function staleLegacyNote(names) {
+  const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? ', …' : '');
+  return 'Kept ' + names.length + ' staging folder' + (names.length === 1 ? '' : 's')
+    + ' from 1.8.3 that no disc can resume (' + shown + '); delete by hand if not needed';
+}
+
 const RESTARTING = 'Restarting… running work stops at its next safe point, then the server restarts. This page reconnects by itself.';
 const RESTART_NOTES = {
   slow: 'Still restarting. If freemkv was started by hand rather than as a service, start it again.',
@@ -41,6 +48,9 @@ async function requestReboot(call) {
   if (!r || r.rebooting !== true) throw new Error('the reboot was not accepted');
   return before || {boot: r.boot};
 }
+
+// What Clear staging removes, as `clear_if_abandoned` decides it.
+const CLEAR_STAGING_NOTE = 'Removes failed rips (including their saved disc images), stopped captures of discs whose identity could not be verified (no rip can resume them, even when their match was corrected) and empty leftover entries. Anything else ripping, muxing, held for review, resumable, corrected or not yet delivered is kept.';
 
 // The toast for Clear staging: what was removed and, as a warning, what could not be.
 function stagedClearToast(r) {
@@ -91,7 +101,7 @@ export default {
       </div>
       <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Storage &amp; folders</b><span class="muted small" id="mounts-note">Access checked every 30 s. Access alone does not confirm successful file delivery.</span></div>
         <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>Health</th><th>Space</th><th>Last good access</th><th>Last error</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>
-      <section class="card" style="margin-top:1.25rem"><div class="toolbar"><b>Staging</b><button class="btn btn-ghost btn-sm" id="clear-staging">Clear staging</button></div><p class="small muted" id="staged-kept" style="margin:.6rem 0 0"></p><p class="small muted" style="margin:.4rem 0 0">Removes failed rips (including their saved disc images) and empty leftover entries. Anything ripping, muxing, held for review, resumable, corrected or not yet delivered is kept.</p></section>`;
+      <section class="card" style="margin-top:1.25rem"><div class="toolbar"><b>Staging</b><button class="btn btn-ghost btn-sm" id="clear-staging">Clear staging</button></div><p class="small muted" id="staged-kept" style="margin:.6rem 0 0"></p><p class="small muted" style="margin:.4rem 0 0">${esc(CLEAR_STAGING_NOTE)}</p></section>`;
     let sys = null;
     let restarting = false;
     const paint = () => {
@@ -143,8 +153,9 @@ export default {
       const r = await act(btn, () => api('POST', '/api/library/staged/clear'), 'Clear staging');
       if (r) {
         toast(...stagedClearToast(r));
+        if (r.legacy && r.legacy.length) toast(staleLegacyNote(r.legacy), 'warn');
         load();
       }
-    }, 'Confirm: remove failed rips'));
+    }, 'Confirm: remove failed and unverified stopped rips'));
   },
 };
