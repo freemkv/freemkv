@@ -2206,7 +2206,7 @@ fn a_correction_committed_during_the_iso_prune_check_keeps_the_iso() {
     let lock = state_lock(dir.path());
     let held = lock.lock().unwrap();
     let path = dir.path().to_path_buf();
-    let pruner = std::thread::spawn(move || prune_unless_replan_required(&path, || {}));
+    let pruner = std::thread::spawn(move || prune_unless_replan_required(&path, &[]).is_some());
     std::thread::sleep(std::time::Duration::from_millis(200));
     // A correction lands (under the state lock) while the prune is deciding.
     let mut st = read_state(dir.path()).unwrap();
@@ -2421,4 +2421,33 @@ fn clear_staging_lists_unmatchable_1_8_3_folders_without_deleting_them() {
     assert_eq!(unmatchable_legacy_jobs(root.path()), ["Heat"]);
     clear_abandoned_staging(root.path());
     assert!(legacy.join("Heat.mkv").exists());
+}
+
+// The multi-GB unlinks of a prune run without the state lock, so a correction request
+// is not held behind them; the files are already renamed aside, so it is refused.
+#[test]
+fn a_prune_unlinks_outside_the_state_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = DiscState::new(StagingState::Done);
+    let iso = dir.path().join("Heat.iso");
+    let map = dir.path().join("Heat.iso.mapfile");
+    st.iso_path = iso.to_string_lossy().into_owned();
+    try_write_state(dir.path(), &st).unwrap();
+    fs::write(&iso, b"image").unwrap();
+    fs::write(&map, b"map").unwrap();
+    let path = dir.path().to_path_buf();
+    let pruned = prune_with(dir.path(), &[&iso, &map], |aside| {
+        let lock = state_lock(&path);
+        assert!(lock.try_lock().is_ok(), "unlink ran under the state lock");
+        assert!(!saved_image_present(&path, &read_state(&path).unwrap()));
+        fs::remove_file(aside)
+    })
+    .unwrap();
+    assert!(pruned.iter().all(|(_, r)| r.is_ok()));
+    assert!(!iso.exists() && !map.exists());
+    assert_eq!(
+        fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "only state.json is left"
+    );
 }

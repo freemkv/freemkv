@@ -2739,17 +2739,46 @@ fn surface_interrupted_reset(dir: &Path, finished: io::Result<bool>) {
     }
 }
 
-/// Run `prune` (deleting a finished capture's ISO/mapfile) unless a correction has
-/// asked for a replan from them. Returns whether it ran.
-/// The check and the deletion share the state lock that commits corrections.
-pub(super) fn prune_unless_replan_required(dir: &Path, prune: impl FnOnce()) -> bool {
+/// Delete a finished capture's ISO and map (`files`) unless a correction asked for a
+/// replan from them; `None` when kept, else each file's outcome. Under the state lock
+/// that commits corrections they are renamed aside, so a correction then finds no saved
+/// image and is refused; the multi-GB unlinks run after the lock is released.
+pub(super) fn prune_unless_replan_required(
+    dir: &Path,
+    files: &[&Path],
+) -> Option<Vec<(PathBuf, io::Result<()>)>> {
+    prune_with(dir, files, |p| std::fs::remove_file(p))
+}
+
+fn prune_with(
+    dir: &Path,
+    files: &[&Path],
+    unlink: impl Fn(&Path) -> io::Result<()>,
+) -> Option<Vec<(PathBuf, io::Result<()>)>> {
     let lock = state_lock(dir);
-    let _state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
     if read_state(dir).is_some_and(|s| s.replan_required) {
-        return false;
+        return None;
     }
-    prune();
-    true
+    let marked: Vec<(PathBuf, io::Result<PathBuf>)> = files
+        .iter()
+        .map(|file| {
+            let mut aside = file.as_os_str().to_owned();
+            aside.push(".pruning");
+            let aside = PathBuf::from(aside);
+            (
+                file.to_path_buf(),
+                std::fs::rename(file, &aside).map(|()| aside),
+            )
+        })
+        .collect();
+    drop(state_owner);
+    Some(
+        marked
+            .into_iter()
+            .map(|(file, aside)| (file, aside.and_then(|aside| unlink(&aside))))
+            .collect(),
+    )
 }
 
 /// Freeze execution mode, stamp the scan's verified identity and read planning

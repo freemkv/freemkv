@@ -5593,23 +5593,24 @@ fn prune_intermediate_iso(
     let Some(staging_dir) = iso_path.parent() else {
         return;
     };
-    staging::prune_unless_replan_required(staging_dir, || {
-        match std::fs::remove_file(iso_path) {
-            Ok(_) => crate::server::log::device_log(device, "Pruned intermediate ISO"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => crate::server::log::device_log(device, &format!("ISO prune warning: {e}")),
-        }
-        // Mirror the ISO arm: a lingering mapfile in staging could be misread as a
-        // partial rip by the resume classifier on next startup, so surface any
-        // unexpected removal error instead of swallowing it.
-        match std::fs::remove_file(mapfile_path) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                crate::server::log::device_log(device, &format!("mapfile prune warning: {e}"))
+    let Some(pruned) =
+        staging::prune_unless_replan_required(staging_dir, &[iso_path, mapfile_path])
+    else {
+        return;
+    };
+    // A lingering mapfile could be misread as a partial rip by the resume classifier on
+    // next startup, so any unexpected removal error is surfaced, not swallowed.
+    for (path, result) in pruned {
+        let what = if path == iso_path { "ISO" } else { "mapfile" };
+        match result {
+            Ok(()) if path == iso_path => {
+                crate::server::log::device_log(device, "Pruned intermediate ISO")
             }
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => crate::server::log::device_log(device, &format!("{what} prune warning: {e}")),
         }
-    });
+    }
 }
 
 /// What the orchestrator must do with a mux outcome, decided from the header
