@@ -8,6 +8,17 @@ use super::{
 };
 
 #[test]
+fn a_scanned_disc_with_no_titles_is_an_early_error() {
+    let msg = super::no_titles_error(&[]).expect("empty scan must fail");
+    assert!(
+        msg.contains(&crate::strings::get("error.no_titles")),
+        "{msg}"
+    );
+    let titles = crate::selection_test_fixtures::variant_titles();
+    assert_eq!(super::no_titles_error(&titles), None);
+}
+
+#[test]
 fn presentation_language_cli_is_independent_of_audio_all() {
     let titles = crate::selection_test_fixtures::variant_titles();
     for (language, expected) in [("de", 1), ("en", 0), ("fr", 0)] {

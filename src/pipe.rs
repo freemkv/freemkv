@@ -776,6 +776,14 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // `preflight_validate`. A disc source skips the upfront `scan_iso` but
     // still honors multiple `-t` flags, building jobs from `title_nums`.
     let iso_disc = if is_disc { None } else { scan_iso(source) };
+    let scanned_titles = disc_scan
+        .as_ref()
+        .map(|(disc, _, _)| &disc.titles)
+        .or_else(|| iso_disc.as_ref().map(|(disc, _)| &disc.titles));
+    if let Some(msg) = scanned_titles.and_then(|t| no_titles_error(t)) {
+        out.raw(Always, &msg);
+        return 1;
+    }
     if automatic_title {
         let scanned = disc_scan
             .as_ref()
@@ -2851,6 +2859,14 @@ fn resolve_scanned_title<'a>(
         }
     }
     Ok(title)
+}
+
+// A scanned disc with no titles has nothing to rip: fail early, coded and localized.
+fn no_titles_error(titles: &[libfreemkv::DiscTitle]) -> Option<String> {
+    titles.is_empty().then(|| {
+        let level = strings::get(crate::messaging::Level::Error.locale_key());
+        format!("{level}: {}", strings::get("error.no_titles"))
+    })
 }
 
 // The main title (0-based): title 0, or a cut of it in the wanted language. Never a review.

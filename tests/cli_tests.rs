@@ -609,8 +609,8 @@ fn info_share_on_a_folder_honours_help() {
     assert!(!s.0.join("disc-profile-backup").exists(), "captured anyway");
 }
 
-// `--presentation-language` is checked as the flag is read, and on a source the keyless
-// scan cannot read it is a no-op (one title), not a demand for a scanned disc.
+// `--presentation-language` is checked as the flag is read; it is a title selection flag,
+// so a stream source (no titles) refuses it like -t/-a/-s.
 #[test]
 fn presentation_language_is_validated_and_needs_no_scan() {
     let s = Scratch::new("presentation");
@@ -634,9 +634,20 @@ fn presentation_language_is_validated_and_needs_no_scan() {
         combined.contains("E9083") && combined.contains("'xx'"),
         "{combined}"
     );
+    // On an image the keyless scan cannot read, the flag is not what fails.
     let combined = combined_output(&run("de"));
-    assert!(
-        !combined.contains("requires a scanned disc"),
-        "an unscanned source must not demand a scan: {combined}"
-    );
+    assert!(combined.contains("E6020"), "{combined}");
+    // A stream source has no titles, so the flag is refused like -t/-a/-s.
+    let stream = freemkv()
+        .args([
+            "m2ts://in.m2ts".to_string(),
+            format!("mkv://{}", mkv.display()),
+            "--presentation-language".into(),
+            "de".into(),
+        ])
+        .output()
+        .expect("failed to run");
+    let combined = combined_output(&stream);
+    assert_eq!(stream.status.code(), Some(1), "{combined}");
+    assert!(combined.contains("m2ts://in.m2ts"), "{combined}");
 }
