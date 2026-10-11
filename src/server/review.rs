@@ -236,7 +236,8 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
                 st.state = crate::server::ripper::staging::StagingState::Failed;
                 st.failure_reason = Some("cancelled by operator".to_string());
                 st.muxing = false;
-                crate::server::ripper::staging::try_write_state(&d, &st)
+                st.title_identity_review = false;
+                crate::server::ripper::staging::try_write_state_abandoning_hold(&d, &st)
                     .map_err(|e| e.to_string())?;
             } else {
                 let failed_body = serde_json::json!({
