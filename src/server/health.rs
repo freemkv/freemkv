@@ -491,7 +491,15 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let deadline = Instant::now() + limit;
+    begin_until(key, Instant::now() + limit, probe)
+}
+
+/// [`begin`] with the deadline given, so a batch can share one deadline across its folders.
+pub fn begin_until<T, F>(key: &Path, deadline: Instant, probe: F) -> Pending<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
     let busy = Pending { rx: None, deadline };
     {
         let mut held = IN_FLIGHT.folders.lock().unwrap_or_else(|e| e.into_inner());
@@ -565,11 +573,12 @@ where
     F: Fn(I) -> T + Send + Sync + 'static,
 {
     let f = Arc::new(f);
+    let deadline = Instant::now() + limit;
     let started: Vec<_> = items
         .into_iter()
         .map(|(key, item)| {
             let f = f.clone();
-            begin(&key, limit, move || f(item))
+            begin_until(&key, deadline, move || f(item))
         })
         .collect();
     started.into_iter().map(Pending::wait).collect()
@@ -832,7 +841,7 @@ pub fn preflight_with<F>(
 where
     F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
 {
-    let started = preflight_begin(role, dir, limit, probe);
+    let started = preflight_begin(role, dir, Instant::now() + limit, probe);
     preflight_finish(role, dir, limit, started)
 }
 
@@ -847,9 +856,10 @@ pub fn preflight_each<F>(
 where
     F: Fn(&Path) -> std::io::Result<()> + Copy + Send + 'static,
 {
+    let deadline = Instant::now() + limit;
     let started: Vec<_> = dirs
         .iter()
-        .map(|d| preflight_begin(role, d, limit, probe))
+        .map(|d| preflight_begin(role, d, deadline, probe))
         .collect();
     dirs.iter()
         .zip(started)
@@ -860,7 +870,7 @@ where
 // A preflight under way: refused up front, or its probe running.
 type Started = (Instant, Result<Pending<std::io::Result<()>>, Problem>);
 
-fn preflight_begin<F>(role: &'static str, dir: &Path, limit: Duration, probe: F) -> Started
+fn preflight_begin<F>(role: &'static str, dir: &Path, deadline: Instant, probe: F) -> Started
 where
     F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
 {
@@ -871,7 +881,7 @@ where
     }
     let owned = dir.to_path_buf();
     let generation = probe_generation();
-    let pending = begin(dir, limit, move || {
+    let pending = begin_until(dir, deadline, move || {
         let result = probe(&owned);
         report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
         result

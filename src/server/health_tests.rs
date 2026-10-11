@@ -527,3 +527,27 @@ fn a_writable_folder_going_bad_gets_a_syslog_line() {
     let line = unusable_line("Library", &m);
     assert!(!line.contains("PRESERVED"), "{line}");
 }
+
+#[test]
+fn a_batch_over_busy_folders_costs_one_limit_not_one_per_folder() {
+    let keys: Vec<PathBuf> = (0..3)
+        .map(|i| PathBuf::from(format!("/test/batch-busy-{i}")))
+        .collect();
+    let running: Vec<_> = keys
+        .iter()
+        .map(|k| {
+            begin(k, Duration::from_secs(5), || {
+                std::thread::sleep(Duration::from_millis(1500));
+            })
+        })
+        .collect();
+    let items: Vec<_> = keys.iter().map(|k| (k.clone(), ())).collect();
+    let t = Instant::now();
+    let out = bounded_each(items, Duration::from_millis(400), |_| ());
+    let took = t.elapsed();
+    assert!(took < Duration::from_millis(800), "took {took:?}");
+    assert!(out.iter().all(|o| *o != Bounded::Done(())));
+    for p in running {
+        let _ = p.wait();
+    }
+}
