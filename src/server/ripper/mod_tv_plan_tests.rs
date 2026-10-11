@@ -176,7 +176,7 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
 
 #[test]
 fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
-    use crate::server::planner::{MediaKind, MediaMetadata, planner_for};
+    use crate::server::planner::{MediaKind, MediaMetadata, plan};
     use std::path::Path;
     let cfg = Config::default();
     let mut titles = vec![title(2640.0, 100), title(2650.0, 200)];
@@ -197,12 +197,7 @@ fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
                 ..Default::default()
             };
             let capture = plan_mux_outputs(&titles, &cfg, "tv", &label, 0, "Show.mkv", None);
-            let remux = planner_for(&cfg, &media).plan(
-                Path::new("disc.iso"),
-                &titles,
-                &media,
-                Path::new("Show.mkv"),
-            );
+            let remux = plan(&cfg, &titles, &media, Path::new("Show.mkv"));
             assert!(matches!(
                 capture,
                 Err(crate::server::planner::PlanError::SelectionNeedsReview(_))

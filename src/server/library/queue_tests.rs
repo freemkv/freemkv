@@ -10,8 +10,7 @@ fn postrename_failure_preserves_landed_queue_before_legacy_persist() {
                 f,
                 vec![job(t.path(), "landed")],
                 false,
-                None,
-                None,
+                false,
             ))
         },
         |path, bytes| {
@@ -108,20 +107,9 @@ fn uncertain_admission_keeps_frozen_intent_and_blocks_claim_until_storage_recove
     let t = tempfile::tempdir().unwrap();
     let q = Queue::open(t.path());
     let item = job(t.path(), "old");
-    std::fs::write(&item.iso, b"source").unwrap();
-    let replacement =
-        super::super::replacement::Replacement::capture(&item.iso, &Default::default()).unwrap();
     assert!(
         q.try_mutate_durable_with(
-            |f| {
-                Ok(Queue::append(
-                    f,
-                    vec![item.clone()],
-                    false,
-                    Some(corrected_match()),
-                    Some(replacement),
-                ))
-            },
+            |f| Ok(Queue::append(f, vec![item.clone()], false, true)),
             fail_directory_sync
         )
         .is_err()
@@ -132,12 +120,15 @@ fn uncertain_admission_keeps_frozen_intent_and_blocks_claim_until_storage_recove
     std::fs::create_dir(&tmp).unwrap();
     assert!(q.claim_next().is_none());
     assert_eq!(q.snapshot().jobs[0].state, JobState::Queued);
-    assert!(q.add_corrected(item.clone(), corrected_match()).is_err());
     std::fs::remove_dir(tmp).unwrap();
-    assert_eq!(q.add_corrected(item, corrected_match()).unwrap(), 0);
+    assert_eq!(
+        q.add_fresh(vec![item], true),
+        0,
+        "the source is already queued"
+    );
     let claimed = q.claim_next().unwrap();
     assert_eq!(claimed.id, id);
-    assert_eq!(claimed.selected_match, Some(corrected_match()));
+    assert!(claimed.retire);
     assert_eq!(q.snapshot().jobs.len(), 1);
 }
 
@@ -150,161 +141,18 @@ fn job(dir: &Path, name: &str) -> NewJob {
     }
 }
 
-fn corrected_match() -> crate::server::library::matches::SavedMatch {
-    crate::server::library::matches::SavedMatch {
-        revision: 9,
-        media: crate::server::planner::MediaMetadata {
-            title: "Cast Away".into(),
-            year: 2000,
-            tmdb_id: 8358,
-            kind: Some(crate::server::planner::MediaKind::Movie),
-            ..Default::default()
-        },
-    }
-}
-
 #[test]
-fn replacement_phase_checkpoints_survive_postrename_failure_and_legacy_write() {
-    for phase in ["prepared", "retired", "complete"] {
-        let t = tempfile::tempdir().unwrap();
-        let q = Queue::open(t.path());
-        let item = job(t.path(), "old");
-        std::fs::write(&item.iso, b"source").unwrap();
-        q.add_corrected(item, corrected_match()).unwrap();
-        let claimed = q.claim_next().unwrap();
-        let mut journal = serde_json::to_value(claimed.replacement.unwrap()).unwrap();
-        journal["prepared"] = serde_json::json!([{
-            "target": claimed.target,
-            "candidate": t.path().join("candidate"),
-            "identity": null,
-            "writing_app": null
-        }]);
-        if phase != "prepared" {
-            journal["retired"] = serde_json::json!([t.path().join("old-output")]);
-        }
-        if phase == "complete" {
-            journal["complete"] = serde_json::json!(true);
-        }
-        let expected: super::super::replacement::Replacement =
-            serde_json::from_value(journal).unwrap();
-        assert!(
-            q.try_mutate_durable_with(
-                |f| {
-                    f.jobs[0].replacement = Some(expected.clone());
-                    Ok(())
-                },
-                fail_directory_sync
-            )
-            .is_err()
-        );
-        q.set_debug_log(true);
-        let reopened = Queue::open(t.path());
-        assert_eq!(
-            reopened.snapshot().jobs[0].replacement.as_ref(),
-            Some(&expected),
-            "phase {phase}"
-        );
-    }
-}
-
-#[test]
-fn unfinished_replacement_survives_drop_clear_and_legacy_enqueue() {
+fn a_change_match_is_queued_durably_to_retire_and_planned_at_claim() {
     let t = tempfile::tempdir().unwrap();
     let q = Queue::open(t.path());
-    let item = job(t.path(), "old");
-    std::fs::write(&item.iso, b"source").unwrap();
-    q.add_corrected(item, corrected_match()).unwrap();
-    let claimed = q.claim_next().unwrap();
-    // Model the durable checkpoint reserving a candidate before preparation.
-    let mut journal = serde_json::to_value(claimed.replacement.as_ref().unwrap()).unwrap();
-    journal["prepared"] = serde_json::json!([{
-        "target": claimed.target,
-        "candidate": t.path().join("reserved-candidate"),
-        "identity": null,
-        "writing_app": null
-    }]);
-    let replacement = serde_json::from_value(journal).unwrap();
-    q.save_replacement(claimed.id, replacement).unwrap();
-    q.drop_job(claimed.id);
-    assert_eq!(
-        q.clear_finished(),
-        0,
-        "cleanup journal is not disposable history"
-    );
-    assert_eq!(
-        q.add(vec![job(t.path(), "old")]),
-        0,
-        "legacy enqueue cannot erase the journal"
-    );
-    let mut other = job(t.path(), "other-target");
-    other.iso = claimed.iso.clone();
-    assert_eq!(
-        q.add(vec![other]),
-        0,
-        "same source under another target cannot bypass ownership"
-    );
-    drop(q);
-    let q = Queue::open(t.path());
-    let saved = q.snapshot();
-    assert_eq!(saved.jobs.len(), 1);
-    assert_eq!(saved.jobs[0].id, claimed.id);
-    assert!(saved.jobs[0].has_replacement_work());
-    assert_eq!(saved.jobs[0].state, JobState::Failed);
-}
-
-#[test]
-fn corrected_enqueue_freezes_identity_durably_before_claim() {
-    let t = tempfile::tempdir().unwrap();
-    let q = Queue::open(t.path());
-    let selected = corrected_match();
-    std::fs::write(t.path().join("old.iso"), b"source").unwrap();
-    assert_eq!(
-        q.add_corrected(job(t.path(), "old"), selected.clone())
-            .unwrap(),
-        1
-    );
+    assert_eq!(q.add_fresh(vec![job(t.path(), "old")], true), 1);
     let disk: QueueFile = serde_json::from_slice(&std::fs::read(&q.path).unwrap()).unwrap();
-    assert_eq!(disk.jobs[0].selected_match.as_ref(), Some(&selected));
+    assert!(disk.jobs[0].retire);
     drop(q);
     let q = Queue::open(t.path());
     let claimed = q.claim_next().unwrap();
-    assert_eq!(claimed.selected_match, Some(selected));
-    assert!(claimed.plan.is_none());
-    let replacement = claimed.replacement.unwrap();
-    replacement.verify_source(&claimed.iso).unwrap();
-    std::fs::write(&claimed.iso, b"different source").unwrap();
-    assert!(replacement.verify_source(&claimed.iso).is_err());
-}
-
-#[test]
-fn corrected_enqueue_refuses_unreadable_ownership_without_resetting_links() {
-    let t = tempfile::tempdir().unwrap();
-    let q = Queue::open(t.path());
-    let item = job(t.path(), "old");
-    std::fs::write(&item.iso, b"source").unwrap();
-    let links = t.path().join(crate::server::library::links::LINKS_FILE);
-    std::fs::write(&links, b"corrupt provenance").unwrap();
-    assert!(q.add_corrected(item, corrected_match()).is_err());
-    assert!(q.snapshot().jobs.is_empty());
-    assert_eq!(std::fs::read(links).unwrap(), b"corrupt provenance");
-}
-
-#[test]
-fn corrected_enqueue_write_failure_does_not_publish_or_consume_id() {
-    let t = tempfile::tempdir().unwrap();
-    let q = Queue::open(t.path());
-    let before = q.snapshot();
-    let generation = q.generation();
-    std::fs::write(t.path().join("old.iso"), b"source").unwrap();
-    std::fs::rename(&q.path, q.path.with_extension("saved")).unwrap();
-    std::fs::create_dir(&q.path).unwrap();
-    assert!(
-        q.add_corrected(job(t.path(), "old"), corrected_match())
-            .is_err()
-    );
-    assert_eq!(q.snapshot(), before);
-    assert_eq!(q.generation(), generation);
-    assert!(q.claim_next().is_none());
+    assert!(claimed.retire);
+    assert!(claimed.plan.is_none() && claimed.owned.is_none());
 }
 
 #[test]
@@ -316,7 +164,7 @@ fn corrected_enqueue_excludes_other_jobs_using_same_iso() {
     let mut other = job(t.path(), "different");
     other.iso = first.iso.clone();
     q.add(vec![first]);
-    assert_eq!(q.add_corrected(other, corrected_match()).unwrap(), 0);
+    assert_eq!(q.add_fresh(vec![other], true), 0);
     assert_eq!(q.snapshot().jobs.len(), 1);
 }
 
@@ -327,8 +175,6 @@ fn corrected_source_replans_without_reusing_prior_episode_selection() {
     q.add(vec![job(t.path(), "old")]);
     let first = q.claim_next().unwrap();
     let plan = crate::server::planner::RemuxPlan {
-        version: crate::server::planner::PLAN_VERSION,
-        source_iso: first.iso.clone(),
         media: Default::default(),
         outputs: vec![crate::server::planner::PlannedOutput {
             id: "episode".into(),
@@ -347,7 +193,7 @@ fn corrected_source_replans_without_reusing_prior_episode_selection() {
             finished_at: 1,
         },
     );
-    assert_eq!(q.add_replanned(vec![job(t.path(), "old")]), 1);
+    assert_eq!(q.add_fresh(vec![job(t.path(), "old")], false), 1);
     let fresh = q.claim_next().unwrap();
     assert!(fresh.plan.is_none());
     assert!(fresh.outputs.is_empty());
@@ -363,11 +209,11 @@ fn correction_cannot_compete_with_an_active_source_at_a_different_target() {
     q.add(vec![job(t.path(), "old")]);
     let mut new = job(t.path(), "new");
     new.iso = t.path().join("old.iso");
-    assert_eq!(q.add_replanned(vec![new]), 0);
+    assert_eq!(q.add_fresh(vec![new], true), 0);
     let running = q.claim_next().unwrap();
     let mut new = job(t.path(), "new");
     new.iso = running.iso;
-    assert_eq!(q.add_replanned(vec![new]), 0);
+    assert_eq!(q.add_fresh(vec![new], true), 0);
     assert_eq!(q.snapshot().jobs.len(), 1);
 }
 
@@ -485,8 +331,6 @@ fn a_claimed_job_persists_its_frozen_plan_once() {
     q.add(vec![job(t.path(), "show")]);
     let claimed = q.claim_next().unwrap();
     let plan = crate::server::planner::RemuxPlan {
-        version: crate::server::planner::PLAN_VERSION,
-        source_iso: claimed.iso.clone(),
         media: crate::server::planner::MediaMetadata {
             title: "Show".into(),
             kind: Some(crate::server::planner::MediaKind::Tv),
@@ -528,8 +372,6 @@ fn frozen_plan_write_failure_leaves_job_unplanned() {
     std::fs::rename(&q.path, q.path.with_extension("saved")).unwrap();
     std::fs::create_dir(&q.path).unwrap();
     let plan = crate::server::planner::RemuxPlan {
-        version: crate::server::planner::PLAN_VERSION,
-        source_iso: claimed.iso,
         media: Default::default(),
         outputs: vec![crate::server::planner::PlannedOutput {
             id: "movie".into(),
@@ -929,58 +771,6 @@ fn stop_all_and_unqueue_keep_a_kept_file_offered() {
     assert_eq!(q.staged_total(), (0, 0));
 }
 
-fn failed_replacement_with_candidate(t: &Path, q: &Queue, record_identity: bool) -> (Job, PathBuf) {
-    let item = job(t, "old");
-    std::fs::write(&item.iso, b"source").unwrap();
-    q.add_corrected(item, corrected_match()).unwrap();
-    let claimed = q.claim_next().unwrap();
-    let candidate = t.join("old-candidate.mkv");
-    std::fs::write(&candidate, b"prepared multi-GB candidate").unwrap();
-    let identity = super::super::replacement::FileIdentity::read(&candidate).unwrap();
-    let mut journal = serde_json::to_value(claimed.replacement.as_ref().unwrap()).unwrap();
-    journal["prepared"] = serde_json::json!([{
-        "target": claimed.target,
-        "candidate": candidate,
-        "identity": if record_identity { serde_json::to_value(identity).unwrap() } else { serde_json::Value::Null },
-        "writing_app": null
-    }]);
-    q.save_replacement(claimed.id, serde_json::from_value(journal).unwrap())
-        .unwrap();
-    q.drop_job(claimed.id);
-    (claimed, candidate)
-}
-
-#[test]
-fn clearing_a_failed_unpublished_replacement_reclaims_its_candidates() {
-    let t = tempfile::tempdir().unwrap();
-    let q = Queue::open(t.path());
-    let (claimed, candidate) = failed_replacement_with_candidate(t.path(), &q, true);
-    assert_eq!(q.snapshot().jobs[0].state, JobState::Failed);
-    assert_eq!(q.clear_finished(), 1);
-    assert!(!candidate.exists(), "the verified candidate is reclaimed");
-    assert!(q.snapshot().jobs.is_empty());
-    assert!(q.with_idle_source(&claimed.iso, || Ok(())).is_ok());
-}
-
-#[test]
-fn clearing_keeps_a_replacement_whose_candidate_cannot_be_proven_ours() {
-    let t = tempfile::tempdir().unwrap();
-    let q = Queue::open(t.path());
-    let (_, candidate) = failed_replacement_with_candidate(t.path(), &q, false);
-    assert_eq!(q.clear_finished(), 0);
-    assert!(candidate.exists());
-    // A recorded candidate that changed, or vanished (possibly published), stays too.
-    let t = tempfile::tempdir().unwrap();
-    let q = Queue::open(t.path());
-    let (_, candidate) = failed_replacement_with_candidate(t.path(), &q, true);
-    std::fs::write(&candidate, b"something else entirely, longer").unwrap();
-    assert_eq!(q.clear_finished(), 0);
-    assert!(candidate.exists());
-    std::fs::remove_file(&candidate).unwrap();
-    assert_eq!(q.clear_finished(), 0);
-    assert_eq!(q.snapshot().jobs.len(), 1);
-}
-
 #[test]
 fn sweeping_a_missing_partial_never_touches_the_share_under_the_queue_lock() {
     let t = tempfile::tempdir().unwrap();
@@ -992,33 +782,12 @@ fn sweeping_a_missing_partial_never_touches_the_share_under_the_queue_lock() {
 }
 
 #[test]
-fn corrected_admission_captures_old_outputs_outside_the_queue_lock() {
-    let t = tempfile::tempdir().unwrap();
-    let q = Queue::open(t.path());
-    let item = job(t.path(), "old");
-    std::fs::write(&item.iso, b"source").unwrap();
-    let iso = item.iso.clone();
-    let added = q
-        .add_corrected_with(item, corrected_match(), || {
-            assert!(
-                q.state.try_lock().is_ok(),
-                "capture ran under the queue lock"
-            );
-            super::super::replacement::Replacement::capture(&iso, &Default::default())
-        })
-        .unwrap();
-    assert_eq!(added, 1);
-}
-
-#[test]
 fn forgetting_a_jobs_kept_file_forgets_it_on_its_output_too() {
     let t = tempfile::tempdir().unwrap();
     let q = Queue::open(t.path());
     q.add(vec![job(t.path(), "show")]);
     let claimed = q.claim_next().unwrap();
     let plan = crate::server::planner::RemuxPlan {
-        version: crate::server::planner::PLAN_VERSION,
-        source_iso: claimed.iso.clone(),
         media: crate::server::planner::MediaMetadata::default(),
         outputs: vec![crate::server::planner::PlannedOutput {
             id: "feature".into(),
@@ -1042,4 +811,34 @@ fn forgetting_a_jobs_kept_file_forgets_it_on_its_output_too() {
     // The kept file turned out unusable: the job forgets it.
     q.set_staged(claimed.id, None);
     assert_eq!(q.snapshot().jobs[0].outputs[0].staged, None);
+}
+
+// A schema-2 job from a development build, mid-way through the old replacement transaction.
+const DEV_QUEUE: &str = r#"{"schema": 2, "next_id": 4, "jobs": [{
+  "id": 4, "title": "Show", "iso": "/i/Show.iso", "target": "/m/Show/Show.mkv",
+  "plan": {"version": 1, "source_iso": "/i/Show.iso",
+    "media": {"title": "Show", "year": 2001, "tmdb_id": 7, "season": 1, "disc": null, "kind": "tv"},
+    "outputs": [{"id": "title-0", "title_index": 0, "episode": null, "episode_name": "", "filename": "Show.mkv"}]},
+  "selected_match": {"revision": 2, "media": {"title": "Show", "year": 2001, "tmdb_id": 7, "season": 1, "disc": null, "kind": "tv"}},
+  "replacement": {"source": {"canonical": "/i/Show.iso", "size": 3, "modified": {"secs_since_epoch": 1, "nanos_since_epoch": 0}},
+    "old_outputs": [{"path": "/m/Old.mkv", "identity": {"canonical": "/m/Old.mkv", "size": 3, "modified": {"secs_since_epoch": 1, "nanos_since_epoch": 0}}}],
+    "prepared": [{"target": "/m/Show/Show.mkv", "candidate": "/m/Show/.replacement-4-0.mkv", "identity": null}],
+    "retired": [], "complete": false},
+  "outputs": [{"id": "title-0", "target": "/m/Show/Show.mkv", "state": "running"}],
+  "replace": true, "state": "running", "queued_at": 1}]}"#;
+
+#[test]
+fn a_dev_queue_file_with_the_old_replacement_fields_loads_as_a_plain_job() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join(QUEUE_FILE), DEV_QUEUE).unwrap();
+    let q = Queue::open(t.path());
+    assert!(!t.path().join("library-queue.json.unreadable").exists());
+    let job = q.claim_next().unwrap();
+    assert_eq!(job.id, 4);
+    assert!(!job.retire, "never deletes anything");
+    assert_eq!(job.plan.unwrap().outputs[0].filename, "Show.mkv");
+    let back = std::fs::read_to_string(t.path().join(QUEUE_FILE)).unwrap();
+    for gone in ["replacement", "selected_match", "source_iso", "\"version\""] {
+        assert!(!back.contains(gone), "{gone}: {back}");
+    }
 }

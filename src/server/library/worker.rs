@@ -4,11 +4,11 @@
 
 use super::arbiter::Arbiter;
 use super::deliver;
+use super::owned::Owned;
 use super::queue::{Failure, Job, JobNote, JobResult, NewJob, OutputState, StagedFile};
 use super::{Dirs, Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use crate::server::health::{self, Fault, Problem};
-use crate::server::planner::Planner;
 use freemkv_engine::{Event, Level, Progress, Sink};
 use std::io::Write as _;
 use std::path::Path;
@@ -160,14 +160,8 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
 /// Freeze automatic title selection before execution, including single outputs.
 /// Existing plans and retained media keep their original selection on restart.
 fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
-    if let Some(replacement) = &job.replacement {
-        replacement.verify_source(&job.iso)?;
-    }
     if job.plan.is_some() || job.staged.is_some() {
         return Ok(());
-    }
-    if let Some(saved) = job.selected_match.clone() {
-        return attach_corrected_plan(lib, cfg, job, &saved.media);
     }
     if let Some(saved) = lib.source_match(&job.iso).map_err(std::io::Error::other)? {
         return attach_corrected_plan(lib, cfg, job, &saved.media);
@@ -209,8 +203,12 @@ fn attach_from_lookup(
         kind: Some(crate::server::planner::MediaKind::Tv),
         episode_start: None,
     };
-    let planner = crate::server::planner::TvPlanner { cfg };
-    let plan = tv_plan_result(planner.plan(&job.iso, &disc.titles, &media, &job.target))?;
+    let plan = tv_plan_result(crate::server::planner::plan(
+        cfg,
+        &disc.titles,
+        &media,
+        &job.target,
+    ))?;
     persist_auto_plan(lib, cfg, job, plan)
 }
 
@@ -244,8 +242,8 @@ fn persist_auto_plan(
 fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
-    let plan = crate::server::planner::MoviePlanner::from_config(cfg).plan(
-        &job.iso,
+    let plan = crate::server::planner::plan(
+        cfg,
         &disc.titles,
         &crate::server::planner::MediaMetadata::default(),
         &job.target,
@@ -292,10 +290,9 @@ fn attach_corrected_plan(
     job: &mut Job,
     media: &crate::server::planner::MediaMetadata,
 ) -> std::io::Result<()> {
-    use crate::server::planner::{MediaKind, MoviePlanner, TvPlanner};
-    let Some(kind) = media.kind else {
+    if media.kind.is_none() {
         return Err(std::io::Error::other("saved match has no media type"));
-    };
+    }
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     let media = &with_label_numbers(
@@ -304,44 +301,7 @@ fn attach_corrected_plan(
         disc.meta_title.as_deref(),
         &job.title,
     );
-    let metadata = Some(crate::server::tmdb::TmdbResult {
-        title: media.title.clone(),
-        year: media.year,
-        tmdb_id: media.tmdb_id,
-        media_type: match kind {
-            MediaKind::Movie => "movie",
-            MediaKind::Tv => "tv",
-        }
-        .into(),
-        poster_url: String::new(),
-        overview: String::new(),
-    });
-    let target = std::path::PathBuf::from(crate::server::mover::build_destination(
-        cfg,
-        &metadata,
-        "feature.mkv",
-        media.season,
-    ));
-    let plan = match kind {
-        MediaKind::Movie => {
-            MoviePlanner::from_config(cfg).plan(&job.iso, &disc.titles, media, &target)
-        }
-        MediaKind::Tv => {
-            let mut explicit = cfg.clone();
-            explicit.tv_auto = true;
-            TvPlanner { cfg: &explicit }.plan(&job.iso, &disc.titles, media, &target)
-        }
-    }
-    .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
-    let targets = tv_destinations(cfg, &plan)
-        .map(|(_, paths)| paths)
-        .unwrap_or_else(|| vec![target]);
-    validate_corrected_targets_with_authorization(
-        &job.iso,
-        &targets,
-        &super::links::load(&lib.config_dir),
-        job.replacement.as_ref(),
-    )?;
+    let (plan, targets) = corrected_plan(cfg, &disc.titles, media)?;
     if !lib.queue.set_plan_targets(job.id, plan, Some(targets)) {
         return Err(std::io::Error::other(
             "job changed while preparing corrected match",
@@ -357,45 +317,43 @@ fn attach_corrected_plan(
     Ok(())
 }
 
-#[cfg(test)]
-fn validate_corrected_targets(
-    source: &Path,
-    targets: &[std::path::PathBuf],
-    links: &std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
-) -> std::io::Result<()> {
-    validate_corrected_targets_with_authorization(source, targets, links, None)
-}
-
-fn validate_corrected_targets_with_authorization(
-    source: &Path,
-    targets: &[std::path::PathBuf],
-    links: &std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
-    authorization: Option<&super::replacement::Replacement>,
-) -> std::io::Result<()> {
-    if let Some(authorization) = authorization {
-        authorization.verify_source(source)?;
-    }
-    for target in targets {
-        match std::fs::symlink_metadata(target) {
-            Ok(metadata)
-                if metadata.is_file()
-                    && (links.get(target).is_some_and(|iso| iso == source)
-                        || (!links.contains_key(target)
-                            && authorization.is_some_and(|a| a.authorizes_existing(target)))) => {}
-            Ok(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "corrected destination is not an owned output: {}",
-                        target.display()
-                    ),
-                ));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+// The plan and library paths a confirmed match produces from the disc's titles.
+fn corrected_plan(
+    cfg: &Config,
+    titles: &[libfreemkv::DiscTitle],
+    media: &crate::server::planner::MediaMetadata,
+) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
+    use crate::server::planner::MediaKind;
+    let Some(kind) = media.kind else {
+        return Err(std::io::Error::other("saved match has no media type"));
+    };
+    let metadata = Some(crate::server::tmdb::TmdbResult {
+        title: media.title.clone(),
+        year: media.year,
+        tmdb_id: media.tmdb_id,
+        media_type: match kind {
+            MediaKind::Movie => "movie",
+            MediaKind::Tv => "tv",
         }
-    }
-    Ok(())
+        .into(),
+        poster_url: String::new(),
+        overview: String::new(),
+    });
+    // Named as the ripper names a single output; a later disc takes the mover's `_N`.
+    let disc = u32::from(media.disc.unwrap_or(1));
+    let name = crate::server::util::disc_variant_name(&media.title, disc);
+    let target = std::path::PathBuf::from(crate::server::mover::build_destination(
+        cfg,
+        &metadata,
+        &crate::server::ripper::staged_output_name(&name, "mkv"),
+        media.season,
+    ));
+    let plan = crate::server::planner::plan(cfg, titles, media, &target)
+        .map_err(|e| std::io::Error::other(format!("Corrected match needs review: {e}")))?;
+    let targets = tv_destinations(cfg, &plan)
+        .map(|(_, paths)| paths)
+        .unwrap_or_else(|| vec![target]);
+    Ok((plan, targets))
 }
 
 fn tv_plan_result(
@@ -416,6 +374,17 @@ fn after_tv_planning(planning: std::io::Result<()>, remux: impl FnOnce() -> Endi
     }
 }
 
+fn tv_metadata(media: &crate::server::planner::MediaMetadata) -> crate::server::tmdb::TmdbResult {
+    crate::server::tmdb::TmdbResult {
+        title: media.title.clone(),
+        year: media.year,
+        media_type: "tv".into(),
+        tmdb_id: media.tmdb_id,
+        poster_url: String::new(),
+        overview: String::new(),
+    }
+}
+
 fn tv_destinations(
     cfg: &Config,
     plan: &crate::server::planner::RemuxPlan,
@@ -426,14 +395,7 @@ fn tv_destinations(
     {
         return None;
     }
-    let metadata = Some(crate::server::tmdb::TmdbResult {
-        title: plan.media.title.clone(),
-        year: plan.media.year,
-        media_type: "tv".into(),
-        tmdb_id: plan.media.tmdb_id,
-        poster_url: String::new(),
-        overview: String::new(),
-    });
+    let metadata = Some(tv_metadata(&plan.media));
     let outputs: Vec<_> = plan
         .outputs
         .iter()
@@ -473,11 +435,6 @@ fn tv_destinations(
 fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     if let Some(ending) = cancelled_ending(sink) {
         return ending;
-    }
-    if let Some(replacement) = &job.replacement
-        && let Err(error) = replacement.verify_source(&job.iso)
-    {
-        return Ending::Failed(error);
     }
     if let Some(plan) = &job.plan {
         return remux_planned(job, plan, cfg, sink);
@@ -526,9 +483,6 @@ fn remux_planned(
     cfg: &Config,
     sink: &JobSink<'_>,
 ) -> Ending {
-    if job.replacement.is_some() {
-        return replacement_run::run(job, plan, cfg, sink);
-    }
     let keys = crate::server::keysource::key_params(cfg);
     let stage = remux_stage_dir();
     remux_planned_with(job, plan, cfg, sink, |request, kept, ordinal| {
@@ -548,9 +502,6 @@ fn remux_planned(
         }
     })
 }
-
-#[path = "worker_replacement.rs"]
-mod replacement_run;
 
 fn cancelled_ending(sink: &JobSink<'_>) -> Option<Ending> {
     if sink.lib.cancelled(sink.job_id) {
@@ -587,17 +538,6 @@ fn remux_planned_with(
         usize,
     ) -> std::io::Result<Option<String>>,
 ) -> Ending {
-    if plan.version != crate::server::planner::PLAN_VERSION {
-        return Ending::Failed(std::io::Error::other(format!(
-            "unsupported remux plan version {}",
-            plan.version
-        )));
-    }
-    if plan.source_iso != job.iso {
-        return Ending::Failed(std::io::Error::other(
-            "remux plan source ISO does not match queued job",
-        ));
-    }
     if plan.outputs.is_empty()
         || plan.outputs.iter().any(|o| {
             let p = Path::new(&o.filename);
@@ -623,10 +563,7 @@ fn remux_planned_with(
             "TV destinations changed; preserve this plan and queue a new job with the current TV folder",
         ));
     }
-    let validate = |target: &Path| match &tv {
-        Some((root, _)) => safe_destination(root, target, true),
-        None => safe_to_create(&super::dirs(cfg), target),
-    };
+    let validate = |target: &Path| planned_target_ok(cfg, plan, target);
     let saved = sink.lib.queue.snapshot();
     let Some(current) = saved.jobs.iter().find(|j| j.id == job.id) else {
         return Ending::Failed(std::io::Error::other("remux job no longer exists"));
@@ -657,11 +594,32 @@ fn remux_planned_with(
             return Ending::Failed(std::io::Error::other(why));
         }
     }
-    // `job.replace` only vouches for `job.target`; other paths need this source's link.
-    let links = super::links::load(&sink.lib.config_dir);
-    let may_replace = |target: &Path| {
-        (job.replace && target == job.target) || links.get(target) == Some(&job.iso)
+    let owned = match current.owned.clone() {
+        Some(owned) => owned,
+        None => match capture_owned(job, cfg, &sink.lib.config_dir).and_then(|owned| {
+            sink.lib
+                .queue
+                .set_owned(job.id, owned.clone())
+                .map(|()| owned)
+        }) {
+            Ok(owned) => owned,
+            Err(e) => return Ending::Failed(e),
+        },
     };
+    // Every existing target must be ours before anything is written; a staged output
+    // defers to its sidecar, which recorded the target as the remux found it.
+    for (output, target) in plan.outputs.iter().zip(&targets) {
+        let progress = current.outputs.iter().find(|p| p.id == output.id);
+        if progress.is_some_and(|p| p.state == OutputState::Done || p.staged.is_some()) {
+            continue;
+        }
+        if landed_by_this_job(&sink.lib.config_dir, &job.iso, target) {
+            continue;
+        }
+        if let Err(e) = refuse_unowned(target, &owned) {
+            return Ending::Failed(e);
+        }
+    }
     let mut writing_app = None;
     for (ordinal, output) in plan.outputs.iter().enumerate() {
         if let Some(ending) = cancelled_ending(sink) {
@@ -675,26 +633,36 @@ fn remux_planned_with(
             continue;
         }
         let target = targets[ordinal].clone();
+        let unowned = !owned.iter().any(|o| o.path == target);
+        if unowned
+            && target.is_file()
+            && landed_by_this_job(&sink.lib.config_dir, &job.iso, &target)
+        {
+            sink.lib
+                .queue
+                .finish_output(job.id, &output.id, OutputState::Done);
+            continue;
+        }
         if let Err(why) = validate(&target) {
             return Ending::Failed(std::io::Error::other(why));
-        }
-        let replace = may_replace(&target);
-        if !replace && target.exists() {
-            return Ending::Failed(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("planned output already exists: {}", target.display()),
-            ));
-        }
-        if let Some(parent) = target.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            return Ending::Failed(e);
         }
         let staged = job
             .outputs
             .iter()
             .find(|p| p.id == output.id)
             .and_then(|p| p.staged.as_deref());
+        let replace = match staged {
+            Some(_) => false,
+            None => match may_replace(&target, &owned) {
+                Ok(replace) => replace,
+                Err(e) => return Ending::Failed(e),
+            },
+        };
+        if let Some(parent) = target.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Ending::Failed(e);
+        }
         let request = freemkv_engine::RemuxJob {
             iso: freemkv_engine::ImageSource::from_path(&job.iso),
             title: Some(output.title_index),
@@ -734,7 +702,131 @@ fn remux_planned_with(
             return Ending::Failed(e);
         }
     }
+    if job.retire {
+        if !outputs_all_done(&sink.lib.queue.snapshot(), job.id) {
+            return Ending::Failed(std::io::Error::other(
+                "not every new file is recorded as done; no old file was removed",
+            ));
+        }
+        let roots = super::owned::roots(&super::dirs(cfg));
+        let retire = super::retire::Retire {
+            iso: &job.iso,
+            config_dir: &sink.lib.config_dir,
+            roots: &roots,
+            sink,
+            stopping: &|| cancelled_ending(sink).is_some(),
+        };
+        match super::retire::run(&retire, &owned, &targets) {
+            Ok(kept) if kept.is_empty() => {}
+            Ok(kept) => {
+                let message = super::retire::kept_message(targets.len(), &kept);
+                return Ending::Failed(std::io::Error::other(message));
+            }
+            Err(e) => return cancelled_ending(sink).unwrap_or(Ending::Failed(e)),
+        }
+    }
     Ending::Done { writing_app }
+}
+
+// True when the queue shows every output of job `id` as Done (and the job exists).
+fn outputs_all_done(queue: &super::queue::QueueFile, id: u64) -> bool {
+    queue
+        .jobs
+        .iter()
+        .find(|j| j.id == id)
+        .is_some_and(|j| j.outputs.iter().all(|o| o.state == OutputState::Done))
+}
+
+// True when links.json already maps `target` to the job's ISO: an earlier run of this job
+// landed it after the owned files were captured.
+fn landed_by_this_job(config_dir: &Path, iso: &Path, target: &Path) -> bool {
+    super::links::load(config_dir)
+        .get(target)
+        .map(|p| p.as_path())
+        == Some(iso)
+}
+
+// The files a job may overwrite: links for its ISO under the output folders, plus the
+// row's own MKV when queued to replace it. Links that cannot be read stop a correction.
+fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<Vec<Owned>> {
+    let links = if job.retire {
+        super::links::read(config_dir)?
+    } else {
+        super::links::load(config_dir)
+    };
+    let roots = super::owned::roots(&super::dirs(cfg));
+    let targets = job.output_targets();
+    // A retire job needs every linked file; a plain remux only its own targets.
+    let mut owned = super::owned::capture_with(&links, &job.iso, &roots, |p| {
+        job.retire || p == job.target || targets.iter().any(|t| t == p)
+    })?;
+    if job.replace && !owned.iter().any(|o| o.path == job.target) {
+        match std::fs::symlink_metadata(&job.target) {
+            Ok(meta) if meta.is_file() => owned.push(Owned {
+                path: job.target.clone(),
+                stamp: crate::server::util::Stamp::read(&job.target)?,
+            }),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        owned.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    Ok(owned)
+}
+
+fn refuse_unowned(target: &Path, owned: &[Owned]) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(target) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+        Ok(_) if owned.iter().any(|o| o.path == target) => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} already exists and was not made from this ISO; nothing was written",
+                target.display()
+            ),
+        )),
+    }
+}
+
+// Overwrite only a file this job owns and that is still as it was captured.
+fn may_replace(target: &Path, owned: &[Owned]) -> std::io::Result<bool> {
+    refuse_unowned(target, owned)?;
+    let Some(ours) = owned.iter().find(|o| o.path == target) else {
+        return Ok(false);
+    };
+    match crate::server::util::Stamp::read(target) {
+        Ok(stamp) if stamp == ours.stamp => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) if e.kind() != std::io::ErrorKind::Other => Err(e),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} changed since this remux was planned; it was not touched",
+                target.display()
+            ),
+        )),
+    }
+}
+
+// A planned output must sit under the root its plan files into.
+fn planned_target_ok(
+    cfg: &Config,
+    plan: &crate::server::planner::RemuxPlan,
+    target: &Path,
+) -> Result<(), String> {
+    if plan.media.kind == Some(crate::server::planner::MediaKind::Tv) {
+        let root = std::path::PathBuf::from(crate::server::mover::destination_root(
+            cfg,
+            &Some(tv_metadata(&plan.media)),
+        ));
+        // A TV plan files under the TV root, or the library for a legacy single output.
+        if target.starts_with(&root) {
+            return safe_destination(&root, target, true);
+        }
+    }
+    safe_to_create(&super::dirs(cfg), target)
 }
 
 fn remux_stage_dir() -> Option<std::path::PathBuf> {
@@ -884,7 +976,11 @@ pub(crate) fn safe_to_create(d: &super::Dirs, target: &std::path::Path) -> Resul
     safe_destination(&d.library, target, false)
 }
 
-fn safe_destination(root: &Path, target: &Path, allow_empty: bool) -> Result<(), String> {
+pub(super) fn safe_destination(
+    root: &Path,
+    target: &Path,
+    allow_empty: bool,
+) -> Result<(), String> {
     if !target.starts_with(root)
         || target
             .components()
@@ -1297,8 +1393,9 @@ fn retry_storage_fault(
 }
 
 fn safe_text(job: &Job) -> &'static str {
-    if job.replacement.is_some() {
-        "The source ISO is retained. Replacement progress is saved for retry; already delivered files are not rolled back."
+    if job.retire {
+        "The source ISO is retained. Old files made from this ISO are removed only after every \
+         new file is in place, and only if unchanged; run Change match again to finish."
     } else if job.plan.as_ref().is_some_and(|plan| plan.outputs.len() > 1) {
         "The source ISO is retained. Completed outputs remain in the library; unfinished outputs can be retried."
     } else if job.replace {

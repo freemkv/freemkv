@@ -1,10 +1,10 @@
 use super::*;
 use crate::server::library::queue;
-use crate::server::planner::{MediaMetadata, PLAN_VERSION, PlannedOutput, RemuxPlan};
+use crate::server::planner::{MediaMetadata, PlannedOutput, RemuxPlan};
 
 #[test]
 fn presentation_preference_frozen_movie_and_single_tv_execute_audio_all_after_preference_change() {
-    use crate::server::planner::{MediaKind, planner_for};
+    use crate::server::planner::MediaKind;
     for kind in [MediaKind::Movie, MediaKind::Tv] {
         let (_t, lib, dirs) = library_with(&["B"]);
         lib.queue.add(vec![NewJob {
@@ -19,15 +19,8 @@ fn presentation_preference_frozen_movie_and_single_tv_execute_audio_all_after_pr
             tv_auto: false,
             ..config(&dirs)
         };
-        let plan = planner_for(
+        let plan = crate::server::planner::plan(
             &cfg,
-            &MediaMetadata {
-                kind: Some(kind),
-                ..Default::default()
-            },
-        )
-        .plan(
-            &job.iso,
             &crate::selection_test_fixtures::variant_titles(),
             &MediaMetadata {
                 kind: Some(kind),
@@ -89,8 +82,6 @@ fn planned(lib: &Library, dirs: &Dirs) -> Job {
     }]);
     let job = lib.queue.claim_next().unwrap();
     let plan = RemuxPlan {
-        version: PLAN_VERSION,
-        source_iso: job.iso.clone(),
         media: MediaMetadata::default(),
         outputs: (0..2)
             .map(|n| PlannedOutput {
@@ -118,8 +109,8 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
     let (t, lib, dirs) = library_with(&["B"]);
     let original = planned(&lib, &dirs);
     let mut plan = original.plan.unwrap();
-    plan.source_iso = dirs.isos.as_ref().unwrap().join("Show.iso");
-    std::fs::write(&plan.source_iso, b"source image").unwrap();
+    let source_iso = dirs.isos.as_ref().unwrap().join("Show.iso");
+    std::fs::write(&source_iso, b"source image").unwrap();
     lib.queue.drop_job(original.id);
     plan.media = MediaMetadata {
         title: "Show".into(),
@@ -147,7 +138,7 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
     std::fs::create_dir_all(&root).unwrap();
     lib.queue.add(vec![NewJob {
         title: "Show".into(),
-        iso: plan.source_iso.clone(),
+        iso: source_iso.clone(),
         target: original.target.clone(),
         replace: false,
     }]);
@@ -623,4 +614,135 @@ fn planned_output_linked_to_this_source_may_be_replaced() {
     );
     assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
     assert_eq!(std::fs::read(&targets[1]).unwrap(), movie());
+}
+
+#[test]
+fn unlinked_file_at_a_new_target_fails_already_exists_before_any_output() {
+    let (t, lib, dirs) = library_with(&["B"]);
+    let job = planned(&lib, &dirs);
+    let targets = job.output_targets();
+    let config_dir = t.path().join("config");
+    std::fs::create_dir_all(targets[1].parent().unwrap()).unwrap();
+    std::fs::write(&targets[1], b"someone else's episode").unwrap();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &config(&dirs),
+        &sink,
+        |_, _, _| panic!("nothing may be written while a target is someone else's"),
+    );
+    assert!(
+        matches!(&ending, Ending::Failed(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+        "{ending:?}"
+    );
+    assert!(!targets[0].exists());
+    assert_eq!(
+        std::fs::read(&targets[1]).unwrap(),
+        b"someone else's episode"
+    );
+    assert!(super::super::super::links::load(&config_dir).is_empty());
+}
+
+#[test]
+fn a_file_that_appears_at_a_target_after_capture_stops_that_output_only() {
+    let (_t, lib, dirs) = library_with(&["B"]);
+    let job = planned(&lib, &dirs);
+    let targets = job.output_targets();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let mut calls = 0;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &config(&dirs),
+        &sink,
+        |request, _, _| {
+            calls += 1;
+            std::fs::write(&targets[1], b"appeared meanwhile").unwrap();
+            land_like_engine(request)
+        },
+    );
+    assert!(
+        matches!(&ending, Ending::Failed(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+        "{ending:?}"
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(std::fs::read(&targets[0]).unwrap(), movie());
+    assert_eq!(std::fs::read(&targets[1]).unwrap(), b"appeared meanwhile");
+}
+
+#[test]
+fn a_linked_target_changed_after_capture_is_not_overwritten() {
+    let (t, lib, dirs) = library_with(&["B"]);
+    let job = planned(&lib, &dirs);
+    let targets = job.output_targets();
+    std::fs::create_dir_all(targets[1].parent().unwrap()).unwrap();
+    std::fs::write(&targets[1], b"our earlier episode").unwrap();
+    super::super::super::links::record(&t.path().join("config"), &targets[1], &job.iso).unwrap();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &config(&dirs),
+        &sink,
+        |request, _, _| {
+            if request.title == Some(0) {
+                std::fs::write(&targets[1], b"edited by the user since").unwrap();
+            }
+            land_like_engine(request)
+        },
+    );
+    assert!(
+        matches!(&ending, Ending::Failed(e) if e.to_string().contains("changed since")),
+        "{ending:?}"
+    );
+    assert_eq!(
+        std::fs::read(&targets[1]).unwrap(),
+        b"edited by the user since"
+    );
+}
+
+#[test]
+fn overwrite_authority_is_size_and_mtime_not_inode() {
+    let t = tempfile::tempdir().unwrap();
+    let path = t.path().join("Show S01E01.mkv");
+    std::fs::write(&path, b"episode").unwrap();
+    crate::server::util::pin_mtime(&path).unwrap();
+    let owned = vec![Owned {
+        path: path.clone(),
+        stamp: crate::server::util::Stamp::read(&path).unwrap(),
+    }];
+    // An SMB remount renumbers files: a new inode, same size and time, is still ours.
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let copy = t.path().join("copy");
+    std::fs::copy(&path, &copy).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&copy)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    std::fs::rename(&copy, &path).unwrap();
+    assert!(may_replace(&path, &owned).unwrap());
+    // Same name and size with another time is someone else's file.
+    std::fs::write(&path, b"edited!").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified + Duration::from_secs(60))
+        .unwrap();
+    let e = may_replace(&path, &owned).unwrap_err();
+    assert!(e.to_string().contains("changed since"), "{e}");
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        !may_replace(&path, &owned).unwrap(),
+        "a gone file lands as new"
+    );
 }
