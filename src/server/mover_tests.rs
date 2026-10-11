@@ -3505,7 +3505,10 @@ fn check_and_move_card_carries_the_create_dir_error() {
     let recorded = error_snapshot(&dir_str);
     clear_error(&dir_str);
 
-    let reason = recorded.expect("a card must be recorded").reason;
+    let recorded = recorded.expect("a card must be recorded");
+    // The failure may be a share that dropped or was remounted, not only permissions.
+    assert!(recorded.hint.contains("mounted"), "{}", recorded.hint);
+    let reason = recorded.reason;
     let without_cause = format!(
         "cannot create destination directory {}",
         movie_dir.join("Blocked (2024)").display()

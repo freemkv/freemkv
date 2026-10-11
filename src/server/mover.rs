@@ -368,11 +368,15 @@ fn commit_retry_with(
     if stalled {
         row.stall_resume = Some(None);
     }
-    row.reason = format!(
-        "{}; automatic retries stopped because the retry state could not be saved: {error}",
-        row.reason
+    row.reason = crate::strings::fmt_or(
+        "server.mover.retry_state_unsaved",
+        "{reason}; automatic retries stopped because the retry state could not be saved: {error}",
+        &[("reason", &row.reason), ("error", &error.to_string())],
     );
-    row.hint = "Free space on the staging storage or make it writable, then choose Retry. Staged source files are retained.".into();
+    row.hint = crate::strings::get_or(
+        "server.mover.retry_state_unsaved_hint",
+        "Free space on the staging storage or make it writable, then choose Retry. Staged source files are retained.",
+    );
     let line = format!("Move held: {path} — {}", row.reason);
     drop(errors);
     log(&line);
@@ -1951,7 +1955,10 @@ fn check_and_move(cfg: &Config) {
                             "cannot create destination directory {}: {e}",
                             absolute_for_log(&folder.to_string_lossy())
                         ),
-                        "check write permissions on the output / movie / tv directory",
+                        &crate::strings::get_or(
+                            "server.mover.folder_create_failed_hint",
+                            "Check that the destination share is mounted and writable: a share that dropped or was remounted since its check refuses this too. It is tried again on the next pass; nothing was moved.",
+                        ),
                     );
                     dest_ok = false;
                     break;
@@ -2207,7 +2214,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination size does not match source",
-                SIZE_MISMATCH_HINT,
+                &crate::strings::get_or("server.mover.size_mismatch_hint", SIZE_MISMATCH_HINT),
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2217,7 +2224,10 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination is structurally invalid or unreadable",
-                POST_COPY_INVALID_HINT,
+                &crate::strings::get_or(
+                    "server.mover.post_copy_invalid_hint",
+                    POST_COPY_INVALID_HINT,
+                ),
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2243,7 +2253,10 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 &reason,
-                "See device_system.log for the underlying error. The delivery is tried again after 30 s, then 2 min; after that it waits for Retry.",
+                &crate::strings::get_or(
+                    "server.mover.copy_failed_hint",
+                    "See device_system.log for the underlying error. The delivery is tried again after 30 s, then 2 min; after that it waits for Retry.",
+                ),
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -2300,7 +2313,10 @@ fn check_and_move(cfg: &Config) {
                     "staging teardown skipped: the directory could not be fully listed: {}",
                     dir.display()
                 ),
-                "The files are delivered; staging is kept until it can be listed in full. Check the staging mount; the teardown retries after a backoff, then waits for Retry.",
+                &crate::strings::get_or(
+                    "server.mover.teardown_listing_hint",
+                    "The files are delivered; staging is kept until it can be listed in full. Check the staging mount; the teardown retries after a backoff, then waits for Retry.",
+                ),
             );
             continue;
         }
@@ -2318,7 +2334,10 @@ fn check_and_move(cfg: &Config) {
             teardown_blocked(
                 &dir_str,
                 &format!("staging cleanup failed: {}", e),
-                "The files are delivered. Inspect changed or unplanned staging artifacts; they are not automatically deleted. The teardown retries after a backoff, then waits for Retry.",
+                &crate::strings::get_or(
+                    "server.mover.teardown_cleanup_hint",
+                    "The files are delivered. Inspect changed or unplanned staging artifacts; they are not automatically deleted. The teardown retries after a backoff, then waits for Retry.",
+                ),
             );
         }
 
@@ -2333,7 +2352,7 @@ fn check_and_move(cfg: &Config) {
     prune_stranded_warned(&seen_dirs);
 }
 
-// What a failed copy's row tells the operator to do.
+// What a failed copy's row tells the operator to do (English; the catalog may translate it).
 const SIZE_MISMATCH_HINT: &str = "Check the destination filesystem for ENOSPC / short writes. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
 const POST_COPY_INVALID_HINT: &str = "The copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); see device_system.log for the specific check. The mover removes only its temp file and tries again after 30 s, then 2 min; after that it waits for Retry (if a dst file remains, remove it).";
 
