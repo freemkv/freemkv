@@ -167,7 +167,7 @@ fn the_dialog_lists_exactly_the_files_a_change_match_captures() {
     let (_, linked, checked) = lib.match_view(&cfg, &sources[0]).unwrap();
     assert!(checked);
     let captured: Vec<_> = owned::capture(
-        &links::read(&lib.config_dir).unwrap(),
+        &links::read_entries(&lib.config_dir).unwrap(),
         &sources[0],
         &owned::roots(&d),
     )
@@ -184,6 +184,8 @@ fn a_hung_share_gives_the_rule_filtered_list_and_a_flag() {
     let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
     let d = dirs(&cfg);
     let movie = d.library.join("Cast Away (2000)/Cast Away (2000).mkv");
+    std::fs::create_dir_all(movie.parent().unwrap()).unwrap();
+    std::fs::write(&movie, b"mkv").unwrap();
     links::record(&lib.config_dir, &movie, &sources[0]).unwrap();
     links::record(&lib.config_dir, Path::new("/elsewhere/X.mkv"), &sources[0]).unwrap();
     let (_, linked, checked) = lib

@@ -158,7 +158,18 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
         return Ok(());
     }
     if let Some(saved) = lib.source_match(&job.iso).map_err(std::io::Error::other)? {
-        return attach_corrected_plan(lib, cfg, job, &saved.media);
+        if saved.is_for(super::links::iso_stamp(&job.iso)) {
+            return attach_corrected_plan(lib, cfg, job, &saved.media);
+        }
+        // Confirmed for an earlier disc filed at this ISO path: not this disc's identity.
+        if job.retire {
+            return Err(std::io::Error::other(format!(
+                "The match saved for {} was confirmed for an earlier disc filed at that path, \
+                 so nothing was written. Open Change match again for this disc.",
+                job.iso.display()
+            )));
+        }
+        tracing::info!(iso = %job.iso.display(), "saved match is for an earlier disc at this path; ignored");
     }
     if !cfg.tv_auto || cfg.tmdb_api_key.is_empty() {
         return attach_automatic_movie_plan(lib, cfg, job);
@@ -618,8 +629,17 @@ fn remux_planned_with(
         if let Some(ending) = cancelled_ending(sink) {
             return ending;
         }
+        let episode = output.episode.is_some();
         if !sink.lib.queue.begin_output(job.id, &output.id) {
-            if let Err(e) = super::links::record(&sink.lib.config_dir, &targets[ordinal], &job.iso)
+            // Done before; its link may not have been written. Never vouch for the file there now.
+            if !landed_by_this_job(&sink.lib.config_dir, &job.iso, &targets[ordinal])
+                && let Err(e) = super::links::record_output(
+                    &sink.lib.config_dir,
+                    &targets[ordinal],
+                    &job.iso,
+                    None,
+                    episode,
+                )
             {
                 return Ending::Failed(e);
             }
@@ -691,7 +711,10 @@ fn remux_planned_with(
         sink.lib
             .queue
             .finish_output(job.id, &output.id, OutputState::Done);
-        if let Err(e) = super::links::record(&sink.lib.config_dir, &target, &job.iso) {
+        let landed = crate::server::util::Stamp::read(&target).ok();
+        if let Err(e) =
+            super::links::record_output(&sink.lib.config_dir, &target, &job.iso, landed, episode)
+        {
             return Ending::Failed(e);
         }
     }
@@ -730,22 +753,25 @@ fn outputs_all_done(queue: &super::queue::QueueFile, id: u64) -> bool {
         .is_some_and(|j| j.outputs.iter().all(|o| o.state == OutputState::Done))
 }
 
-// True when links.json already maps `target` to the job's ISO: an earlier run of this job
-// landed it after the owned files were captured.
+// True when links.json maps `target` to the job's ISO with the file there now: an earlier
+// run of this job landed it after the owned files were captured.
 fn landed_by_this_job(config_dir: &Path, iso: &Path, target: &Path) -> bool {
-    super::links::load(config_dir)
-        .get(target)
-        .map(|p| p.as_path())
-        == Some(iso)
+    let Some(link) = super::links::entries(config_dir).remove(target) else {
+        return false;
+    };
+    link.iso == iso
+        && link.stamp.is_some()
+        && matches!(super::owned::present(target), Ok(super::owned::Present::File(s)) if Some(s) == link.stamp)
 }
 
 // The files a job may overwrite: links for its ISO under the output folders, plus the
-// row's own MKV when queued to replace it. Links that cannot be read stop a correction.
+// row's own MKV when queued to replace it, unless a link says that file is no longer the
+// one this ISO made. Links that cannot be read stop a correction.
 fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<Vec<Owned>> {
     let links = if job.retire {
-        super::links::read(config_dir)?
+        super::links::read_entries(config_dir)?
     } else {
-        super::links::load(config_dir)
+        super::links::entries(config_dir)
     };
     let roots = super::owned::roots(&super::dirs(cfg));
     let targets = job.output_targets();
@@ -753,16 +779,15 @@ fn capture_owned(job: &Job, cfg: &Config, config_dir: &Path) -> std::io::Result<
     let mut owned = super::owned::capture_with(&links, &job.iso, &roots, |p| {
         job.retire || p == job.target || targets.iter().any(|t| t == p)
     })?;
-    if job.replace && !owned.iter().any(|o| o.path == job.target) {
-        match std::fs::symlink_metadata(&job.target) {
-            Ok(meta) if meta.is_file() => owned.push(Owned {
-                path: job.target.clone(),
-                stamp: crate::server::util::Stamp::read(&job.target)?,
-            }),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
+    if job.replace
+        && !owned.iter().any(|o| o.path == job.target)
+        && !super::owned::disowned(&links, &job.iso, &job.target)
+        && let super::owned::Present::File(stamp) = super::owned::present(&job.target)?
+    {
+        owned.push(Owned {
+            path: job.target.clone(),
+            stamp,
+        });
         owned.sort_by(|a, b| a.path.cmp(&b.path));
     }
     Ok(owned)
@@ -789,10 +814,9 @@ fn may_replace(target: &Path, owned: &[Owned]) -> std::io::Result<bool> {
     let Some(ours) = owned.iter().find(|o| o.path == target) else {
         return Ok(false);
     };
-    match crate::server::util::Stamp::read(target) {
-        Ok(stamp) if stamp == ours.stamp => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) if e.kind() != std::io::ErrorKind::Other => Err(e),
+    match super::owned::present(target)? {
+        super::owned::Present::File(stamp) if stamp == ours.stamp => Ok(true),
+        super::owned::Present::Gone => Ok(false),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!(

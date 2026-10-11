@@ -1680,3 +1680,6 @@ fn a_folder_still_being_checked_holds_new_jobs() {
     assert!(next_job(&lib, &arbiter, &dirs, &ok, 2).is_some());
     set_mounts(Vec::new());
 }
+
+#[path = "worker_ownership_tests.rs"]
+mod ownership;

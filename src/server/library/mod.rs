@@ -504,7 +504,7 @@ impl Library {
     ) -> std::io::Result<(Option<matches::SavedMatch>, Vec<PathBuf>, bool)>
     where
         F: FnOnce(
-                HashMap<PathBuf, PathBuf>,
+                HashMap<PathBuf, links::Link>,
                 PathBuf,
                 Vec<PathBuf>,
             ) -> std::io::Result<Vec<owned::Owned>>
@@ -512,7 +512,7 @@ impl Library {
             + 'static,
     {
         let saved = self.source_match(source).map_err(std::io::Error::other)?;
-        let links = links::read(&self.config_dir)?;
+        let links = links::read_entries(&self.config_dir)?;
         let d = dirs(cfg);
         let roots = owned::roots(&d);
         let (by_rules, iso) = (
@@ -555,9 +555,10 @@ impl Library {
             .ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "source ISO is not indexed")
             })?;
-        let saved = self
-            .queue
-            .with_idle_source(source, || store.save(source, expected_revision, media))?;
+        let disc = links::iso_stamp(source);
+        let saved = self.queue.with_idle_source(source, || {
+            store.save_for(source, expected_revision, media, disc)
+        })?;
         self.touch_index();
         // Keyed by the source, so same-title discs never share one queue identity.
         let job = NewJob {
@@ -1215,7 +1216,8 @@ impl Library {
                 added += self.queue.add(std::mem::take(&mut plain));
                 format!("{added} jobs queued; saved source matches unavailable: {error}")
             })?;
-            if selected.is_none() {
+            // A match confirmed for an earlier disc filed at this path is not this disc's.
+            if selected.is_none_or(|m| !m.is_for(links::iso_stamp(&job.iso))) {
                 plain.push(job);
                 continue;
             }
@@ -1398,6 +1400,30 @@ fn stat_unless_unverified(
 
 fn gone(p: &Path) -> bool {
     matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Move the damaged file `path` to `<name>.unreadable` (`.unreadable.N` when that is taken),
+/// so an earlier copy set aside is never overwritten. Returns where it went.
+pub(crate) fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    for n in 0..1000u32 {
+        let aside = path.with_file_name(match n {
+            0 => format!("{name}.unreadable"),
+            n => format!("{name}.unreadable.{n}"),
+        });
+        match std::fs::symlink_metadata(&aside) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::rename(path, &aside)?;
+                return Ok(aside);
+            }
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("too many copies of {name} are already set aside"),
+    ))
 }
 
 /// Read a per-title log written by the worker: `ts<TAB>kind<TAB>text` lines.

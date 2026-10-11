@@ -2,8 +2,7 @@
 //! each run re-reads the files and links.json, so a resumed job redoes only what is left.
 
 use super::links;
-use super::owned::Owned;
-use crate::server::util::Stamp;
+use super::owned::{Owned, Present, present};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -118,12 +117,11 @@ fn retire_one(r: &Retire<'_>, old: &Owned) -> io::Result<bool> {
         .get(&old.path)
         .map(PathBuf::as_path)
         == Some(r.iso);
-    let unchanged = match Stamp::read(&old.path) {
-        Ok(stamp) => Some(stamp == old.stamp),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+    let unchanged = match present(&old.path)? {
+        Present::File(stamp) => Some(stamp == old.stamp),
+        Present::Gone => None,
         // Not a regular file any more: someone else's.
-        Err(e) if e.kind() == io::ErrorKind::Other => Some(false),
-        Err(e) => return Err(e),
+        Present::Other => Some(false),
     };
     match (unchanged, linked) {
         (None, true) => links::forget(r.config_dir, &old.path, r.iso).map(|()| true),

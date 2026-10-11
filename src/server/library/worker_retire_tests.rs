@@ -169,7 +169,12 @@ fn old_file_changed_after_the_remux_started_is_kept_disowned_and_needs_action() 
     let job = &c.lib.queue.snapshot().jobs[0];
     assert!(job.outputs.iter().all(|o| o.state == OutputState::Done));
     let roots = crate::server::library::owned::roots(&c.dirs);
-    let again = crate::server::library::owned::capture(&c.links(), Path::new(ISO), &roots).unwrap();
+    let again = crate::server::library::owned::capture(
+        &links::read_entries(&c.t.path().join("config")).unwrap(),
+        Path::new(ISO),
+        &roots,
+    )
+    .unwrap();
     assert!(
         again.iter().all(|o| o.path != c.old[1]),
         "never captured again"

@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::util::Stamp;
 
 struct Quiet;
 impl freemkv_engine::Sink for Quiet {}
