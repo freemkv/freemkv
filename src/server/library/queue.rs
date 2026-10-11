@@ -869,13 +869,14 @@ impl Queue {
     }
 
     /// Record the file output `output_id` of job `id` is about to land as, before it lands.
+    /// An error means the record may not survive a restart: the file must not land.
     pub(crate) fn set_output_landing(
         &self,
         id: u64,
         output_id: &str,
         landing: crate::server::util::Stamp,
-    ) {
-        self.mutate(|f| {
+    ) -> std::io::Result<()> {
+        self.mutate_durable(|f| {
             if let Some(output) = f
                 .jobs
                 .iter_mut()
@@ -884,7 +885,7 @@ impl Queue {
             {
                 output.landing = Some(landing);
             }
-        });
+        })
     }
 
     pub fn set_output_staged(&self, id: u64, output_id: &str, staged: Option<PathBuf>) {

@@ -139,3 +139,38 @@ fn may_replace_refuses_an_owned_path_that_is_now_a_symlink_as_changed() {
     assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}");
     assert!(e.to_string().contains("changed since"), "{e}");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_landing_that_cannot_be_recorded_durably_is_not_landed() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root ignores modes
+    }
+    let (t, lib, dirs, job, target) = replacing();
+    let before = std::fs::read(&target).unwrap();
+    let config = t.path().join("config");
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| {
+            // The config folder stops taking writes while the title muxes.
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o500))?;
+            let landed = land_like_the_engine(&sink, &request.target, &movie());
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755))?;
+            landed
+        },
+    );
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let Ending::Failed(e) = ending else {
+        panic!("{ending:?}")
+    };
+    assert!(e.to_string().contains("could not be recorded"), "{e}");
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+}

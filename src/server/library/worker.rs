@@ -878,6 +878,16 @@ fn remux_planned_with(
                     ),
                 ));
             }
+            Err(_) if let Some(why) = sink.landing_unsaved() => {
+                sink.lib
+                    .queue
+                    .finish_output(job.id, &output.id, OutputState::Failed);
+                return Ending::Failed(std::io::Error::other(crate::strings::fmt_or(
+                    "server.library.landing_not_recorded",
+                    "The new file for {path} was not put in place because its landing could not be recorded ({error}). Retry once the config folder takes writes again.",
+                    &[("path", &target.display().to_string()), ("error", &why)],
+                )));
+            }
             Err(e) => {
                 if let Some(kept) = deliver::kept_of(&e) {
                     sink.lib
@@ -1846,6 +1856,8 @@ struct Landing {
     /// The owned file it replaces, as captured; `None` when it creates the file.
     replaces: Option<crate::server::util::Stamp>,
     refused: bool,
+    /// Why the landing could not be recorded durably; it must not land then.
+    unsaved: Option<String>,
 }
 
 impl JobSink<'_> {
@@ -1861,7 +1873,14 @@ impl JobSink<'_> {
             output_id: output_id.to_string(),
             replaces,
             refused: false,
+            unsaved: None,
         });
+    }
+
+    // Why the landing about to happen could not be recorded, if it could not.
+    fn landing_unsaved(&self) -> Option<String> {
+        let landing = self.landing.lock().unwrap_or_else(|e| e.into_inner());
+        landing.as_ref().and_then(|l| l.unsaved.clone())
     }
 
     // Whether the last check before landing found the replaced file changed.
@@ -1891,11 +1910,12 @@ impl JobSink<'_> {
             return;
         }
         let partial = super::queue::partial_path(&landing.target);
-        if let Ok(stamp) = crate::server::util::Stamp::read(&partial) {
+        let recorded = crate::server::util::Stamp::read(&partial).and_then(|stamp| {
             self.lib
                 .queue
-                .set_output_landing(self.job_id, &landing.output_id, stamp);
-        }
+                .set_output_landing(self.job_id, &landing.output_id, stamp)
+        });
+        landing.unsaved = recorded.err().map(|e| e.to_string());
     }
     fn preempted(&self) -> bool {
         self.arbiter.rip_active() || self.arbiter.rip_started_since(self.epoch)
@@ -2097,6 +2117,7 @@ impl Sink for JobSink<'_> {
             || self.lib.stall_cancel.load(Ordering::SeqCst)
             || self.lib.cancelled(self.job_id)
             || self.landing_refused().is_some()
+            || self.landing_unsaved().is_some()
     }
 }
 
