@@ -203,9 +203,17 @@ impl FolderView {
     }
 }
 
-/// The folders a remux uses: where MKVs land, where the ISOs are, and the local staging.
+// What one root's Change-match check is given: that root's links, the ISO, and the root.
+type CaptureInput = (HashMap<PathBuf, links::Link>, PathBuf, Vec<PathBuf>);
+
+/// The role of a separate TV folder among [`folder_views`].
+pub(crate) const TV_ROLE: &str = "TV output";
+
+/// The folders a remux uses: where MKVs land (and TV episodes, when that folder is separate),
+/// where the ISOs are, and the local staging.
 pub fn folder_views(d: &Dirs) -> Vec<FolderView> {
     let mut out = vec![("output", d.library.clone())];
+    out.extend(d.tv.clone().map(|p| (TV_ROLE, p)));
     out.extend(d.isos.clone().map(|p| ("source ISO", p)));
     out.extend(health::remux_stage_dir().map(|p| ("remux staging", p)));
     out.into_iter()
@@ -233,9 +241,12 @@ pub fn folder_views(d: &Dirs) -> Vec<FolderView> {
         .collect()
 }
 
-// The first folder of `views` whose last check failed, as a hold.
-fn folder_gate(views: &[FolderView]) -> Option<Hold> {
-    let v = views.iter().find(|v| !v.ok())?;
+// The first folder of `views` whose last check failed, as a hold. The TV folder counts only
+// with `tv`: a job that files nothing there does not wait for it.
+fn folder_gate(views: &[FolderView], tv: bool) -> Option<Hold> {
+    let v = views
+        .iter()
+        .find(|v| (tv || v.role != TV_ROLE) && !v.ok())?;
     let m = v.health.as_ref()?;
     Some(Hold {
         role: v.role,
@@ -503,28 +514,53 @@ impl Library {
         capture: F,
     ) -> std::io::Result<(Option<matches::SavedMatch>, Vec<PathBuf>, bool)>
     where
-        F: FnOnce(
+        F: Fn(
                 HashMap<PathBuf, links::Link>,
                 PathBuf,
                 Vec<PathBuf>,
             ) -> std::io::Result<Vec<owned::Owned>>
             + Send
+            + Sync
             + 'static,
     {
         let saved = self.source_match(source).map_err(std::io::Error::other)?;
         let links = links::read_entries(&self.config_dir)?;
         let d = dirs(cfg);
         let roots = owned::roots(&d);
-        let (by_rules, iso) = (
-            owned::eligible_paths(&links, source, &roots),
-            source.to_path_buf(),
-        );
-        match health::bounded(&d.library, limit, move || capture(links, iso, roots)) {
-            health::Bounded::Done(found) => {
-                Ok((saved, found?.into_iter().map(|o| o.path).collect(), true))
+        let by_rules = owned::eligible_paths(&links, source, &roots);
+        // One probe per root, each under that root's own probe slot: a hung TV share
+        // never holds the library folder's.
+        let mut per_root: Vec<(PathBuf, CaptureInput)> = roots
+            .iter()
+            .map(|r| {
+                (
+                    r.clone(),
+                    (HashMap::new(), source.to_path_buf(), vec![r.clone()]),
+                )
+            })
+            .collect();
+        for (path, link) in links {
+            let deepest = per_root
+                .iter_mut()
+                .filter(|(root, _)| path.starts_with(root))
+                .max_by_key(|(root, _)| root.components().count());
+            if let Some((_, (mine, _, _))) = deepest {
+                mine.insert(path, link);
             }
-            _ => Ok((saved, by_rules, false)),
         }
+        let capture = std::sync::Arc::new(capture);
+        let answers = health::bounded_each(per_root, limit, move |(links, iso, roots)| {
+            capture(links, iso, roots)
+        });
+        let mut found = Vec::new();
+        for answer in answers {
+            match answer {
+                health::Bounded::Done(owned) => found.extend(owned?.into_iter().map(|o| o.path)),
+                _ => return Ok((saved, by_rules, false)),
+            }
+        }
+        found.sort();
+        Ok((saved, found, true))
     }
 
     /// Save `media` as the identity of an indexed, idle `source`, then queue its remux.
@@ -1058,7 +1094,7 @@ impl Library {
     /// library beside a full ISO folder looks like an unmounted share, and a
     /// new MKV would then land on the local disk under the mountpoint.
     pub fn queue_block(&self, d: &Dirs, creates: bool) -> Option<String> {
-        if let Some(h) = folder_gate(&folder_views(d)) {
+        if let Some(h) = folder_gate(&folder_views(d), false) {
             return Some(format!(
                 "{} ({}) {} Nothing was queued.",
                 h.message,
@@ -1107,9 +1143,10 @@ impl Library {
     }
 
     /// Whether the next remux must wait for a folder at `now`: one failed its last
-    /// check, or a preflight failed and its recheck time has not come.
-    pub(crate) fn blocked(&self, d: &Dirs, now: u64) -> Option<Hold> {
-        if let Some(h) = folder_gate(&folder_views(d)) {
+    /// check, or a preflight failed and its recheck time has not come. `tv` says the job
+    /// files into the separate TV folder.
+    pub(crate) fn blocked(&self, d: &Dirs, now: u64, tv: bool) -> Option<Hold> {
+        if let Some(h) = folder_gate(&folder_views(d), tv) {
             return Some(h);
         }
         self.hold()

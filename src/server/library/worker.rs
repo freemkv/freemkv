@@ -59,22 +59,48 @@ fn next_job(
     if arbiter.rip_active() {
         return None;
     }
-    if lib.queue.peek_next().is_none() {
+    let Some(next) = lib.queue.peek_next() else {
         lib.set_hold(None);
         return None;
-    }
-    if let Some(hold) = lib.blocked(d, now) {
+    };
+    let tv = tv_root_of(d, &next);
+    if let Some(hold) = lib.blocked(d, now, tv.is_some()) {
         lib.set_hold(Some(hold));
         return None;
     }
-    if let Err(p) = preflight(&d.library) {
-        tracing::warn!(folder = %p.path.display(), error = %p.detail, "remux held: {}", p.message);
-        lib.hold_for(&p, now);
-        return None;
+    for folder in std::iter::once(&d.library).chain(tv) {
+        if let Err(p) = preflight(folder) {
+            tracing::warn!(folder = %p.path.display(), error = %p.detail, "remux held: {}", p.message);
+            lib.hold_for(&p, now);
+            return None;
+        }
     }
     lib.set_hold(None);
     let epoch = arbiter.epoch();
     lib.queue.claim_next().map(|j| (j, epoch))
+}
+
+// The separate TV folder, when `job`'s planned outputs file under it.
+fn tv_root_of<'a>(d: &'a Dirs, job: &Job) -> Option<&'a std::path::PathBuf> {
+    d.tv.as_ref()
+        .filter(|tv| job.output_targets().iter().any(|t| t.starts_with(tv)))
+}
+
+// A folder check's failure as the error a job ends in, carrying its fault for the retry.
+fn problem_error(p: &Problem) -> std::io::Error {
+    use std::io::ErrorKind as K;
+    let kind = match p.fault {
+        Fault::Stale => K::StaleNetworkFileHandle,
+        Fault::ReadOnly => K::ReadOnlyFilesystem,
+        Fault::Missing => K::NotFound,
+        Fault::Denied => K::PermissionDenied,
+        Fault::Unresponsive | Fault::Unmounted => K::TimedOut,
+        Fault::Io | Fault::Other => K::Other,
+    };
+    std::io::Error::new(
+        kind,
+        format!("{} Folder: {}. {}", p.message, p.path.display(), p.detail),
+    )
 }
 
 /// How one job ended, before it is written to the queue.
@@ -691,6 +717,12 @@ fn remux_planned_with(
             return Ending::Failed(std::io::Error::other(why));
         }
     }
+    // A plan frozen just now was never preflighted on its TV folder by the queue.
+    if let Some(tv) = tv_root_of(&super::dirs(cfg), current)
+        && let Err(p) = health::preflight(super::TV_ROLE, tv)
+    {
+        return Ending::Failed(problem_error(&p));
+    }
     let owned = match current.owned.clone() {
         Some(owned) => owned,
         None => match capture_owned(job, cfg, &sink.lib.config_dir).and_then(|owned| {
@@ -972,17 +1004,14 @@ fn planned_target_ok(
     plan: &crate::server::planner::RemuxPlan,
     target: &Path,
 ) -> Result<(), String> {
-    if plan.media.kind == Some(crate::server::planner::MediaKind::Tv) {
-        let root = std::path::PathBuf::from(crate::server::mover::destination_root(
-            cfg,
-            &Some(tv_metadata(&plan.media)),
-        ));
-        // A TV plan files under the TV root, or the library for a legacy single output.
-        if target.starts_with(&root) {
-            return safe_destination(&root, target, true);
-        }
+    let d = super::dirs(cfg);
+    // A TV plan files under the TV folder, or the library for a legacy single output.
+    if plan.media.kind == Some(crate::server::planner::MediaKind::Tv)
+        && let Some(tv) = d.tv.as_ref().filter(|tv| target.starts_with(tv))
+    {
+        return safe_destination(tv, target);
     }
-    safe_to_create(&super::dirs(cfg), target)
+    safe_to_create(&d, target)
 }
 
 // Only this directory and these numeric job files (`<id>.mkv` and its `.partial` and
@@ -1125,14 +1154,12 @@ mod staged_cleanup_tests;
 /// the library folder, and that folder must be listable and not empty (an
 /// unmounted share is an empty mountpoint on the local disk).
 pub(crate) fn safe_to_create(d: &super::Dirs, target: &std::path::Path) -> Result<(), String> {
-    safe_destination(&d.library, target, false)
+    safe_destination(&d.library, target)
 }
 
-pub(super) fn safe_destination(
-    root: &Path,
-    target: &Path,
-    allow_empty: bool,
-) -> Result<(), String> {
+/// [`safe_to_create`] under any configured `root` (the library or the TV folder): it must
+/// be listable and not empty, so an unmounted share's mountpoint is never written into.
+pub(super) fn safe_destination(root: &Path, target: &Path) -> Result<(), String> {
     if !target.starts_with(root)
         || target
             .components()
@@ -1165,7 +1192,7 @@ pub(super) fn safe_destination(
             }
         }
     }
-    match std::fs::read_dir(root).map(|mut r| r.next().is_some() || allow_empty) {
+    match std::fs::read_dir(root).map(|mut r| r.next().is_some()) {
         Ok(true) => Ok(()),
         Ok(false) => Err(format!(
             "the library folder {} is empty (is the share mounted?); nothing was written",
@@ -1459,6 +1486,12 @@ pub(crate) fn folder_problem(lib: &Library, job: &Job) -> Option<Problem> {
         .map(|d| d.library.clone())
         .or_else(|| job.target.parent().map(Path::to_path_buf))?;
     if let Err(p) = health::preflight("output", &output) {
+        return Some(p);
+    }
+    let dirs = lib.snapshot().dirs.clone();
+    if let Some(tv) = dirs.as_ref().and_then(|d| tv_root_of(d, job))
+        && let Err(p) = health::preflight(super::TV_ROLE, tv)
+    {
         return Some(p);
     }
     if let Some(dir) = job.iso.parent() {

@@ -1608,7 +1608,8 @@ fn a_wrong_title_iso_corrected_to_tv_honours_tv_auto_and_takes_the_shows_name() 
     let tv_root = output.join("tv");
     std::fs::create_dir_all(output.join("movies")).unwrap();
     std::fs::write(output.join("movies/keep.mkv"), b"x").unwrap();
-    std::fs::create_dir_all(&tv_root).unwrap();
+    // A configured root is written into only once it is not empty.
+    std::fs::create_dir_all(tv_root.join("Other Show")).unwrap();
     let cfg = Config {
         output_dir: output.to_string_lossy().into_owned(),
         movie_dir: "movies".into(),
@@ -1690,3 +1691,6 @@ mod episode;
 
 #[path = "worker_landing_tests.rs"]
 mod landing;
+
+#[path = "worker_mounts_tests.rs"]
+mod mounts;

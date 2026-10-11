@@ -58,7 +58,7 @@ pub(super) fn run(
             .iter()
             .find(|root| old.path.starts_with(root))
             .ok_or_else(|| outside(&old.path))?;
-        super::worker::safe_destination(root, &old.path, true).map_err(io::Error::other)?;
+        super::worker::safe_destination(root, &old.path).map_err(io::Error::other)?;
         // A missing folder is a share that went away, not a file someone removed.
         if old
             .path
@@ -69,17 +69,6 @@ pub(super) fn run(
                 io::ErrorKind::NotConnected,
                 format!(
                     "the folder of {} cannot be found (is the share mounted?); it was not removed",
-                    old.path.display()
-                ),
-            ));
-        }
-        // A folder on another device than its root is a dropped share with a local stand-in.
-        let dir = old.path.parent().ok_or_else(|| outside(&old.path))?;
-        if !same_device(root, dir)? {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                format!(
-                    "the folder of {} is not on the same storage as its library folder (is the share mounted?); it was not removed",
                     old.path.display()
                 ),
             ));
@@ -97,11 +86,6 @@ pub(super) fn run(
         }
     }
     Ok(kept)
-}
-
-fn same_device(root: &Path, dir: &Path) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(std::fs::metadata(root)?.dev() == std::fs::metadata(dir)?.dev())
 }
 
 fn outside(path: &Path) -> io::Error {

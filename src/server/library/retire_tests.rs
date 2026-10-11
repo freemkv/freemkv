@@ -151,13 +151,6 @@ fn an_old_path_outside_the_roots_is_never_removed() {
 }
 
 #[test]
-fn a_folder_on_another_device_than_its_root_is_not_the_same_storage() {
-    let f = fixture();
-    assert!(same_device(&f.root, &f.root.join("Show")).unwrap());
-    assert!(!same_device(&f.root, Path::new("/dev")).unwrap());
-}
-
-#[test]
 fn a_missing_new_file_does_not_fail_when_there_is_nothing_to_retire() {
     let f = fixture();
     let own = Owned {
@@ -189,4 +182,38 @@ fn an_owned_file_swapped_for_a_symlink_is_kept_and_disowned_not_a_failed_pass() 
     assert_eq!(f.linked(&swapped.path), None, "disowned");
     assert!(!after.path.exists(), "the pass went on past it");
     assert_eq!(std::fs::read(&elsewhere).unwrap(), b"a copy");
+}
+
+// Amendment 4: no device comparison. A child dataset, subvolume or crossmnt export below
+// the root has its own device id and is still the root's storage.
+#[test]
+fn an_old_file_on_a_nested_filesystem_below_its_root_is_retired() {
+    use std::os::unix::fs::MetadataExt;
+    let f = fixture();
+    let dev = |p: &Path| std::fs::metadata(p).unwrap().dev();
+    let Some(root) = f
+        .root
+        .ancestors()
+        .find(|a| dev(a) != dev(&f.root))
+        .map(Path::to_path_buf)
+    else {
+        return; // every ancestor is on one filesystem here
+    };
+    let old = f.old("Old.mkv", Some(&f.iso));
+    let roots = [root];
+    let r = Retire {
+        iso: &f.iso,
+        config_dir: &f.config,
+        roots: &roots,
+        sink: &Quiet,
+        stopping: &|| false,
+    };
+    let kept = run(
+        &r,
+        std::slice::from_ref(&old),
+        std::slice::from_ref(&f.target),
+    )
+    .unwrap();
+    assert!(kept.is_empty());
+    assert!(!old.path.exists());
 }
