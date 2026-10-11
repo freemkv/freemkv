@@ -5,7 +5,7 @@ use super::*;
 use crate::server::ripper::{jobs, staging};
 use crate::server::upgrade_fixture as fx;
 
-const BD_HASH: &str = "0xA1B2C3D4E5F60718293A4B5C6D7E8F9012345678";
+const BD_HASH: &str = "0x0123456789ABCDEF0123456789ABCDEF01234567";
 
 fn files_under(dir: &Path) -> Vec<(PathBuf, u64)> {
     let mut out: Vec<_> = std::fs::read_dir(dir)
