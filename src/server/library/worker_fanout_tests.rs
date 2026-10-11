@@ -476,7 +476,7 @@ fn fanout_stop_preserves_retained_episode_for_retry_or_discard() {
     assert!(saved.staged.is_some());
     assert_eq!(saved.state, JobState::Failed);
     assert!(lib.queue.retry_staged_now(&job.target));
-    let path = lib.queue.take_staged(&job.target).unwrap();
+    let path = lib.queue.take_staged(&job.target, false).unwrap();
     assert!(path.exists());
     deliver::discard(&path).unwrap();
     assert_eq!(lib.queue.staged_total(), (0, 0));

@@ -749,8 +749,11 @@ fn stop_all_and_unqueue_keep_a_kept_file_offered() {
     assert!(q.retry_staged_now(&a.target));
     assert_eq!(q.remove_queued(&a.target, None), 1);
     assert_eq!(q.snapshot().jobs.len(), 1, "unqueued, still listed");
-    assert_eq!(q.take_staged(&a.target), Ok("/stage/a.staged.mkv".into()));
-    assert_eq!(q.take_staged(&a.target), Err(false));
+    assert_eq!(
+        q.take_staged(&a.target, false),
+        Ok("/stage/a.staged.mkv".into())
+    );
+    assert_eq!(q.take_staged(&a.target, false), Err(false));
     assert_eq!(q.staged_total(), (0, 0));
 }
 

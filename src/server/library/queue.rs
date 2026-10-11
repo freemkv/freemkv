@@ -1064,8 +1064,9 @@ impl Queue {
 
     /// Detach the kept file of `target`'s job so it can be deleted: a queued job leaves the
     /// queue, a failed one keeps its failure. `Err(true)` while that job runs, `Err(false)`
-    /// when there is no kept file (or the queue file could not be loaded).
-    pub fn take_staged(&self, target: &Path) -> Result<PathBuf, bool> {
+    /// when there is no kept file (or the queue file could not be loaded), or with
+    /// `abandoned` when its job is neither failed nor finished.
+    pub fn take_staged(&self, target: &Path, abandoned: bool) -> Result<PathBuf, bool> {
         self.mutate_or(Err(false), |f| {
             let pos = f
                 .jobs
@@ -1074,6 +1075,9 @@ impl Queue {
                 .ok_or(false)?;
             if f.jobs[pos].state == JobState::Running {
                 return Err(true);
+            }
+            if abandoned && !matches!(f.jobs[pos].state, JobState::Failed | JobState::Done) {
+                return Err(false);
             }
             let path = f.jobs[pos].staged.clone().ok_or(false)?;
             for output in &mut f.jobs[pos].outputs {

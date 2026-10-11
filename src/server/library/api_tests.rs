@@ -159,27 +159,33 @@ fn discard_deletes_only_a_kept_pair_in_staging_and_never_while_it_is_copied_in()
     let (target, mkv) = kept_job(&lib, &stage);
     let elsewhere = t.path().join("other");
     assert_eq!(
-        discard_kept(&lib, &target, Some(&elsewhere)).unwrap_err().0,
+        discard_kept(&lib, &target, Some(&elsewhere), false)
+            .unwrap_err()
+            .0,
         409
     );
-    assert_eq!(discard_kept(&lib, &target, None).unwrap_err().0, 409);
+    assert_eq!(discard_kept(&lib, &target, None, false).unwrap_err().0, 409);
     assert!(mkv.exists(), "nothing deleted outside the staging folder");
     let running = lib.queue.claim_next().unwrap();
     assert_eq!(
-        discard_kept(&lib, &target, Some(&stage)).unwrap_err().0,
+        discard_kept(&lib, &target, Some(&stage), false)
+            .unwrap_err()
+            .0,
         409
     );
     assert!(mkv.exists(), "never while it is being copied in");
     lib.queue
         .requeue(running.id, super::super::queue::JobNote::Interrupted);
-    discard_kept(&lib, &target, Some(&stage)).unwrap();
+    discard_kept(&lib, &target, Some(&stage), false).unwrap();
     assert!(!mkv.exists() && !mkv.with_extension("json").exists());
     assert!(
         lib.queue.snapshot().jobs.iter().all(|j| j.target != target),
         "the waiting job went with it"
     );
     assert_eq!(
-        discard_kept(&lib, &target, Some(&stage)).unwrap_err().0,
+        discard_kept(&lib, &target, Some(&stage), false)
+            .unwrap_err()
+            .0,
         404
     );
     assert_eq!(lib.queue.snapshot().count(JobState::Queued), 0);
@@ -235,7 +241,7 @@ fn discard_finds_a_planned_jobs_kept_file_by_its_output_target() {
             finished_at: 1,
         },
     );
-    discard_kept(&lib, &episode, Some(&stage)).unwrap();
+    discard_kept(&lib, &episode, Some(&stage), false).unwrap();
     assert!(!mkv.exists());
 }
 
@@ -261,4 +267,35 @@ fn clear_staging_keeps_a_kept_remux_still_waiting_to_be_copied_in() {
     );
     assert_eq!(clear_kept_remuxes(&lib, &stage), (1, 0));
     assert!(!mkv.exists());
+}
+
+// Clear staging decides on a snapshot; a Copy in now that lands before it takes the file
+// keeps the job and its kept remux.
+#[test]
+fn clear_staging_never_takes_a_kept_remux_requeued_since_its_snapshot() {
+    let t = tempfile::tempdir().unwrap();
+    let stage = t.path().join("stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::create_dir_all(t.path().join("cfg")).unwrap();
+    let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+    let (target, mkv) = kept_job(&lib, &stage);
+    let job = lib.queue.claim_next().unwrap();
+    lib.queue.finish(
+        job.id,
+        super::super::queue::JobResult::Failed {
+            code: None,
+            message: "the copy failed".into(),
+            finished_at: 0,
+        },
+    );
+    // Clear staging has picked it; the operator presses Copy in now.
+    assert!(lib.queue.retry_staged_now(&target));
+    assert_eq!(
+        discard_kept(&lib, &target, Some(&stage), true)
+            .unwrap_err()
+            .0,
+        409
+    );
+    assert!(mkv.exists());
+    assert_eq!(lib.queue.snapshot().count(JobState::Queued), 1);
 }
