@@ -39,7 +39,6 @@ pub enum MovePhase {
     Copying,
     Finalizing,
     Delivered,
-    CleanupNeeded,
     Blocked,
 }
 
@@ -367,16 +366,6 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
         .retain(|key| Path::new(key).parent() != Some(root) || seen.contains(key));
 }
 
-fn prune_after_listing(
-    staging_root: &str,
-    seen: &std::collections::HashSet<String>,
-    complete: bool,
-) {
-    if complete {
-        prune_move_errors(staging_root, seen);
-    }
-}
-
 /// Operator-initiated Retry: clear this error and its retry budget. The next
 /// mover tick may attempt delivery again; no media is removed by this action.
 pub fn clear_move_error(path: &str) {
@@ -405,7 +394,7 @@ pub fn clear_all_move_errors() {
 }
 
 /// Outcome of moving a single file. Distinguishes between an active move
-/// (Moved / MovedDirty) and a no-op re-check (Skipped) so the caller can
+/// (Moved) and a no-op re-check (Skipped) so the caller can
 /// suppress webhook spam and log noise on subsequent loop ticks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MoveOutcome {
@@ -414,10 +403,6 @@ enum MoveOutcome {
     Skipped,
     /// Atomic rename succeeded — src is gone, dest has the bytes.
     Moved,
-    /// Copy succeeded but unlink of src failed (perm/NFS issue). Dest has
-    /// the bytes. Caller should record an error and stop trying to clean
-    /// the staging dir; subsequent ticks will Skip.
-    MovedDirty,
     /// Copy itself failed. Caller can retry on the next tick.
     Failed,
     /// This attempt stalled and drained. Immutable even if the operator
@@ -511,30 +496,6 @@ fn fresh_metadata(path: &Path) -> std::io::Result<std::fs::Metadata> {
     f.metadata()
 }
 
-// Cheap content-identity probe for two files KNOWN to be the same length: compares a fixed-size
-// head/tail window from each; any read error conservatively returns false.
-fn same_head_and_tail(a: &Path, b: &Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    const WINDOW: u64 = 64 * 1024;
-
-    fn windows(path: &Path, window: u64) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
-        let mut f = std::fs::File::open(path)?;
-        let size = f.metadata()?.len();
-        let n = window.min(size) as usize;
-        let mut head = vec![0u8; n];
-        f.read_exact(&mut head)?;
-        let mut tail = vec![0u8; n];
-        f.seek(SeekFrom::End(-(n as i64)))?;
-        f.read_exact(&mut tail)?;
-        Ok((head, tail))
-    }
-
-    match (windows(a, WINDOW), windows(b, WINDOW)) {
-        (Ok(wa), Ok(wb)) => wa == wb,
-        _ => false,
-    }
-}
-
 // Copy src -> dest in 4 MiB chunks, publishing the running bytes-written count into `written`
 // as we go, so the move loop can show real progress without stat()-ing the destination.
 #[cfg(test)]
@@ -602,41 +563,6 @@ fn copy_counting_with_halt(
     // Remove any stale temp from a prior interrupted run before we start.
     stage("removing stale destination temporary file");
     remove_temporary(&tmp);
-    // The temp name embeds OUR pid, so the line above only clears our own
-    // name; orphaned `.part-<other-pid>` temps from prior crashed runs
-    // would otherwise linger. Scan the dest parent and remove any of them.
-    if let Some(parent) = dest.parent()
-        && let Some(stem) = dest.file_name().and_then(|n| n.to_str())
-    {
-        let prefix = format!("{stem}.part-");
-        stage("listing destination temporary files");
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            for entry in entries {
-                // Don't `.flatten()` away per-entry errors: a partial NFS
-                // degradation can error on a DirEntry, skipping a `.part-*`
-                // orphan; without this WARN, orphans accumulate silently.
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            dir = %parent.display(),
-                            "mover: cannot read dir entry while clearing orphaned \
-                             .part-* temps; an orphan may be left behind"
-                        );
-                        continue;
-                    }
-                };
-                if let Some(name) = entry.file_name().to_str()
-                    && name.starts_with(&prefix)
-                {
-                    stage("removing stale destination temporary file");
-                    remove_temporary(&entry.path());
-                }
-            }
-        }
-    }
-
     let copy_to_tmp = || -> std::io::Result<u64> {
         let context = |operation: &str, path: &Path, error: std::io::Error| {
             std::io::Error::new(
@@ -979,15 +905,6 @@ pub(crate) fn check_post_copy(src: &Path, dst: &Path) -> Result<(), MoveError> {
         check(dst)?;
     }
     check_post_copy_size(src, dst)
-}
-
-/// The structural half of `check_post_copy` for a dest whose SOURCE is gone
-/// (the src-missing idempotent fast path) — there is no src left to size-compare.
-/// A format without a structural check (iso, unknown) can't be told apart from a
-/// foreign file at that path, so it is NOT accepted: reporting Moved would tear
-/// down staging and announce a delivery we cannot vouch for.
-fn dest_structural_ok(dst: &Path) -> bool {
-    structural_check(dst).is_some_and(|check| check(dst).is_ok())
 }
 
 // One pass of the mover loop: take a config SNAPSHOT, release the lock, then move. Returns
@@ -1669,7 +1586,6 @@ fn check_and_move(cfg: &Config) {
                 if let Some(entry) = ms.get_mut(i) {
                     entry.phase = match outcome {
                         MoveOutcome::Moved | MoveOutcome::Skipped => MovePhase::Delivered,
-                        MoveOutcome::MovedDirty => MovePhase::CleanupNeeded,
                         _ => MovePhase::Blocked,
                     };
                     entry.speed_mbs = 0.0;
@@ -1683,11 +1599,8 @@ fn check_and_move(cfg: &Config) {
             }
             // Peg this artifact's bar to 100% on success. Skipped (idempotent
             // re-move) reports no progress, so it'd sit at 0% otherwise;
-            // Moved/MovedDirty may stop short of 100. Failed/Collision stay stalled.
-            if matches!(
-                outcome,
-                MoveOutcome::Moved | MoveOutcome::MovedDirty | MoveOutcome::Skipped
-            ) {
+            // Moved may stop short of 100. Failed/Collision stay stalled.
+            if matches!(outcome, MoveOutcome::Moved | MoveOutcome::Skipped) {
                 let mut ms = MOVE_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(entry) = ms.get_mut(i) {
                     entry.progress_pct = 100;
@@ -1715,21 +1628,6 @@ fn check_and_move(cfg: &Config) {
                     // path that could hide a wrong-filesystem write (Mercy incident).
                     crate::server::log::syslog(&format!(
                         "Moved {} → {}",
-                        src.file_name().unwrap_or_default().to_string_lossy(),
-                        absolute_for_log(dest)
-                    ));
-                }
-                MoveOutcome::MovedDirty => {
-                    if !announced_moving {
-                        crate::server::log::syslog(&format!(
-                            "Moving: {} ({} files)",
-                            display_name,
-                            ripped_files.len()
-                        ));
-                        announced_moving = true;
-                    }
-                    crate::server::log::syslog(&format!(
-                        "Moved {} → {} but source could not be removed",
                         src.file_name().unwrap_or_default().to_string_lossy(),
                         absolute_for_log(dest)
                     ));
@@ -1767,9 +1665,6 @@ fn check_and_move(cfg: &Config) {
         let any_post_copy_invalid = outcomes
             .iter()
             .any(|o| matches!(o, MoveOutcome::PostCopyInvalid));
-        let any_dirty = outcomes
-            .iter()
-            .any(|o| matches!(o, MoveOutcome::MovedDirty));
 
         if outcomes
             .iter()
@@ -1809,7 +1704,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination size does not match source",
-                "check the destination filesystem for ENOSPC / short writes; the mover removes a broken copy it made and retries next tick (if a dst file remains, remove it)",
+                "check the destination filesystem for ENOSPC / short writes; the mover removes only its temp file and retries next tick (if a dst file remains, remove it)",
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -1819,7 +1714,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination is structurally invalid or unreadable",
-                "the copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); the mover removes a broken copy it made and retries next tick (if a dst file remains, remove it) — see device_system.log for the specific check",
+                "the copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); the mover removes only its temp file and retries next tick (if a dst file remains, remove it) — see device_system.log for the specific check",
             );
             schedule_failed_delivery(&dir_str, &outcomes);
             continue;
@@ -1913,12 +1808,6 @@ fn check_and_move(cfg: &Config) {
             }
             clear_error(&dir_str);
             crate::server::log::syslog(&format!("Move complete: {}", display_name));
-        } else if any_dirty {
-            record_error(
-                &dir_str,
-                "destination has the file but source could not be removed",
-                "Fix staging permissions and retry; the delivery journal is retained until verified cleanup completes.",
-            );
         } else if let Some(e) = cleanup_err {
             record_error(
                 &dir_str,
@@ -1931,7 +1820,9 @@ fn check_and_move(cfg: &Config) {
         // ends — including via every `continue` above.
     }
 
-    prune_after_listing(staging_root, &seen_dirs, root_listing_complete);
+    if root_listing_complete {
+        prune_move_errors(staging_root, &seen_dirs);
+    }
     // Same unbounded-growth prune for the stranded-dir one-time-warn dedup set.
     prune_stranded_warned(&seen_dirs);
 }
@@ -2476,106 +2367,26 @@ fn absolute_for_log(dest: &str) -> String {
     }
 }
 
-// Move a file with idempotent retry semantics: pre-flight Skipped/Collision check, then an
-// atomic rename(2), falling back to a worker-thread copy_counting + unlink.
-#[cfg(test)]
-fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -> MoveOutcome {
-    move_file_inner(
-        src,
-        dest,
-        on_progress,
-        std::sync::Arc::new(|_| Ok(())),
-        false,
-        src.parent().unwrap_or_else(|| Path::new("")),
-        Default::default(),
-    )
-}
-
 type BeforePublish = std::sync::Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
 // Set once our own no_replace returned Ok, whatever outcome is reported later.
 type Published = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
-fn move_file_journaled(
+fn move_file(
     src: &Path,
     dest: &Path,
     on_progress: &dyn Fn(u8, f64, f64, f64),
     before_publish: BeforePublish,
-    job: &Path,
-    published: Published,
-) -> MoveOutcome {
-    move_file_inner(src, dest, on_progress, before_publish, true, job, published)
-}
-
-fn move_file_inner(
-    src: &Path,
-    dest: &Path,
-    on_progress: &dyn Fn(u8, f64, f64, f64),
-    before_publish: BeforePublish,
-    journaled: bool,
     job: &Path,
     published: Published,
 ) -> MoveOutcome {
     // Journal recovery alone may adopt an existing destination. Never infer
     // transaction ownership from its size, structure, or the source's absence.
-    if journaled {
-        match std::fs::symlink_metadata(dest) {
-            Ok(_) => return MoveOutcome::Collision,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return MoveOutcome::Failed,
-        }
+    match std::fs::symlink_metadata(dest) {
+        Ok(_) => return MoveOutcome::Collision,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return MoveOutcome::Failed,
     }
-    // Fresh-FD stat on both sides: a cache-served stat on NFS can mis-size
-    // either side, spuriously tripping the Skipped or src-missing Moved
-    // pre-flights below.
     let src_meta = fresh_metadata(src);
-    let dest_meta = fresh_metadata(dest);
-
-    // Pre-flight: dest already matches, stopping the infinite re-copy loop when src can't
-    // unlink. Equal LENGTH alone doesn't prove equal CONTENT, so a same-size different file is
-    // refused here too; different-size destinations are also never overwritten.
-    if let (Ok(s), Ok(d)) = (&src_meta, &dest_meta)
-        && !journaled
-        && s.is_file()
-        && d.is_file()
-        && s.len() == d.len()
-        && s.len() > 0
-    {
-        if same_head_and_tail(src, dest) {
-            // Equal length + matching head/tail still isn't proof of a DURABLE dest: a prior
-            // copy that failed post-copy validation can match these cheap probes. Re-run
-            // validation before treating it as already-moved.
-            if check_post_copy(src, dest).is_ok() {
-                clear_stale_dest_error(dest);
-                return MoveOutcome::Skipped;
-            }
-            crate::server::log::syslog(&format!(
-                "Pre-existing destination failed post-copy validation; re-copying: {:?}",
-                dest
-            ));
-            // Fall through to the copy path below.
-        } else {
-            crate::server::log::syslog(&format!(
-                "Move blocked (destination same size but different content): {:?} vs {:?}",
-                src, dest
-            ));
-            return MoveOutcome::Collision;
-        }
-    }
-    // Pre-flight: src missing but dest present. Must be a genuine NotFound — any OTHER stat
-    // error leaves src's fate UNKNOWN, so treating it as gone could report Moved for garbage
-    // and destroy the real src. Non-NotFound falls through to the copy path instead.
-    if let (Err(e), Ok(d)) = (&src_meta, &dest_meta)
-        && !journaled
-        && e.kind() == std::io::ErrorKind::NotFound
-        && d.is_file()
-        && d.len() > 0
-        // A non-empty dest alone isn't proof it's OUR output — a foreign file can
-        // sit here, and with src gone we can't content-compare. A structural check
-        // rejects garbage/foreign non-media rather than falsely reporting Moved.
-        && dest_structural_ok(dest)
-    {
-        return MoveOutcome::Moved;
-    }
 
     if let Err(e) = before_publish(src) {
         record_error(
@@ -2642,9 +2453,7 @@ fn move_file_inner(
             &|| crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
             Some(&worker_halt),
             &|candidate| {
-                if journaled {
-                    check_candidate(&src_owned, &dest_owned, candidate)?;
-                }
+                check_candidate(&src_owned, &dest_owned, candidate)?;
                 before_publish(candidate)
             },
             Some(&worker_activity),
@@ -2677,12 +2486,6 @@ fn move_file_inner(
     match result {
         Ok(_bytes) => {
             on_progress(100, total_gb, total_gb, 0.0);
-            if let Err(e) = check_post_copy(src, Path::new(&dest_str)) {
-                return match e {
-                    MoveError::SizeDoesNotMatch { .. } => MoveOutcome::SizeMismatch,
-                    _ => MoveOutcome::PostCopyInvalid,
-                };
-            }
             if let Some(parent) = dest.parent()
                 && let Err(e) = libfreemkv::io::fsync::dir_checked(parent)
             {
@@ -2694,15 +2497,8 @@ fn move_file_inner(
                 return MoveOutcome::Failed;
             }
             clear_stale_dest_error(dest);
-            if journaled {
-                // Retire sources only after exact identities and durable links.
-                MoveOutcome::Moved
-            } else {
-                match std::fs::remove_file(src) {
-                    Ok(()) => MoveOutcome::Moved,
-                    Err(_) => MoveOutcome::MovedDirty,
-                }
-            }
+            // Retire sources only after exact identities and durable links.
+            MoveOutcome::Moved
         }
         Err(e) => {
             if !copy_monitor::was_stalled(&e) && !shutdown_interrupted(&e) {

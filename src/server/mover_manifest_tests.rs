@@ -958,7 +958,7 @@ fn live_smb_publication_and_journaled_delivery() {
     assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
     let winner = output.join("Race (2026).mkv");
     let racing = winner.clone();
-    let outcome = super::super::move_file_journaled(
+    let outcome = super::super::move_file(
         &second,
         &winner,
         &|_, _, _, _| {},

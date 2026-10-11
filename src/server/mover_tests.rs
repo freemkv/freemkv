@@ -31,21 +31,12 @@ fn mixed_collision_failures_back_off_and_uncertain_listing_preserves_hold() {
     }
     let later = std::time::Instant::now() + std::time::Duration::from_secs(3600);
     assert!(!super::move_retry_ready(&path, later));
-    super::prune_after_listing(&root, &std::collections::HashSet::new(), false);
-    assert!(
-        !super::move_retry_ready(&path, later),
-        "enumeration error cannot reset hold"
-    );
-    super::prune_after_listing(
-        &root,
-        &std::collections::HashSet::from([path.clone()]),
-        true,
-    );
+    super::prune_move_errors(&root, &std::collections::HashSet::from([path.clone()]));
     assert!(
         !super::move_retry_ready(&path, later),
         "observed entry with failed stat cannot reset hold"
     );
-    super::prune_after_listing(&root, &std::collections::HashSet::new(), true);
+    super::prune_move_errors(&root, &std::collections::HashSet::new());
     assert!(
         super::move_retry_ready(&path, later),
         "confirmed absence prunes stale hold"
@@ -150,7 +141,7 @@ fn move_file_never_replaces_different_size_destination() {
     std::fs::write(&source, b"source bytes").unwrap();
     std::fs::write(&destination, b"winner").unwrap();
     assert!(matches!(
-        super::move_file(&source, &destination, &|_, _, _, _| {}),
+        deliver(&source, &destination),
         super::MoveOutcome::Collision
     ));
     assert_eq!(std::fs::read(source).unwrap(), b"source bytes");
@@ -164,7 +155,7 @@ fn journal_checkpoint_failure_preserves_source_and_never_publishes() {
     let destination = dir.path().join("destination.iso");
     std::fs::write(&source, b"source bytes").unwrap();
     let published = super::Published::default();
-    let outcome = super::move_file_journaled(
+    let outcome = super::move_file(
         &source,
         &destination,
         &|_, _, _, _| {},
@@ -186,7 +177,7 @@ fn journal_callback_concurrent_winner_is_not_overwritten() {
     std::fs::write(&source, b"source bytes").unwrap();
     let winner = destination.clone();
     let published = super::Published::default();
-    let outcome = super::move_file_journaled(
+    let outcome = super::move_file(
         &source,
         &destination,
         &|_, _, _, _| {},
@@ -207,7 +198,7 @@ fn a_journaled_publication_reports_that_it_published() {
     let destination = dir.path().join("destination.iso");
     std::fs::write(&source, b"source bytes").unwrap();
     let published = super::Published::default();
-    let outcome = super::move_file_journaled(
+    let outcome = super::move_file(
         &source,
         &destination,
         &|_, _, _, _| {},
@@ -1117,22 +1108,16 @@ fn destination_root_for_selects_iso_root_only_for_iso_files() {
 
 fn noop_progress(_: u8, _: f64, _: f64, _: f64) {}
 
-#[test]
-fn move_file_skips_when_dest_size_matches() {
-    // Circuit breaker: a prior tick already cp'd the file but
-    // couldn't unlink src. Re-detecting the same-size dest must NOT
-    // recopy — that's the bug this fix exists for.
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("a.mkv");
-    let dest = tmp.path().join("b.mkv");
-    // Valid EBML-framed payload: Skipped now requires the pre-existing
-    // dest to pass the same post-copy validation the copy path runs.
-    write_minimal_mkv(&src, b"hello world");
-    write_minimal_mkv(&dest, b"hello world");
-    let outcome = move_file(&src, &dest, &noop_progress);
-    assert_eq!(outcome, MoveOutcome::Skipped);
-    assert!(src.exists(), "src must remain untouched on Skipped");
-    assert!(dest.exists());
+// The production move entry with a no-op publication checkpoint.
+fn deliver(src: &Path, dest: &Path) -> MoveOutcome {
+    move_file(
+        src,
+        dest,
+        &noop_progress,
+        std::sync::Arc::new(|_| Ok(())),
+        src.parent().unwrap(),
+        Default::default(),
+    )
 }
 
 #[test]
@@ -1142,7 +1127,7 @@ fn move_file_moves_when_dest_missing() {
     let dest = tmp.path().join("sub/b.mkv");
     std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
     std::fs::write(&src, b"data data data").unwrap();
-    let outcome = move_file(&src, &dest, &noop_progress);
+    let outcome = deliver(&src, &dest);
     assert_eq!(outcome, MoveOutcome::Moved);
     assert!(!src.exists(), "rename consumes src");
     assert_eq!(std::fs::read(&dest).unwrap(), b"data data data");
@@ -1156,7 +1141,7 @@ fn move_file_preserves_unowned_different_size_destination() {
     let dest = tmp.path().join("b.mkv");
     std::fs::write(&src, b"new full content").unwrap();
     std::fs::write(&dest, b"partial").unwrap();
-    let outcome = move_file(&src, &dest, &noop_progress);
+    let outcome = deliver(&src, &dest);
     assert_eq!(outcome, MoveOutcome::Collision);
     assert_eq!(std::fs::read(&dest).unwrap(), b"partial");
     assert_eq!(std::fs::read(&src).unwrap(), b"new full content");
@@ -1211,7 +1196,7 @@ fn a_successful_move_clears_a_stale_destination_keyed_error() {
         "fixture: the stale row must exist before the successful move"
     );
 
-    let outcome = move_file(&src, &dest, &noop_progress);
+    let outcome = deliver(&src, &dest);
 
     let left = error_snapshot(&dest_key);
     clear_error(&dest_key);
@@ -1240,175 +1225,14 @@ fn move_file_copy_failure_leaves_no_partial_dest() {
     std::fs::write(&not_a_dir, b"x").unwrap();
     let dest = not_a_dir.join("b.mkv");
 
-    let outcome = move_file(&src, &dest, &noop_progress);
+    let outcome = deliver(&src, &dest);
     assert_eq!(outcome, MoveOutcome::Failed, "copy failure → Failed");
     assert!(!dest.exists(), "no partial destination may be left behind");
     // Source is the only copy and must be preserved on any failure.
     assert!(src.exists(), "source must survive a failed move");
 }
 
-#[test]
-fn move_file_does_not_skip_an_invalid_same_size_dest() {
-    // Regression (finding 9): the Skipped pre-flight accepted a dest on
-    // equal length + matching head/tail WITHOUT post-copy validation. A
-    // structurally invalid dest must not be treated as already-moved.
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("a.mkv");
-    let dest = tmp.path().join("b.mkv");
-    // Byte-identical, same length, matching head/tail — but no EBML magic,
-    // so check_post_copy rejects it.
-    let bytes = vec![0xAAu8; 4096];
-    std::fs::write(&src, &bytes).unwrap();
-    std::fs::write(&dest, &bytes).unwrap();
-    let outcome = move_file(&src, &dest, &noop_progress);
-    assert_ne!(
-        outcome,
-        MoveOutcome::Skipped,
-        "an invalid same-size dest must not be accepted as already-moved"
-    );
-    assert_eq!(
-        outcome,
-        MoveOutcome::Collision,
-        "invalid contents do not authorize overwriting an unowned destination"
-    );
-}
-
-#[test]
-fn move_file_returns_moved_when_src_missing_but_dest_present() {
-    // Earlier atomic rename succeeded; src is gone, dest is fine.
-    // Re-entering move_file (e.g. on next tick before staging
-    // cleanup) must not error out.
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("a.mkv");
-    let dest = tmp.path().join("b.mkv");
-    // Dest must be a structurally-valid mkv: the src-missing fast path now
-    // rejects a foreign/garbage dest rather than mislabelling it Moved.
-    write_minimal_mkv(&dest, &vec![0xAA; 256]);
-    let outcome = move_file(&src, &dest, &noop_progress);
-    assert_eq!(outcome, MoveOutcome::Moved);
-}
-
-#[test]
-fn move_file_does_not_report_moved_on_foreign_dest_when_src_missing() {
-    // src is gone and the dest is a NON-media/foreign file: the idempotent
-    // fast path must NOT claim Moved for it (it isn't our output).
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("a.mkv");
-    let dest = tmp.path().join("b.mkv");
-    std::fs::write(&dest, b"foreign non-media file, not our rip output").unwrap();
-    let outcome = move_file(&src, &dest, &noop_progress);
-    assert_ne!(
-        outcome,
-        MoveOutcome::Moved,
-        "a foreign non-media dest is not proof of a completed move; got {outcome:?}"
-    );
-}
-
-// An ISO (or any format with no structural check) at dest can't be told apart from a foreign
-// file once src is gone, so it must not be reported Moved; the foreign file stays untouched.
-#[test]
-fn move_file_does_not_report_moved_on_unverifiable_dest_when_src_missing() {
-    let tmp = tempfile::tempdir().unwrap();
-    for name in ["b.iso", "b.ISO", "b.txt", "b"] {
-        let src = tmp.path().join(format!("src-{name}"));
-        let dest = tmp.path().join(name);
-        std::fs::write(&dest, b"somebody else's file").unwrap();
-        let outcome = move_file(&src, &dest, &noop_progress);
-        assert_ne!(
-            outcome,
-            MoveOutcome::Moved,
-            "unverifiable dest {name} reported Moved with src missing"
-        );
-        assert_eq!(
-            std::fs::read(&dest).unwrap(),
-            b"somebody else's file",
-            "the foreign dest {name} must be left untouched"
-        );
-    }
-}
-
-// The pre-flight "src missing, dest present" branch must require a genuine NotFound on the
-// src stat, not just any error (EACCES/EIO/ ESTALE prove nothing).
-#[cfg(unix)]
-#[test]
-fn move_file_does_not_report_moved_on_non_notfound_src_stat_error() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src_dir = tmp.path().join("staging");
-    std::fs::create_dir_all(&src_dir).unwrap();
-    let src = src_dir.join("a.mkv");
-    std::fs::write(&src, b"still here, just unreadable right now").unwrap();
-
-    let dest = tmp.path().join("b.mkv");
-    // Predates this attempt — could be the real completed copy (e.g. a
-    // MovedDirty leftover whose src unlink failed on a prior tick) or a
-    // stale partial from an unrelated attempt. Either way, not proof.
-    std::fs::write(&dest, b"already at the destination").unwrap();
-
-    // Strip all permissions from src's PARENT so `stat(src)` fails with
-    // EACCES (can't even traverse to look it up) rather than ENOENT —
-    // src still physically exists on disk.
-    std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-    let perms_enforced = std::fs::File::open(&src).is_err();
-    let outcome = move_file(&src, &dest, &noop_progress);
-
-    // Restore so tempdir cleanup can remove everything.
-    std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    if !perms_enforced {
-        eprintln!(
-            "SKIP move_file_does_not_report_moved_on_non_notfound_src_stat_error: \
-                 running with read-through privileges (root?)"
-        );
-        return;
-    }
-    assert_ne!(
-        outcome,
-        MoveOutcome::Moved,
-        "a non-NotFound src stat error proves nothing about src; got {outcome:?}"
-    );
-}
-
-#[test]
-fn move_file_collides_when_dest_same_size_different_content() {
-    // Atomicity/safety contract: when the dest already holds a DIFFERENT
-    // file of the SAME length, move_file must NOT clobber it — it
-    // returns Collision and leaves both files intact for the operator.
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("a.mkv");
-    let dest = tmp.path().join("b.mkv");
-    // Equal length, differing content: same 4-byte EBML magic, same total
-    // size, but the payload differs (so head/tail probe mismatches).
-    write_minimal_mkv(&src, b"AAAAAAAAAAAA");
-    write_minimal_mkv(&dest, b"BBBBBBBBBBBB");
-    assert_eq!(
-        std::fs::metadata(&src).unwrap().len(),
-        std::fs::metadata(&dest).unwrap().len(),
-        "precondition: equal length"
-    );
-
-    let outcome = move_file(&src, &dest, &noop_progress);
-    assert_eq!(
-        outcome,
-        MoveOutcome::Collision,
-        "same-size different-content dest must collide, not overwrite"
-    );
-    // Both originals survive untouched.
-    assert_eq!(std::fs::read(&src).unwrap(), {
-        let mut b = vec![0x1A, 0x45, 0xDF, 0xA3];
-        b.extend_from_slice(b"AAAAAAAAAAAA");
-        b
-    });
-    assert_eq!(std::fs::read(&dest).unwrap(), {
-        let mut b = vec![0x1A, 0x45, 0xDF, 0xA3];
-        b.extend_from_slice(b"BBBBBBBBBBBB");
-        b
-    });
-}
-
-// Cross-device (EXDEV) copy+unlink SUCCESS path, driven end-to-end through move_file
+// Cross-device (EXDEV) copy SUCCESS path, driven end-to-end through move_file
 // against a SEPARATE real filesystem; SKIPS when one isn't available.
 #[cfg(unix)]
 #[test]
@@ -1447,22 +1271,22 @@ fn move_file_cross_device_copy_unlink_success_when_two_filesystems_exist() {
     let dest = primary.path().join("a.mkv");
     write_minimal_mkv(&src, b"cross device payload bytes");
 
-    let outcome = move_file(&src, &dest, &noop_progress);
+    let outcome = deliver(&src, &dest);
 
     // Best-effort cleanup of the secondary-fs scratch dir.
     let _ = std::fs::remove_dir_all(&work);
 
     // If for some reason rename still succeeded (same fs after all), we'd
     // get Moved too — both acceptable; the key assertions are that the
-    // dest holds the bytes and the src was unlinked.
+    // dest holds the bytes and the src is left for the journal.
     assert_eq!(
         outcome,
         MoveOutcome::Moved,
         "cross-device move must succeed"
     );
     assert!(
-        !src.exists(),
-        "src must be unlinked after a successful copy"
+        src.exists(),
+        "the journal, not the mover, retires the source"
     );
     let moved = std::fs::read(&dest).unwrap();
     assert_eq!(
@@ -2276,34 +2100,6 @@ fn copy_counting_success_renames_atomically_and_cleans_temp() {
     );
 }
 
-#[test]
-fn copy_counting_clears_orphaned_part_temps_from_other_pids() {
-    let _g = errors_guard();
-    use std::sync::atomic::AtomicU64;
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src.bin");
-    let dst = tmp.path().join("final.bin");
-    std::fs::write(&src, vec![0x11u8; 1024]).unwrap();
-    // Simulate orphaned temps left by prior crashed copies of THIS dest
-    // under different pids. The current copy must sweep them before
-    // writing its own fresh `.part-<pid>`.
-    let orphan_a = tmp.path().join("final.bin.part-999991");
-    let orphan_b = tmp.path().join("final.bin.part-999992");
-    std::fs::write(&orphan_a, b"stale").unwrap();
-    std::fs::write(&orphan_b, b"stale").unwrap();
-    // An unrelated `.part-*` for a DIFFERENT dest must be left untouched.
-    let unrelated = tmp.path().join("other.bin.part-999993");
-    std::fs::write(&unrelated, b"keep").unwrap();
-
-    let written = AtomicU64::new(0);
-    copy_counting(&src, &dst, &written, &libfreemkv::halt::Halt::new()).unwrap();
-
-    assert!(!orphan_a.exists(), "orphaned .part for this dest removed");
-    assert!(!orphan_b.exists(), "orphaned .part for this dest removed");
-    assert!(unrelated.exists(), "unrelated .part for other dest kept");
-    assert_eq!(std::fs::read(&dst).unwrap(), vec![0x11u8; 1024]);
-}
-
 // SIGTERM must be observed BETWEEN CHUNKS, not at the end of the copy.
 #[test]
 fn copy_counting_aborts_between_chunks_when_shutdown_is_requested() {
@@ -2762,7 +2558,7 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
         let _g = errors_guard();
         let dest_key = dest.to_string_lossy().to_string();
         clear_error(&dest_key);
-        let o = move_file(&src, &dest, &noop_progress);
+        let o = deliver(&src, &dest);
         let recorded = error_snapshot(&dest_key);
         clear_error(&dest_key);
         assert!(
@@ -2795,7 +2591,7 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
 }
 
 // DATA LOSS regression: a failed copy must never delete a destination that PRE-DATES the
-// attempt (a legitimate MovedDirty leftover).
+// attempt (a leftover from an earlier delivery).
 #[cfg(unix)]
 #[test]
 fn move_file_copy_failure_keeps_pre_existing_dest() {
@@ -2809,7 +2605,7 @@ fn move_file_copy_failure_keeps_pre_existing_dest() {
     let src = src_dir.join("keepdest.mkv");
     let dest = dest_dir.join("keepdest.mkv");
     write_minimal_mkv(&src, b"staging source bytes that cannot be read");
-    // The complete library copy an earlier MovedDirty tick left behind.
+    // The complete library copy an earlier tick left behind.
     write_minimal_mkv(&dest, b"the complete library copy from an earlier tick");
     let good_bytes = std::fs::read(&dest).unwrap();
 
@@ -2823,7 +2619,7 @@ fn move_file_copy_failure_keeps_pre_existing_dest() {
         let _g = errors_guard();
         let dest_key = dest.to_string_lossy().to_string();
         clear_error(&dest_key);
-        let o = move_file(&src, &dest, &noop_progress);
+        let o = deliver(&src, &dest);
         clear_error(&dest_key);
         assert!(
             dest.exists(),
@@ -2884,7 +2680,7 @@ fn move_file_copy_failure_removes_this_attempts_dest() {
         let _g = errors_guard();
         let dest_key = dest.to_string_lossy().to_string();
         clear_error(&dest_key);
-        let o = move_file(&src, &dest, &noop_progress);
+        let o = deliver(&src, &dest);
         let recorded = error_snapshot(&dest_key);
         clear_error(&dest_key);
         assert!(
@@ -3498,46 +3294,6 @@ fn done_absence_present_dir_without_marker_is_fault() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-#[test]
-fn same_head_and_tail_distinguishes_identical_from_different() {
-    let dir = scratch_dir("headtail");
-    let a = dir.join("a.bin");
-    let b = dir.join("b.bin");
-    let c = dir.join("c.bin");
-    let base = vec![0x5Au8; 200 * 1024]; // larger than the 64 KiB window
-    std::fs::write(&a, &base).unwrap();
-    std::fs::write(&b, &base).unwrap();
-    // c: same length, differs only in the middle (outside both windows)
-    // — head+tail treats it as identical (acceptable: an interior-only
-    // real collision is unrealistic, and a full compare every tick isn't).
-    let mut mid = base.clone();
-    let m = mid.len() / 2;
-    mid[m] ^= 0xFF;
-    std::fs::write(&c, &mid).unwrap();
-    assert!(same_head_and_tail(&a, &b), "identical files match");
-    assert!(same_head_and_tail(&a, &c), "interior-only diff matches");
-
-    // e: same length, differs ~2 KiB in — INSIDE the 64 KiB head window,
-    // where the window is load-bearing: a much smaller window would wave
-    // this real collision through as an idempotent re-move.
-    let e = dir.join("e.bin");
-    let mut neardiff = base.clone();
-    neardiff[2000] ^= 0xFF;
-    std::fs::write(&e, &neardiff).unwrap();
-    assert!(
-        !same_head_and_tail(&a, &e),
-        "a difference 2 KiB in must fall inside the head window"
-    );
-
-    // d: differs at the head → not identical.
-    let d = dir.join("d.bin");
-    let mut headdiff = base.clone();
-    headdiff[0] ^= 0xFF;
-    std::fs::write(&d, &headdiff).unwrap();
-    assert!(!same_head_and_tail(&a, &d), "head diff must not match");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
 // Fail-loud destination validation (Mercy incident hardening): the mover must ERROR +
 // preserve-in-staging when the configured root is missing/unwritable, never silently
 // create it (writing into the container overlay), and must log FULL ABSOLUTE paths.
@@ -3797,7 +3553,7 @@ fn move_file_permission_failure_does_not_fall_back_to_copy() {
     // Read-only staging dir: rename(2) can't unlink src, so the copy path runs.
     std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
     let renames_anyway = std::fs::File::create(src_dir.join("root-check")).is_ok();
-    let outcome = (!renames_anyway).then(|| move_file(&src, &dest, &noop_progress));
+    let outcome = (!renames_anyway).then(|| deliver(&src, &dest));
     std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     let Some(outcome) = outcome else {
         eprintln!("SKIP move_file_removes_its_own_copy_that_fails_validation: running as root");
