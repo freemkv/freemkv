@@ -75,6 +75,29 @@ pub fn key_params(k: &KeySettings) -> KeyParamsData {
     }
 }
 
+/// The CLI's plan for a whole-disc output: its key flags (the keydb defaulting to
+/// `default_keydb`) and `(raw, multipass, force)`, titles and streams as the engine defaults
+/// them. The CLI runs this plan; the parity tests compare the app's and server's against it.
+pub fn cli_plan(
+    source: &str,
+    dest: &str,
+    keys: &CliKeys,
+    default_keydb: &str,
+    flags: (bool, bool, bool),
+) -> freemkv_engine::Plan {
+    let (raw, multipass, force) = flags;
+    freemkv_engine::Plan {
+        source: source.to_string(),
+        dest: dest.to_string(),
+        titles: freemkv_engine::Selection::default(),
+        streams: freemkv_engine::StreamChoice::default(),
+        raw,
+        multipass,
+        keys: key_params(&cli_key_settings(keys, default_keydb)),
+        force,
+    }
+}
+
 #[cfg(test)]
 #[path = "plan_core_tests.rs"]
 mod tests;

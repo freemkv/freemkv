@@ -37,6 +37,7 @@ fn get_set_round_trips_every_key() {
         "filename_template",
         "selection",
         "subtitle_mode",
+        "presentation_language",
         "min_title_secs",
         "rip_mode",
         "max_passes",

@@ -820,7 +820,10 @@ fn usage() {
     println!("{}", crate::strings::get("usage.flag.audio"));
     println!(
         "{}",
-        crate::strings::get("usage.flag.presentation_language")
+        crate::strings::get_or(
+            "usage.flag.presentation_language",
+            "      --presentation-language de  Prefer the version of the movie in this language (keeps the main title when none)",
+        )
     );
     println!("{}", crate::strings::get("usage.flag.subtitles"));
     println!("{}", crate::strings::get("usage.flag.keydb"));

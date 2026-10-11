@@ -44,6 +44,25 @@ fn presentation_language_cli_is_independent_of_audio_all() {
     assert_eq!(super::main_title(&[], &de, None), None);
 }
 
+// The rip path's automatic title: `--presentation-language de` picks the German cut (title 2),
+// through the parsed flags themselves, not a binding run() keeps of its own.
+#[test]
+fn the_rip_path_picks_the_main_title_with_the_presentation_language() {
+    let titles = crate::selection_test_fixtures::variant_titles();
+    let flags = parse_flags(&["--presentation-language".into(), "de".into()]).unwrap();
+    assert_eq!(super::MainPick::of(&flags).title(&titles), Some(1));
+    let none = parse_flags(&[]).unwrap();
+    assert_eq!(super::MainPick::of(&none).title(&titles), Some(0));
+    let src = include_str!("pipe.rs").replace("\r\n", "\n");
+    let at = src.find("\npub fn run(").expect("run");
+    let run = &src[at..at + src[at..].find("\n}\n").expect("end of run")];
+    let pick = run
+        .find("let main_pick = MainPick::of(&flags);")
+        .expect("built from flags");
+    assert!(pick < run.find("let ParsedFlags {").expect("destructure"));
+    assert!(run.contains("scanned.and_then(|disc| main_pick.title(&disc.titles))"));
+}
+
 // A tag selection cannot match is refused as the flag is read, not silently ripped as title 0.
 #[test]
 fn presentation_language_flag_rejects_a_tag_that_is_not_a_language() {
