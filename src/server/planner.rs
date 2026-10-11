@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_authored_zero_or_one_episode_roster_keeps_single_output_policy() {
+    fn authored_roster_naming_no_episode_needs_review_and_one_episode_stays_single() {
         let cfg = Config::default();
         let media = MediaMetadata {
             kind: Some(MediaKind::Tv),
@@ -588,7 +588,15 @@ mod tests {
                     ordinal: (index < members).then_some(index),
                 };
             }
-            let plan = plan(&cfg, &titles, &media, Path::new("Show.mkv")).unwrap();
+            let planned = plan(&cfg, &titles, &media, Path::new("Show.mkv"));
+            if members == 0 {
+                assert!(
+                    matches!(&planned, Err(PlanError::Selection(r)) if r.reason == freemkv_engine::SelectionReviewReason::IncompleteEpisodeRoster),
+                    "{planned:?}"
+                );
+                continue;
+            }
+            let plan = planned.unwrap();
             assert_eq!(plan.outputs.len(), 1);
             assert_eq!(plan.outputs[0].filename, "Show.mkv");
             assert_eq!(plan.outputs[0].episode, None);
