@@ -986,6 +986,110 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
 static STRANDED_WARNED: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
+// Staged outputs of 1.8.3 hand-offs already reported as filed by it, logged once each.
+static MOVED_AWAY_LOGGED: once_cell::sync::Lazy<
+    Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
+
+// A hand-off v1.8.3 wrote: its state.json predates `disc_identity`, which this build
+// always writes and which arrived with the delivery journal.
+fn pre_journal_handoff(dir: &Path) -> bool {
+    std::fs::read(dir.join(crate::server::ripper::staging::STATE_FILE)).is_ok_and(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .is_ok_and(|v| v.is_object() && v.get("disc_identity").is_none())
+    })
+}
+
+// The outputs still to deliver, and those 1.8.3 already moved away: a planned leaf whose
+// staged path is positively absent. Anything else stays planned (and is held if missing).
+fn split_moved_away(
+    dir: &Path,
+    outputs: Vec<crate::server::ripper::staging::Output>,
+) -> (
+    Vec<crate::server::ripper::staging::Output>,
+    Vec<crate::server::ripper::staging::Output>,
+) {
+    let (gone, kept): (Vec<_>, Vec<_>) = outputs.into_iter().partition(|output| {
+        Path::new(&output.filename).file_name() == Some(output.filename.as_ref())
+            && std::fs::symlink_metadata(dir.join(&output.filename))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    });
+    for output in &gone {
+        let staged = dir.join(&output.filename);
+        if MOVED_AWAY_LOGGED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(staged.clone())
+        {
+            crate::server::log::syslog(&format!(
+                "{}: already filed by the earlier version (no longer staged); not delivered again",
+                staged.display()
+            ));
+        }
+    }
+    (kept, gone)
+}
+
+// With an output moved away, every other file must be planned or ripper bookkeeping: a
+// staged file under another name is never left to the journal's cleanup to delete.
+fn legacy_unlisted_file(
+    dir: &Path,
+    planned: &[std::path::PathBuf],
+) -> std::io::Result<Option<String>> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default();
+        let map_of_planned = path.extension().is_some_and(|e| e == "mapfile")
+            && planned.contains(&path.with_extension(""));
+        if planned.contains(&path)
+            || crate::server::ripper::staging::is_ripper_bookkeeping(name)
+            || map_of_planned
+            || orphan_mapfile(&path)
+        {
+            continue;
+        }
+        return Ok(Some(name.to_string_lossy().into_owned()));
+    }
+    Ok(None)
+}
+
+// A recovery map whose image is gone: it holds no media.
+fn orphan_mapfile(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "mapfile")
+        && std::fs::symlink_metadata(path.with_extension(""))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+// Every output of a 1.8.3 hand-off was already filed by it: only bookkeeping is left, so
+// the rip is complete. Removes that bookkeeping and the folder; nothing else.
+fn finish_filed_elsewhere(dir: &Path, display_name: &str) {
+    let key = dir.to_string_lossy().to_string();
+    let removed = (|| -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            let name = path.file_name().unwrap_or_default();
+            if crate::server::ripper::staging::is_ripper_bookkeeping(name) || orphan_mapfile(&path)
+            {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        std::fs::remove_dir(dir)
+    })();
+    match removed {
+        Ok(()) => {
+            clear_error(&key);
+            crate::server::log::syslog(&format!(
+                "Move complete: {display_name} (filed by the earlier version)"
+            ));
+        }
+        Err(e) => record_error(
+            &key,
+            &format!("staging cleanup failed: {e}"),
+            "The rip was already filed; remove its staging folder by hand.",
+        ),
+    }
+}
+
 // Forget in-memory mover state, as a process restart would.
 #[cfg(test)]
 pub(super) fn forget_process_state() {
@@ -1287,6 +1391,41 @@ fn check_and_move(cfg: &Config) {
             });
         }
 
+        // 1.8.3 delivered without a journal and may have been cut off mid-delivery. An output
+        // it already moved out of staging is left where it was filed: never claimed, linked
+        // or delivered again. Existing destinations are never adopted (the strict rule).
+        let legacy = delivery.is_none() && pre_journal_handoff(&dir);
+        let (state_outputs, moved_away) = if legacy {
+            split_moved_away(&dir, state_outputs)
+        } else {
+            (state_outputs, Vec::new())
+        };
+        if !moved_away.is_empty() {
+            match legacy_unlisted_file(&dir, &ripped_files) {
+                Ok(None) => {}
+                Ok(Some(name)) => {
+                    record_error(
+                        &dir.to_string_lossy(),
+                        &format!("staging holds a file this hand-off does not list: {name}"),
+                        "Nothing was moved or deleted. Rename it to the output it is, or remove it if it is not wanted, then choose Retry.",
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    record_error(
+                        &dir.to_string_lossy(),
+                        &format!("cannot list staging directory {}: {e}", dir.display()),
+                        "check that the staging mount is healthy and readable",
+                    );
+                    continue;
+                }
+            }
+            if ripped_files.is_empty() {
+                finish_filed_elsewhere(&dir, &display_name);
+                continue;
+            }
+        }
+
         if ripped_files.is_empty() && delivery.is_none() {
             // Nothing the mover should promote. Skip; the dir's lifetime
             // is governed by the ripper (which owns the state.json transition
@@ -1324,25 +1463,6 @@ fn check_and_move(cfg: &Config) {
         if let Some(saved) = &delivery {
             planned_moves = saved.moves();
         }
-        // A hand-off from before delivery journals (v1.8.3) may have been cut off mid-delivery.
-        // Like that build's next pass, only what is still staged is planned: an output it
-        // already moved away is never claimed, linked or delivered again.
-        let legacy = delivery.is_none() && pre_journal_handoff(&dir);
-        let (state_outputs, moved_away): (Vec<_>, Vec<_>) =
-            state_outputs.into_iter().partition(|output| {
-                !legacy
-                    || ripped_files
-                        .iter()
-                        .any(|p| p.file_name().is_some_and(|n| n == output.filename.as_str()))
-            });
-        let moved_away: Vec<String> = moved_away
-            .iter()
-            .map(|output| {
-                let leaf = tv_episode_leaf(&tmdb_result, &moved_away, &output.filename, season)
-                    .unwrap_or_else(|| output.filename.clone());
-                build_destination(cfg, &tmdb_result, &leaf, season)
-            })
-            .collect();
 
         // Nothing below touches a destination root before it passes a bounded write test:
         // a stale or hung share holds the move (output kept in staging) and never blocks here.
@@ -1396,21 +1516,15 @@ fn check_and_move(cfg: &Config) {
         // gives disc 2 `Title (Year)_2.mkv` instead of a collision. ONE variant
         // covers the whole file set (MKV+ISO matched); a STAT failure aborts as `uncertain`.
         if delivery.is_none() {
-            let mut uncertain = false;
+            let mut uncertain = None;
             let mut residue = None;
-            let staging_canonical = Path::new(staging_root).canonicalize();
             let variant = crate::server::util::disc_variant(|n| {
-                if uncertain || residue.is_some() {
+                if uncertain.is_some() || residue.is_some() {
                     return false;
                 }
-                for (src, dest) in planned_moves.iter() {
+                for (_, dest) in planned_moves.iter() {
                     let candidate = dest_with_variant(dest, n);
-                    let claim = if legacy {
-                        legacy_dest_claim(src, &candidate, &staging_canonical)
-                    } else {
-                        unowned_dest_claim(&candidate)
-                    };
-                    match claim {
+                    match unowned_dest_claim(&candidate) {
                         DestClaim::Claimable => {}
                         DestClaim::OtherFile => return false,
                         DestClaim::EmptyFile => {
@@ -1418,7 +1532,7 @@ fn check_and_move(cfg: &Config) {
                             return false;
                         }
                         DestClaim::Unknown => {
-                            uncertain = true;
+                            uncertain = Some(candidate);
                             return false;
                         }
                     }
@@ -1443,16 +1557,20 @@ fn check_and_move(cfg: &Config) {
                         *dest = dest_with_variant(dest, n);
                     }
                 }
-                None if uncertain && legacy => {
-                    // Never fall back to base names: hold this tick and look again next tick.
+                None if legacy && uncertain.is_some() => {
+                    // A legacy rip never falls back to the base names it could not examine.
+                    let path = uncertain.unwrap_or_default();
                     record_error(
                         &dir_str,
-                        "a destination could not be examined, so nothing was moved",
-                        "Check the output folder's permissions and mount; the rip stays in staging and is tried again on the next pass.",
+                        &format!(
+                            "cannot examine the destination {}; nothing was moved",
+                            absolute_for_log(&path)
+                        ),
+                        "Check the output folder's permissions and mount. The rip stays in staging and is tried again on the next pass.",
                     );
                     continue;
                 }
-                None if uncertain => {
+                None if uncertain.is_some() => {
                     // Left to the collision guard's stat-error branch, which logs
                     // the deferral and retries next tick.
                 }
@@ -1568,26 +1686,12 @@ fn check_and_move(cfg: &Config) {
                 );
                 continue;
             }
-            for dest in &moved_away {
-                tracing::info!(
-                    dir = %dir.display(),
-                    destination = %absolute_for_log(dest),
-                    "mover: an output of this 1.8.3 hand-off is no longer staged; its earlier delivery is not repeated"
-                );
-            }
-            // Destinations a legacy hand-off already filed: proved identical above.
-            let landed: Vec<std::path::PathBuf> = planned_moves
-                .iter()
-                .filter(|(_, dest)| legacy && std::fs::symlink_metadata(dest).is_ok())
-                .map(|(src, _)| src.clone())
-                .collect();
             match manifest::Manifest::create(
                 &dir,
                 marker.clone(),
                 state_outputs.clone(),
                 dest_roots,
                 &planned_moves,
-                &landed,
             ) {
                 Ok(saved) => {
                     planned_moves = saved.moves();
@@ -2036,95 +2140,6 @@ enum DestClaim {
     /// We could not find out. NOT a licence to try another name — see
     /// [`dest_claim`].
     Unknown,
-}
-
-// A hand-off v1.8.3 wrote: its state.json predates `disc_identity`, which this build
-// always writes and which arrived with the delivery journal.
-fn pre_journal_handoff(dir: &Path) -> bool {
-    std::fs::read(dir.join(crate::server::ripper::staging::STATE_FILE)).is_ok_and(|bytes| {
-        serde_json::from_slice::<serde_json::Value>(&bytes)
-            .is_ok_and(|v| v.is_object() && v.get("disc_identity").is_none())
-    })
-}
-
-// v1.8.3 recognised its own earlier copy; here only a byte-for-byte identical, valid file
-// outside staging counts, never the staged source itself (a link or a folder into staging).
-fn legacy_dest_claim(
-    src: &Path,
-    dest: &str,
-    staging: &std::io::Result<std::path::PathBuf>,
-) -> DestClaim {
-    let path = Path::new(dest);
-    match unowned_dest_claim(dest) {
-        DestClaim::OtherFile => {}
-        claim => return claim,
-    }
-    let (Ok(staging), Ok(found), Ok(source)) = (
-        staging,
-        std::fs::symlink_metadata(path),
-        std::fs::metadata(src),
-    ) else {
-        return DestClaim::Unknown;
-    };
-    let Ok(canonical) = path.canonicalize() else {
-        return DestClaim::Unknown;
-    };
-    #[cfg(unix)]
-    let same_file = {
-        use std::os::unix::fs::MetadataExt;
-        found.dev() == source.dev() && found.ino() == source.ino()
-    };
-    #[cfg(not(unix))]
-    let same_file = src.canonicalize().is_ok_and(|s| s == canonical);
-    if !found.is_file()
-        || same_file
-        || canonical.starts_with(staging)
-        || check_post_copy(src, path).is_err()
-    {
-        return DestClaim::OtherFile;
-    }
-    match same_bytes(src, path) {
-        Ok(true) => DestClaim::Claimable,
-        Ok(false) => DestClaim::OtherFile,
-        Err(_) => DestClaim::Unknown,
-    }
-}
-
-// Whether two files hold the same bytes, read in chunks; stops at the first difference
-// and gives up (Interrupted) once shutdown begins.
-fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
-    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
-    if a.metadata()?.len() != b.metadata()?.len() {
-        return Ok(false);
-    }
-    let (mut x, mut y) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
-    loop {
-        if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "comparison cancelled by shutdown",
-            ));
-        }
-        let n = read_full(&mut a, &mut x)?;
-        if read_full(&mut b, &mut y[..n.max(1)])? != n || x[..n] != y[..n] {
-            return Ok(false);
-        }
-        if n == 0 {
-            return Ok(true);
-        }
-    }
-}
-
-fn read_full(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
-    use std::io::Read;
-    let mut done = 0;
-    while done < buf.len() {
-        match file.read(&mut buf[done..])? {
-            0 => break,
-            n => done += n,
-        }
-    }
-    Ok(done)
 }
 
 // A new plan owns no existing files, even when their bytes happen to match.

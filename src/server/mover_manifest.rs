@@ -105,16 +105,12 @@ impl Manifest {
         Ok(Some(manifest))
     }
 
-    /// Freeze the delivery of `moves`. The sources in `landed` were already filed by a
-    /// pre-journal build (v1.8.3) cut off mid-delivery: their destination is recorded as
-    /// delivered, and a staged copy still present must be the same file.
     pub fn create(
         dir: &Path,
         marker: serde_json::Value,
         outputs: Vec<crate::server::ripper::staging::Output>,
         roots: Vec<String>,
         moves: &[(PathBuf, String)],
-        landed: &[PathBuf],
     ) -> io::Result<Self> {
         let directory = dir.canonicalize()?;
         let roots = roots
@@ -128,10 +124,6 @@ impl Manifest {
         let mut entries = Vec::new();
         for (source, destination) in moves {
             let destination_planned = destination;
-            if landed.contains(source) {
-                entries.push(landed_entry(&directory, source, destination)?);
-                continue;
-            }
             let source_identity = Stamp::read(source)?;
             let source = source.canonicalize()?;
             let target = Path::new(destination);
@@ -170,15 +162,6 @@ impl Manifest {
                 completed: false,
                 planned: Some(destination_planned.clone()),
             });
-        }
-        let mut destinations = std::collections::HashSet::new();
-        if entries.iter().any(|e| {
-            !destinations.insert(&e.destination)
-                || !roots.iter().any(|root| e.destination.starts_with(root))
-        }) {
-            return Err(io::Error::other(
-                "delivery plan has an invalid source or duplicate destination",
-            ));
         }
         let mut cleanup = Vec::new();
         for entry in std::fs::read_dir(&directory)? {
@@ -501,46 +484,6 @@ impl Manifest {
     }
 }
 
-// A destination a pre-journal build (v1.8.3) already published for the staged `source`:
-// the mover proved them identical; checked again here, and never the source itself.
-fn landed_entry(directory: &Path, source: &Path, destination: &str) -> io::Result<Entry> {
-    let target = Path::new(destination);
-    let parent = target
-        .parent()
-        .ok_or_else(|| io::Error::other("delivery target has no parent"))?
-        .canonicalize()?;
-    let entry_destination = parent.join(
-        target
-            .file_name()
-            .ok_or_else(|| io::Error::other("delivery target has no filename"))?,
-    );
-    let prepared = Stamp::read(&entry_destination)?;
-    let source_identity = Stamp::read(source)?;
-    let staged = source.canonicalize()?;
-    let unowned = || {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "unowned delivery destination exists",
-        )
-    };
-    if staged.parent() != Some(directory)
-        || entry_destination.starts_with(directory)
-        || entry_destination.canonicalize()? == staged
-        || source_identity.size != prepared.size
-        || !same_head_and_tail(&staged, &entry_destination)?
-    {
-        return Err(unowned());
-    }
-    Ok(Entry {
-        source: staged,
-        destination: entry_destination,
-        source_identity,
-        prepared: Some(prepared),
-        completed: true,
-        planned: Some(destination.to_owned()),
-    })
-}
-
 // The destination's folder still resolves to itself (it was canonical at freeze).
 fn verify_parent(path: &Path) -> io::Result<()> {
     let parent = path
@@ -574,7 +517,7 @@ fn adoptable(entry: &Entry) -> io::Result<()> {
 }
 
 // Compare the first and last 64 KiB of two files of equal length.
-pub(super) fn same_head_and_tail(a: &Path, b: &Path) -> io::Result<bool> {
+fn same_head_and_tail(a: &Path, b: &Path) -> io::Result<bool> {
     use std::io::{Read, Seek, SeekFrom};
     const WINDOW: u64 = 64 * 1024;
     let windows = |path: &Path| -> io::Result<(Vec<u8>, Vec<u8>)> {
