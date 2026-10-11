@@ -923,7 +923,8 @@ fn boot_creates_a_configured_staging_folder_only_where_its_parent_exists() {
     let temp = tempfile::tempdir().unwrap();
     let unmounted = temp.path().join("Volumes/nas/staging");
     let mounted = temp.path().join("mnt");
-    std::fs::create_dir_all(&mounted).unwrap();
+    // A mounted share has content; an empty mount point is refused (test below).
+    std::fs::create_dir_all(mounted.join("movies")).unwrap();
     let cfg_dir = temp.path().join("cfg");
     for (staging, created) in [
         (unmounted.clone(), false),
@@ -941,4 +942,31 @@ fn boot_creates_a_configured_staging_folder_only_where_its_parent_exists() {
         assert_eq!(staging.is_dir(), created, "{}", staging.display());
     }
     assert!(!temp.path().join("Volumes").exists());
+}
+
+// On Linux an unmounted share's mount point is an empty folder that exists: a configured
+// staging folder is not created inside it at boot.
+#[test]
+fn boot_does_not_create_staging_inside_an_empty_mount_point() {
+    let temp = tempfile::tempdir().unwrap();
+    let mountpoint = temp.path().join("mnt/nas");
+    std::fs::create_dir_all(&mountpoint).unwrap();
+    let cfg = Config {
+        autorip_dir: temp.path().join("cfg").to_string_lossy().into_owned(),
+        staging_dir: mountpoint.join("staging").to_string_lossy().into_owned(),
+        output_dir: temp.path().join("out").to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let created = ensure_dirs_bounded(
+        boot_dirs(&cfg, false),
+        std::time::Duration::from_secs(5),
+        boot_create(&cfg),
+    );
+    assert!(!mountpoint.join("staging").exists(), "{created:?}");
+    let reason = created
+        .iter()
+        .find(|(d, _)| *d == cfg.staging_dir)
+        .and_then(|(_, r)| r.clone().err())
+        .expect("refused with a reason");
+    assert!(reason.contains("empty"), "{reason}");
 }

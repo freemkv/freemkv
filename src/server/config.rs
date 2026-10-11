@@ -513,9 +513,9 @@ fn boot_dirs(cfg: &Config, output_relocated: bool) -> Vec<String> {
     dirs
 }
 
-// How startup creates one of `boot_dirs`. A configured staging folder is made only where
-// its parent exists (one level): on a share not mounted yet it would land on local disk.
-// The relocated default under the config folder is ours, and made in full.
+// How startup creates one of `boot_dirs`. A configured staging folder is made only on a live
+// parent (`create_dir_on_live_parent`): on a share not mounted yet it would land on local
+// disk. The relocated default under the config folder is ours, and made in full.
 fn boot_create(
     cfg: &Config,
 ) -> impl Fn(&std::path::Path) -> std::io::Result<()> + Send + Sync + 'static {
@@ -525,10 +525,7 @@ fn boot_create(
         if p != staging || staging == default {
             return std::fs::create_dir_all(p);
         }
-        match std::fs::create_dir(p) {
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && p.is_dir() => Ok(()),
-            other => other,
-        }
+        crate::server::util::create_dir_on_live_parent(p)
     }
 }
 

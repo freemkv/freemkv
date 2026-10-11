@@ -333,3 +333,30 @@ fn a_stamp_of_a_fifo_is_refused_without_blocking() {
     let error = result.expect_err("a FIFO is not a delivered file");
     assert!(error.to_string().contains("not a regular file"), "{error}");
 }
+
+// A folder is created only on a live parent: a missing parent, or an EMPTY one (what an
+// unmounted share's mount point looks like), is refused with a reason; an existing folder
+// is fine as it is.
+#[test]
+fn a_folder_is_created_only_on_a_live_parent() {
+    let t = tempfile::tempdir().unwrap();
+    let mountpoint = t.path().join("mnt/nas");
+    std::fs::create_dir_all(&mountpoint).unwrap();
+    let on_empty = mountpoint.join("staging");
+    let error = create_dir_on_live_parent(&on_empty).unwrap_err();
+    assert!(error.to_string().contains("empty"), "{error}");
+    assert!(!on_empty.exists());
+
+    let missing = t.path().join("Volumes/nas/staging");
+    assert!(create_dir_on_live_parent(&missing).is_err());
+    assert!(!t.path().join("Volumes").exists());
+
+    let live = t.path().join("live");
+    std::fs::create_dir_all(live.join("other")).unwrap();
+    create_dir_on_live_parent(&live.join("staging")).unwrap();
+    assert!(live.join("staging").is_dir());
+    create_dir_on_live_parent(&live.join("staging")).unwrap();
+
+    std::fs::create_dir(&on_empty).unwrap();
+    create_dir_on_live_parent(&on_empty).expect("an existing folder stands");
+}

@@ -258,6 +258,35 @@ pub fn source_lf(src: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Create the folder `path` (one level) only on a live parent: refused when the parent is
+/// missing or an empty folder, which is what an unmounted share's mount point looks like
+/// (a write there would land on the local disk). An existing folder at `path` is fine.
+pub(crate) fn create_dir_on_live_parent(path: &std::path::Path) -> std::io::Result<()> {
+    if std::fs::metadata(path).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| std::io::Error::other(format!("{} has no parent folder", path.display())))?;
+    let mut entries = std::fs::read_dir(parent).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("the folder above {} is not there: {e}", path.display()),
+        )
+    })?;
+    if entries.next().is_none() {
+        return Err(std::io::Error::other(format!(
+            "not created: the folder above {} is empty (an unmounted share's mount point?)",
+            path.display()
+        )));
+    }
+    match std::fs::create_dir(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        other => other,
+    }
+}
+
 /// Run the test `path` alone in a child process with `env` set, returning its exit status.
 /// Panics unless the child ran exactly that one test: a filter matching nothing exits 0.
 #[cfg(test)]
