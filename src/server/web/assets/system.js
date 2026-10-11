@@ -102,7 +102,7 @@ export default {
       if (document.activeElement !== dbg) { dbg.checked = !!d.debug_enabled; dbg.nextElementSibling.textContent = d.debug_enabled ? 'On' : 'Off'; }
       put($('#logdir', view), 'Logs live in <span class="mono">' + esc(d.log_dir) + '</span>. The download bundles every one of them.');
     };
-    const load = () => api('GET', '/api/system').then(d => { sys = d; paint(); }).catch(e => ctx.stale() || restarting || put($('#lede', view), '<span style="color:var(--bad)">Could not load: ' + esc(e.message) + '</span>'));
+    const load = () => restarting ? Promise.resolve() : api('GET', '/api/system').then(d => { sys = d; paint(); }).catch(e => ctx.stale() || restarting || put($('#lede', view), '<span style="color:var(--bad)">Could not load: ' + esc(e.message) + '</span>'));
     load();
     ctx.every(10000, load);
 

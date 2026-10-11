@@ -87,15 +87,24 @@ fn wait_for_zero_waits_for_held_handlers_within_its_bound() {
 #[test]
 fn only_a_launchd_job_label_counts_as_a_service_manager() {
     use std::ffi::OsStr;
-    assert!(launchd_job(Some(OsStr::new("io.freemkv.library"))));
+    assert!(launchd_job(Some(OsStr::new("io.freemkv.library")), 1));
     for terminal in [
         None,
         Some(""),
         Some("0"),
         Some("application.com.apple.Terminal.1234"),
     ] {
-        assert!(!launchd_job(terminal.map(OsStr::new)), "{terminal:?}");
+        assert!(!launchd_job(terminal.map(OsStr::new), 1), "{terminal:?}");
     }
+}
+
+// A job label with a non-launchd parent (a script run under another job) is unsupervised,
+// so the reboot route answers 409.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_job_label_without_a_launchd_parent_is_not_supervised() {
+    use std::ffi::OsStr;
+    assert!(!launchd_job(Some(OsStr::new("io.freemkv.library")), 4242));
 }
 
 // tiny_http's accept thread exits after reporting an accept error, so the port

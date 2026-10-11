@@ -365,9 +365,13 @@ fn relaunch_with(
         }
     };
     let e = exec(exe, &relaunch.argv);
-    log::syslog(&format!(
-        "autorip reboot: not re-executed ({e}); exiting 75 for the service manager to restart"
-    ));
+    if e.kind() == std::io::ErrorKind::Unsupported {
+        log::syslog("autorip reboot: exiting 75 for the service manager to restart");
+    } else {
+        log::syslog(&format!(
+            "autorip reboot: not re-executed ({e}); exiting 75 for the service manager to restart"
+        ));
+    }
     RESTART_EXIT_CODE
 }
 

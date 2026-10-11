@@ -2773,7 +2773,25 @@ fn relaunch_supported() -> bool {
 
 #[cfg(target_os = "macos")]
 fn relaunch_supported() -> bool {
-    launchd_job(std::env::var_os("XPC_SERVICE_NAME").as_deref())
+    launchd_job(
+        std::env::var_os("XPC_SERVICE_NAME").as_deref(),
+        parent_pid(),
+    )
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn parent_pid() -> i32 {
+    // SAFETY: getppid has no preconditions and cannot fail.
+    unsafe { libc::getppid() }
+}
+
+// Test seam: the route tests set the parent pid through the environment.
+#[cfg(all(target_os = "macos", test))]
+fn parent_pid() -> i32 {
+    std::env::var("FREEMKV_TEST_PPID")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
 }
 
 #[cfg(not(unix))]
@@ -2782,12 +2800,16 @@ fn relaunch_supported() -> bool {
 }
 
 // launchd sets XPC_SERVICE_NAME to the job label; a terminal inherits "0" or the label
-// of the app it runs in ("application.…"), and neither restarts a server.
+// of the app it runs in ("application.…"), and neither restarts a server. The parent
+// must be launchd (pid 1) too, or a script under another job would pass.
 #[cfg(target_os = "macos")]
-fn launchd_job(xpc_service_name: Option<&std::ffi::OsStr>) -> bool {
-    xpc_service_name
-        .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|name| !name.is_empty() && name != "0" && !name.starts_with("application."))
+fn launchd_job(xpc_service_name: Option<&std::ffi::OsStr>, ppid: i32) -> bool {
+    ppid == 1
+        && xpc_service_name
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| {
+                !name.is_empty() && name != "0" && !name.starts_with("application.")
+            })
 }
 
 fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {

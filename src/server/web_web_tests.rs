@@ -4412,7 +4412,7 @@ mod http {
 
     // Run `name` (in `http`) alone in a child process with `env` applied: a reboot sets
     // the process-wide SHUTDOWN, which refuses every rip spawn.
-    fn reboot_route_in_child(name: &str, env: Option<&str>) -> bool {
+    fn reboot_route_in_child(name: &str, env: Option<&str>, ppid: &str) -> bool {
         const CHILD: &str = "FREEMKV_TEST_REBOOT_ROUTE_CHILD";
         if std::env::var_os(CHILD).is_some() {
             return true;
@@ -4424,7 +4424,8 @@ mod http {
                 &format!("server::web::web_tests::http::{name}"),
                 "--nocapture",
             ])
-            .env(CHILD, "1");
+            .env(CHILD, "1")
+            .env("FREEMKV_TEST_PPID", ppid);
         match env {
             Some(label) => child.env("XPC_SERVICE_NAME", label),
             None => child.env_remove("XPC_SERVICE_NAME"),
@@ -4457,6 +4458,7 @@ mod http {
         if !reboot_route_in_child(
             "system_reboot_requests_a_relaunch",
             Some("io.freemkv.library"),
+            "1",
         ) {
             return;
         }
@@ -4476,7 +4478,11 @@ mod http {
     #[cfg(target_os = "macos")]
     #[test]
     fn system_reboot_is_refused_without_a_service_manager() {
-        if !reboot_route_in_child("system_reboot_is_refused_without_a_service_manager", None) {
+        if !reboot_route_in_child(
+            "system_reboot_is_refused_without_a_service_manager",
+            None,
+            "1",
+        ) {
             return;
         }
         let cfg = Arc::new(RwLock::new(Config::default()));
@@ -4487,6 +4493,23 @@ mod http {
         assert!(!v["error"].as_str().unwrap_or_default().is_empty());
         assert!(!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
         assert!(!crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    // A job label inherited by a script under another launchd job is not supervision.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_reboot_is_refused_when_the_parent_is_not_launchd() {
+        if !reboot_route_in_child(
+            "system_reboot_is_refused_when_the_parent_is_not_launchd",
+            Some("io.freemkv.library"),
+            "4242",
+        ) {
+            return;
+        }
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
+        assert_eq!(code, 409, "{body}");
+        assert!(!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
     }
 
     // ── handle_device_log (GET /api/logs/<device>) ──────────────────
