@@ -1091,3 +1091,34 @@ fn shipped_stop_grace_outlasts_the_stop_deadline() {
         "Dockerfile --stop-timeout hint {hinted} < {need}"
     );
 }
+
+// Rips and services share one budget: time the rips leave goes to the services.
+#[test]
+fn services_get_the_time_the_rips_leave() {
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let mover = std::thread::spawn(move || {
+        let _ = wait.recv();
+    });
+    let staging = tempfile::tempdir().unwrap();
+    let bounds = Bounds {
+        rips: Duration::from_secs(5),
+        services: Duration::from_millis(100),
+        web: Duration::from_millis(100),
+    };
+    let progress = StopProgress::default();
+    // The worker finishes well after the services' own 100 ms, inside the rips' unused 5 s.
+    let finisher = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        drop(release);
+    });
+    assert!(stop_services(
+        staging.path(),
+        |_| true,
+        vec![("mover", Some(mover))],
+        None,
+        &bounds,
+        &progress,
+    ));
+    assert_eq!(progress.pending(), "nothing (the exit itself stalled)");
+    finisher.join().unwrap();
+}

@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 // Stop bounds: the rip threads, then every other service together, then the web thread.
 // Every step is a cancel whose work resumes on the next start (markers are cleared first), so
 // a bound only has to let the cancel land: a rip gets one drive recovery read (60 s) so its
-// ISO is not cut mid-write; the services, cancelling since the stop request, 30 s more.
+// ISO is not cut mid-write; the services (cancelling since the stop request) share that
+// budget and get 30 s more.
 const RIP_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const WEB_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -279,7 +280,6 @@ pub fn run(argv: Vec<String>) {
     ripper::drive_poll_loop(&cfg);
 
     SHUTDOWN.store(true, Ordering::Release);
-    progress.finish("startup and drive polling");
     let workers = vec![
         ("mover", Some(mover_handle)),
         ("muxer", Some(muxer_handle)),
@@ -293,6 +293,7 @@ pub fn run(argv: Vec<String>) {
         .unwrap_or_else(|e| e.into_inner())
         .staging_dir
         .clone();
+    progress.finish("startup and drive polling");
     stop_services(
         Path::new(&staging),
         ripper::join_all_rip_threads,
@@ -337,6 +338,8 @@ fn stop_services(
             move || ripper::staging::clear_inprogress_markers(&staging),
         )
     };
+    // Rips and services share one budget from here: time the rips leave goes to the services.
+    let services_deadline = Instant::now() + bounds.rips + bounds.services;
     let mut done = clear_markers(progress);
     progress.start("rip threads");
     for (name, _) in &workers {
@@ -349,9 +352,8 @@ fn stop_services(
     } else {
         done = false;
     }
-    let deadline = Instant::now() + bounds.services;
     for (name, handle) in workers {
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = services_deadline.saturating_duration_since(Instant::now());
         done &= progress.finish_if(name, join_bounded(handle, name, left));
     }
     let web_deadline = Instant::now() + bounds.web;
@@ -1093,7 +1095,7 @@ pub(crate) fn listed_in(table: &str, path: &str) -> bool {
 }
 
 // The kernel writes space, tab, newline and backslash in a mount path as \ooo octal.
-fn unescape_mount_path(s: &str) -> String {
+pub(crate) fn unescape_mount_path(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
