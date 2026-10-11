@@ -340,6 +340,57 @@ pub fn partial_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
+// The queue file at `path` as a restart finds it, and why it could not be loaded if it
+// could not. A damaged file is set aside and the queue starts empty.
+fn load(path: &Path) -> (QueueFile, Option<String>) {
+    let mut unreadable = None;
+    let mut file = match read_retrying(path) {
+        Ok(Some(bytes)) => serde_json::from_slice::<QueueFile>(&bytes).unwrap_or_else(|e| {
+            match super::set_aside(path) {
+                Ok(aside) => {
+                    tracing::warn!(path = %path.display(), aside = %aside.display(), error = %e, "library queue damaged; set aside, starting empty");
+                }
+                Err(aside_error) => {
+                    tracing::error!(path = %path.display(), error = %aside_error, "damaged library queue could not be set aside");
+                    unreadable = Some(crate::strings::fmt_or(
+                        "server.library.queue_damaged",
+                        "{path} is damaged ({error}) and could not be set aside ({aside_error}); the remux queue is held and the file is left as it is.",
+                        &[
+                            ("path", &path.display().to_string()),
+                            ("error", &e.to_string()),
+                            ("aside_error", &aside_error.to_string()),
+                        ],
+                    ));
+                }
+            }
+            QueueFile::default()
+        }),
+        Ok(None) => QueueFile::default(),
+        Err(e) => {
+            tracing::error!(path = %path.display(), error = %e, "library queue unreadable; held, file left as it is");
+            unreadable = Some(crate::strings::fmt_or(
+                "server.library.queue_unreadable",
+                "{path} cannot be read ({error}); the remux queue is held and the file is left as it is. Fix the config folder; it is read again every minute.",
+                &[("path", &path.display().to_string()), ("error", &e.to_string())],
+            ));
+            QueueFile::default()
+        }
+    };
+    file.schema = SCHEMA;
+    for job in &mut file.jobs {
+        if job.state == JobState::Running {
+            job.state = JobState::Queued;
+            job.note = Some(JobNote::Restarted);
+        }
+    }
+    for job in file.jobs.iter().filter(|j| j.state == JobState::Queued) {
+        for target in std::iter::once(job.target.clone()).chain(job.output_targets()) {
+            let _ = std::fs::remove_file(partial_path(&target));
+        }
+    }
+    (file, unreadable)
+}
+
 /// The persistent queue.
 pub struct Queue {
     path: PathBuf,
@@ -350,8 +401,13 @@ pub struct Queue {
     generation: AtomicU64,
     durability_pending: AtomicBool,
     // Set when the file on disk could not be loaded: it is never written over.
-    unreadable: Option<String>,
+    unreadable: Mutex<Option<String>>,
+    // When loading the unreadable file was last tried, in epoch seconds.
+    load_tried_at: AtomicU64,
 }
+
+/// How long a queue file that could not be read waits before it is read again.
+const UNREADABLE_RETRY_SECS: u64 = 60;
 
 // The queue file's bytes (`None`: there is none), tried a few times: a share that answers
 // EIO or ESTALE for a moment must not cost the queue.
@@ -421,63 +477,68 @@ impl Queue {
     /// Load (or start) the queue in `config_dir`, re-queueing a job a restart cut off. A
     /// damaged file is set aside under a name of its own and the queue starts empty; a file
     /// that cannot be read (after a few tries) is left as it is, and the queue holds
-    /// without ever writing over it ([`Self::unreadable`]).
+    /// without ever writing over it ([`Self::unreadable`]) until it reads again.
     pub fn open(config_dir: &Path) -> Self {
         let path = config_dir.join(QUEUE_FILE);
-        let mut unreadable = None;
-        let mut file = match read_retrying(&path) {
-            Ok(Some(bytes)) => serde_json::from_slice::<QueueFile>(&bytes).unwrap_or_else(|e| {
-                match super::set_aside(&path) {
-                    Ok(aside) => {
-                        tracing::warn!(path = %path.display(), aside = %aside.display(), error = %e, "library queue damaged; set aside, starting empty");
-                    }
-                    Err(aside_error) => {
-                        tracing::error!(path = %path.display(), error = %aside_error, "damaged library queue could not be set aside");
-                        unreadable = Some(format!(
-                            "{} is damaged ({e}) and could not be set aside ({aside_error}); the remux queue is held and the file is left as it is.",
-                            path.display()
-                        ));
-                    }
-                }
-                QueueFile::default()
-            }),
-            Ok(None) => QueueFile::default(),
-            Err(e) => {
-                tracing::error!(path = %path.display(), error = %e, "library queue unreadable; held, file left as it is");
-                unreadable = Some(format!(
-                    "{} cannot be read ({e}); the remux queue is held and the file is left as it is. Fix the config folder, then restart.",
-                    path.display()
-                ));
-                QueueFile::default()
-            }
-        };
-        file.schema = SCHEMA;
-        for job in &mut file.jobs {
-            if job.state == JobState::Running {
-                job.state = JobState::Queued;
-                job.note = Some(JobNote::Restarted);
-            }
-        }
-        for job in file.jobs.iter().filter(|j| j.state == JobState::Queued) {
-            for target in std::iter::once(job.target.clone()).chain(job.output_targets()) {
-                let _ = std::fs::remove_file(partial_path(&target));
-            }
-        }
+        let (file, unreadable) = load(&path);
         let q = Self {
             path,
             state: Mutex::new(file),
             saved: Mutex::new(0),
             generation: AtomicU64::new(1),
             durability_pending: AtomicBool::new(true),
-            unreadable,
+            unreadable: Mutex::new(unreadable),
+            load_tried_at: AtomicU64::new(crate::server::util::epoch_secs()),
         };
         q.persist_now();
         q
     }
 
-    /// Why the queue file could not be loaded: nothing is claimed or written until a restart.
-    pub fn unreadable(&self) -> Option<&str> {
-        self.unreadable.as_deref()
+    /// Why the queue file could not be loaded: nothing is claimed or written until it is.
+    pub fn unreadable(&self) -> Option<String> {
+        self.unreadable
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn is_unreadable(&self) -> bool {
+        self.unreadable
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Read a queue file that could not be loaded again, at most once a minute (`now`, in
+    /// epoch seconds). True once it is loaded; until then it is never written over.
+    pub fn retry_unreadable(&self, now: u64) -> bool {
+        if !self.is_unreadable() {
+            return true;
+        }
+        let tried = self.load_tried_at.load(Ordering::SeqCst);
+        if now < tried.saturating_add(UNREADABLE_RETRY_SECS)
+            || self
+                .load_tried_at
+                .compare_exchange(tried, now, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return false;
+        }
+        let (file, still) = load(&self.path);
+        if still.is_some() {
+            *self.unreadable.lock().unwrap_or_else(|e| e.into_inner()) = still;
+            return false;
+        }
+        {
+            let mut state = self.lock();
+            *state = file;
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.durability_pending.store(true, Ordering::SeqCst);
+            *self.unreadable.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        tracing::info!(path = %self.path.display(), "library queue readable again; loaded");
+        self.persist_now();
+        true
     }
 
     /// The queue file.
@@ -662,7 +723,7 @@ impl Queue {
     /// Take the oldest queued job past its backoff and mark it running. `None` while
     /// paused. An idle queue is left alone: no generation bump, no write.
     pub fn claim_next(&self) -> Option<Job> {
-        if self.unreadable.is_some() {
+        if self.is_unreadable() {
             return None;
         }
         if self.durability_pending.load(Ordering::SeqCst) {
@@ -1189,8 +1250,8 @@ impl Queue {
         f: impl FnOnce(&mut QueueFile) -> std::io::Result<T>,
         write: impl FnOnce(&Path, &[u8]) -> Result<(), (bool, std::io::Error)>,
     ) -> std::io::Result<T> {
-        if let Some(why) = &self.unreadable {
-            return Err(std::io::Error::other(why.clone()));
+        if let Some(why) = self.unreadable() {
+            return Err(std::io::Error::other(why));
         }
         let mut state = self.lock();
         let mut next = state.clone();
@@ -1235,7 +1296,7 @@ impl Queue {
         json: &[u8],
         write: impl FnOnce(&Path, &[u8]) -> Result<(), (bool, std::io::Error)>,
     ) {
-        if self.unreadable.is_some() {
+        if self.is_unreadable() {
             return;
         }
         let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());

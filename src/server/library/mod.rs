@@ -1276,8 +1276,16 @@ impl Library {
             .filter(|h| h.recheck_at.is_some_and(|t| now < t))
     }
 
-    /// Hold the queue while its file could not be loaded; true when it is held so.
+    /// Hold the queue while its file could not be loaded; true when it is held so. The
+    /// file is read again at most once a minute, and the hold clears once it loads.
     pub(crate) fn hold_for_unreadable_queue(&self, now: u64) -> bool {
+        if self.queue.unreadable().is_none() {
+            return false;
+        }
+        if self.queue.retry_unreadable(now) {
+            self.set_hold(None);
+            return false;
+        }
         let Some(why) = self.queue.unreadable() else {
             return false;
         };
@@ -1285,7 +1293,7 @@ impl Library {
             role: "config",
             path: self.queue.path().to_path_buf(),
             state: health::State::Unhealthy,
-            message: why.to_string(),
+            message: why,
             hint: String::new(),
             since: now,
             recheck_at: None,

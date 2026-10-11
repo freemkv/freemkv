@@ -904,3 +904,33 @@ fn every_damaged_queue_file_is_set_aside_under_its_own_name() {
         b"second damage"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_queue_file_that_could_not_be_read_is_loaded_once_it_reads_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join(QUEUE_FILE);
+    let first = Queue::open(t.path());
+    first.add(vec![job(t.path(), "A")]);
+    drop(first);
+    let written = std::fs::read(&file).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        return; // running as a user that ignores modes
+    }
+    let q = Queue::open(t.path());
+    let opened = crate::server::util::epoch_secs();
+    assert!(q.unreadable().is_some());
+    // Still unreadable: held, and the file is never written over.
+    assert!(!q.retry_unreadable(opened + 60));
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), written);
+    // At most one try a minute.
+    assert!(!q.retry_unreadable(opened + 61));
+    assert!(q.unreadable().is_some());
+    assert!(q.retry_unreadable(opened + 120));
+    assert!(q.unreadable().is_none());
+    assert_eq!(q.snapshot().jobs.len(), 1);
+    assert!(q.claim_next().is_some(), "the loaded queue runs");
+}

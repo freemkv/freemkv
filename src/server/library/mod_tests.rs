@@ -615,3 +615,26 @@ fn tv_folder_partials_no_job_owns_are_swept() {
     assert!(!orphan.exists());
     assert!(season.join("Show S01E03.mkv").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn the_unreadable_queue_hold_clears_once_the_file_reads() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let cfg = t.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let file = cfg.join(queue::QUEUE_FILE);
+    std::fs::write(&file, br#"{"schema":2,"next_id":4,"jobs":[]}"#).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        return; // running as a user that ignores modes
+    }
+    let lib = Library::open(&cfg, &t.path().join("logs"));
+    let now = crate::server::util::epoch_secs();
+    assert!(lib.hold_for_unreadable_queue(now));
+    assert!(lib.hold().is_some());
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!lib.hold_for_unreadable_queue(now + 120));
+    assert!(lib.hold().is_none());
+    assert!(lib.queue.unreadable().is_none());
+}
