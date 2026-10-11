@@ -12,11 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-// Stop bounds: the rip threads, then every other service together, then the web thread.
-// Every step is a cancel whose work resumes on the next start (markers are cleared first), so
-// a bound only has to let the cancel land: a rip gets one drive recovery read (60 s) so its
-// ISO is not cut mid-write; the services (cancelling since the stop request) share that
-// budget and get 30 s more.
+// Stop bounds (rips, then the other services, then web). Each step is a cancel resumed next
+// start, so a bound only lets it land: a rip gets one drive recovery read (60 s) so its ISO
+// is not cut mid-write; the services, cancelling since the stop request, get 30 s more.
 const RIP_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 const SERVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const WEB_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -26,10 +24,9 @@ const MARKER_CLEAR_TIMEOUT: Duration = Duration::from_secs(3);
 const RESTART_EXIT_CODE: i32 = 75;
 // Slack past the drain bounds for the stop's own tail (log writes, the relaunch).
 const RELAUNCH_SLACK: Duration = Duration::from_secs(15);
-// Hard bound on any stop, counted from the stop request: past it the process exits, whatever
-// is still running (a thread blocked in the kernel on a dead share is never joined). 116 s.
-// The service managers we ship give a stop longer than this plus STOP_LOG_GRACE (pinned by
-// a test), so this deadline, not their SIGKILL, governs.
+// Hard bound on any stop (116 s from the request): past it the process exits, whatever still
+// runs. Our service managers allow longer than this plus STOP_LOG_GRACE (pinned by a test),
+// so this deadline, not their SIGKILL, governs.
 const STOP_DEADLINE: Duration = Duration::from_secs(
     RIP_DRAIN_TIMEOUT.as_secs()
         + SERVICE_DRAIN_TIMEOUT.as_secs()
@@ -317,10 +314,9 @@ struct Bounds {
     web: Duration,
 }
 
-// Graceful stop, bounded; whether everything finished. Markers are cleared first so a
-// SIGKILL mid-drain leaves resumable dirs, and again for a rip a late request started.
-// Nothing here waits without a bound: a component that does not stop in time is left
-// running (never joined) and named in `progress` and the closing log line.
+// Graceful stop, bounded; whether everything finished. Markers are cleared first (and again
+// for a late rip) so a SIGKILL mid-drain leaves resumable dirs. A component that does not
+// stop in time is left running, never joined, and named in `progress` and the last log line.
 fn stop_services(
     staging: &Path,
     join_rips: impl FnOnce(Duration) -> bool,
@@ -525,11 +521,9 @@ fn stop_exit_code() -> i32 {
     }
 }
 
-// The hard stop deadline. Once `stopping()` holds, it waits `after`, logs what the stop is
-// still waiting on (`log`, given at most STOP_LOG_GRACE), then calls `exit(code())`. Nothing
-// is joined: a thread blocked in the kernel on a dead share cannot be, and must not hold the
-// exit. (The kernel may still keep the process from finishing its exit until that syscall
-// returns; neither _exit nor SIGKILL can do better.)
+// The hard stop deadline: once `stopping()` holds, wait `after`, log what is still pending
+// (`log`, given at most STOP_LOG_GRACE), then `exit(code())`, the code decided then. Nothing
+// is joined: a thread blocked in the kernel on a dead share must not hold the exit.
 fn spawn_stop_deadline(
     after: Duration,
     stopping: impl Fn() -> bool + Send + 'static,

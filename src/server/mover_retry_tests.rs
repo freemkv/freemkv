@@ -849,3 +849,29 @@ fn concurrent_journal_updates_are_not_lost() {
     let journal = super::manifest::Manifest::load(&job).unwrap().unwrap();
     assert!(journal.announced(), "an update was lost");
 }
+
+// Retry says whether it scheduled anything: not for a path with no row, nor while the row's
+// copy worker is still blocked.
+#[test]
+fn retry_reports_whether_it_was_scheduled() {
+    let _g = guard();
+    let key = "/test-retry-report/job";
+    assert!(!clear_move_error(key), "no row");
+    record_error_with(key, "copy failed", "retry", |_| {});
+    MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get_mut(key)
+        .unwrap()
+        .worker_active = true;
+    assert!(!clear_move_error(key), "worker still blocked");
+    MOVE_ERRORS
+        .lock()
+        .unwrap()
+        .get_mut(key)
+        .unwrap()
+        .worker_active = false;
+    assert!(clear_move_error(key), "scheduled");
+    assert!(row(key).is_none() && requested(key));
+    prune_move_errors("/test-retry-report", &HashSet::new());
+}

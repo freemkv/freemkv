@@ -568,14 +568,17 @@ fn prune_move_errors(staging_root: &str, seen: &std::collections::HashSet<String
 
 /// Operator-initiated Retry: clear this error and its retry budget. The next
 /// mover tick may attempt delivery again; no media is removed by this action.
-pub fn clear_move_error(path: &str) {
+/// False when nothing was scheduled: no such row, or its copy worker is still blocked.
+pub fn clear_move_error(path: &str) -> bool {
     with_retry_maps(|errors, requests| {
         if errors.get(path).is_some_and(|e| !e.worker_active)
             && let Some(row) = errors.remove(path)
         {
             *requests.entry(path.to_string()).or_insert(false) |= row.missing_folder;
+            return true;
         }
-    });
+        false
+    })
 }
 
 /// Operator-initiated Retry all: reset errors and their retry budgets.

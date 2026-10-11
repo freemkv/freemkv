@@ -986,10 +986,9 @@ fn check_reporting(role: &'static str, path: PathBuf, want_write: bool) -> Mount
     result
 }
 
-// Check every folder at once, waiting up to `wait` between them; results keep the input
-// order. A probe out longer than `wait` reads "checking", one out for `hang_after` "not
-// responding"; `None` for a probe out less than `wait` (one started by someone else just now).
-// Either way the probe publishes its answer when it comes.
+// Check every folder at once within `wait`, in input order. A probe out longer than `wait`
+// reads "checking", one out for `hang_after` "not responding", a younger one `None`; each
+// probe publishes its answer whenever it comes.
 fn check_folders(
     folders: Vec<(&'static str, PathBuf, bool)>,
     wait: Duration,
