@@ -1044,10 +1044,9 @@ fn auto_insert_rip_mode(on_insert: &str) -> Option<crate::server::web::ResumeMod
     }
 }
 
-// Fresh unattended rip (1.7.7): discard this disc's staging, whatever it holds, then sweep.
-// Only staging the mux worker owns, another drive uses, or that can't be read stands down;
-// rip_disc's job lease (taken before its wipe) excludes the same disc in a second drive;
-// an empty dir is removed only while holding that lease.
+// Fresh unattended rip (1.7.7): reset this disc's capture (identity and corrections kept)
+// and sweep. Staging the mux worker owns, another drive leases, or that can't be read, or
+// a held delivery, stands down; an empty dir is removed only under the job lease.
 fn auto_rip_fresh(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     if staging_hold_stands_down(cfg, device, GuardFor::Insert) {
         return;

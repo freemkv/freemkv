@@ -136,15 +136,12 @@ fn warn_bad_key_throttled() {
     }
 }
 
-/// Resolve a disc `label` to a TMDB movie/TV entry.
-///
-/// Takes the RAW disc volume label (not a pre-cleaned string): cleaning and
-/// progressive-fallback trimming both live here so the lookup and the auto-file gate
-/// ([`is_confident_match`]) never disagree on what was searched. Queries the cleaned label,
-/// then on no confident match peels junk-shaped trailing tokens one at a time and re-queries
-/// (`query_variants`). Returns the first confident match (exact title + year) across the
-/// variants, else the best non-exact guess. A failed query with no confident match is an
-/// error, not "no match".
+/// Resolve a RAW disc volume `label` to a TMDB movie/TV entry. Cleaning and fallback
+/// trimming live here, so the lookup and the auto-file gate ([`is_confident_match`]) never
+/// disagree on what was searched: the cleaned label, then, with no confident match, with
+/// junk-shaped trailing tokens peeled one at a time (`query_variants`). Returns the first
+/// confident match (exact title + year), else the best guess; a failed query with no
+/// confident match is an error, not "no match".
 pub fn lookup(label: &str, api_key: &str) -> Result<Option<TmdbResult>, LookupFailed> {
     if api_key.is_empty() {
         return Ok(None);
