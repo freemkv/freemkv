@@ -98,8 +98,6 @@ pub enum PlanError {
     DuplicateOutput(String),
     /// The engine's episode selection needs review (E9086).
     Selection(freemkv_engine::SelectionReview),
-    /// A later disc's episode numbering has no confirmed First episode.
-    LaterDiscStart,
     /// The episode numbers would run past the supported range.
     EpisodeRange,
 }
@@ -113,7 +111,7 @@ impl PlanError {
                 "error.plan.action.roster",
                 "If it is a film, correct its match to the movie; to rip it as one title, turn off \"Rip TV seasons automatically\" in Settings.",
             )),
-            PlanError::LaterDiscStart | PlanError::EpisodeRange => Some(get_or(
+            PlanError::EpisodeRange => Some(get_or(
                 "error.plan.action.first_episode",
                 "Set the First episode when you correct its match.",
             )),
@@ -141,10 +139,6 @@ impl std::fmt::Display for PlanError {
                 "two outputs would use the same file name: {name}",
                 &[("name", name)],
             ),
-            PlanError::LaterDiscStart => get_or(
-                "error.plan.later_disc_start",
-                "Later-disc episode numbering needs a confirmed First episode; disc number and runtimes do not establish it.",
-            ),
             PlanError::EpisodeRange => get_or(
                 "error.plan.episode_range",
                 "Episode numbering is outside the supported range.",
@@ -171,11 +165,17 @@ pub fn plan(
         return Ok(single_plan(media, title_index, leaf(movie_filename)));
     }
     let season = media.season.unwrap_or(1);
-    // The disc number is the caller's (from the ISO labels), never the show title.
-    let start =
-        confirmed_episode_start(media.disc.unwrap_or(1), indices.len(), media.episode_start)?;
-    // Validate numbering before the blocking TMDB fetch.
+    // Validate an operator First episode before the blocking TMDB fetch.
+    check_episode_range(media.episode_start, indices.len())?;
     let episodes = crate::server::tmdb::season_episodes(media.tmdb_id, season, &cfg.tmdb_api_key);
+    // The disc number is the caller's (from the ISO labels), never the show title.
+    let start = episode_start(
+        titles,
+        &indices,
+        media.disc.unwrap_or(1),
+        &episodes,
+        media.episode_start,
+    )?;
     let outputs =
         episode_outputs_from_start(titles, &indices, season, start, &episodes, movie_filename);
     validate_outputs(outputs).map(|outputs| RemuxPlan {
@@ -246,7 +246,7 @@ pub(crate) fn episode_outputs(
     movie_filename: &Path,
     episode_start: Option<u16>,
 ) -> Result<Vec<PlannedOutput>, PlanError> {
-    let start = confirmed_episode_start(disc, indices.len(), episode_start)?;
+    let start = self::episode_start(titles, indices, disc, episodes, episode_start)?;
     Ok(episode_outputs_from_start(
         titles,
         indices,
@@ -257,14 +257,31 @@ pub(crate) fn episode_outputs(
     ))
 }
 
-fn confirmed_episode_start(
+/// A disc's first episode number: the operator's First episode, else 1.8.3's numbering —
+/// disc N starts at `(N-1)*count+1`, moved to where the TMDB runtimes clearly align.
+fn episode_start(
+    titles: &[DiscTitle],
+    indices: &[usize],
     disc: u16,
-    count: usize,
+    episodes: &[crate::server::tmdb::Episode],
     explicit: Option<u16>,
 ) -> Result<u16, PlanError> {
-    let start = explicit
-        .or((disc <= 1).then_some(1))
-        .ok_or(PlanError::LaterDiscStart)?;
+    let count = indices.len();
+    let start = explicit.unwrap_or_else(|| {
+        let runtimes: Vec<f64> = indices.iter().map(|&i| titles[i].duration_secs).collect();
+        let count = u16::try_from(count).unwrap_or(u16::MAX);
+        let fallback = 1u16.saturating_add(disc.max(1).saturating_sub(1).saturating_mul(count));
+        crate::server::tmdb::align_disc_offset(&runtimes, episodes, fallback)
+    });
+    check_episode_range(Some(start), count)?;
+    Ok(start)
+}
+
+/// Episodes `start..start+count` must be numbered 1..=65535.
+pub(crate) fn check_episode_range(start: Option<u16>, count: usize) -> Result<(), PlanError> {
+    let Some(start) = start else {
+        return Ok(());
+    };
     if start == 0
         || count == 0
         || usize::from(start)
@@ -273,7 +290,7 @@ fn confirmed_episode_start(
     {
         return Err(PlanError::EpisodeRange);
     }
-    Ok(start)
+    Ok(())
 }
 
 fn episode_outputs_from_start(
@@ -366,21 +383,26 @@ mod tests {
     }
 
     #[test]
-    fn uneven_disc_split_uses_confirmed_start_not_runtime_guess() {
-        assert_eq!(confirmed_episode_start(1, 3, None), Ok(1));
-        assert!(matches!(
-            confirmed_episode_start(2, 2, None),
-            Err(PlanError::LaterDiscStart)
-        ));
-        let start = confirmed_episode_start(2, 2, Some(4)).unwrap();
+    fn a_later_disc_is_numbered_from_its_position_and_runtimes() {
         let titles = vec![title(50.0 * 60.0, 100), title(50.0 * 60.0, 200)];
+        assert_eq!(episode_start(&titles, &[0, 1], 1, &[], None), Ok(1));
+        // No runtimes: the uniform split, (2-1)*2+1.
+        assert_eq!(episode_start(&titles, &[0, 1], 2, &[], None), Ok(3));
+        // Disc 1 held three episodes: the 51-minute pair pins disc 2 to E04.
         let episodes = (1..=5)
             .map(|number| crate::server::tmdb::Episode {
                 number,
                 name: format!("Episode {number}"),
-                runtime_min: if number < 4 { 50 } else { 51 },
+                runtime_min: if number < 4 { 40 } else { 50 },
             })
             .collect::<Vec<_>>();
+        let start = episode_start(&titles, &[0, 1], 2, &episodes, None).unwrap();
+        assert_eq!(start, 4);
+        // The operator's First episode wins.
+        assert_eq!(
+            episode_start(&titles, &[0, 1], 2, &episodes, Some(2)),
+            Ok(2)
+        );
         let outputs = episode_outputs_from_start(
             &titles,
             &[0, 1],
@@ -395,8 +417,13 @@ mod tests {
         );
         assert_eq!(outputs[0].episode_name, "Episode 4");
         assert_eq!(outputs[1].filename, "Show_S01E05.mkv");
-        assert!(confirmed_episode_start(2, 2, Some(u16::MAX)).is_err());
-        assert!(confirmed_episode_start(2, 2, Some(0)).is_err());
+        assert!(episode_start(&titles, &[0, 1], 2, &[], Some(u16::MAX)).is_err());
+        assert!(episode_start(&titles, &[0, 1], 2, &[], Some(0)).is_err());
+        // A disc number past the numbering range is held, never wrapped.
+        assert_eq!(
+            episode_start(&titles, &[0, 1], u16::MAX, &[], None),
+            Err(PlanError::EpisodeRange)
+        );
     }
 
     #[test]
@@ -639,7 +666,6 @@ mod tests {
                 reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
                 candidates: vec![0],
             }),
-            PlanError::LaterDiscStart,
             PlanError::EpisodeRange,
         ] {
             let text = error.to_string();
@@ -654,9 +680,8 @@ mod tests {
                 .contains("a.mkv")
         );
         assert!(
-            confirmed_episode_start(2, 2, None)
-                .unwrap_err()
-                .to_string()
+            PlanError::EpisodeRange
+                .with_action(PlanError::EpisodeRange.to_string())
                 .contains("First episode")
         );
     }

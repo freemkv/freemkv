@@ -5442,6 +5442,8 @@ fn plan_mux_outputs(
         }]);
     }
     let season_num = crate::server::tmdb::season_from_label(disc_name).unwrap_or(1);
+    // An operator First episode out of range fails before the blocking TMDB fetch.
+    crate::server::planner::check_episode_range(episode_start, indices.len())?;
     // TMDB episode list, best-effort (empty on any failure → sequential naming).
     let episodes = crate::server::tmdb::season_episodes(tmdb_id, season_num, &cfg.tmdb_api_key);
     plan_episode_outputs(

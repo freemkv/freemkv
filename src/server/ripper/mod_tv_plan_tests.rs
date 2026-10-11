@@ -212,7 +212,7 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
 }
 
 #[test]
-fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
+fn capture_and_remux_number_a_later_disc_as_1_8_3_did() {
     use crate::server::planner::{MediaKind, MediaMetadata, plan};
     use std::path::Path;
     let cfg = Config::default();
@@ -242,15 +242,17 @@ fn capture_and_remux_both_require_confirmed_later_disc_numbering() {
                 "Show.mkv",
                 None,
             );
-            let remux = plan(&cfg, &titles, &media, Path::new("Show.mkv"));
-            assert!(matches!(
-                capture,
-                Err(crate::server::planner::PlanError::LaterDiscStart)
-            ));
-            assert!(matches!(
-                remux,
-                Err(crate::server::planner::PlanError::LaterDiscStart)
-            ));
+            let remux = plan(&cfg, &titles, &media, Path::new("Show.mkv")).unwrap();
+            // 1.8.3: disc 2 of two-episode discs starts at (2-1)*2+1 = E03.
+            let numbers = |e: Vec<Option<u16>>| e;
+            assert_eq!(
+                numbers(capture.unwrap().iter().map(|o| o.episode).collect()),
+                [Some(3), Some(4)]
+            );
+            assert_eq!(
+                numbers(remux.outputs.iter().map(|o| o.episode).collect()),
+                [Some(3), Some(4)]
+            );
         }
     }
 }
@@ -394,9 +396,9 @@ fn mux_reserve_sums_every_planned_episode() {
     );
 }
 
-// A disc number does not establish the episode count on preceding discs.
+// 1.8.3 (and autorip 1.7.7): disc N of a season starts at (N-1)*count+1.
 #[test]
-fn multi_disc_season_requires_confirmed_episode_numbers() {
+fn disc_two_of_four_episode_discs_is_e05_to_e08() {
     let cfg = Config::default();
     let ep = 44.0 * 60.0;
     // 4 episode titles on disc 2 (label carries "Disc 2").
@@ -413,10 +415,24 @@ fn multi_disc_season_requires_confirmed_episode_numbers() {
         "Endeavour.mkv",
         None,
     );
-    assert!(
-        matches!(plan, Err(crate::server::planner::PlanError::LaterDiscStart)),
-        "disc number does not establish how many episodes earlier discs held"
+    let plan = plan.unwrap();
+    assert_eq!(
+        plan.iter().map(|o| o.episode).collect::<Vec<_>>(),
+        [Some(5), Some(6), Some(7), Some(8)]
     );
+    assert_eq!(plan[0].filename, "Endeavour_S05E05.mkv");
+    // An operator First episode still wins.
+    let first = plan_mux_outputs(
+        &titles,
+        &cfg,
+        crate::server::planner::MediaKind::Tv,
+        "Endeavour Season 5 Disc 2",
+        44264,
+        "Endeavour.mkv",
+        Some(9),
+    )
+    .unwrap();
+    assert_eq!(first[0].episode, Some(9));
 }
 
 // A single feature carrying a TV label (a TV movie) is one movie-style output, not E01.
@@ -439,9 +455,9 @@ fn a_single_feature_tv_disc_stays_one_output() {
     assert!(plan[0].episode.is_none());
 }
 
-// Distinctive runtimes are still not proof of season episode identity.
+// 1.8.3: TMDB runtimes move a later disc off the uniform guess when they clearly fit better.
 #[test]
-fn tmdb_runtimes_do_not_authorize_episode_numbering() {
+fn tmdb_runtimes_align_a_later_disc_on_an_uneven_split() {
     let ep = |number: u16, runtime_min: u16| crate::server::tmdb::Episode {
         number,
         name: format!("Ep {number}"),
@@ -458,10 +474,12 @@ fn tmdb_runtimes_do_not_authorize_episode_numbering() {
         "Show.mkv",
         None,
     );
-    assert!(matches!(
-        plan,
-        Err(crate::server::planner::PlanError::LaterDiscStart)
-    ));
+    let plan = plan.unwrap();
+    assert_eq!(
+        plan.iter().map(|o| o.episode).collect::<Vec<_>>(),
+        [Some(4), Some(5)]
+    );
+    assert_eq!(plan[1].episode_name, "Ep 5");
 }
 
 // tv_auto=false holds a TV disc on the single-output path (no auto fan-out).

@@ -165,7 +165,7 @@ fn planner_errors_require_review_without_entering_remux_or_requeueing() {
             reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
             candidates: vec![0],
         }),
-        PlanError::LaterDiscStart,
+        PlanError::EpisodeRange,
     ] {
         let detail = error.to_string();
         let (_t, lib, dirs) = library_with(&["B"]);
