@@ -2102,7 +2102,7 @@ const KEYSERVER_CHECK: fn(&str) -> Result<(), String> = if cfg!(test) {
 };
 
 // A Settings write Quit waited for: one still out (or whose writer died) counts as not
-// saved, and is logged, so the existing "Could not save settings" path reports it.
+// saved, so the "Could not save settings" path reports it.
 fn awaited_write(
     r: Result<Result<(), String>, std::sync::mpsc::RecvTimeoutError>,
 ) -> Result<(), String> {
@@ -2115,6 +2115,20 @@ fn awaited_write(
         Err(std::io::Error::from(kind).to_string())
     })
 }
+
+fn settings_save_error(e: &str) -> String {
+    crate::strings::fmt_or(
+        "gui.log.settings_save_error",
+        "Could not save settings: {e}",
+        &[("e", e)],
+    )
+}
+
+/// Where Quit reports settings it could not save: the window and its log close at once.
+#[cfg(not(test))]
+const QUIT_NOTICE: fn(&str) = |line| eprintln!("{line}");
+#[cfg(test)]
+const QUIT_NOTICE: fn(&str) = tests::quit_notice;
 
 // One Settings write at a time, in the order asked (`order` is the App's): a later write
 // waits for an earlier one still running, so the newest settings land last.
@@ -2810,14 +2824,7 @@ impl App {
                 &crate::strings::get_or("gui.log.settings_saved", "Settings saved"),
             ),
             Ok(()) => {}
-            Err(e) => self.say(
-                LogKind::Notice,
-                &crate::strings::fmt_or(
-                    "gui.log.settings_save_error",
-                    "Could not save settings: {e}",
-                    &[("e", &e)],
-                ),
-            ),
+            Err(e) => self.say(LogKind::Notice, &settings_save_error(&e)),
         }
     }
 
@@ -2848,7 +2855,7 @@ impl App {
             let r = awaited_write(rx.recv_timeout(BOUND));
             // A queued write of the latest settings follows: its outcome is the one to report.
             if r.is_ok() || queued.is_none() {
-                self.settings_written(r, announce);
+                self.written_at_quit(r, announce);
             }
         }
         if queued.is_none() {
@@ -2862,7 +2869,14 @@ impl App {
             Ok(rx) => awaited_write(rx.recv_timeout(BOUND)),
             Err(_) => ordered_write(&self.write_order, self.save_fn, &self.settings),
         };
-        self.settings_written(r, false);
+        self.written_at_quit(r, false);
+    }
+
+    fn written_at_quit(&mut self, r: Result<(), String>, announce: bool) {
+        if let Err(e) = &r {
+            QUIT_NOTICE(&settings_save_error(e));
+        }
+        self.settings_written(r, announce);
     }
 
     // Check a key-service URL by the rule the key layer uses, so the form cannot accept a
