@@ -1081,7 +1081,10 @@ fn a_batch_waits_within_its_limit_for_a_probe_already_out() {
     release.send(()).unwrap();
     let out = batch.join().unwrap();
     let _ = running.wait();
-    assert!(started_free.is_ok(), "the free folder waited on the busy one");
+    assert!(
+        started_free.is_ok(),
+        "the free folder waited on the busy one"
+    );
     assert_eq!(out, vec![Bounded::Done(1), Bounded::Done(2)]);
 }
 

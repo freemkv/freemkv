@@ -515,35 +515,92 @@ fn boot_dirs(cfg: &Config, output_relocated: bool) -> Vec<String> {
     dirs
 }
 
-// How startup creates one of `boot_dirs`; the staging folder as `create_staging_root` does.
+// How startup creates one of `boot_dirs`; the staging folder only as `staging_root_ready` does.
 fn boot_create(
     cfg: &Config,
 ) -> impl Fn(&std::path::Path) -> std::io::Result<()> + Send + Sync + 'static {
-    let staging = std::path::PathBuf::from(&cfg.staging_dir);
-    let default = std::path::Path::new(&cfg.autorip_dir).join("staging");
+    let cfg = cfg.clone();
     move |p: &std::path::Path| {
-        if p != staging {
+        if p != std::path::Path::new(&cfg.staging_dir) {
             return std::fs::create_dir_all(p);
         }
-        make_staging_root(p, &default)
+        staging_root_ready(&cfg)
+            .map(|_| ())
+            .map_err(|problem| std::io::Error::other(problem.message))
     }
 }
 
-/// Create the staging folder: a configured one only on a live parent
-/// (`create_dir_on_live_parent`), as on a share not mounted yet it would land on local
-/// disk; the default under the config folder is ours, and made in full.
-pub(crate) fn create_staging_root(cfg: &Config) -> std::io::Result<()> {
-    make_staging_root(
+/// The staging folder, ready for a rip. The default under the config folder is created; a
+/// configured one never is, as it may be a share's mount point not mounted yet (a folder made
+/// there lands on the local disk). A configured one that is missing is a `Problem` whose
+/// `message` names it; work holds until it appears.
+pub(crate) fn staging_root_ready(
+    cfg: &Config,
+) -> Result<std::path::PathBuf, crate::server::health::Problem> {
+    staging_ready(
         std::path::Path::new(&cfg.staging_dir),
         &std::path::Path::new(&cfg.autorip_dir).join("staging"),
     )
 }
 
-fn make_staging_root(staging: &std::path::Path, default: &std::path::Path) -> std::io::Result<()> {
-    if staging == default {
+// The ripper's rule until it holds on `staging_root_ready` instead: remove then.
+pub(crate) fn create_staging_root(cfg: &Config) -> std::io::Result<()> {
+    let staging = std::path::Path::new(&cfg.staging_dir);
+    if staging == std::path::Path::new(&cfg.autorip_dir).join("staging") {
         std::fs::create_dir_all(staging)
     } else {
         crate::server::util::create_dir_on_live_parent(staging)
+    }
+}
+
+fn staging_ready(
+    staging: &std::path::Path,
+    default: &std::path::Path,
+) -> Result<std::path::PathBuf, crate::server::health::Problem> {
+    use crate::server::health::{Fault, NOT_A_FOLDER, Problem};
+    let problem = |fault, detail: String| Problem::new("Staging", staging, fault, detail);
+    if staging == default {
+        return match std::fs::create_dir_all(staging) {
+            Ok(()) => Ok(staging.to_path_buf()),
+            Err(e) => Err(problem(Fault::of(&e), e.to_string())),
+        };
+    }
+    match std::fs::metadata(staging) {
+        Ok(m) if m.is_dir() => Ok(staging.to_path_buf()),
+        Ok(_) => Err(problem(Fault::Other, NOT_A_FOLDER.into())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut missing = problem(Fault::Missing, e.to_string());
+            missing.message = crate::strings::fmt_or(
+                "error.staging.root_missing",
+                "staging folder {path} is missing — is the share mounted?",
+                &[("path", &staging.display().to_string())],
+            );
+            Err(missing)
+        }
+        Err(e) => Err(problem(Fault::of(&e), e.to_string())),
+    }
+}
+
+/// A Settings save that sets a new staging folder creates it (on a live parent): the
+/// operator asked for that folder, unlike startup or a rip finding it missing.
+pub(crate) fn create_new_staging_root(previous: &Config, saved: &Config) {
+    let staging = std::path::PathBuf::from(&saved.staging_dir);
+    if saved.staging_dir == previous.staging_dir || staging.as_os_str().is_empty() {
+        return;
+    }
+    let key = staging.clone();
+    let made =
+        crate::server::health::bounded(&key, crate::server::health::CHECK_TIMEOUT, move || {
+            crate::server::util::create_dir_on_live_parent(&staging)
+        });
+    match made {
+        crate::server::health::Bounded::Done(Ok(())) => {}
+        crate::server::health::Bounded::Done(Err(e)) => {
+            tracing::warn!(path = %key.display(), error = %e, "could not create the new staging folder");
+        }
+        _ => {
+            tracing::warn!(path = %key.display(), "creating the new staging folder did not answer in time");
+        }
     }
 }
 

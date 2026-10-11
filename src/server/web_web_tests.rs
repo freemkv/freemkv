@@ -3281,6 +3281,20 @@ mod http {
         );
     }
 
+    // Startup and rips never create a configured staging folder; a Settings save that sets a
+    // new one does, as the operator asked for it.
+    #[test]
+    fn settings_post_creates_a_newly_set_staging_folder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = cfg_in_tempdir(tmp.path());
+        std::fs::create_dir_all(tmp.path().join("share/movies")).unwrap();
+        let staging = tmp.path().join("share/staging");
+        let patch = serde_json::json!({ "staging_dir": staging.to_string_lossy() });
+        let (code, body) = roundtrip(&cfg, "POST", "/api/settings", Some(&patch.to_string()), &[]);
+        assert_eq!(code, 200, "{body}");
+        assert!(staging.is_dir(), "the new staging folder is created");
+    }
+
     // `?since=` answers JSON with a sequence to continue from.
     #[test]
     fn device_log_since_answers_json() {

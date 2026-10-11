@@ -2628,6 +2628,8 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
     // in-flight work uses the old pool, the next rip picks up the new size.
     config::apply_decrypt_threads(snapshot.decrypt_threads);
 
+    config::create_new_staging_root(&current, &snapshot);
+
     // Warn early if a configured directory is missing/unwritable. The health monitor owns
     // the syslog line for the failure, so this only traces; the save still succeeds.
     for (root, reason) in crate::server::mover::check_configured_destinations(&snapshot) {
