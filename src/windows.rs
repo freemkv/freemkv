@@ -4717,7 +4717,7 @@ impl Shell {
         check(
             "settings-load",
             !self.app.borrow().settings.dest_dir.is_empty(),
-            "destination restored from disk",
+            "settings carry a destination folder",
         );
         let st = self.app.borrow().settings.clone();
         self.prefs.show(&st);

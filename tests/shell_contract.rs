@@ -150,8 +150,8 @@ fn expected_default_kinds(cmd: &Cmd) -> Vec<&'static str> {
         Cmd::QuitRequested => vec!["Quit"],
         // The form as it was opened: nothing to save, nothing to say.
         Cmd::CommitSettings(_) => vec![],
-        // A download starts and the tick collects it (no URL: just the note).
-        Cmd::UpdateKeydb { .. } => vec!["Redraw", "StartTicking"],
+        // No URL (and no stored one): only the note, nothing starts.
+        Cmd::UpdateKeydb { .. } => vec!["Redraw"],
         // The rest all do state-changing work that a fresh, source-less
         // `App` collapses to a single redraw — no source to close, no tree
         // to select, no run to cancel, no disc to eject.
@@ -167,6 +167,18 @@ fn expected_default_kinds(cmd: &Cmd) -> Vec<&'static str> {
         | Cmd::ToggleLog
         | Cmd::TestKeyserver(_) => vec!["Redraw"],
     }
+}
+
+/// With no URL given or stored, UpdateKeydb starts nothing: no network, just the note.
+#[test]
+fn a_keydb_update_with_no_url_only_redraws() {
+    let mut app = App::new();
+    app.settings.keydb_url = String::new();
+    let cmd = Cmd::UpdateKeydb {
+        url: String::new(),
+        path: String::new(),
+    };
+    assert_eq!(kinds(&mut app, cmd.clone()), expected_default_kinds(&cmd));
 }
 
 #[test]

@@ -513,7 +513,7 @@ impl Prefs {
     // The core checks the live URL and logs its verdict; shown here too.
     fn test_keyserver(&self, shell: &Rc<Shell>) {
         shell.act(Cmd::TestKeyserver(self.field("keyserver_url")));
-        let verdict = shell.app.borrow().log.last().map(|l| l.text.clone());
+        let verdict = shell.app.borrow().keyserver_verdict().map(str::to_owned);
         if let Some(text) = verdict {
             self.toast(&text);
         }

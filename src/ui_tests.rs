@@ -3078,3 +3078,33 @@ fn a_failed_settings_save_is_reported_as_a_notice() {
     // Applied all the same: the failed write must not undo the edit.
     assert_eq!(app.settings.filename_template, "{title}");
 }
+
+// A second Settings open refills the form base from the stored settings, which the
+// shell shows again, so a later commit keeps a bar pick made in between.
+#[test]
+fn a_reopened_settings_form_keeps_a_bar_pick_on_commit() {
+    let mut app = App::new();
+    let _ = opened_form(&mut app);
+    app.settings.audio_langs = "de".into();
+    let refilled = opened_form(&mut app);
+    assert_eq!(refilled.audio_langs, "de");
+    let mut edited = refilled;
+    edited.filename_template = "{title}".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(edited)));
+    assert_eq!(app.settings.audio_langs, "de");
+    assert_eq!(app.settings_form().audio_langs, "de");
+}
+
+// A pick made after the first commit survives a second commit of the same form.
+#[test]
+fn two_commits_in_a_session_keep_a_bar_pick() {
+    let mut app = App::new();
+    let mut form = opened_form(&mut app);
+    form.filename_template = "{title}_a".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form.clone())));
+    app.settings.sub_langs = "fr".into();
+    form.filename_template = "{title}_b".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    assert_eq!(app.settings.sub_langs, "fr");
+    assert_eq!(app.settings.filename_template, "{title}_b");
+}

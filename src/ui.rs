@@ -2163,6 +2163,7 @@ pub struct App {
     keydb_fn: fn(&str, &str) -> Result<String, String>,
     /// Settings ▸ Keys note: the keydb update's progress or verdict.
     keydb_note: Option<String>,
+    keyserver_verdict: Option<String>,
     /// The operator chose "Stop & Quit": the close that follows is not asked again.
     quit_confirmed: bool,
     /// The Settings write — a seam so tests never touch the shared settings file.
@@ -2370,6 +2371,7 @@ impl App {
             keydb: None,
             keydb_fn: crate::settings::update_keydb,
             keydb_note: None,
+            keyserver_verdict: None,
             quit_confirmed: false,
             save_fn: SAVE_SETTINGS,
             reported_bad: 0,
@@ -2612,7 +2614,12 @@ impl App {
         }
         let dest = edited.dest_dir.clone();
         let new_dest = dest != before.dest_dir && !dest.trim().is_empty();
-        self.settings_form = self.commit_settings(&before, edited);
+        // The form base is what the controls hold after validation; the
+        // merge (which keeps bar picks) lives only in `self.settings`.
+        let mut read = edited.clone();
+        let merged = self.commit_settings(&before, edited);
+        read.presentation_language = merged.presentation_language;
+        self.settings_form = read;
         // A one-off folder pick survives an edit elsewhere in the form.
         if new_dest {
             self.output_dir = dest;
@@ -2664,6 +2671,13 @@ impl App {
             }
         };
         self.say(kind, &msg);
+        self.keyserver_verdict = Some(msg);
+    }
+
+    /// The last key-service check's verdict line, for a shell to show.
+    #[allow(dead_code)] // the server bin compiles `ui` without a Settings window
+    pub fn keyserver_verdict(&self) -> Option<&str> {
+        self.keyserver_verdict.as_deref()
     }
 
     // Download the keydb off the UI thread, one at a time; the tick reports it.

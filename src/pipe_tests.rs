@@ -2375,3 +2375,82 @@ fn windows_sanitize_name_drops_reserved_punctuation() {
     let s = sanitize_name(r"C:\Movie");
     assert!(!s.contains(':') && !s.contains('\\'), "got {s}");
 }
+
+// The CLI's real plan builder agrees with the app's for the same inputs, so drift fails here.
+#[test]
+fn cli_plan_equals_the_shared_gui_plan_for_the_same_inputs() {
+    use freemkv::engine::{KeyConfig as GuiKeys, RipRequest, TitleStreams, gui_plan};
+    let dest = "iso:///out/Movie.iso";
+    let cases = [
+        (
+            Some("/k/keydb.cfg"),
+            None,
+            (false, false, false),
+            "disc:///dev/sr0",
+        ),
+        (
+            None,
+            Some("https://keys.example/keys"),
+            (false, true, false),
+            "disc:///dev/sr0",
+        ),
+        (
+            Some("/k/keydb.cfg"),
+            None,
+            (true, false, true),
+            "iso:///in/Movie.iso",
+        ),
+    ];
+    for (keydb, url, (raw, multipass, force), source) in cases {
+        let cli = freemkv_engine_plan(keydb, url, source, dest, (raw, multipass, force));
+        let local_only = url.is_none();
+        let req = RipRequest {
+            // The app names a source by path or device, not by URL.
+            source: source.strip_prefix("iso://").unwrap_or(source).into(),
+            dest_dir: "/out".into(),
+            titles: vec![],
+            title_ids: Vec::new(),
+            format: "Whole disc → ISO image".into(),
+            audio_pids: vec![],
+            sub_pids: vec![],
+            title_pids: TitleStreams::Unspecified,
+            explicit_streams: false,
+            raw,
+            force,
+            filename_template: String::new(),
+            decrypt_threads: 0,
+            multipass,
+            max_passes: if multipass { 3 } else { 0 },
+            abort_lost_secs: 0,
+            keep_iso: false,
+            auto_eject: false,
+            keys: GuiKeys {
+                keydb_path: resolved_keydb_path(&keydb.map(String::from))
+                    .to_string_lossy()
+                    .into_owned(),
+                keyserver_url: url.unwrap_or_default().into(),
+                keyserver_token: String::new(),
+                online_only: keydb.is_none(),
+                local_only,
+            },
+            seed: None,
+            vid_from: None,
+        };
+        assert_eq!(cli, gui_plan(&req, dest), "{keydb:?} {url:?} {source}");
+    }
+}
+
+fn freemkv_engine_plan(
+    keydb: Option<&str>,
+    url: Option<&str>,
+    source: &str,
+    dest: &str,
+    flags: (bool, bool, bool),
+) -> freemkv_engine::Plan {
+    let keys = KeyConfig {
+        keydb_path: keydb.map(String::from),
+        key_url: url.map(String::from),
+        key_auth: None,
+    };
+    super::cli_plan(source, dest, &keys, flags)
+}

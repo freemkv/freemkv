@@ -1425,13 +1425,16 @@ impl Controller {
                     }
                 }
                 E::ShowSettings(st) => {
-                    // Built fresh unless already open, so a window left by
-                    // Cancel or its close button shows the stored settings
-                    // rather than the edits that were walked away from.
+                    // A reused visible window is refilled from the carried
+                    // settings so its controls match the core's form base.
                     let open = self.ivars().win_prefs.borrow().clone();
-                    let w = open
-                        .filter(|w| w.isVisible())
-                        .unwrap_or_else(|| build_prefs(mtm, self, &st));
+                    let w = match open.filter(|w| w.isVisible()) {
+                        Some(w) => {
+                            self.refill_prefs(mtm, &st);
+                            w
+                        }
+                        None => build_prefs(mtm, self, &st),
+                    };
                     *self.ivars().win_prefs.borrow_mut() = Some(w.clone());
                     w.center();
                     w.makeKeyAndOrderFront(None);
@@ -1853,6 +1856,23 @@ impl Controller {
     /// Read every Settings control back into `st` (no save, no close). Shared by
     /// OK and the live language switch so the form-reading rules (canonical enum
     /// values, container/format mapping) live in one place.
+    fn refill_prefs(&self, mtm: MainThreadMarker, st: &crate::settings::Settings) {
+        let iv = self.ivars();
+        fill_prefs(
+            mtm,
+            self,
+            st,
+            &iv.pf_fields.borrow(),
+            &iv.pf_checks.borrow(),
+            &iv.pf_popups.borrow(),
+            &iv.pf_langs.borrow(),
+        );
+        for (k, f) in iv.pf_fields.borrow().iter() {
+            if PATH_KEYS.contains(&k.as_str()) {
+                fit_wrapping_field(f);
+            }
+        }
+    }
     fn read_prefs_form(&self, st: &mut crate::settings::Settings) {
         for (k, f) in self.ivars().pf_fields.borrow().iter() {
             st.set(k, { f.stringValue() }.to_string());
@@ -3704,6 +3724,60 @@ impl Rows {
     }
 }
 
+type PrefFields = [(String, Retained<NSTextField>)];
+
+// Fill the Settings controls from `st`; also used to refill a reused visible window.
+fn fill_prefs(
+    mtm: MainThreadMarker,
+    c: &Controller,
+    st: &crate::settings::Settings,
+    all_fields: &PrefFields,
+    all_checks: &[(String, Retained<NSButton>)],
+    all_popups: &[(String, Retained<NSPopUpButton>)],
+    all_langs: &[(String, Retained<NSPopUpButton>)],
+) {
+    for (k, f) in all_fields {
+        f.setStringValue(&NSString::from_str(&st.get(k)));
+    }
+    for (k, b) in all_checks {
+        b.setState(if st.get_bool(k) { 1 } else { 0 });
+    }
+    for (k, p) in all_popups {
+        let want = st.get(k);
+        let opts = enum_options(k);
+        if !opts.is_empty() {
+            // Enum popup: map the stored canonical to its menu index.
+            if let Some(i) = opts.iter().position(|(canon, _)| *canon == want) {
+                p.selectItemAtIndex(i as isize);
+            }
+        } else if k == "container" {
+            // Canonical format string; the popup shows the localized label.
+            p.selectItemWithTitle(&NSString::from_str(&crate::ui::format_label(&want)));
+        } else if !want.is_empty() {
+            p.selectItemWithTitle(&NSString::from_str(&want));
+        }
+        // A stored value that matched no item leaves nothing selected (a
+        // blank popup). Fall back to the first row so every popup always
+        // shows a value.
+        if p.indexOfSelectedItem() < 0 {
+            p.selectItemAtIndex(0);
+        }
+        // The language popup applies live the instant it changes.
+        if k == "language" {
+            unsafe {
+                p.setTarget(Some(c));
+                p.setAction(Some(sel!(onPickLanguage:)));
+            }
+        }
+    }
+    // Language pickers hold a SET, so they are populated by their own
+    // setter rather than by matching a title: the stored string may name
+    // several languages, or one this build does not list.
+    for (k, p) in all_langs {
+        set_lang_picker(mtm, p, &st.get(k), c);
+    }
+}
+
 fn build_prefs(
     mtm: MainThreadMarker,
     c: &Controller,
@@ -4019,51 +4093,16 @@ fn build_prefs(
     bd.addSubview(&tabs);
     *c.ivars().tabs.borrow_mut() = Some(tabs.clone());
 
-    // Populate from disk, then hand the controls to the controller so OK can
-    // read them back. Defaults that are empty stay empty on purpose (the key
-    // endpoints ship blank).
-    {
-        for (k, f) in &all_fields {
-            f.setStringValue(&NSString::from_str(&st.get(k)));
-        }
-        for (k, b) in &all_checks {
-            b.setState(if st.get_bool(k) { 1 } else { 0 });
-        }
-        for (k, p) in &all_popups {
-            let want = st.get(k);
-            let opts = enum_options(k);
-            if !opts.is_empty() {
-                // Enum popup: map the stored canonical to its menu index.
-                if let Some(i) = opts.iter().position(|(canon, _)| *canon == want) {
-                    p.selectItemAtIndex(i as isize);
-                }
-            } else if k == "container" {
-                // Canonical format string; the popup shows the localized label.
-                p.selectItemWithTitle(&NSString::from_str(&crate::ui::format_label(&want)));
-            } else if !want.is_empty() {
-                p.selectItemWithTitle(&NSString::from_str(&want));
-            }
-            // A stored value that matched no item leaves nothing selected (a
-            // blank popup). Fall back to the first row so every popup always
-            // shows a value.
-            if p.indexOfSelectedItem() < 0 {
-                p.selectItemAtIndex(0);
-            }
-            // The language popup applies live the instant it changes.
-            if k == "language" {
-                unsafe {
-                    p.setTarget(Some(c));
-                    p.setAction(Some(sel!(onPickLanguage:)));
-                }
-            }
-        }
-        // Language pickers hold a SET, so they are populated by their own
-        // setter rather than by matching a title: the stored string may name
-        // several languages, or one this build does not list.
-        for (k, p) in &all_langs {
-            set_lang_picker(mtm, p, &st.get(k), c);
-        }
-    }
+    // Populate from the carried Settings; empty defaults stay empty on purpose.
+    fill_prefs(
+        mtm,
+        c,
+        st,
+        &all_fields,
+        &all_checks,
+        &all_popups,
+        &all_langs,
+    );
     // Every text field reports to the controller, which commits on Enter and
     // when focus leaves; a path field is sized to its stored value.
     for (k, f) in &all_fields {
@@ -4836,7 +4875,7 @@ impl Controller {
         check(
             "settings-load",
             !self.ivars().app.borrow().settings.dest_dir.is_empty(),
-            "destination restored from disk",
+            "settings carry a destination folder",
         );
 
         // 10 ── windows build
