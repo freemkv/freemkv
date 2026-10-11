@@ -1106,10 +1106,15 @@ impl Queue {
         })
     }
 
-    /// Drop the queued (not running) job for `target`. Returns how many went. A job with a
-    /// kept file stays listed as failed, so the file is still offered.
-    pub fn remove_queued(&self, target: &Path) -> usize {
-        self.mutate(|f| unqueue(f, |j| j.owns_target(target)))
+    /// Drop the queued (not running) job for `target`, or the Change match job of `source`.
+    /// Returns how many went. A job with a kept file stays listed as failed, so the file is
+    /// still offered.
+    pub fn remove_queued(&self, target: &Path, source: Option<&Path>) -> usize {
+        self.mutate(|f| {
+            unqueue(f, |j| {
+                j.owns_target(target) || source.is_some_and(|s| j.retire && j.iso == s)
+            })
+        })
     }
 
     /// Drop every queued job and un-pause: an empty queue has nothing to

@@ -657,6 +657,19 @@ impl Library {
         Ok((saved, queued))
     }
 
+    /// Drop the queued job of the row at `target`, and for an ISO-only row its Change
+    /// match job, which writes under its own name. Returns how many went.
+    pub fn remove_queued(&self, d: &Dirs, target: &Path) -> usize {
+        let snap = self.snapshot();
+        let source = snap
+            .rows
+            .iter()
+            .filter(|_| snap.dirs.as_ref() == Some(d))
+            .find(|r| r.mkv.is_none() && r.target.as_deref() == Some(target))
+            .and_then(|r| r.iso.as_deref());
+        self.queue.remove_queued(target, source)
+    }
+
     /// The last scan. Cheap: an `Arc` clone under a read lock.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.index.read().unwrap_or_else(|e| e.into_inner()).clone()
@@ -1039,8 +1052,13 @@ impl Library {
         }
         let q = self.queue.snapshot();
         let mut latest: HashMap<&Path, &Job> = HashMap::new();
+        // A Change match job writes under its own hashed name: its row has only the ISO.
+        let mut matched = HashMap::new();
         for j in &q.jobs {
             latest.insert(j.target.as_path(), j);
+            if j.retire {
+                matched.insert(j.iso.as_path(), j);
+            }
             for output in &j.outputs {
                 latest.insert(output.target.as_path(), j);
             }
@@ -1108,7 +1126,24 @@ impl Library {
                 auditing += usize::from(audit_queued || audit_running);
                 let needs_remux =
                     r.remuxable() && (r.mkv.is_none() || (probed && muxed_with.out_of_date()));
+                let by_source = r
+                    .iso
+                    .as_deref()
+                    .filter(|_| r.mkv.is_none())
+                    .and_then(|iso| matched.get(iso))
+                    .filter(|m| {
+                        let by_row = r.target.as_deref().and_then(|t| latest.get(t));
+                        by_row.is_none_or(|j| j.id < m.id)
+                    });
                 let (job, result) = match &r.target {
+                    _ if by_source.is_some() => {
+                        let j = by_source.map(|j| (*j).clone());
+                        let result = j
+                            .as_ref()
+                            .and_then(|j| q.results.get(&*j.target.to_string_lossy()))
+                            .cloned();
+                        (j, result)
+                    }
                     Some(t) => (
                         latest.get(t.as_path()).map(|j| (*j).clone()),
                         q.results

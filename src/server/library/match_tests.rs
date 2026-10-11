@@ -299,3 +299,25 @@ fn the_listing_does_not_present_a_match_saved_for_an_earlier_disc_at_the_path() 
     lib.index_now(&d);
     assert_eq!(row_match(&lib), None);
 }
+
+#[test]
+fn a_change_match_job_shows_on_its_iso_only_row_and_unqueues_from_it() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
+    let d = dirs(&cfg);
+    lib.confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .unwrap();
+    let row = lib
+        .listing(&d)
+        .rows
+        .into_iter()
+        .find(|r| r.iso.as_deref() == Some(sources[0].as_path()))
+        .unwrap();
+    assert_eq!(row.kind, RowKind::IsoOnly);
+    let job = row
+        .job
+        .expect("the Change match job shows on its ISO-only row");
+    assert_eq!(job.state, queue::JobState::Queued);
+    assert_ne!(Some(&job.target), row.target.as_ref());
+    assert_eq!(lib.remove_queued(&d, row.target.as_ref().unwrap()), 1);
+    assert!(lib.queue.snapshot().jobs.is_empty());
+}

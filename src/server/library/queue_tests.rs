@@ -548,11 +548,11 @@ fn removing_and_dropping_touch_only_what_they_name() {
     ]);
     let a = q.claim_next().unwrap();
     assert_eq!(
-        q.remove_queued(&a.target),
+        q.remove_queued(&a.target, None),
         0,
         "a running job is not removable"
     );
-    assert_eq!(q.remove_queued(&job(t.path(), "b").target), 1);
+    assert_eq!(q.remove_queued(&job(t.path(), "b").target, None), 1);
     q.note_running(a.id, JobNote::Stalled);
     assert_eq!(q.snapshot().running().unwrap().note, Some(JobNote::Stalled));
     q.note_running(a.id + 100, JobNote::Cancelled);
@@ -747,7 +747,7 @@ fn stop_all_and_unqueue_keep_a_kept_file_offered() {
             .contains("still kept")
     );
     assert!(q.retry_staged_now(&a.target));
-    assert_eq!(q.remove_queued(&a.target), 1);
+    assert_eq!(q.remove_queued(&a.target, None), 1);
     assert_eq!(q.snapshot().jobs.len(), 1, "unqueued, still listed");
     assert_eq!(q.take_staged(&a.target), Ok("/stage/a.staged.mkv".into()));
     assert_eq!(q.take_staged(&a.target), Err(false));
@@ -854,7 +854,7 @@ fn remove_finds_a_planned_job_by_any_of_its_output_targets() {
     let q = Queue::open(t.path());
     let (job, targets) = planned_two(&q, t.path());
     q.requeue(job.id, JobNote::Interrupted);
-    assert_eq!(q.remove_queued(&targets[1]), 1);
+    assert_eq!(q.remove_queued(&targets[1], None), 1);
     assert!(q.snapshot().jobs.is_empty());
 }
 

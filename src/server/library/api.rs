@@ -264,7 +264,7 @@ pub fn handle(
             }
             let n = targets
                 .iter()
-                .map(|t| lib.queue.remove_queued(t))
+                .map(|t| lib.remove_queued(&d, t))
                 .sum::<usize>();
             json_response(request, 200, &json!({"ok": true, "removed": n}).to_string());
         }
