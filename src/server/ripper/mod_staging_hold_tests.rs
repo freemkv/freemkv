@@ -156,3 +156,88 @@ fn a_device_never_held_is_not_restarted() {
     let cfg = Config::default();
     assert!(!staging_hold_lifted("_staging_never_held", &cfg, 1_000));
 }
+
+// A verified disc whose staging folder is a file names the folder and the cause on the
+// drive, as an unverified one does, not a generic listing error.
+#[test]
+fn a_verified_scan_names_a_staging_folder_that_cannot_be_used() {
+    crate::strings::set_locale("en");
+    let base = tempfile::tempdir().unwrap();
+    let file = base.path().join("staging");
+    std::fs::write(&file, b"").unwrap();
+    let cfg = Config {
+        staging_dir: file.to_string_lossy().into_owned(),
+        ..Config::default()
+    };
+    let device = "_staging_scan_fault_test";
+    assert!(scan_staging_job(device, &cfg, Ok("sample-v1-ab".into()), false).is_none());
+    let row = STATE.lock().unwrap().get(device).cloned().unwrap();
+    assert!(
+        row.last_error.contains(&file.display().to_string())
+            && row.last_error.contains("not a folder"),
+        "{}",
+        row.last_error
+    );
+    forget(device);
+}
+
+// The scan's staging check holds only an insert's rip: an operator's is refused, so the
+// folder appearing later never replays it as an insert.
+#[test]
+fn the_scan_holds_only_an_inserts_rip_for_a_missing_staging_folder() {
+    for insert in [false, true] {
+        let base = tempfile::tempdir().unwrap();
+        let (root, cfg) = missing_root(base.path());
+        let cfg = cfg.read().unwrap().clone();
+        let device = "_staging_scan_insert_test";
+        let unverified = Err("short sector read".to_string());
+        assert!(scan_staging_job(device, &cfg, unverified, insert).is_none());
+        let row = STATE.lock().unwrap().get(device).cloned().unwrap();
+        assert!(row.last_error.contains("is missing"), "{}", row.last_error);
+        assert_eq!(staging_held(device), insert, "insert {insert}");
+        assert!(!root.exists());
+        forget(device);
+    }
+}
+
+// rip_disc_inner's own staging check holds only an insert's rip, as the dispatch does.
+#[test]
+fn the_rip_holds_only_an_inserts_rip_for_a_missing_staging_folder() {
+    for operator in [true, false] {
+        let base = tempfile::tempdir().unwrap();
+        let (root, cfg) = missing_root(base.path());
+        let device = "_staging_rip_operator_test";
+        seed_scanned(device);
+        update_state_with(device, |s| s.disc_identity = "sample-v1-ab".into());
+        let (t, _fake) = libfreemkv::test_util::FakeTransport::new();
+        store_session(
+            device,
+            DriveSession {
+                drive: libfreemkv::Drive::from_transport(Box::new(t)),
+                disc: Some(crate::ku_fixture::bd_image().disc),
+                scanned: true,
+                probed: true,
+                tmdb: None,
+                device_path: "/nonexistent/hold-drive".into(),
+                key_verdict: None,
+                keys: None,
+                key_error: None,
+                key_reads: Default::default(),
+            },
+        );
+        rip_disc_inner(
+            &cfg,
+            device,
+            "/nonexistent/hold-drive",
+            false,
+            false,
+            operator,
+        );
+        let row = STATE.lock().unwrap().get(device).cloned().unwrap();
+        assert!(row.last_error.contains("is missing"), "{}", row.last_error);
+        assert_eq!(staging_held(device), !operator, "operator {operator}");
+        assert!(!root.exists());
+        drop_session(device);
+        forget(device);
+    }
+}
