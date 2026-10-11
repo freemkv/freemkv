@@ -147,10 +147,13 @@ fn delivery_boundary_refuses_corrections_without_mutating_state() {
 fn tv_identity_change_replans_before_delivery_and_rejects_stale_plan_commit() {
     let root = tempfile::tempdir().unwrap();
     let dir = job(root.path(), "job", "hash");
+    let iso = dir.join("Castaway.iso");
+    std::fs::write(&iso, b"retained capture").unwrap();
     staging::mutate_state(&dir, StagingState::Ripped, |s| {
         s.media_type = "tv".into();
         s.tmdb_id = 1;
         s.max_retries = 3;
+        s.iso_path = iso.to_string_lossy().into_owned();
         s.outputs.push(staging::Output {
             filename: "episode.mkv".into(),
             episode: Some(1),

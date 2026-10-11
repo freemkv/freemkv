@@ -2260,6 +2260,8 @@ fn a_metadata_edit_while_mux_finishes_holds_the_old_plan() {
     initial.media_type = "tv".into();
     initial.tmdb_id = 1;
     initial.max_retries = 3;
+    initial.iso_path = dir.join("show.iso").to_string_lossy().into_owned();
+    fs::write(&initial.iso_path, b"retained capture").unwrap();
     initial.outputs.push(super::Output {
         filename: "old-episode.mkv".into(),
         episode: Some(1),
@@ -2321,4 +2323,74 @@ fn a_correction_committed_during_the_iso_prune_check_keeps_the_iso() {
         !pruner.join().unwrap(),
         "the replan's ISO must not be pruned"
     );
+}
+
+// After the intermediate ISO was pruned, a correction that needs a replan cannot be
+// honoured: it is refused with the reason (job stays held), never flagged for a
+// replan from an image that no longer exists.
+#[test]
+fn a_correction_needing_a_pruned_iso_is_refused_and_the_job_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = DiscState::new(StagingState::Review);
+    st.media_type = "movie".into();
+    st.title = "Castaway".into();
+    st.max_retries = 1;
+    st.iso_path = dir
+        .path()
+        .join("Castaway.iso")
+        .to_string_lossy()
+        .into_owned();
+    st.mapfile_path = dir
+        .path()
+        .join("Castaway.iso.mapfile")
+        .to_string_lossy()
+        .into_owned();
+    st.outputs = vec![Output {
+        filename: "Castaway.mkv".into(),
+        ..Default::default()
+    }];
+    try_write_state(dir.path(), &st).unwrap();
+    fs::write(dir.path().join("Castaway.mkv"), b"muxed").unwrap();
+    let as_tv = UserMetadata {
+        episode_start: None,
+        title: "Castaway Show".into(),
+        year: 2000,
+        media_type: "tv".into(),
+        tmdb_id: 77,
+        poster_url: String::new(),
+        overview: String::new(),
+    };
+    let refused = save_review_metadata(dir.path(), as_tv.clone()).unwrap_err();
+    assert!(refused.to_string().contains("disc image"), "{refused}");
+    let held = read_state(dir.path()).unwrap();
+    assert_eq!(held.state, StagingState::Review);
+    assert!(!held.replan_required);
+    assert!(held.user_metadata.is_none());
+    assert_eq!(held.metadata_revision, 0);
+    // A correction that keeps the plan needs no image and is accepted.
+    let same_plan = UserMetadata {
+        title: "Cast Away".into(),
+        media_type: "movie".into(),
+        ..as_tv.clone()
+    };
+    save_review_metadata(dir.path(), same_plan).unwrap();
+    assert!(!read_state(dir.path()).unwrap().replan_required);
+    // With the image retained the replan is accepted as before.
+    let kept = tempfile::tempdir().unwrap();
+    let mut st = st.clone();
+    st.iso_path = kept
+        .path()
+        .join("Castaway.iso")
+        .to_string_lossy()
+        .into_owned();
+    st.mapfile_path = kept
+        .path()
+        .join("Castaway.iso.mapfile")
+        .to_string_lossy()
+        .into_owned();
+    try_write_state(kept.path(), &st).unwrap();
+    fs::write(&st.iso_path, b"image").unwrap();
+    fs::write(&st.mapfile_path, b"map").unwrap();
+    save_review_metadata(kept.path(), as_tv).unwrap();
+    assert!(read_state(kept.path()).unwrap().replan_required);
 }

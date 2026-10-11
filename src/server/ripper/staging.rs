@@ -635,6 +635,7 @@ fn save_user_metadata_inner(
             "delivery has started; the staged job can no longer be retitled",
         ));
     }
+    let mut needs_replan = false;
     if st.title_identity_review {
         if st.iso_path.is_empty() {
             return Err(io::Error::other(
@@ -643,6 +644,7 @@ fn save_user_metadata_inner(
         }
         st.title_identity_review = false;
         st.replan_required = true;
+        needs_replan = true;
     }
     // Use the persisted execution mode, not settings which may have changed
     // since capture began.
@@ -660,6 +662,14 @@ fn save_user_metadata_inner(
         || (st.state == StagingState::Review && st.outputs.is_empty() && !st.iso_path.is_empty())
     {
         st.replan_required = true;
+        needs_replan = true;
+    }
+    // A replan rebuilds outputs from the saved image; once it was pruned after the
+    // mux (checked under the lock the prune holds), refuse rather than flag one.
+    if needs_replan && !saved_image_present(dir, &st) {
+        return Err(io::Error::other(
+            "this rip's saved disc image is no longer in staging (it is removed after muxing unless Keep ISO is on), so its title plan cannot be rebuilt. The correction was not saved; keep the current plan, or rip the disc again to change it",
+        ));
     }
     st.metadata_revision = st
         .metadata_revision
@@ -682,6 +692,15 @@ fn save_user_metadata_inner(
     // Return this commit's revision while still holding the state lock: a
     // subsequent read could instead observe another request's commit.
     Ok(st.metadata_revision)
+}
+
+// Whether the capture's ISO is still in staging. A stat error reads as absent
+// (the save is refused and can be retried); legacy jobs find it by listing.
+fn saved_image_present(dir: &Path, st: &DiscState) -> bool {
+    if st.iso_path.is_empty() {
+        return super::resume::find_iso_and_mapfile(dir).is_some();
+    }
+    std::fs::metadata(dir.join(&st.iso_path)).is_ok_and(|m| m.is_file())
 }
 
 /// Commit a rebuilt plan only if its metadata is still current.
