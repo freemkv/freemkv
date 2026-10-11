@@ -2427,6 +2427,22 @@ fn clear_staging_lists_unmatchable_1_8_3_folders_without_deleting_them() {
     assert!(legacy.join("Heat.mkv").exists());
 }
 
+// An unverified capture a crash left mid-sweep is stopped at startup, so Clear staging
+// reclaims it like any other unverified capture no drive can adopt again.
+#[test]
+fn an_unverified_capture_cut_off_mid_sweep_is_reclaimed() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("unverified-1769999999");
+    fs::create_dir(&dir).unwrap();
+    try_write_state(&dir, &DiscState::new(StagingState::Sweeping)).unwrap();
+    fs::write(dir.join("Disc.iso"), b"partial capture").unwrap();
+    fs::write(dir.join("Disc.iso.mapfile"), b"# map").unwrap();
+    resume_or_quarantine_staging(&root.path().to_string_lossy());
+    assert_eq!(read_state(&dir).unwrap().state, StagingState::Stopped);
+    assert_eq!(clear_abandoned_staging(root.path()), (1, 0));
+    assert!(!dir.exists());
+}
+
 // Only an inert 1.8.3 leftover is offered for deleting by hand: never one the mover still
 // delivers or holds, a capture waiting in Review, or a folder a live owner holds.
 #[test]

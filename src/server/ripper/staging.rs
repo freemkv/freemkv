@@ -2156,6 +2156,7 @@ pub fn resume_or_quarantine_staging(staging_dir: &str) -> Vec<StagingResumeHint>
         surface_interrupted_reset(&path, finish_interrupted_reset(&path));
         if path.is_dir() {
             remove_prune_leftovers(&path);
+            stop_orphaned_unverified(&path);
         }
         let Some(snap) = snapshot_staging_disc(&path) else {
             continue;
@@ -2513,6 +2514,24 @@ fn inert_legacy(dir: &Path) -> bool {
         && [DONE_MARKER, REVIEW_MARKER, RIPPED_MARKER]
             .iter()
             .all(|m| matches!(std::fs::symlink_metadata(dir.join(m)), Err(e) if e.kind() == io::ErrorKind::NotFound))
+}
+
+// At startup no rip runs: an unverified capture still Sweeping was cut off, and no disc can
+// resume it. Stopped, it is reclaimed like any other unverified capture no drive shows.
+fn stop_orphaned_unverified(dir: &Path) {
+    let unverified = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(UNVERIFIED_JOB_PREFIX));
+    let lease = job_lease(dir);
+    let Ok(_idle) = lease.try_lock() else {
+        return;
+    };
+    if unverified && read_state(dir).is_some_and(|s| s.state == StagingState::Sweeping && !s.muxing)
+    {
+        tracing::info!(path = %dir.display(), "unverified capture cut off mid-sweep; stopped");
+        clear_sweeping_marker(dir);
+    }
 }
 
 // Hidden and NAS system folders (`.snapshot`, `@eaDir`, `#recycle`): never a rip.
