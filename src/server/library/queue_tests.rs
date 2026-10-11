@@ -990,7 +990,10 @@ fn a_partial_the_sweep_keeps_leaves_no_lock_file_it_made() {
     q.add(vec![running]);
     q.claim_next().unwrap();
     assert!(!q.remove_orphan_partial(&partial));
-    assert!(!sidecar.exists(), "the sweep left a lock file beside a running job");
+    assert!(
+        !sidecar.exists(),
+        "the sweep left a lock file beside a running job"
+    );
 }
 
 // A lock that cannot be taken for a reason other than its holder is logged, not skipped

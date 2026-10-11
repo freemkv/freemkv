@@ -505,8 +505,7 @@ impl Queue {
             return false;
         }
         // Another writer's `<target>.lock` owns the partial; a free one is held to the end.
-        let Some((lock, existed)) = partial_target(path).and_then(|t| try_artifact_lock(&t))
-        else {
+        let Some((lock, existed)) = partial_target(path).and_then(|t| try_artifact_lock(&t)) else {
             return false;
         };
         let f = self.lock();
