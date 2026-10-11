@@ -31,17 +31,19 @@ pub(super) fn run(
         match std::fs::symlink_metadata(target) {
             Ok(meta) if meta.is_file() => {}
             Ok(_) => {
-                return Err(io::Error::other(format!(
-                    "the new file {} is no longer a regular file; no old file was removed",
-                    target.display()
+                return Err(io::Error::other(crate::strings::fmt_or(
+                    "server.library.retire.new_not_regular",
+                    "the new file {path} is no longer a regular file; no old file was removed",
+                    &[("path", &target.display().to_string())],
                 )));
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotConnected,
-                    format!(
-                        "the new file {} cannot be found (is the share mounted?); no old file was removed",
-                        target.display()
+                    crate::strings::fmt_or(
+                        "server.library.retire.new_missing",
+                        "the new file {path} cannot be found (is the share mounted?); no old file was removed",
+                        &[("path", &target.display().to_string())],
                     ),
                 ));
             }
@@ -67,9 +69,10 @@ pub(super) fn run(
         {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                format!(
-                    "the folder of {} cannot be found (is the share mounted?); it was not removed",
-                    old.path.display()
+                crate::strings::fmt_or(
+                    "server.library.retire.folder_missing",
+                    "the folder of {path} cannot be found (is the share mounted?); it was not removed",
+                    &[("path", &old.path.display().to_string())],
                 ),
             ));
         }
@@ -104,9 +107,10 @@ fn remove_emptied_folders(removed: &Path, root: &Path) {
 }
 
 fn outside(path: &Path) -> io::Error {
-    io::Error::other(format!(
-        "{} is not under the library folders; it was not removed",
-        path.display()
+    io::Error::other(crate::strings::fmt_or(
+        "server.library.retire.outside",
+        "{path} is not under the library folders; it was not removed",
+        &[("path", &path.display().to_string())],
     ))
 }
 
@@ -157,12 +161,14 @@ impl std::error::Error for KeptOld {}
 /// The failure a retire with kept files ends in: every new file landed, these old ones stay.
 pub(super) fn kept_message(new: usize, kept: &[PathBuf]) -> String {
     let paths: Vec<String> = kept.iter().map(|p| p.display().to_string()).collect();
-    format!(
-        "All {new} new files are in place. {} old file(s) made from this ISO were kept because \
-         they changed after this correction started, or are no longer recorded as made from it: \
-         {}. They are no longer tracked; delete them yourself if they are not wanted.",
-        kept.len(),
-        paths.join(", ")
+    crate::strings::fmt_or(
+        "server.library.retire.kept",
+        "All {new} new files are in place. {count} old file(s) made from this ISO were kept because they changed after this correction started, or are no longer recorded as made from it: {paths}. They are no longer tracked; delete them yourself if they are not wanted.",
+        &[
+            ("new", &new.to_string()),
+            ("count", &kept.len().to_string()),
+            ("paths", &paths.join(", ")),
+        ],
     )
 }
 

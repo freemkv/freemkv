@@ -190,10 +190,10 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
         }
         // Confirmed for an earlier disc filed at this ISO path: not this disc's identity.
         if job.retire {
-            return Err(std::io::Error::other(format!(
-                "The match saved for {} was confirmed for an earlier disc filed at that path, \
-                 so nothing was written. Open Change match again for this disc.",
-                job.iso.display()
+            return Err(std::io::Error::other(crate::strings::fmt_or(
+                "server.library.stale_match",
+                "The match saved for {path} was confirmed for an earlier disc filed at that path, so nothing was written. Open Change match again for this disc.",
+                &[("path", &job.iso.display().to_string())],
             )));
         }
         tracing::info!(iso = %job.iso.display(), "saved match is for an earlier disc at this path; ignored");
@@ -231,11 +231,10 @@ fn lookup_label(lib: &Library, job: &Job) -> String {
 fn episode_alone(job: &Job) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
-        format!(
-            "{} is one episode of a disc that was split into several files, and its title \
-             cannot be told apart from the others, so nothing was written. Use Change match \
-             on its ISO to remux the whole disc.",
-            job.target.display()
+        crate::strings::fmt_or(
+            "server.library.episode_alone",
+            "{path} is one episode of a disc that was split into several files, and its title cannot be told apart from the others, so nothing was written. Use Change match on its ISO to remux the whole disc.",
+            &[("path", &job.target.display().to_string())],
         ),
     )
 }
@@ -365,9 +364,13 @@ fn persist_plan(
 fn plan_not_saved(lib: &Library, e: &std::io::Error) -> std::io::Error {
     std::io::Error::new(
         e.kind(),
-        format!(
-            "the remux plan could not be saved to {} in the config folder: {e}",
-            lib.queue.path().display()
+        crate::strings::fmt_or(
+            "server.library.plan_not_saved",
+            "the remux plan could not be saved to {path} in the config folder: {error}",
+            &[
+                ("path", &lib.queue.path().display().to_string()),
+                ("error", &e.to_string()),
+            ],
         ),
     )
 }
@@ -490,7 +493,11 @@ fn corrected_plan(
         media.season,
     ));
     let plan = crate::server::planner::plan(cfg, titles, media, &target).map_err(|e| {
-        std::io::Error::other(e.with_action(format!("Corrected match needs review: {e}")))
+        std::io::Error::other(e.with_action(crate::strings::fmt_or(
+            "server.library.plan.correction_review",
+            "Corrected match needs review: {reason}",
+            &[("reason", &e.to_string())],
+        )))
     })?;
     let targets = tv_destinations(cfg, &plan)
         .map(|(_, paths)| paths)
@@ -504,7 +511,11 @@ fn tv_plan_result(
     result.map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            error.with_action(format!("Title plan needs review before remux: {error}")),
+            error.with_action(crate::strings::fmt_or(
+                "server.library.plan.review",
+                "Title plan needs review before remux: {reason}",
+                &[("reason", &error.to_string())],
+            )),
         )
     })
 }
@@ -854,9 +865,10 @@ fn remux_planned_with(
                     .finish_output(job.id, &output.id, OutputState::Failed);
                 return Ending::Failed(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "{} changed while this remux ran; it was not touched",
-                        changed.display()
+                    crate::strings::fmt_or(
+                        "server.library.changed_during",
+                        "{path} changed while this remux ran; it was not touched",
+                        &[("path", &changed.display().to_string())],
                     ),
                 ));
             }
