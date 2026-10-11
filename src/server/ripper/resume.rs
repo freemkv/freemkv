@@ -2410,3 +2410,7 @@ mod refuse_open_tests;
 #[cfg(test)]
 #[path = "resume_vid_needs_disc_tests.rs"]
 mod vid_needs_disc_tests;
+
+#[cfg(test)]
+#[path = "resume_upgrade_tests.rs"]
+mod upgrade_tests;

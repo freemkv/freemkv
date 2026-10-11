@@ -1,0 +1,54 @@
+{
+  "staging_dir": "@ROOT@/staging",
+  "output_dir": "@ROOT@/out",
+  "movie_dir": "movies",
+  "tv_dir": "tv",
+  "min_length_secs": 600,
+  "main_feature": true,
+  "tv_auto": true,
+  "auto_eject": true,
+  "on_insert": "resume",
+  "output_format": "mkv",
+  "network_target": "",
+  "on_read_error": "stop",
+  "max_retries": 3,
+  "keep_iso": true,
+  "iso_dir": "iso",
+  "abort_on_lost_secs": 0,
+  "capture_without_keys": false,
+  "max_rip_duration_secs": 28800,
+  "min_pass_budget_secs": 5400,
+  "transport_recovery_delay_secs": 5,
+  "tmdb_api_key": "0123456789abcdef0123456789abcdef",
+  "keydb_path": null,
+  "keydb_url": "https://keys.example.invalid/keydb.zip",
+  "key_source": "online",
+  "keyserver_url": "https://keys.example.invalid",
+  "keyserver_secret": "fixture-secret",
+  "webhook_urls": [
+    {
+      "url": "https://media.example.invalid/Library/Refresh",
+      "headers": {
+        "Authorization": "MediaBrowser Token=\"00000000000000000000000000000000\""
+      },
+      "post_rip": false,
+      "post_mux": false,
+      "post_move": true
+    },
+    {
+      "url": "http://home.example.invalid:8123/api/webhook/fixture",
+      "post_rip": true,
+      "post_mux": false,
+      "post_move": false
+    }
+  ],
+  "autorip_dir": "@ROOT@/config",
+  "decrypt_threads": 0,
+  "log_retention_days": 30,
+  "library_dir": "",
+  "library_iso_dir": "",
+  "library_iso_subfolders": false,
+  "deep_audit": true,
+  "remux_staged_max_age_days": 0,
+  "remux_staged_max_gb": 0
+}

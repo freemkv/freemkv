@@ -1,0 +1,26 @@
+{
+  "@ROOT@/out/iso/Bravo (2002).iso": {
+    "revision": 2,
+    "media": {
+      "title": "Bravo Corrected",
+      "year": 2003,
+      "tmdb_id": 4242,
+      "season": null,
+      "disc": null,
+      "episode_start": null,
+      "kind": "movie"
+    }
+  },
+  "@ROOT@/out/iso/Delta (2004).iso": {
+    "revision": 1,
+    "media": {
+      "title": "Delta Show",
+      "year": 2004,
+      "tmdb_id": 4343,
+      "season": 1,
+      "disc": 2,
+      "episode_start": null,
+      "kind": "tv"
+    }
+  }
+}

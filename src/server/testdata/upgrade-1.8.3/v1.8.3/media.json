@@ -1,0 +1,62 @@
+[
+  [
+    "capture-crashed/staging/Ember Falls/Ember Falls.iso",
+    32768,
+    "iso"
+  ],
+  [
+    "capture-crashed/staging/Quiet Meadow/Quiet Meadow.iso",
+    32768,
+    "iso"
+  ],
+  [
+    "capture-ripped/staging/Ember Falls/Ember Falls.iso",
+    32768,
+    "iso"
+  ],
+  [
+    "capture-stopped/staging/Ember Falls/Ember Falls.iso",
+    32768,
+    "iso"
+  ],
+  [
+    "capture-stopped/staging/Quiet Meadow/Quiet Meadow.iso",
+    32768,
+    "iso"
+  ],
+  [
+    "staging/Night Harbor/Night Harbor.iso",
+    16384,
+    "iso"
+  ],
+  [
+    "staging/Night Harbor/Night Harbor.mkv",
+    244,
+    "mkv"
+  ],
+  [
+    "staging/Paper Lantern/Paper Lantern.iso",
+    16384,
+    "iso"
+  ],
+  [
+    "staging/Paper Lantern/Paper Lantern.mkv",
+    244,
+    "mkv"
+  ],
+  [
+    "staging/Tidewater/Tidewater.iso",
+    16384,
+    "iso"
+  ],
+  [
+    "staging/Tidewater/Tidewater_t00.mkv",
+    244,
+    "mkv"
+  ],
+  [
+    "staging/Tidewater/Tidewater_t01.mkv",
+    244,
+    "mkv"
+  ]
+]

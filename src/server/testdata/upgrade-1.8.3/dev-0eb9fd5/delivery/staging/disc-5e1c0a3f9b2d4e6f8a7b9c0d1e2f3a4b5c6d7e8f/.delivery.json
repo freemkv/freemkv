@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "directory": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f",
+  "directory_id": [
+    16777234,
+    727847310
+  ],
+  "marker": {
+    "date": "2026-10-11",
+    "disc": null,
+    "disc_name": "Long Shore",
+    "format": "uhd",
+    "media_type": "movie",
+    "overview": "An anonymised overview.",
+    "poster_url": "https://image.tmdb.org/t/p/w300/fixture.jpg",
+    "season": null,
+    "title": "Long Shore",
+    "tmdb_id": 100001,
+    "year": 2017
+  },
+  "outputs": [
+    {
+      "filename": "Long Shore.mkv",
+      "title_index": 0,
+      "title_identity": {
+        "playlist": "00100.mpls",
+        "playlist_id": 100,
+        "extents": [
+          [
+            695424,
+            524256
+          ],
+          [
+            1219680,
+            524256
+          ]
+        ]
+      },
+      "episode": null,
+      "episode_name": "",
+      "moved": false
+    }
+  ],
+  "roots": [
+    "@ROOT@/out/movies",
+    "@ROOT@/out/iso"
+  ],
+  "entries": [
+    {
+      "source": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/Long Shore.mkv",
+      "destination": "@ROOT@/out/movies/Long Shore (2017)/Long Shore (2017).mkv",
+      "destination_parent_id": [
+        905969683,
+        10399234286547103370
+      ],
+      "source_identity": {
+        "file_id": [
+          16777234,
+          728961278
+        ],
+        "size": 244,
+        "modified": {
+          "secs_since_epoch": 1791696065,
+          "nanos_since_epoch": 978261908
+        }
+      },
+      "prepared": {
+        "file_id": [
+          905969683,
+          10595623575515488777
+        ],
+        "size": 244,
+        "modified": {
+          "secs_since_epoch": 1791696064,
+          "nanos_since_epoch": 0
+        }
+      },
+      "published": {
+        "file_id": [
+          905969683,
+          3899833678351027926
+        ],
+        "size": 244,
+        "modified": {
+          "secs_since_epoch": 1791696064,
+          "nanos_since_epoch": 0
+        }
+      },
+      "completed": true,
+      "planned": "@ROOT@/out/movies/Long Shore (2017)/Long Shore (2017).mkv"
+    },
+    {
+      "source": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/Long Shore.iso",
+      "destination": "@ROOT@/out/iso/Long Shore (2017).iso",
+      "destination_parent_id": [
+        905969683,
+        9520841256715015800
+      ],
+      "source_identity": {
+        "file_id": [
+          16777234,
+          727847345
+        ],
+        "size": 16384,
+        "modified": {
+          "secs_since_epoch": 1791695974,
+          "nanos_since_epoch": 673465764
+        }
+      },
+      "prepared": {
+        "file_id": [
+          16777234,
+          727847345
+        ],
+        "size": 16384,
+        "modified": {
+          "secs_since_epoch": 1791695974,
+          "nanos_since_epoch": 673465764
+        }
+      },
+      "published": null,
+      "completed": false,
+      "planned": "@ROOT@/out/iso/Long Shore (2017).iso"
+    }
+  ],
+  "cleanup": [
+    {
+      "path": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/state.json",
+      "identity": {
+        "file_id": [
+          16777234,
+          728974573
+        ],
+        "size": 5432,
+        "modified": {
+          "secs_since_epoch": 1791696066,
+          "nanos_since_epoch": 34447555
+        }
+      }
+    },
+    {
+      "path": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/.disc-label",
+      "identity": {
+        "file_id": [
+          16777234,
+          727847315
+        ],
+        "size": 7,
+        "modified": {
+          "secs_since_epoch": 1791692791,
+          "nanos_since_epoch": 441163548
+        }
+      }
+    },
+    {
+      "path": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/Long Shore.mkv",
+      "identity": {
+        "file_id": [
+          16777234,
+          728961278
+        ],
+        "size": 244,
+        "modified": {
+          "secs_since_epoch": 1791696065,
+          "nanos_since_epoch": 978261908
+        }
+      }
+    },
+    {
+      "path": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/Long Shore.iso.mapfile",
+      "identity": {
+        "file_id": [
+          16777234,
+          728961235
+        ],
+        "size": 216,
+        "modified": {
+          "secs_since_epoch": 1791695974,
+          "nanos_since_epoch": 679148784
+        }
+      }
+    },
+    {
+      "path": "@ROOT@/staging/disc-5e1c0a3f9b2d4e6f8a7b9c0d1e2f3a4b5c6d7e8f/Long Shore.iso",
+      "identity": {
+        "file_id": [
+          16777234,
+          727847345
+        ],
+        "size": 16384,
+        "modified": {
+          "secs_since_epoch": 1791695974,
+          "nanos_since_epoch": 673465764
+        }
+      }
+    }
+  ],
+  "retry": null,
+  "announced": false
+}

@@ -1,0 +1,49 @@
+{
+  "schema": 2,
+  "state": "ripped",
+  "restart_count": 0,
+  "muxing": false,
+  "accept_loss": false,
+  "failure_reason": null,
+  "aborted_loss_attempt": 0,
+  "needs_disc": false,
+  "disc_label": "",
+  "disc_name": "",
+  "disc_format": "bluray",
+  "title": "Ember Falls",
+  "year": 2021,
+  "media_type": "movie",
+  "tmdb_id": 0,
+  "tmdb_poster": "https://image.tmdb.org/t/p/w300/fixture.jpg",
+  "tmdb_overview": "An anonymised overview.",
+  "season": null,
+  "disc_number": null,
+  "title_confident": true,
+  "iso_path": "@ROOT@/capture-ripped/staging/Ember Falls/Ember Falls.iso",
+  "mapfile_path": "@ROOT@/capture-ripped/staging/Ember Falls/Ember Falls.iso.mapfile",
+  "max_retries": 3,
+  "abort_on_lost_secs": 0,
+  "origin_device": "ioreg:4295201274",
+  "rip": {
+    "elapsed_secs": 5321.5,
+    "errors": 0,
+    "lost_video_secs": 0.0,
+    "last_sector": 0,
+    "sweep_errors": 0,
+    "sweep_total_lost_ms": 0.0,
+    "sweep_main_lost_ms": 0.0,
+    "sweep_num_bad_ranges": 0,
+    "sweep_largest_gap_ms": 0.0
+  },
+  "outputs": [
+    {
+      "filename": "Ember Falls.mkv",
+      "title_index": 0,
+      "episode": null,
+      "episode_name": "",
+      "moved": false
+    }
+  ],
+  "date": "",
+  "resumed": false
+}

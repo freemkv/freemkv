@@ -735,3 +735,7 @@ fn run_save_writer(path: &str) {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_upgrade_tests.rs"]
+mod upgrade_tests;

@@ -27,6 +27,7 @@ path = [
     "**/*.iss",
     "**/*.golden",
     "tests/media-fixtures/*.mkv",
+    "src/server/testdata/**",
     "**/*.svg",
     "**/*.html",
     "**/*.css",

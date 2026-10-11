@@ -60,4 +60,7 @@ pub mod util;
 pub mod web;
 pub mod webhook;
 
+#[cfg(test)]
+pub(crate) mod upgrade_fixture;
+
 pub use daemon::run;

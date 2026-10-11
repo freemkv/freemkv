@@ -2648,3 +2648,7 @@ fn copy_failure_outcome(error: &std::io::Error) -> MoveOutcome {
 #[cfg(test)]
 #[path = "mover_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mover_upgrade_tests.rs"]
+mod upgrade_tests;
