@@ -478,8 +478,8 @@ fn release(key: &Path) {
 
 /// Run `probe` for the folder `key` on its own thread and wait at most `limit`.
 /// A probe of `key` already running is waited for within the same limit; one past its own
-/// limit means the folder hangs, and the answer is `Busy` at once. The probe thread is
-/// abandonable (no restart ticket): it may touch only its own probe artifacts.
+/// limit means the folder hangs, and the answer is `Busy` at once. A probe that outlives
+/// its caller is left running: it may touch only its own probe artifacts.
 pub fn bounded<T, F>(key: &Path, limit: Duration, probe: F) -> Bounded<T>
 where
     T: Send + 'static,
@@ -503,18 +503,20 @@ where
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let owned = key.to_path_buf();
-    let spawned = crate::server::daemon::spawn_abandonable("folder-probe", move || {
-        struct Release(PathBuf);
-        impl Drop for Release {
-            fn drop(&mut self) {
-                release(&self.0);
+    let spawned = std::thread::Builder::new()
+        .name("folder-probe".into())
+        .spawn(move || {
+            struct Release(PathBuf);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    release(&self.0);
+                }
             }
-        }
-        let guard = Release(owned);
-        let out = probe();
-        drop(guard);
-        let _ = tx.send(out);
-    });
+            let guard = Release(owned);
+            let out = probe();
+            drop(guard);
+            let _ = tx.send(out);
+        });
     if spawned.is_err() {
         release(key);
         return Bounded::Busy;

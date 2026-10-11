@@ -1250,14 +1250,17 @@ pub(crate) fn resolve_with_timeout(host: &str, port: u16) -> Result<Vec<SocketAd
     let (tx, rx) = mpsc::sync_channel::<Result<Vec<SocketAddr>, std::io::Error>>(1);
     // A refused thread (pid/thread exhaustion) is a resolve failure, not a
     // panic; the closure, and the guard in it, drop on the Err.
-    if let Err(e) = crate::server::daemon::spawn_abandonable("dns-resolver", move || {
-        let _g = guard;
-        let res = (host.as_str(), port)
-            .to_socket_addrs()
-            .map(|it| it.collect::<Vec<SocketAddr>>());
-        // Receiver may be gone after the timeout — ignore the send error.
-        let _ = tx.send(res);
-    }) {
+    if let Err(e) = std::thread::Builder::new()
+        .name("dns-resolver".into())
+        .spawn(move || {
+            let _g = guard;
+            let res = (host.as_str(), port)
+                .to_socket_addrs()
+                .map(|it| it.collect::<Vec<SocketAddr>>());
+            // Receiver may be gone after the timeout — ignore the send error.
+            let _ = tx.send(res);
+        })
+    {
         return Err(format!("{RESOLVE_FAILED_PREFIX}{e}"));
     }
     match rx.recv_timeout(DNS_TIMEOUT) {
