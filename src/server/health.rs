@@ -989,12 +989,36 @@ fn heal(cfg: &Config) {
     refresh(cfg);
 }
 
+/// Warnings for destination roots that are empty or relative: the checks resolve them against
+/// the working directory, so such a root can look healthy. Pure; no I/O.
+pub fn root_warnings(cfg: &Config) -> Vec<String> {
+    [("Output", &cfg.output_dir), ("Staging", &cfg.staging_dir)]
+        .into_iter()
+        .filter_map(|(role, dir)| {
+            let why = if dir.trim().is_empty() {
+                "is not set"
+            } else if !Path::new(dir).is_absolute() {
+                "is not an absolute path"
+            } else {
+                return None;
+            };
+            Some(format!(
+                "WARNING: {role} folder '{dir}' {why}; use an absolute path or finished rips may land in the wrong place."
+            ))
+        })
+        .collect()
+}
+
 /// Start the health thread; `None` if it could not be spawned.
 pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
     let cfg = cfg.clone();
     std::thread::Builder::new()
         .name("health".into())
         .spawn(move || {
+            let first = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+            for line in root_warnings(&first) {
+                crate::server::log::syslog(&line);
+            }
             while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                 let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
                 refresh(&c);
