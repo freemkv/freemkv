@@ -737,6 +737,10 @@ fn a_target_that_appears_before_landing_reports_remux_target_exists() {
     );
     assert_eq!(std::fs::read(&target).unwrap(), b"theirs");
     assert_eq!(std::fs::read(&partial).unwrap(), b"ours");
+    std::fs::remove_file(&target).unwrap();
+    land(&partial, &target, false).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"ours");
+    assert!(!partial.exists());
 }
 
 // Rewrites the library file while the copy is synced: it changes after the remux began.

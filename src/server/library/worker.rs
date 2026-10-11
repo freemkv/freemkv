@@ -160,14 +160,8 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
 /// Freeze automatic title selection before execution, including single outputs.
 /// Existing plans and retained media keep their original selection on restart.
 fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
-    if let Some(replacement) = &job.replacement {
-        replacement.verify_source(&job.iso)?;
-    }
     if job.plan.is_some() || job.staged.is_some() {
         return Ok(());
-    }
-    if let Some(saved) = job.selected_match.clone() {
-        return attach_corrected_plan(lib, cfg, job, &saved.media);
     }
     if let Some(saved) = lib.source_match(&job.iso).map_err(std::io::Error::other)? {
         return attach_corrected_plan(lib, cfg, job, &saved.media);
@@ -308,12 +302,6 @@ fn attach_corrected_plan(
         &job.title,
     );
     let (plan, targets) = corrected_plan(cfg, &disc.titles, media)?;
-    validate_corrected_targets_with_authorization(
-        &job.iso,
-        &targets,
-        &super::links::load(&lib.config_dir),
-        job.replacement.as_ref(),
-    )?;
     if !lib.queue.set_plan_targets(job.id, plan, Some(targets)) {
         return Err(std::io::Error::other(
             "job changed while preparing corrected match",
@@ -366,47 +354,6 @@ fn corrected_plan(
         .map(|(_, paths)| paths)
         .unwrap_or_else(|| vec![target]);
     Ok((plan, targets))
-}
-
-#[cfg(test)]
-fn validate_corrected_targets(
-    source: &Path,
-    targets: &[std::path::PathBuf],
-    links: &std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
-) -> std::io::Result<()> {
-    validate_corrected_targets_with_authorization(source, targets, links, None)
-}
-
-fn validate_corrected_targets_with_authorization(
-    source: &Path,
-    targets: &[std::path::PathBuf],
-    links: &std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
-    authorization: Option<&super::replacement::Replacement>,
-) -> std::io::Result<()> {
-    if let Some(authorization) = authorization {
-        authorization.verify_source(source)?;
-    }
-    for target in targets {
-        match std::fs::symlink_metadata(target) {
-            Ok(metadata)
-                if metadata.is_file()
-                    && (links.get(target).is_some_and(|iso| iso == source)
-                        || (!links.contains_key(target)
-                            && authorization.is_some_and(|a| a.authorizes_existing(target)))) => {}
-            Ok(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "corrected destination is not an owned output: {}",
-                        target.display()
-                    ),
-                ));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
 }
 
 fn tv_plan_result(
@@ -489,11 +436,6 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     if let Some(ending) = cancelled_ending(sink) {
         return ending;
     }
-    if let Some(replacement) = &job.replacement
-        && let Err(error) = replacement.verify_source(&job.iso)
-    {
-        return Ending::Failed(error);
-    }
     if let Some(plan) = &job.plan {
         return remux_planned(job, plan, cfg, sink);
     }
@@ -541,9 +483,6 @@ fn remux_planned(
     cfg: &Config,
     sink: &JobSink<'_>,
 ) -> Ending {
-    if job.replacement.is_some() {
-        return replacement_run::run(job, plan, cfg, sink);
-    }
     let keys = crate::server::keysource::key_params(cfg);
     let stage = remux_stage_dir();
     remux_planned_with(job, plan, cfg, sink, |request, kept, ordinal| {
@@ -563,9 +502,6 @@ fn remux_planned(
         }
     })
 }
-
-#[path = "worker_replacement.rs"]
-mod replacement_run;
 
 fn cancelled_ending(sink: &JobSink<'_>) -> Option<Ending> {
     if sink.lib.cancelled(sink.job_id) {
@@ -1417,9 +1353,7 @@ fn retry_storage_fault(
 }
 
 fn safe_text(job: &Job) -> &'static str {
-    if job.replacement.is_some() {
-        "The source ISO is retained. Replacement progress is saved for retry; already delivered files are not rolled back."
-    } else if job.retire {
+    if job.retire {
         "The source ISO is retained. Old files made from this ISO are removed only after every \
          new file is in place, and only if unchanged; run Change match again to finish."
     } else if job.plan.as_ref().is_some_and(|plan| plan.outputs.len() > 1) {

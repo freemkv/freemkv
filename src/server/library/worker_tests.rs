@@ -64,51 +64,14 @@ fn presentation_preference_single_output_is_frozen_in_queue() {
 }
 
 #[test]
-fn replacement_stop_message_does_not_claim_old_files_are_unchanged() {
+fn a_change_match_stop_message_says_how_to_finish_not_that_files_are_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let mut job = job_for(dir.path(), 1);
-    std::fs::write(&job.iso, b"source").unwrap();
-    job.replacement = Some(
-        super::super::replacement::Replacement::capture(
-            &job.iso,
-            &std::collections::HashMap::new(),
-        )
-        .unwrap(),
-    );
+    job.retire = true;
     let text = safe_text(&job);
-    assert!(text.contains("already delivered files are not rolled back"));
-    assert!(!text.contains("unchanged"));
-    assert!(!text.contains("No MKV was written"));
-}
-
-#[test]
-fn corrected_destinations_never_replace_unrelated_files() {
-    let t = tempfile::tempdir().unwrap();
-    let source = t.path().join("source.iso");
-    let target = t.path().join("movie.mkv");
-    let mut links = std::collections::HashMap::new();
-    assert!(validate_corrected_targets(&source, std::slice::from_ref(&target), &links).is_ok());
-    std::fs::write(&target, b"existing").unwrap();
-    assert!(validate_corrected_targets(&source, std::slice::from_ref(&target), &links).is_err());
-    links.insert(target.clone(), t.path().join("other.iso"));
-    assert!(validate_corrected_targets(&source, std::slice::from_ref(&target), &links).is_err());
-    links.insert(target.clone(), source.clone());
-    assert!(validate_corrected_targets(&source, std::slice::from_ref(&target), &links).is_ok());
-    assert_eq!(std::fs::read(target).unwrap(), b"existing");
-}
-
-#[cfg(unix)]
-#[test]
-fn corrected_destinations_reject_even_recorded_symlinks() {
-    let t = tempfile::tempdir().unwrap();
-    let source = t.path().join("source.iso");
-    let original = t.path().join("original.mkv");
-    let target = t.path().join("movie.mkv");
-    std::fs::write(&original, b"untouched").unwrap();
-    std::os::unix::fs::symlink(&original, &target).unwrap();
-    let links = std::collections::HashMap::from([(target.clone(), source.clone())]);
-    assert!(validate_corrected_targets(&source, &[target], &links).is_err());
-    assert_eq!(std::fs::read(original).unwrap(), b"untouched");
+    assert!(text.contains("run Change match again"), "{text}");
+    assert!(!text.contains("Your existing MKV is unchanged"), "{text}");
+    assert!(!text.contains("No MKV was written"), "{text}");
 }
 
 #[test]
@@ -167,54 +130,6 @@ fn unreadable_remux_matches_block_automatic_fallback() {
     }]);
     let mut job = lib.queue.claim_next().unwrap();
     assert!(maybe_attach_tv_plan(&lib, &Config::default(), &mut job).is_err());
-    assert!(!job.target.exists());
-}
-
-#[test]
-fn corrected_frozen_plan_rejects_a_replaced_iso_before_execution() {
-    let t = tempfile::tempdir().unwrap();
-    let lib = Library::open(t.path(), &t.path().join("logs"));
-    let iso = t.path().join("source.iso");
-    std::fs::write(&iso, b"original image").unwrap();
-    let media = crate::server::planner::MediaMetadata {
-        title: "Movie".into(),
-        year: 2000,
-        tmdb_id: 1,
-        kind: Some(crate::server::planner::MediaKind::Movie),
-        ..Default::default()
-    };
-    lib.queue
-        .add_corrected(
-            NewJob {
-                title: "Wrong".into(),
-                iso: iso.clone(),
-                target: t.path().join("Movie.mkv"),
-                replace: false,
-            },
-            super::super::matches::SavedMatch {
-                revision: 1,
-                media: media.clone(),
-            },
-        )
-        .unwrap();
-    let claimed = lib.queue.claim_next().unwrap();
-    assert!(lib.queue.set_plan(
-        claimed.id,
-        crate::server::planner::RemuxPlan {
-            media,
-            outputs: vec![crate::server::planner::PlannedOutput {
-                id: "movie".into(),
-                title_index: 0,
-                episode: None,
-                episode_name: String::new(),
-                filename: "Movie.mkv".into(),
-            }],
-        }
-    ));
-    let mut job = lib.queue.snapshot().jobs[0].clone();
-    std::fs::write(&iso, b"new and different image").unwrap();
-    let error = maybe_attach_tv_plan(&lib, &Config::default(), &mut job).unwrap_err();
-    assert!(error.to_string().contains("file changed"));
     assert!(!job.target.exists());
 }
 
@@ -740,8 +655,6 @@ fn job_for(dir: &Path, id: u64) -> Job {
         iso: dir.join("missing.iso"),
         target: dir.join("A/A.mkv"),
         plan: None,
-        selected_match: None,
-        replacement: None,
         outputs: Vec::new(),
         owned: None,
         retire: false,

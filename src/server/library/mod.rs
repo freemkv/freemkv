@@ -18,7 +18,6 @@ pub mod media;
 mod owned;
 pub mod probe;
 pub mod queue;
-pub mod replacement;
 mod retire;
 pub mod transcript;
 pub mod worker;
@@ -524,9 +523,9 @@ impl Library {
             title: saved.media.title.clone(),
             iso: source.to_path_buf(),
             target: index::new_mkv_target(&d.library, &iso_title),
-            replace: true,
+            replace: false,
         };
-        let queued = self.queue.add_corrected(job, saved.clone())?;
+        let queued = self.queue.add_fresh(vec![job], true);
         Ok((saved, queued))
     }
 
@@ -1147,24 +1146,24 @@ impl Library {
                 })
             })
             .collect();
-        // Runs of plain rows go in one queue write; each corrected row needs its own.
+        // Runs of plain rows go in one queue write. A row whose ISO has a saved match is
+        // planned afresh from it and may overwrite only files linked to that ISO.
         let mut added = 0;
         let mut plain = Vec::new();
-        for job in jobs {
+        for mut job in jobs {
             let selected = self.source_match(&job.iso).map_err(|error| {
                 added += self.queue.add(std::mem::take(&mut plain));
                 format!("{added} jobs queued; saved source matches unavailable: {error}")
             })?;
-            let Some(selected) = selected else {
+            if selected.is_none() {
                 plain.push(job);
                 continue;
-            };
+            }
             if !plain.is_empty() {
                 added += self.queue.add(std::mem::take(&mut plain));
             }
-            added += self.queue.add_corrected(job, selected).map_err(|error| {
-                format!("{added} jobs queued; corrected remux could not be saved: {error}")
-            })?;
+            job.replace = false;
+            added += self.queue.add_fresh(vec![job], false);
         }
         if !plain.is_empty() {
             added += self.queue.add(plain);

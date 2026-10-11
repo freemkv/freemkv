@@ -21,12 +21,15 @@ struct Correction {
 impl Correction {
     fn new(n: usize) -> Self {
         let (t, lib, dirs) = library_with(&["B"]);
-        lib.queue.add(vec![NewJob {
-            title: "Show".into(),
-            iso: ISO.into(),
-            target: dirs.library.join("Show/Show.mkv"),
-            replace: false,
-        }]);
+        lib.queue.add_fresh(
+            vec![NewJob {
+                title: "Show".into(),
+                iso: ISO.into(),
+                target: dirs.library.join("Show/Show.mkv"),
+                replace: false,
+            }],
+            true,
+        );
         let claimed = lib.queue.claim_next().unwrap();
         let plan = RemuxPlan {
             media: MediaMetadata::default(),
@@ -41,8 +44,8 @@ impl Correction {
                 .collect(),
         };
         assert!(lib.queue.set_plan(claimed.id, plan));
-        let mut job = lib.queue.snapshot().jobs[0].clone();
-        job.retire = true;
+        let job = lib.queue.snapshot().jobs[0].clone();
+        assert!(job.retire);
         let config = t.path().join("config");
         let old: Vec<PathBuf> = (1..=3)
             .map(|e| dirs.library.join(format!("Old/Old E{e:02}.mkv")))
@@ -238,4 +241,69 @@ fn a_plain_remux_of_the_same_iso_overwrites_owned_targets_but_never_deletes() {
     assert!(c.old.iter().all(|p| p.exists()));
     assert!(c.old.iter().all(|p| c.links().contains_key(p)));
     c.assert_bystanders_untouched();
+}
+
+#[test]
+fn correction_failing_at_output_two_keeps_every_old_file_and_resumes_the_kept_file() {
+    let c = Correction::new(4);
+    let stage = c.t.path().join("stage");
+    let ending = c.run(|request, _, ordinal| {
+        if ordinal == 1 {
+            let kept = write_kept(&stage, "Show.2", &request.target, &movie(), 1);
+            let stale = std::io::Error::from_raw_os_error(libc::ESTALE);
+            return Err(kept_error(&kept, stale));
+        }
+        std::fs::write(&request.target, movie())?;
+        Ok(Some(current_stamp()))
+    });
+    assert!(matches!(ending, Ending::Failed(_)), "{ending:?}");
+    let arbiter = Arbiter::new();
+    let sink = test_sink(&c.lib, &arbiter);
+    finish(&c.lib, &c.job, ending, Duration::ZERO, &sink);
+    let job = c.lib.queue.snapshot().jobs[0].clone();
+    assert!(job.staged.is_some());
+    assert_eq!(job.outputs[0].state, OutputState::Done);
+    assert!(
+        c.old.iter().all(|p| p.exists()),
+        "nothing retired on a failure"
+    );
+    assert!(c.lib.queue.retry_staged_now(&job.outputs[1].target));
+    let retry = c.lib.queue.claim_next().unwrap();
+    assert_eq!((retry.id, retry.retire), (c.job.id, true));
+    let mut sink = test_sink(&c.lib, &arbiter);
+    sink.job_id = retry.id;
+    let mut seen = Vec::new();
+    let ending = remux_planned_with(
+        &retry,
+        retry.plan.as_ref().unwrap(),
+        &config_of(&c.dirs),
+        &sink,
+        |request, kept, ordinal| {
+            assert_ne!(ordinal, 0, "a done output is not muxed again");
+            assert_eq!(
+                kept.is_some(),
+                ordinal == 1,
+                "only output 2 resumes its kept file"
+            );
+            assert!(c.old.iter().all(|p| p.exists()));
+            seen.push(ordinal);
+            std::fs::write(&request.target, movie())?;
+            Ok(Some(current_stamp()))
+        },
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(seen, vec![1, 2, 3]);
+    assert!(c.old.iter().all(|p| !p.exists()));
+    c.assert_bystanders_untouched();
+}
+
+#[test]
+fn a_correction_with_unreadable_links_writes_and_removes_nothing() {
+    let c = Correction::new(2);
+    let file = c.t.path().join("config").join(links::LINKS_FILE);
+    std::fs::write(&file, b"{ not json").unwrap();
+    let ending = c.run(|_, _, _| panic!("nothing is written without readable links"));
+    assert!(matches!(ending, Ending::Failed(_)), "{ending:?}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"{ not json");
+    assert!(c.old.iter().all(|p| p.exists()));
 }

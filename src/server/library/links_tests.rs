@@ -1,44 +1,19 @@
 use super::*;
 
 #[test]
-fn final_owner_change_after_reconciliation_blocks_each_cleanup() {
+fn forget_drops_only_a_link_to_the_named_iso() {
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("source.iso");
-    let final_path = dir.path().join("new.mkv");
-    let old = dir.path().join("old.mkv");
-    std::fs::write(&old, b"old").unwrap();
-    let targets = vec![final_path.clone()];
-    reconcile_replacement(dir.path(), &targets, &source).unwrap();
-    let other = dir.path().join("other.iso");
-    record(dir.path(), &final_path, &other).unwrap();
-    assert!(
-        retire_replacement(dir.path(), &old, &source, true, &targets, || panic!(
-            "must not remove any original after final ownership changed"
-        ))
-        .is_err()
+    let (ours, theirs) = (Path::new("/m/A.mkv"), Path::new("/m/B.mkv"));
+    record(dir.path(), ours, Path::new("/i/A.iso")).unwrap();
+    record(dir.path(), theirs, Path::new("/i/B.iso")).unwrap();
+    forget(dir.path(), theirs, Path::new("/i/A.iso")).unwrap();
+    forget(dir.path(), ours, Path::new("/i/A.iso")).unwrap();
+    let links = read(dir.path()).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        links.get(theirs).map(PathBuf::as_path),
+        Some(Path::new("/i/B.iso"))
     );
-    assert_eq!(std::fs::read(&old).unwrap(), b"old");
-    assert_eq!(read(dir.path()).unwrap().get(&final_path), Some(&other));
-}
-
-#[test]
-fn confirmed_cleanup_is_not_provenance_and_conflicting_owners_block_mutation() {
-    let dir = tempfile::tempdir().unwrap();
-    let old = dir.path().join("old.mkv");
-    let source = dir.path().join("source.iso");
-    std::fs::write(&old, b"old").unwrap();
-    assert!(retire_owned(dir.path(), &old, &source, || panic!("unproven cleanup")).is_err());
-    retire_confirmed(dir.path(), &old, &source, || Ok(())).unwrap();
-    assert!(read(dir.path()).unwrap().is_empty());
-    record(dir.path(), &old, &dir.path().join("other.iso")).unwrap();
-    assert!(retire_confirmed(dir.path(), &old, &source, || panic!("conflicting cleanup")).is_err());
-    assert!(
-        publish_replacement(dir.path(), &old, &source, false, || panic!(
-            "conflicting publication"
-        ))
-        .is_err()
-    );
-    assert_eq!(std::fs::read(&old).unwrap(), b"old");
 }
 
 #[test]

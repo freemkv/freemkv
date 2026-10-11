@@ -177,3 +177,35 @@ fn the_dialog_lists_exactly_the_files_a_change_match_captures() {
     assert_eq!(linked, captured);
     assert_eq!(linked, vec![movie, episode]);
 }
+
+#[test]
+fn only_a_change_match_may_retire_old_files() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway", "Other"]);
+    lib.confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .unwrap();
+    let job = serde_json::to_value(&lib.queue.snapshot().jobs[0]).unwrap();
+    assert_eq!(job["retire"], true, "{job}");
+    assert_eq!(job["replace"], false, "{job}");
+    assert!(job.get("replacement").is_none(), "{job}");
+}
+
+#[test]
+fn remux_of_an_iso_with_a_saved_match_replans_but_never_retires() {
+    let (_t, cfg, lib, sources) = corrected_library(&["Castaway", "Other"]);
+    // Remux, Retry and Remux all on an ISO with a saved match replan, but never delete.
+    let d = dirs(&cfg);
+    lib.source_matches
+        .as_ref()
+        .unwrap()
+        .save(&sources[1], 0, show())
+        .unwrap();
+    assert_eq!(
+        lib.enqueue(&d, |r| r.iso.as_deref() == Some(&sources[1])),
+        1
+    );
+    let job = serde_json::to_value(&lib.queue.snapshot().jobs[0]).unwrap();
+    assert_eq!(job["iso"], serde_json::json!(sources[1]), "{job}");
+    assert!(job.get("retire").is_none(), "{job}");
+    assert!(job.get("replacement").is_none(), "{job}");
+    assert!(job.get("plan").is_none(), "planned afresh at claim: {job}");
+}
