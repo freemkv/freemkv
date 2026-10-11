@@ -810,6 +810,14 @@ pub const NOT_A_FOLDER: &str = "not a folder";
 
 /// The write test: `dir` is a folder, and a file can be created in it and removed.
 pub fn probe_write(dir: &Path) -> std::io::Result<()> {
+    probe_write_with(dir, |p| std::fs::remove_file(p))
+}
+
+// [`probe_write`] with the removal given: the seam the tests use.
+fn probe_write_with(
+    dir: &Path,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let meta = std::fs::metadata(dir)?;
     if !meta.is_dir() {
         return Err(std::io::Error::new(
@@ -826,7 +834,11 @@ pub fn probe_write(dir: &Path) -> std::io::Result<()> {
         .write(true)
         .create_new(true)
         .open(&probe)?;
-    std::fs::remove_file(&probe)
+    // Writability is proven; a marker left behind is a warning, never a failed folder.
+    if let Err(e) = remove(&probe) {
+        tracing::warn!(probe = %probe.display(), error = %e, "writability probe left behind");
+    }
+    Ok(())
 }
 
 /// Before a remux or a move starts: `dir` must answer a stat and a create-and-delete

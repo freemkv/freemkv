@@ -582,3 +582,12 @@ fn an_unusable_folder_counts_as_already_reported() {
     assert!(!already_reported(up));
     assert!(!already_reported(Path::new("/test/unknown")));
 }
+
+#[test]
+fn a_probe_file_that_cannot_be_removed_keeps_the_folder_usable() {
+    let t = tempfile::tempdir().unwrap();
+    let result = probe_write_with(t.path(), |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    });
+    assert!(result.is_ok(), "{result:?}");
+}
