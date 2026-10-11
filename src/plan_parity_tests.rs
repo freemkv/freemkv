@@ -46,12 +46,17 @@ fn gui_keys(local_only: bool, online_only: bool) -> KeyConfig {
 }
 
 fn cli(source: &str, dest: &str, flags: (bool, bool, bool), keys: CliKeys) -> Plan {
-    plan(cli_request(
-        source,
-        dest,
-        flags,
-        cli_key_settings(&keys, "/k/keydb.cfg"),
-    ))
+    let (raw, multipass, force) = flags;
+    Plan {
+        source: source.into(),
+        dest: dest.into(),
+        titles: freemkv_engine::Selection::default(),
+        streams: freemkv_engine::StreamChoice::default(),
+        raw,
+        multipass,
+        keys: key_params(&cli_key_settings(&keys, "/k/keydb.cfg")),
+        force,
+    }
 }
 
 #[cfg(feature = "server")]

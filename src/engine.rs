@@ -1233,24 +1233,24 @@ pub fn key_settings(keys: &KeyConfig) -> crate::plan_core::KeySettings {
     }
 }
 
-/// The engine plan for `req` writing `dest` (an output URL): the app's half of the one
-/// plan parser every front end shares.
+/// The engine plan for `req` writing `dest` (an output URL), its keys by the one rule every
+/// front end shares.
 pub fn gui_plan(req: &RipRequest, dest: &str) -> freemkv_engine::Plan {
     let titles = if req.titles.is_empty() {
         fe::Selection::MainMovie
     } else {
         fe::Selection::Titles(req.titles.clone())
     };
-    crate::plan_core::plan(crate::plan_core::PlanRequest {
+    freemkv_engine::Plan {
         source: source_url(&req.source),
         dest: dest.to_string(),
         titles,
         streams: fe::StreamChoice::default(),
         raw: req.raw,
         multipass: req.multipass,
-        keys: key_settings(&req.keys),
+        keys: crate::plan_core::key_params(&key_settings(&req.keys)),
         force: req.force,
-    })
+    }
 }
 
 // The output a request writes, as a URL: its folder for a tree or per-title files, the
@@ -2264,8 +2264,7 @@ fn start_rip_with(
     std::thread::spawn(move || {
         let _done = SignalDone(state.clone());
         let sink = UiSink(state.clone());
-        // The plan this run carries out, in the run log (the one plan parser every front
-        // end shares).
+        // The plan this run carries out, in the run log.
         let plan = gui_plan(&req, &plan_dest(&req));
         state
             .lines

@@ -42,7 +42,7 @@ mod lossy;
 mod messaging;
 mod output;
 mod pipe;
-// The front ends' one way to an engine plan (also declared in `lib.rs`).
+// The front ends' one key rule for an engine plan (also declared in `lib.rs`).
 mod plan_core;
 // Also declared in `lib.rs`: the CLI and the GUI route container sources by one table.
 mod rip_keys;

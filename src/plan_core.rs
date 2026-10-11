@@ -1,13 +1,12 @@
-//! The front ends' one way to an engine `Plan` (pipeline design §2.5; anti-drift measures
-//! 1–3). The CLI's flags, the desktop app's settings and the server's config each become a
-//! `PlanRequest`; `plan` is the one parser that turns it into the engine's `Plan`, so a
-//! rule (which key sources a request asks, what "raw" means) is written once.
+//! The front ends' one key rule (pipeline design §2.5; anti-drift measures 1–3). The CLI,
+//! the desktop app and the server each build the engine's `Plan` directly, taking its keys
+//! from [`key_params`], so which key sources a request asks is written once.
 //!
 //! Every front end also renders the plan it runs through its own exhaustive destructure of
 //! `Plan` (no `..`): a field added to the engine's `Plan` fails to compile until the CLI,
 //! the app and the server each handle it.
 
-use freemkv_engine::{KeyParamsData, Plan, Selection, StreamChoice};
+use freemkv_engine::KeyParamsData;
 
 /// Which key sources a request may ask.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,19 +33,6 @@ pub struct KeySettings {
     pub mode: KeyMode,
 }
 
-/// A front end's request, in front-end-neutral terms.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PlanRequest {
-    pub source: String,
-    pub dest: String,
-    pub titles: Selection,
-    pub streams: StreamChoice,
-    pub raw: bool,
-    pub multipass: bool,
-    pub keys: KeySettings,
-    pub force: bool,
-}
-
 /// The CLI's key flags (`--keydb`, `--key-url`, `--key-auth`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CliKeys {
@@ -69,51 +55,6 @@ pub fn cli_key_settings(k: &CliKeys, default_keydb: &str) -> KeySettings {
         } else {
             KeyMode::Both
         },
-    }
-}
-
-/// The CLI's whole-disc invocation (`freemkv SOURCE DEST [--raw] [--multipass] [--force]`)
-/// as a request.
-pub fn cli_request(
-    source: &str,
-    dest: &str,
-    flags: (bool, bool, bool),
-    keys: KeySettings,
-) -> PlanRequest {
-    let (raw, multipass, force) = flags;
-    PlanRequest {
-        source: source.to_string(),
-        dest: dest.to_string(),
-        titles: Selection::default(),
-        streams: StreamChoice::default(),
-        raw,
-        multipass,
-        keys,
-        force,
-    }
-}
-
-/// The one parser: a [`PlanRequest`] as the engine's [`Plan`].
-pub fn plan(req: PlanRequest) -> Plan {
-    let PlanRequest {
-        source,
-        dest,
-        titles,
-        streams,
-        raw,
-        multipass,
-        keys,
-        force,
-    } = req;
-    Plan {
-        source,
-        dest,
-        titles,
-        streams,
-        raw,
-        multipass,
-        keys: key_params(&keys),
-        force,
     }
 }
 
