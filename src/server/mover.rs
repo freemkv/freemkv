@@ -215,29 +215,27 @@ fn move_retry_ready(path: &str, now: std::time::Instant) -> bool {
 // Only an attempted delivery consumes the retry budget. A health probe waiting
 // for a mount must remain able to recover as soon as that mount responds.
 fn schedule_move_retry(path: &str) {
+    schedule_move_retry_with(path, crate::server::log::syslog);
+}
+
+// `schedule_move_retry` with the log sink given (the stall monitor's is silent).
+fn schedule_move_retry_with(path: &str, log: impl FnOnce(&str)) {
     let attempts = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(path)
         .map(|error| error.attempts.saturating_add(1));
     if let Some(attempts) = attempts {
-        commit_retry(path, attempts, retry_delay(attempts));
+        commit_retry_with(path, attempts, retry_delay(attempts), log);
     }
 }
 
-// A stall is an attempt, committed (journal first) as it is declared: a restart while the
-// worker is still blocked cannot buy a fresh copy. The row holds until the worker returns.
+// A stall is an attempt, committed as it is declared (after the row shows it): a restart while
+// the worker is still blocked cannot buy a fresh copy. The row holds until the worker returns.
 fn commit_stall(path: &str) {
-    schedule_move_retry(path);
-    if let Some(row) = MOVE_ERRORS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_mut(path)
-    {
-        row.stall_resume = Some(row.retry_after);
-        row.retry_after = None;
-        row.retry_held = true;
-    }
+    #[cfg(test)]
+    test_hooks::committing_stall(path);
+    schedule_move_retry_with(path, |_| {});
 }
 
 // The stalled worker returned: the backoff committed at the stall applies from now on.
@@ -315,6 +313,16 @@ fn apply_retry_at(row: &mut MoverError, state: &manifest::RetryState, now: std::
 // restart nor a reboot buys another full-file copy; the row is then derived from it. A
 // state that cannot be saved holds the delivery: the stale journal would reset the count.
 fn commit_retry(path: &str, attempts: u32, delay: Option<std::time::Duration>) {
+    commit_retry_with(path, attempts, delay, crate::server::log::syslog);
+}
+
+// `commit_retry` with the log sink given.
+fn commit_retry_with(
+    path: &str,
+    attempts: u32,
+    delay: Option<std::time::Duration>,
+    log: impl FnOnce(&str),
+) {
     let Some(row) = MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -335,12 +343,22 @@ fn commit_retry(path: &str, attempts: u32, delay: Option<std::time::Duration>) {
         return;
     };
     apply_retry(row, &state);
+    // A blocked worker's row stays held; the committed backoff applies once it returns.
+    let stalled = row.worker_active;
+    if stalled {
+        row.stall_resume = Some(row.retry_after);
+        row.retry_after = None;
+        row.retry_held = true;
+    }
     let Err(error) = saved else {
         return;
     };
     tracing::warn!(%error, dir = path, "mover: retry state not persisted");
     row.retry_after = None;
     row.retry_held = true;
+    if stalled {
+        row.stall_resume = Some(None);
+    }
     row.reason = format!(
         "{}; automatic retries stopped because the retry state could not be saved: {error}",
         row.reason
@@ -348,7 +366,7 @@ fn commit_retry(path: &str, attempts: u32, delay: Option<std::time::Duration>) {
     row.hint = "Free space on the staging storage or make it writable, then choose Retry. Staged source files are retained.".into();
     let line = format!("Move held: {path} — {}", row.reason);
     drop(errors);
-    crate::server::log::syslog(&line);
+    log(&line);
 }
 
 // Whether a journaled dir may attempt delivery now, and whether the operator asked.
@@ -3239,6 +3257,25 @@ pub(crate) mod test_hooks {
         for hook in hooks {
             hook();
         }
+    }
+    /// What the UI showed for a stalled job as its attempt was committed: (worker active,
+    /// a bar shown blocked).
+    pub static STALL_COMMITS: Mutex<Vec<(String, bool, bool)>> = Mutex::new(Vec::new());
+    pub fn committing_stall(path: &str) {
+        let active = super::MOVE_ERRORS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .is_some_and(|e| e.worker_active && e.copy_stalled);
+        let blocked = super::MOVE_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|s| matches!(s.phase, super::MovePhase::Blocked));
+        STALL_COMMITS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((path.to_string(), active, blocked));
     }
     pub fn preflighted(root: &Path) {
         for (_, scope, n) in PREFLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).iter() {

@@ -911,3 +911,30 @@ fn a_clamped_backoff_runs_out_across_passes() {
         "delivered once the clamped backoff ran out: {left:?}"
     );
 }
+
+// A declared stall is shown (worker active, bar blocked) before its attempt is written to the
+// journal, which may sit on the same slow share.
+#[test]
+fn a_stall_is_shown_before_its_attempt_is_written() {
+    let _g = guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, job, _dest) = journaled(tmp.path(), "ShownFirst");
+    let key = job.to_string_lossy().into_owned();
+    clear_error(&key);
+    let _hooks = test_hooks::set(
+        tmp.path(),
+        Duration::from_millis(40),
+        std::sync::Arc::new(|| std::thread::sleep(Duration::from_millis(300))),
+    );
+    check_and_move(&cfg);
+    drop(_hooks);
+    clear_error(&key);
+    let seen: Vec<_> = test_hooks::STALL_COMMITS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, ..)| *k == key)
+        .cloned()
+        .collect();
+    assert_eq!(seen, vec![(key.clone(), true, true)]);
+}

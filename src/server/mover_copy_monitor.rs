@@ -150,7 +150,6 @@ impl Monitor<'_> {
             "Cancellation requested; an already-entered publication may still finish. Cannot retry while the filesystem call is active; restore/remount the filesystem and wait for the worker to return. Sources and ownership are retained.",
             |_| {},
         );
-        super::commit_stall(&key);
         if let Some(error) = super::MOVE_ERRORS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -158,6 +157,8 @@ impl Monitor<'_> {
         {
             error.worker_active = true;
             error.copy_stalled = true;
+            error.retry_held = true;
+            error.retry_after = None;
         }
         for state in super::MOVE_STATE
             .lock()
@@ -173,6 +174,8 @@ impl Monitor<'_> {
                 state.eta.clear();
             }
         }
+        // Shown first: the journal write below may sit on the same slow share.
+        super::commit_stall(&key);
     }
 
     fn worker_returned(&self) {
