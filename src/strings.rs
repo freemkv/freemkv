@@ -89,3 +89,30 @@ pub fn is_unsafe_display_char(c: char) -> bool {
             | '\u{2066}'..='\u{2069}'
             | '\u{FEFF}')
 }
+
+/// Whether a typed presentation language is usable: blank (no preference) or a language tag
+/// title selection understands. `all` and `none` are audio/subtitle words; as ISO 639-3 `all`
+/// is "Allar", so both are refused here.
+#[allow(dead_code)]
+pub fn is_presentation_language(tag: &str) -> bool {
+    let t = tag.trim();
+    t.is_empty()
+        || (!t.eq_ignore_ascii_case("all")
+            && !t.eq_ignore_ascii_case("none")
+            // ISO 639-2 special codes: not languages a title can be in.
+            && !["und", "mul", "zxx", "mis"]
+                .iter()
+                .any(|c| t.eq_ignore_ascii_case(c))
+            && freemkv_engine::is_language_tag(t))
+}
+
+/// The refusal text for a presentation language that is not a language. Not `E9083`: its
+/// `all/none` advice does not apply to this field.
+#[allow(dead_code)]
+pub fn presentation_language_unknown(value: &str) -> String {
+    fmt_or(
+        "error.presentation_language_unknown",
+        "Unknown presentation language \"{value}\". Use an ISO 639 language code such as en, de or fra.",
+        &[("value", value)],
+    )
+}

@@ -2826,6 +2826,16 @@ fn settings_commit_takes_picks_the_form_did_change() {
 // The Settings form's presentation language is checked on commit: a tag that is not a
 // language keeps the previous value and says why, in every shell.
 #[test]
+fn presentation_language_all_and_none_are_not_languages() {
+    for bad in ["all", "none", "None", " ALL ", "und", "MUL", "zxx", "mis"] {
+        assert!(!valid_presentation_language(bad), "{bad}");
+    }
+    for ok in ["", "  ", "de", "fra", "German"] {
+        assert!(valid_presentation_language(ok), "{ok}");
+    }
+}
+
+#[test]
 fn settings_commit_refuses_a_presentation_language_that_is_not_a_language() {
     let mut app = picking(pick_disc());
     app.settings.presentation_language = "de".into();
@@ -2841,7 +2851,10 @@ fn settings_commit_refuses_a_presentation_language_that_is_not_a_language() {
         .last()
         .map(|line| line.text.clone())
         .unwrap_or_default();
-    assert!(last.contains("E9083") && last.contains("xx"), "{last}");
+    assert!(
+        last.contains("Unknown presentation language \"xx\"") && !last.contains("E9083"),
+        "{last}"
+    );
     let mut edited = merged.clone();
     edited.presentation_language = "fr".into();
     assert_eq!(

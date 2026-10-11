@@ -892,7 +892,7 @@ pub fn lang_selection(stored: &str) -> Vec<String> {
 /// Whether a typed presentation language is usable: blank (no preference) or a tag title
 /// selection understands. Selection never reports a tag it cannot match, so check it here.
 pub fn valid_presentation_language(tag: &str) -> bool {
-    tag.trim().is_empty() || freemkv_engine::is_language_tag(tag)
+    crate::strings::is_presentation_language(tag)
 }
 
 /// Settings row label for the presentation-language field, shared by all shells.
@@ -3208,9 +3208,10 @@ impl App {
                 &mut edited.presentation_language,
                 cur.presentation_language.clone(),
             );
-            let e = libfreemkv::Error::StreamLanguageUnknown { tag: tag.clone() };
-            let msg = crate::strings::error_message_with(u32::from(e.code()), &tag);
-            self.say(LogKind::Notice, &format!("E{} {msg}", e.code()));
+            self.say(
+                LogKind::Notice,
+                &crate::strings::presentation_language_unknown(&tag),
+            );
         }
         self.settings = edited.clone();
         edited

@@ -631,7 +631,7 @@ fn presentation_language_is_validated_and_needs_no_scan() {
     let combined = combined_output(&bad);
     assert_ne!(bad.status.code(), Some(0), "{combined}");
     assert!(
-        combined.contains("E9083") && combined.contains("'xx'"),
+        combined.contains("Unknown presentation language \"xx\"") && !combined.contains("E9083"),
         "{combined}"
     );
     // On an image the keyless scan cannot read, the flag is not what fails.
