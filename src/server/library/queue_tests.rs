@@ -997,10 +997,16 @@ fn a_partial_the_sweep_keeps_leaves_no_lock_file_it_made() {
 }
 
 // A lock that cannot be taken for a reason other than its holder is logged, not skipped
-// silently.
+// silently: here another user's sidecar this process cannot open.
+#[cfg(unix)]
 #[test]
 fn a_partial_lock_that_cannot_be_opened_is_logged() {
+    use std::os::unix::fs::PermissionsExt;
     use tracing_subscriber::layer::SubscriberExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root opens the unreadable sidecar anyway
+    }
     #[derive(Clone, Default)]
     struct Buf(std::sync::Arc<Mutex<Vec<u8>>>);
     impl std::io::Write for Buf {
@@ -1022,7 +1028,10 @@ fn a_partial_lock_that_cannot_be_opened_is_logged() {
     let q = Queue::open(t.path());
     let target = t.path().join("Movie/Movie.mkv");
     let partial = partial_path(&target);
-    std::fs::create_dir_all(libfreemkv::io::artifact_lock::lock_path(&target)).unwrap();
+    let sidecar = libfreemkv::io::artifact_lock::lock_path(&target);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&sidecar, b"").unwrap();
+    std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o000)).unwrap();
     std::fs::write(&partial, b"orphan").unwrap();
     let buf = Buf::default();
     let subscriber = tracing_subscriber::registry().with(
