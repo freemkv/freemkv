@@ -3533,7 +3533,14 @@ fn rip_disc_inner(
         return;
     }
     if let Some(Ok(outputs)) = capture_plan.as_ref().map(|p| &p.outputs) {
-        card_plan::publish(&job_id, &disc.titles, &plan_label, &filename, outputs);
+        card_plan::publish(
+            &job_id,
+            &disc.titles,
+            &plan_label,
+            &filename,
+            std::path::Path::new(&mapfile_path_str),
+            outputs,
+        );
     }
     let keep: Vec<String> = match capture_plan.as_ref().map(|p| &p.outputs) {
         Some(Ok(plan)) => plan.iter().map(|o| o.filename.clone()).collect(),

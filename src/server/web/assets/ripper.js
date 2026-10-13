@@ -81,7 +81,9 @@ function episodesHtml(eps) {
   const span = 'S' + pad2(first.season) + 'E' + pad2(first.episode) + (eps.length > 1 ? '–E' + pad2(last.episode) : '');
   const meta = '<span>' + eps.length + ' episode' + (eps.length === 1 ? '' : 's') + ' · ' + span + '</span>';
   const list = '<ol class="eps">' + eps.map(e => '<li><span class="mono">E' + pad2(e.episode) + '</span><span class="grow">'
-    + esc(e.name || 'Episode ' + e.episode) + '</span>' + (e.duration ? '<span class="muted">' + esc(e.duration) + '</span>' : '') + '</li>').join('') + '</ol>';
+    + esc(e.name || 'Episode ' + e.episode) + '</span>'
+    + (e.at_risk_ms > 0 ? '<span class="warn" title="Not read cleanly yet">~' + fmtMs(e.at_risk_ms) + ' at risk</span>' : '')
+    + (e.duration ? '<span class="muted">' + esc(e.duration) + '</span>' : '') + '</li>').join('') + '</ol>';
   return { meta, list };
 }
 
@@ -160,8 +162,12 @@ function ripFigures(s) {
   const pills = [];
   if (s.bytes_good > 0) pills.push('<span class="badge badge-ok">Read ' + fmtBytes(s.bytes_good) + '</span>');
   if (rem > 0) {
-    const risk = s.main_at_risk_ms > 0 ? '~' + fmtMs(s.main_at_risk_ms) : '0:00';
-    pills.push('<span class="badge badge-warn" title="Not read cleanly yet; the time is how much of the movie it affects">Not read yet ' + fmtBytes(rem) + ' · ' + risk + ' of the movie</span>');
+    // A TV plan measures every episode; a movie, its main title.
+    const eps = Array.isArray(s.episodes) && s.episodes.length ? s.episodes : null;
+    const ms = eps ? eps.reduce((sum, e) => sum + (e.at_risk_ms || 0), 0) : s.main_at_risk_ms;
+    const what = eps ? 'the episodes' : 'the movie';
+    const risk = ms > 0 ? '~' + fmtMs(ms) : '0:00';
+    pills.push('<span class="badge badge-warn" title="Not read cleanly yet; the time is how much of ' + what + ' it affects">Not read yet ' + fmtBytes(rem) + ' · ' + risk + ' of ' + what + '</span>');
   }
   return { figs: figs.join('<span class="muted"> · </span>') + left, pills: pills.join(' ') };
 }

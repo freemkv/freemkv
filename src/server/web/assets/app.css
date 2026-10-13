@@ -212,6 +212,7 @@ table.list tr.grey td.title b { font-weight: 500; }
 .drive-info .eps li { display: flex; gap: 0.6rem; padding: 0.15rem 0; }
 .drive-info .eps .mono { color: var(--muted); }
 .drive-info .eps .grow { flex: 1; min-width: 0; }
+.drive-info .eps .warn { color: var(--warn); }
 .drive-info .keys { font-size: 0.82rem; margin-top: 0.4rem; }
 .drive-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0 1.1rem 1.1rem; align-items: center; }
 .drive-actions .elapsed { margin-left: auto; color: var(--muted); font-size: 0.82rem; font-variant-numeric: tabular-nums; }

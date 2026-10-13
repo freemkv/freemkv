@@ -24,9 +24,9 @@ fn title(dur_secs: f64, start_lba: u32) -> libfreemkv::DiscTitle {
 fn episode_disc() -> Vec<libfreemkv::DiscTitle> {
     let mut titles = vec![
         title(3060.0, 100),
-        title(3090.0, 200),
-        title(3100.0, 300),
-        title(60.0, 400),
+        title(3090.0, 2000),
+        title(3100.0, 4000),
+        title(60.0, 6000),
     ];
     let title_count = titles.len();
     for (index, t) in titles.iter_mut().enumerate() {
@@ -95,6 +95,7 @@ fn a_published_plan_is_found_by_job_and_a_movie_correction_clears_it() {
         &titles,
         "Show Season 2 Disc 2",
         "Show.mkv",
+        std::path::Path::new("/nonexistent/card-plan.mapfile"),
         &tv_plan(&titles, None),
     );
     assert_eq!(episodes(job).map(|e| e.len()), Some(3));
@@ -106,4 +107,53 @@ fn a_published_plan_is_found_by_job_and_a_movie_correction_clears_it() {
         assert!(std::time::Instant::now() < deadline, "replan never landed");
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+// title(3060 s, LBA 100): 3060 MB over 1000 sectors at 1 MB/s of playback.
+#[test]
+fn at_risk_time_is_the_damage_inside_the_title_at_its_rate() {
+    let t = title(3060.0, 100);
+    let sector = 2048u64;
+    let inside = (150 * sector, 10 * sector);
+    let outside = (5000 * sector, 10 * sector);
+    let straddle = (1095 * sector, 10 * sector);
+    let ms = |damage: &[(u64, u64)]| at_risk_ms(&t, damage);
+    assert_eq!(ms(&[outside]), 0.0);
+    assert!((ms(&[inside]) - 10.0 * 2048.0 / 1_000_000.0 * 1000.0).abs() < 1e-9);
+    assert!((ms(&[straddle]) - 5.0 * 2048.0 / 1_000_000.0 * 1000.0).abs() < 1e-9);
+}
+
+#[test]
+fn each_episode_measures_its_own_damage_from_the_mapfile() {
+    let titles = episode_disc();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disc.iso.mapfile");
+    let mut map = freemkv_engine::Mapfile::open_or_create(&path, 7000 * 2048, "test").unwrap();
+    // Episode 2 (LBA 2000..3000) has 20 bad sectors; the rest of the disc reads clean.
+    map.record(0, 7000 * 2048, freemkv_engine::SectorStatus::Finished)
+        .unwrap();
+    map.record(
+        2300 * 2048,
+        20 * 2048,
+        freemkv_engine::SectorStatus::NonTrimmed,
+    )
+    .unwrap();
+    map.flush().unwrap();
+    let job = "disc-card-plan-risk-test";
+    publish(
+        job,
+        &titles,
+        "Show Season 2 Disc 2",
+        "Show.mkv",
+        &path,
+        &tv_plan(&titles, None),
+    );
+    let risk: Vec<f64> = episodes(job)
+        .unwrap()
+        .iter()
+        .map(|e| e.at_risk_ms)
+        .collect();
+    assert_eq!(risk[0], 0.0);
+    assert!(risk[1] > 0.0);
+    assert_eq!(risk[2], 0.0);
 }
