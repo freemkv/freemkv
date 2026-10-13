@@ -72,6 +72,19 @@ function dotClass(s) {
 
 // ── Sections of a drive card ───────────────────────────────────────────────
 
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/* A TV disc's planned episodes: "3 episodes · S01E04–E06", then one row each. */
+function episodesHtml(eps) {
+  if (!Array.isArray(eps) || !eps.length) return { meta: '', list: '' };
+  const first = eps[0], last = eps[eps.length - 1];
+  const span = 'S' + pad2(first.season) + 'E' + pad2(first.episode) + (eps.length > 1 ? '–E' + pad2(last.episode) : '');
+  const meta = '<span>' + eps.length + ' episode' + (eps.length === 1 ? '' : 's') + ' · ' + span + '</span>';
+  const list = '<ol class="eps">' + eps.map(e => '<li><span class="mono">E' + pad2(e.episode) + '</span><span class="grow">'
+    + esc(e.name || 'Episode ' + e.episode) + '</span>' + (e.duration ? '<span class="muted">' + esc(e.duration) + '</span>' : '') + '</li>').join('') + '</ol>';
+  return { meta, list };
+}
+
 function discHtml(s) {
   const title = s.tmdb_title || s.disc_name;
   if (!discIn(s)) return '<div class="drive-idle">' + ICON.disc + 'No disc</div>';
@@ -80,13 +93,16 @@ function discHtml(s) {
   const fmt = s.disc_format && s.disc_format !== 'unknown' ? '<span class="badge fmt-' + esc(s.disc_format) + '">' + esc(s.disc_format.toUpperCase()) + '</span>' : '';
   const ks = s.key_status || '';
   const keys = s.status === 'idle' && ks ? '<div class="keys" style="color:' + (ks.indexOf('Missing') === 0 ? 'var(--warn)' : 'var(--ok)') + '">' + esc(ks) + '</div>' : '';
+  const eps = episodesHtml(s.episodes);
+  // An episode plan replaces the single title's length, which is one episode's.
+  const length = eps.meta || (s.duration ? '<span>' + esc(s.duration) + '</span>' : '');
   return '<div class="drive-body">' + poster + '<div class="drive-info">'
     + '<div class="t">' + esc(title) + '</div>'
-    + '<div class="meta">' + (s.tmdb_year > 0 ? '<span>' + s.tmdb_year + '</span>' : '') + (s.duration ? '<span>' + esc(s.duration) + '</span>' : '') + fmt
+    + '<div class="meta">' + (s.tmdb_year > 0 ? '<span>' + s.tmdb_year + '</span>' : '') + length + fmt
     + (s.tmdb_media_type === 'tv' ? '<span class="badge badge-muted">TV</span>' : '') + '</div>'
     + (s.tmdb_overview ? '<div class="ov">' + esc(s.tmdb_overview) + '</div>' : '')
     + (s.codecs ? '<div class="codecs">' + esc(s.codecs) + '</div>' : '')
-    + keys + '</div></div>';
+    + eps.list + keys + '</div></div>';
 }
 
 function stepsHtml(s) {

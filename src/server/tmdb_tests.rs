@@ -1075,3 +1075,38 @@ fn align_keeps_the_fallback_unless_another_offset_is_clearly_better() {
     let disc2 = [22.8 * 60.0, 22.8 * 60.0];
     assert_eq!(align_disc_offset(&disc2, &eps, 3), 3);
 }
+
+fn result(title: &str, year: u16, kind: MediaKind, id: u64) -> TmdbResult {
+    TmdbResult {
+        title: title.into(),
+        year,
+        poster_url: format!("https://image.test/{id}.jpg"),
+        overview: String::new(),
+        media_type: kind,
+        tmdb_id: id,
+    }
+}
+
+#[test]
+fn exact_match_takes_the_one_title_of_that_kind() {
+    let results = [
+        result("Aurora Drift Two", 2016, MediaKind::Tv, 1),
+        result("Aurora Drift Three", 2023, MediaKind::Tv, 2),
+        result("Aurora Drift Two", 2016, MediaKind::Movie, 3),
+    ];
+    let hit = exact_match(&results, "aurora drift two", MediaKind::Tv, 0);
+    assert_eq!(hit.map(|r| r.tmdb_id), Some(1));
+}
+
+#[test]
+fn exact_match_refuses_remakes_and_near_names() {
+    let results = [
+        result("K For Kestrel", 1990, MediaKind::Movie, 1),
+        result("K For Kestrel", 2017, MediaKind::Movie, 2),
+        result("K For Kestrel II", 2019, MediaKind::Movie, 3),
+    ];
+    assert!(exact_match(&results, "K For Kestrel", MediaKind::Movie, 0).is_none());
+    assert!(exact_match(&results, "K For Kestre", MediaKind::Movie, 0).is_none());
+    let dated = exact_match(&results, "K For Kestrel", MediaKind::Movie, 2017);
+    assert_eq!(dated.map(|r| r.tmdb_id), Some(2));
+}

@@ -208,6 +208,10 @@ table.list tr.grey td.title b { font-weight: 500; }
 .drive-info .meta { color: var(--slate); font-size: 0.86rem; margin-top: 0.2rem; display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 .drive-info .ov { color: var(--muted); font-size: 0.82rem; margin-top: 0.5rem; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .drive-info .codecs { color: var(--muted); font-size: 0.78rem; margin-top: 0.4rem; }
+.drive-info .eps { list-style: none; margin: 0.6rem 0 0; padding: 0; font-size: 0.82rem; }
+.drive-info .eps li { display: flex; gap: 0.6rem; padding: 0.15rem 0; }
+.drive-info .eps .mono { color: var(--muted); }
+.drive-info .eps .grow { flex: 1; min-width: 0; }
 .drive-info .keys { font-size: 0.82rem; margin-top: 0.4rem; }
 .drive-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0 1.1rem 1.1rem; align-items: center; }
 .drive-actions .elapsed { margin-left: auto; color: var(--muted); font-size: 0.82rem; font-variant-numeric: tabular-nums; }

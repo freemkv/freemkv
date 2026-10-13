@@ -230,6 +230,22 @@ pub fn is_confident_match(label: &str, title: &str, year: u16) -> bool {
     year > 0 && query_variants(label).iter().any(|v| norm(v) == norm(title))
 }
 
+/// The one result a typed name names: exactly one of `kind` whose title is `name` (as
+/// `is_confident_match` compares titles), and of `year` when the operator gave one.
+/// Two remakes or a name no title carries leave it a plain name.
+pub fn exact_match<'a>(
+    results: &'a [TmdbResult],
+    name: &str,
+    kind: MediaKind,
+    year: u16,
+) -> Option<&'a TmdbResult> {
+    let mut hits = results.iter().filter(|r| {
+        r.media_type == kind && norm(&r.title) == norm(name) && (year == 0 || r.year == year)
+    });
+    let hit = hits.next()?;
+    hits.next().is_none().then_some(hit)
+}
+
 /// Return up to `limit` candidate matches for `query`, best first (exact dated
 /// title → dated → popularity). Powers the "needs review" correction picker.
 pub fn search(query: &str, api_key: &str, limit: usize) -> Vec<TmdbResult> {

@@ -8,6 +8,7 @@
 //! multipass recovery runs in the engine (`freemkv_engine::run_with`), driven
 //! through `passes::ServerPassHost`.
 
+pub(crate) mod card_plan;
 mod jobs;
 pub(crate) mod mux;
 mod passes;
@@ -3530,6 +3531,9 @@ fn rip_disc_inner(
             s.last_error = e.to_string();
         });
         return;
+    }
+    if let Some(Ok(outputs)) = capture_plan.as_ref().map(|p| &p.outputs) {
+        card_plan::publish(&job_id, &disc.titles, &plan_label, &filename, outputs);
     }
     let keep: Vec<String> = match capture_plan.as_ref().map(|p| &p.outputs) {
         Some(Ok(plan)) => plan.iter().map(|o| o.filename.clone()).collect(),

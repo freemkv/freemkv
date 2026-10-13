@@ -563,7 +563,7 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
     if title.is_empty() {
         return json_response(request, 400, r#"{"ok":false,"error":"title required"}"#);
     }
-    let year = v["year"]
+    let mut year = v["year"]
         .as_u64()
         .and_then(|y| u16::try_from(y).ok())
         .unwrap_or(0);
@@ -571,8 +571,8 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
     if !poster_raw.is_empty() && !is_valid_poster_url(poster_raw) {
         return json_response(request, 400, r#"{"ok":false,"error":"invalid poster_url"}"#);
     }
-    let poster = clamp_chars(poster_raw, 1000);
-    let overview = clamp_chars(v["overview"].as_str().unwrap_or(""), 2000);
+    let mut poster = clamp_chars(poster_raw, 1000);
+    let mut overview = clamp_chars(v["overview"].as_str().unwrap_or(""), 2000);
     // Preserve the disc's DETECTED media_type when the caller omits one
     // (Manual Rename does): defaulting to "movie" would flip a TV disc and
     // collapse all its episodes into one file. Fall back only when unknown.
@@ -593,7 +593,21 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
     // The picker posts back the chosen result's TMDB id (0 if the operator
     // typed a free-form title with no pick); carry it so the override matches
     // what a `lookup` match would have provided.
-    let tmdb_id = v["tmdb_id"].as_u64().unwrap_or(0);
+    let mut tmdb_id = v["tmdb_id"].as_u64().unwrap_or(0);
+    // A typed name the one TMDB title of its kind carries gets that title's details,
+    // so the card, the episode names and the filing match a pick from the list.
+    if tmdb_id == 0
+        && let Some(hit) = exact_name_match(cfg, &title, media_type, year)
+    {
+        tmdb_id = hit.tmdb_id;
+        year = hit.year;
+        if poster.is_empty() && is_valid_poster_url(&hit.poster_url) {
+            poster = clamp_chars(&hit.poster_url, 1000);
+        }
+        if overview.is_empty() {
+            overview = clamp_chars(&hit.overview, 2000);
+        }
+    }
     let episode_start = match capture_episode_start(&v["episode_start"], media_type) {
         Ok(start) => start,
         Err(error) => {
@@ -645,7 +659,25 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
             },
         );
     });
+    let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    ripper::card_plan::replan(snapshot, expected_job, media_type, tmdb_id, episode_start);
     json_response(request, 200, r#"{"ok":true}"#);
+}
+
+// The one TMDB title a typed name names (`tmdb::exact_match`), or none without a key.
+fn exact_name_match(
+    cfg: &Arc<RwLock<Config>>,
+    name: &str,
+    kind: MediaKind,
+    year: u16,
+) -> Option<crate::server::tmdb::TmdbResult> {
+    let key = cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .tmdb_api_key
+        .clone();
+    let results = crate::server::tmdb::search(name, &key, 8);
+    crate::server::tmdb::exact_match(&results, name, kind, year).cloned()
 }
 
 // Metadata refusals are plain `io::Error::other` messages (a conflict with the job's state).
@@ -1994,6 +2026,12 @@ fn get_state_json(staging_dir: &str) -> String {
     // RipState seeded by the mux worker), serialized as part of `state`.
     // There is no separate live MuxState struct.
     let mut obj = serde_json::to_value(&*state).unwrap_or_else(|_| serde_json::json!({}));
+    // A TV disc's card lists the episodes its capture plan names.
+    for (device, row) in state.iter() {
+        if let Some(episodes) = ripper::card_plan::episodes(&row.job_id) {
+            obj[device.as_str()]["episodes"] = serde_json::to_value(episodes).unwrap_or_default();
+        }
+    }
     if !move_state.is_empty() {
         obj["_move"] = serde_json::to_value(&move_state).unwrap_or_default();
     }
