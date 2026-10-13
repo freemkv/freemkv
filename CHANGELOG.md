@@ -45,6 +45,7 @@
 
 ### Fixed
 
+- **A TV disc's retry passes cover every episode** (server only): the passes after the sweep stopped as soon as the first episode read clean ("muxed title is 100% recovered"), so damage in a later episode went straight to the mux. They now run until every planned episode is clean, or the retries run out.
 - **A typed show or movie name gets its poster, year and episode names** (server only: Change title on a drive card): "Use this exact name" saved only the text, so the card stayed blank and episodes were filed without names. When exactly one TMDB title of that type carries the name (and the year, if typed), the correction takes its details; two titles of that name, or none, keep the name as typed.
 - **Episodes on a pressing whose play-all trims an episode by a few frames** (libfreemkv): such a disc held every rip as E9086 "no authored episode list"; it now rips its episodes.
 - **A share that is not mounted no longer gets folders created on the local disk** (server only: Library startup, rips and Settings): 1.8.3 created the configured staging and output folders at startup, so an unmounted share's rips filled the boot disk or landed hidden under the share. A missing configured staging folder now makes a rip started by inserting a disc wait ("staging folder … is missing — is the share mounted?") and start once it appears; Rip, Resume and Start over are refused with that reason. Saving a new staging folder in Settings creates it, inside a folder that exists and is not empty.

@@ -3887,7 +3887,12 @@ fn rip_disc_inner(
         let plan = freemkv_engine::Plan {
             source: format!("disc://{device_path}"),
             dest: format!("iso://{iso_path_str}"),
-            titles: freemkv_engine::Selection::Titles(vec![main_idx]),
+            titles: freemkv_engine::Selection::Titles(recovery_titles(
+                &disc.titles,
+                &cfg_read,
+                (tmdb_media_type, &plan_label),
+                main_idx,
+            )),
             raw: !iso_decrypts,
             multipass: true,
             ..freemkv_engine::Plan::default()
@@ -5557,6 +5562,23 @@ pub(crate) fn plan_kind(
 ) -> Option<crate::server::planner::MediaKind> {
     (media_type.is_tv() || crate::server::tmdb::season_from_label(disc_name).is_some())
         .then_some(MediaKind::Tv)
+}
+
+// The titles the retry passes must recover before they stop: every episode a TV plan muxes,
+// not only the first. The main title leads, as the one progress reports.
+fn recovery_titles(
+    titles: &[libfreemkv::DiscTitle],
+    cfg: &Config,
+    (media_type, disc_name): (MediaKind, &str),
+    main_idx: usize,
+) -> Vec<usize> {
+    let mut out = vec![main_idx];
+    for index in fanout_episode_indices(titles, cfg, media_type, disc_name) {
+        if !out.contains(&index) {
+            out.push(index);
+        }
+    }
+    out
 }
 
 // The titles a fresh rip's staged image must hold for its mux: the main feature, the TV plan's

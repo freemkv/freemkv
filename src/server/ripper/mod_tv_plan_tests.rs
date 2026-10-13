@@ -658,3 +658,19 @@ fn the_hand_off_replans_a_start_plan_made_without_tmdb() {
     });
     assert_eq!(numbers(kept)[1].1, "Ep 5");
 }
+
+// Pass 1 can leave a later episode damaged while the first reads clean: the retry passes
+// must measure every planned episode, or they skip as "converged" and mux the damage.
+#[test]
+fn retry_passes_measure_every_planned_episode() {
+    let mut titles = vec![title(2640.0, 100), title(2650.0, 5000), title(2660.0, 9000)];
+    authored_roster(&mut titles, 0..3);
+    let cfg = Config::default();
+    let tv = (
+        crate::server::planner::MediaKind::Tv,
+        "Show Season 1 Disc 2",
+    );
+    assert_eq!(recovery_titles(&titles, &cfg, tv, 0), [0, 1, 2]);
+    let movie = (crate::server::planner::MediaKind::Movie, "Movie");
+    assert_eq!(recovery_titles(&titles, &cfg, movie, 0), [0]);
+}
