@@ -45,6 +45,7 @@
 
 ### Fixed
 
+- **TLS library updated for four advisories** (CLI, app, server: online key service and TMDB): the locked rustls is 0.23.46, for RUSTSEC-2026-0346, -0347, -0348 and -0349.
 - **Blu-rays rip again on drives whose speed calibration hits a bus fault** (CLI, app, server; libfreemkv and freemkv-unlock): on an LG BU40N (MediaTek) a bus fault during calibration cleared the drive's unlock, and the scan then failed on every disc with "the drive returned a command error"; 1.7.7 ripped the same discs. The unlock is kept when the drive still confirms it, the command after a fault waits for the device to reopen, and a handshake bus fault no longer fails the scan.
 - **Logs name the real error** (server only: logs): every error shown as a plain-English line is also logged at warn with its code and full detail (opcode, status, sense).
 
