@@ -221,25 +221,22 @@ fn fetch_follows_a_relative_redirect_to_the_keydb() {
 
 #[test]
 fn redirect_target_resolves_every_reference_form() {
-    let base = "https://fvonline-db.bplaced.net/fv_download.php?lang=eng";
+    let base = "https://keydb-mirror.test/fv_download.php?lang=eng";
     for (loc, want) in [
         (
             "./export/keydb_eng.zip",
-            "https://fvonline-db.bplaced.net/export/keydb_eng.zip",
+            "https://keydb-mirror.test/export/keydb_eng.zip",
         ),
-        (
-            "export/k.zip",
-            "https://fvonline-db.bplaced.net/export/k.zip",
-        ),
+        ("export/k.zip", "https://keydb-mirror.test/export/k.zip"),
         (
             "/a/./b/../k.zip?x=1",
-            "https://fvonline-db.bplaced.net/a/k.zip?x=1",
+            "https://keydb-mirror.test/a/k.zip?x=1",
         ),
         ("//mirror.test/k.zip", "https://mirror.test/k.zip"),
         ("https://other.test/k.zip#frag", "https://other.test/k.zip"),
         (
             "?lang=deu",
-            "https://fvonline-db.bplaced.net/fv_download.php?lang=deu",
+            "https://keydb-mirror.test/fv_download.php?lang=deu",
         ),
     ] {
         assert_eq!(redirect_target(base, loc).as_deref(), Some(want), "{loc}");
