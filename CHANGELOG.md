@@ -45,6 +45,9 @@
 
 ### Fixed
 
+- **Blu-rays rip again on drives whose speed calibration hits a bus fault** (CLI, app, server; libfreemkv and freemkv-unlock): on an LG BU40N (MediaTek) a bus fault during calibration cleared the drive's unlock, and the scan then failed on every disc with "the drive returned a command error"; 1.7.7 ripped the same discs. The unlock is kept when the drive still confirms it, the command after a fault waits for the device to reopen, and a handshake bus fault no longer fails the scan.
+- **Logs name the real error** (server only: logs): every error shown as a plain-English line is also logged at warn with its code and full detail (opcode, status, sense).
+
 - **A TV disc's retry passes cover every episode** (server only): the passes after the sweep stopped as soon as the first episode read clean ("muxed title is 100% recovered"), so damage in a later episode went straight to the mux. They now run until every planned episode is clean, or the retries run out.
 - **A typed show or movie name gets its poster, year and episode names** (server only: Change title on a drive card): "Use this exact name" saved only the text, so the card stayed blank and episodes were filed without names. When exactly one TMDB title of that type carries the name (and the year, if typed), the correction takes its details; two titles of that name, or none, keep the name as typed.
 - **Episodes on a pressing whose play-all trims an episode by a few frames** (libfreemkv): such a disc held every rip as E9086 "no authored episode list"; it now rips its episodes.

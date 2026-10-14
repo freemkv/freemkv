@@ -6486,6 +6486,9 @@ fn format_pass_error(pass_label: &str, e: &libfreemkv::Error) -> String {
 fn format_lib_error(phase: &str, e: &libfreemkv::Error) -> String {
     use libfreemkv::Error;
 
+    // The operator line drops the code and sense, so the log keeps the raw error.
+    tracing::warn!(phase, code = e.code(), error = ?e, "library error behind the operator message");
+
     // Drive read failures carry SCSI sense — reuse the sense decoder so the
     // operator gets the same "media damage / power-cycle the drive" guidance
     // the pass-error path produces, rather than a bare sector dump.
