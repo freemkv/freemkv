@@ -5,8 +5,9 @@
 //! `freemkv_keysources::KeydbSource::save` for verify + atomic save.
 //!
 //! Hardened like the online key service: resolves the host, refuses
-//! unreachable addresses (LAN is fine), pins the validated addresses into the agent, follows zero redirects,
-//! and bounds the connect/read timeouts and the response body size.
+//! unreachable addresses (LAN is fine), pins the validated addresses into the agent,
+//! and bounds the connect/read timeouts and the response body size. Redirects are
+//! followed by hand, a few hops at most, each re-guarded and re-pinned like the first.
 //!
 
 use libfreemkv::{Error, Result};
@@ -37,29 +38,139 @@ const DNS_TIMEOUT: Duration = Duration::from_secs(10);
 /// body to OOM the client. `save` independently caps the *decompressed* size.
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Redirect hops one fetch follows (FindVUK answers its download link with a 302 to the ZIP).
+pub(crate) const MAX_REDIRECTS: usize = 5;
+
 /// Fetch keydb bytes from `url` over HTTP or HTTPS via `ureq`, with the same
-/// SSRF / redirect / timeout hardening as the online key service. The returned
-/// bytes are the raw response body (plain text, `.zip`, or `.gz`) — hand them
-/// to `freemkv_keysources::KeydbSource::save` for verify + atomic save.
+/// SSRF / timeout hardening as the online key service, following up to
+/// [`MAX_REDIRECTS`] redirects (never https to http). The returned bytes are the raw
+/// response body (plain text, `.zip`, or `.gz`) — hand them to
+/// `freemkv_keysources::KeydbSource::save` for verify + atomic save.
 pub fn fetch(url: &str) -> Result<Vec<u8>> {
-    let pinned = resolve_and_guard(url).map_err(|r| {
-        tracing::warn!(host = %host_of(url), reason = %r, "keydb URL refused before connecting");
-        r.into_error(url)
-    })?;
-    get_body(&hardened_agent(pinned), url, MAX_BODY_BYTES)
+    let mut url = url.to_string();
+    let mut last_status = 0;
+    for _ in 0..=MAX_REDIRECTS {
+        let pinned = resolve_and_guard(&url).map_err(|r| {
+            tracing::warn!(host = %host_of(&url), reason = %r, "keydb URL refused before connecting");
+            r.into_error(&url)
+        })?;
+        match get_hop(&hardened_agent(pinned), &url, MAX_BODY_BYTES)? {
+            Hop::Body(body) => return Ok(body),
+            Hop::Redirect { status, to } => {
+                if is_downgrade(&url, &to) {
+                    tracing::warn!(host = %host_of(&to), "keydb redirect from https to http refused");
+                    return Err(Error::KeydbUnsupportedScheme {
+                        scheme: "http".to_string(),
+                    });
+                }
+                tracing::info!(status, from = %host_of(&url), to = %host_of(&to), "keydb URL redirected");
+                last_status = status;
+                url = to;
+            }
+        }
+    }
+    Err(Error::KeydbHttp {
+        status: last_status,
+    })
 }
 
-// One GET through `agent`: the body, or the error it maps to. The agent follows no redirect, so
-// a 3xx comes back as a response and is refused here with the other non-2xx statuses.
-fn get_body(agent: &ureq::Agent, url: &str, cap: u64) -> Result<Vec<u8>> {
+// What one GET produced: the body, or a redirect to follow (already made absolute).
+#[derive(Debug, PartialEq)]
+enum Hop {
+    Body(Vec<u8>),
+    Redirect { status: u16, to: String },
+}
+
+// One GET through `agent`. The agent follows no redirect itself: a 3xx with a usable
+// `Location` comes back as [`Hop::Redirect`]; any other non-2xx is the HTTP-status error.
+fn get_hop(agent: &ureq::Agent, url: &str, cap: u64) -> Result<Hop> {
     let resp = agent.get(url).call().map_err(|e| map_ureq_err(url, &e))?;
     let status = resp.status();
+    if status.is_redirection()
+        && let Some(to) = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|l| redirect_target(url, l))
+    {
+        return Ok(Hop::Redirect {
+            status: status.as_u16(),
+            to,
+        });
+    }
     if !status.is_success() {
         return Err(Error::KeydbHttp {
             status: status.as_u16(),
         });
     }
-    read_capped(resp.into_body().into_reader(), cap).map_err(|e| cap_error(&e, url))
+    read_capped(resp.into_body().into_reader(), cap)
+        .map(Hop::Body)
+        .map_err(|e| cap_error(&e, url))
+}
+
+// Whether following `from` → `to` would drop TLS.
+pub(crate) fn is_downgrade(from: &str, to: &str) -> bool {
+    matches!(
+        (split_http_scheme(from), split_http_scheme(to)),
+        (Some(("https", _)), Some(("http", _)))
+    )
+}
+
+// `location` resolved against `base` (RFC 3986 §5.2): absolute, scheme-relative, absolute-path
+// or relative-path, dot segments removed. `None` for a non-HTTP scheme or an empty value.
+pub(crate) fn redirect_target(base: &str, location: &str) -> Option<String> {
+    let location = location.trim().split('#').next()?;
+    if location.is_empty() {
+        return None;
+    }
+    if location.contains("://") {
+        return split_http_scheme(location).map(|_| location.to_string());
+    }
+    let (scheme, rest) = split_http_scheme(base)?;
+    if let Some(net) = location.strip_prefix("//") {
+        return Some(format!("{scheme}://{net}"));
+    }
+    let auth_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(auth_len);
+    let base_path = tail.split(['?', '#']).next().unwrap_or("");
+    let (path, query) = match location.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (location, None),
+    };
+    let merged = if path.starts_with('/') {
+        path.to_string()
+    } else if path.is_empty() {
+        if base_path.is_empty() { "/" } else { base_path }.to_string()
+    } else {
+        let dir = base_path.rfind('/').map_or("/", |i| &base_path[..=i]);
+        format!("{dir}{path}")
+    };
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
+    Some(format!(
+        "{scheme}://{authority}{}{query}",
+        remove_dot_segments(&merged)
+    ))
+}
+
+// RFC 3986 §5.2.4 on an absolute path: `.` dropped, `..` pops a segment.
+fn remove_dot_segments(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    for (i, seg) in segments.iter().enumerate() {
+        let last = i + 1 == segments.len();
+        match *seg {
+            "." | ".." => {
+                if *seg == ".." {
+                    out.pop();
+                }
+                if last {
+                    out.push("");
+                }
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 // Which keydb error a capped read's failure is: an over-large body is E8002 (content), a dead
@@ -376,7 +487,14 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, Refusal>
     static DNS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     const MAX_DNS_IN_FLIGHT: usize = 4;
 
-    let addrs: Vec<SocketAddr> = {
+    // An IP literal needs no lookup, so it never waits on (or takes) a DNS slot.
+    let literal = host
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| vec![SocketAddr::new(ip, port)]);
+    let addrs: Vec<SocketAddr> = if let Some(addrs) = literal {
+        addrs
+    } else {
         use std::sync::atomic::Ordering;
         use std::sync::mpsc;
         // Check-and-increment in one atomic op — a separate load-then-add left a

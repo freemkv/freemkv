@@ -1083,3 +1083,49 @@ fn each_caller_passes_its_own_keydb_budget() {
     let web = include_str!("web.rs");
     assert!(web.contains("refresh_keydb(cfg, &keydb_url, KEYDB_FETCH_TIMEOUT)"));
 }
+
+// Field report (FindVUK): the download link answers 302 with a relative `Location`. The
+// update follows it (re-guarded), so the error is the second hop's, at the second path.
+#[test]
+fn refresh_keydb_follows_a_relative_redirect() {
+    use std::io::{Read, Write};
+    let cfg = std::sync::RwLock::new(Config::default());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        for head in [
+            &b"HTTP/1.1 302 Found\r\nLocation: ./export/keydb_eng.zip\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"[..],
+            &b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"[..],
+        ] {
+            // Bounded accept: on a client that stops after one hop this must not hang.
+            listener.set_nonblocking(true).unwrap();
+            let t0 = std::time::Instant::now();
+            let mut sock = loop {
+                match listener.accept() {
+                    Ok((sock, _)) => break sock,
+                    Err(_) if t0.elapsed() < std::time::Duration::from_secs(10) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(_) => return lines,
+                }
+            };
+            sock.set_nonblocking(false).unwrap();
+            let mut buf = [0u8; 1024];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            lines.push(req.lines().next().unwrap_or("").to_string());
+            let _ = sock.write_all(head);
+        }
+        lines
+    });
+    let err = refresh_keydb(
+        &cfg,
+        &format!("http://127.0.0.1:{port}/fv_download.php?lang=eng"),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert!(matches!(err, KeydbError::Status(404)), "{err:?}");
+    let lines = upstream.join().unwrap();
+    assert_eq!(lines[1], "GET /export/keydb_eng.zip HTTP/1.1", "{lines:?}");
+}

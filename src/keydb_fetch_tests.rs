@@ -129,39 +129,146 @@ fn stub_agent(pinned: SocketAddr) -> ureq::Agent {
     )
 }
 
-// A non-2xx answer is the HTTP-status error, a redirect included: the agent follows none,
-// so a mirror's 301 is reported rather than saved as keydb content.
+// A non-2xx answer is the HTTP-status error; so is a 3xx with no usable `Location`.
 #[test]
 fn a_non_success_status_is_a_keydb_http_error() {
     for (head, want) in [
-            (
-                &b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://keydb-mirror.test/new\r\nContent-Length: 0\r\n\r\n"[..],
-                301u16,
-            ),
-            (&b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"[..], 404),
-            (&b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"[..], 503),
-        ] {
-            let head: &'static [u8] = Box::leak(head.to_vec().into_boxed_slice());
-            let (pinned, server) = keydb_stub(head, |_| {});
-            let got = get_body(&stub_agent(pinned), "http://keydb-mirror.test/keydb.zip", 1024);
-            let _ = server.join();
-            assert!(
-                matches!(got, Err(Error::KeydbHttp { status }) if status == want),
-                "{want}: {got:?}"
-            );
-        }
+        (
+            &b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n"[..],
+            302u16,
+        ),
+        (
+            &b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"[..],
+            404,
+        ),
+        (
+            &b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"[..],
+            503,
+        ),
+    ] {
+        let head: &'static [u8] = Box::leak(head.to_vec().into_boxed_slice());
+        let (pinned, server) = keydb_stub(head, |_| {});
+        let got = get_hop(
+            &stub_agent(pinned),
+            "http://keydb-mirror.test/keydb.zip",
+            1024,
+        );
+        let _ = server.join();
+        assert!(
+            matches!(got, Err(Error::KeydbHttp { status }) if status == want),
+            "{want}: {got:?}"
+        );
+    }
 }
 
-// `get_body` hands the cap to the body read: over it is E8002, at it is the body.
+// A 3xx with a `Location` is a hop to follow, made absolute against the request URL.
+#[test]
+fn a_redirect_with_a_location_is_a_hop() {
+    let head =
+        b"HTTP/1.1 302 Found\r\nLocation: ./export/keydb_eng.zip\r\nContent-Length: 0\r\n\r\n";
+    let (pinned, server) = keydb_stub(head, |_| {});
+    let got = get_hop(
+        &stub_agent(pinned),
+        "http://keydb-mirror.test/fv_download.php?lang=eng",
+        1024,
+    );
+    let _ = server.join();
+    assert_eq!(
+        got.expect("a hop"),
+        Hop::Redirect {
+            status: 302,
+            to: "http://keydb-mirror.test/export/keydb_eng.zip".to_string()
+        }
+    );
+}
+
+// Field report (FindVUK): the download link answers 302 with a relative `Location` to the
+// ZIP. `fetch` follows it, re-guarding the next hop, and returns the ZIP's bytes.
+#[test]
+fn fetch_follows_a_relative_redirect_to_the_keydb() {
+    use std::io::{Read as _, Write as _};
+    let listener =
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stub listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = std::thread::spawn(move || {
+        let mut paths = Vec::new();
+        for head in [
+            &b"HTTP/1.1 302 Found\r\nLocation: ./export/keydb_eng.zip\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nPK\x03\x04"[..],
+        ] {
+            let Some(mut sock) = accept_within(&listener, Duration::from_secs(10)) else {
+                break;
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while !req.ends_with(b"\r\n\r\n") {
+                match sock.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => req.push(byte[0]),
+                }
+            }
+            let line = String::from_utf8_lossy(&req).lines().next().unwrap_or("").to_string();
+            paths.push(line);
+            let _ = sock.write_all(head);
+        }
+        paths
+    });
+    let got = fetch(&format!("http://127.0.0.1:{port}/fv_download.php?lang=eng"));
+    assert_eq!(got.expect("the redirected body"), b"PK\x03\x04");
+    let paths = server.join().expect("stub");
+    assert_eq!(paths[1], "GET /export/keydb_eng.zip HTTP/1.1", "{paths:?}");
+}
+
+#[test]
+fn redirect_target_resolves_every_reference_form() {
+    let base = "https://fvonline-db.bplaced.net/fv_download.php?lang=eng";
+    for (loc, want) in [
+        (
+            "./export/keydb_eng.zip",
+            "https://fvonline-db.bplaced.net/export/keydb_eng.zip",
+        ),
+        (
+            "export/k.zip",
+            "https://fvonline-db.bplaced.net/export/k.zip",
+        ),
+        (
+            "/a/./b/../k.zip?x=1",
+            "https://fvonline-db.bplaced.net/a/k.zip?x=1",
+        ),
+        ("//mirror.test/k.zip", "https://mirror.test/k.zip"),
+        ("https://other.test/k.zip#frag", "https://other.test/k.zip"),
+        (
+            "?lang=deu",
+            "https://fvonline-db.bplaced.net/fv_download.php?lang=deu",
+        ),
+    ] {
+        assert_eq!(redirect_target(base, loc).as_deref(), Some(want), "{loc}");
+    }
+    assert_eq!(
+        redirect_target("http://h.test/a/b/c", "../k").as_deref(),
+        Some("http://h.test/a/k")
+    );
+    assert_eq!(redirect_target(base, "ftp://h.test/k"), None);
+    assert_eq!(redirect_target(base, "  "), None);
+}
+
+#[test]
+fn an_https_to_http_redirect_is_a_downgrade() {
+    assert!(is_downgrade("https://a.test/k", "http://a.test/k"));
+    assert!(!is_downgrade("http://a.test/k", "https://a.test/k"));
+    assert!(!is_downgrade("https://a.test/k", "https://b.test/k"));
+}
+
+// `get_hop` hands the cap to the body read: over it is E8002, at it is the body.
 #[test]
 fn get_body_enforces_its_cap() {
     let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nkeys";
     let (pinned, server) = keydb_stub(ok, |_| {});
-    let got = get_body(&stub_agent(pinned), "http://keydb-mirror.test/k", 4);
+    let got = get_hop(&stub_agent(pinned), "http://keydb-mirror.test/k", 4);
     let _ = server.join();
-    assert_eq!(got.expect("a body at the cap"), b"keys");
+    assert_eq!(got.expect("a body at the cap"), Hop::Body(b"keys".to_vec()));
     let (pinned, server) = keydb_stub(ok, |_| {});
-    let got = get_body(&stub_agent(pinned), "http://keydb-mirror.test/k", 3);
+    let got = get_hop(&stub_agent(pinned), "http://keydb-mirror.test/k", 3);
     let _ = server.join();
     assert!(matches!(got, Err(Error::KeydbInvalid)), "{got:?}");
 }
@@ -407,4 +514,18 @@ fn hardened_agent_connects_to_the_pinned_address_not_dns() {
         head.contains("keydb-mirror.test"),
         "the pinned agent must still address the original host; got: {head}"
     );
+}
+
+// `accept`, giving up after `limit` so a client that never connects cannot hang the test.
+fn accept_within(listener: &std::net::TcpListener, limit: Duration) -> Option<std::net::TcpStream> {
+    listener.set_nonblocking(true).ok()?;
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < limit {
+        if let Ok((sock, _)) = listener.accept() {
+            sock.set_nonblocking(false).ok()?;
+            return Some(sock);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    None
 }

@@ -193,22 +193,56 @@ pub fn refresh_keydb(
     limit: std::time::Duration,
 ) -> std::result::Result<SaveReport, KeydbError> {
     use crate::server::web;
-    // Resolve+validate once, then pin the connection to those IPs so DNS rebinding can't
-    // redirect the fetch between validation and connect.
-    let pinned = web::validate_fetch_url(url).map_err(KeydbError::UrlRejected)?;
-    let resp = match web::keydb_update_call(pinned, url, limit, web::STALL_TIMEOUT) {
-        Ok(resp) => resp,
-        Err(ureq::Error::StatusCode(code)) => return Err(KeydbError::Status(code)),
-        Err(e) => {
-            // Detail stays in the log, through the URL-free `ureq_error_kind`.
-            let kind = web::ureq_error_kind(&e);
-            tracing::warn!(
-                origin = %crate::server::webhook::webhook_url_origin(url),
-                error_kind = %kind,
-                "keydb update: could not connect to configured KEYDB server"
-            );
-            return Err(KeydbError::Connect(kind));
+    let started = std::time::Instant::now();
+    let mut url = url.to_string();
+    let mut hops = 0;
+    let resp = loop {
+        // Resolve+validate every hop, then pin the connection to those IPs so DNS rebinding
+        // can't move the fetch between validation and connect.
+        let pinned = web::validate_fetch_url(&url).map_err(KeydbError::UrlRejected)?;
+        let left = limit.saturating_sub(started.elapsed());
+        let resp = match web::keydb_update_call(pinned, &url, left, web::STALL_TIMEOUT) {
+            Ok(resp) => resp,
+            Err(ureq::Error::StatusCode(code)) => return Err(KeydbError::Status(code)),
+            Err(e) => {
+                // Detail stays in the log, through the URL-free `ureq_error_kind`.
+                let kind = web::ureq_error_kind(&e);
+                tracing::warn!(
+                    origin = %crate::server::webhook::webhook_url_origin(&url),
+                    error_kind = %kind,
+                    "keydb update: could not connect to configured KEYDB server"
+                );
+                return Err(KeydbError::Connect(kind));
+            }
+        };
+        let status = resp.status();
+        if !status.is_redirection() {
+            if !status.is_success() {
+                return Err(KeydbError::Status(status.as_u16()));
+            }
+            break resp;
         }
+        // A FindVUK-style download link answers 302 to the archive: follow it by hand.
+        let next = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|l| crate::keydb_fetch::redirect_target(&url, l));
+        let Some(next) = next.filter(|_| hops < crate::keydb_fetch::MAX_REDIRECTS) else {
+            return Err(KeydbError::Status(status.as_u16()));
+        };
+        if crate::keydb_fetch::is_downgrade(&url, &next) {
+            return Err(KeydbError::UrlRejected(
+                "redirect from https to http refused".to_string(),
+            ));
+        }
+        tracing::info!(
+            status = status.as_u16(),
+            to = %crate::server::webhook::webhook_url_origin(&next),
+            "keydb update: following redirect"
+        );
+        hops += 1;
+        url = next;
     };
     let body = web::read_capped_keydb_body(resp.into_body().into_reader(), web::KEYDB_MAX_BYTES)
         .map_err(|e| match e {
