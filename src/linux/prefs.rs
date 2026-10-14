@@ -107,8 +107,11 @@ fn g(key: &str) -> String {
     crate::strings::get(key)
 }
 
-fn group(desc: Option<&str>) -> adw::PreferencesGroup {
+/// A settings section: a heading (catalog key) over its rows, as GNOME apps lay
+/// them out, with an optional note under the heading.
+fn group(title: &str, desc: Option<&str>) -> adw::PreferencesGroup {
     let grp = adw::PreferencesGroup::new();
+    grp.set_title(&glib::markup_escape_text(&g(title)));
     if let Some(d) = desc {
         grp.set_description(Some(&glib::markup_escape_text(d)));
     }
@@ -287,11 +290,11 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     let mut f = Form::default();
 
     // ── Output
-    let o1 = group(None);
+    let o1 = group("gui.set.group_files", None);
     f.combo(&o1, "container", &g("gui.set.default_output"));
     f.path(shell, &o1, "dest_dir", &g("gui.set.default_dest"), true);
     f.entry(&o1, "filename_template", &g("gui.set.filename_template"));
-    let o2 = group(None);
+    let o2 = group("gui.set.group_after_rip", None);
     f.switch(&o2, "keep_iso", &g("gui.set.keep_iso"));
     f.switch(&o2, "auto_eject", &g("gui.set.auto_eject"));
     f.switch(
@@ -305,10 +308,13 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     window.add(&page("gui.tab.output", "folder-videos-symbolic", &[o1, o2]));
 
     // ── Selection
-    let s1 = group(Some(&g("gui.set.min_length_note")));
+    let s1 = group("gui.set.group_titles", Some(&g("gui.set.min_length_note")));
     f.combo(&s1, "selection", &g("gui.set.default_selection"));
     f.entry(&s1, "min_title_secs", &g("gui.set.min_length"));
-    let s2 = group(Some(&g("gui.set.lang_prefs_note")));
+    let s2 = group(
+        "gui.set.group_languages",
+        Some(&g("gui.set.lang_prefs_note")),
+    );
     f.entry(
         &s2,
         "presentation_language",
@@ -332,13 +338,16 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     ));
 
     // ── Recovery
-    let r1 = group(Some(&g("gui.set.abort_lost_note")));
+    let r1 = group(
+        "gui.set.group_recovery",
+        Some(&g("gui.set.abort_lost_note")),
+    );
     f.combo(&r1, "rip_mode", &g("gui.set.rip_mode"));
     f.entry(&r1, "max_passes", &g("gui.set.max_passes"));
     f.entry(&r1, "abort_lost_secs", &g("gui.set.abort_lost"));
-    let r2 = group(Some(&g("gui.set.raw_note")));
+    let r2 = group("gui.set.group_raw", Some(&g("gui.set.raw_note")));
     f.switch(&r2, "raw", &g("gui.set.keep_encrypted"));
-    let r3 = group(None);
+    let r3 = group("gui.set.group_existing", None);
     f.switch(&r3, "force", &g("gui.set.overwrite"));
     window.add(&page(
         "gui.tab.recovery",
@@ -347,9 +356,9 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     ));
 
     // ── Keys
-    let k1 = group(None);
+    let k1 = group("gui.set.group_key_source", None);
     f.combo(&k1, "key_source", &g("gui.set.key_source"));
-    let k2 = group(None);
+    let k2 = group("gui.set.group_keydb", None);
     f.path(shell, &k2, "keydb_path", &g("gui.set.keydb_path"), false);
     f.entry(&k2, "keydb_url", &g("gui.set.keydb_url"));
     let keydb_row = adw::ActionRow::builder()
@@ -359,7 +368,7 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
         .build();
     keydb_row.add_suffix(&gtk::Image::from_icon_name("folder-download-symbolic"));
     k2.add(&keydb_row);
-    let k3 = group(None);
+    let k3 = group("gui.set.group_key_service", None);
     f.entry(&k3, "keyserver_url", &g("gui.set.keyserver_url"));
     f.secret(&k3, "keyserver_token", &g("gui.set.keyserver_token"));
     let test_row = adw::ActionRow::builder()
@@ -377,11 +386,14 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     ));
 
     // ── Advanced
-    let a1 = group(None);
+    let a1 = group("gui.set.group_interface", None);
     let language = f.combo(&a1, "language", &g("gui.set.language"));
-    let a2 = group(Some(&g("gui.set.decrypt_threads_note")));
+    let a2 = group(
+        "gui.set.group_performance",
+        Some(&g("gui.set.decrypt_threads_note")),
+    );
     f.entry(&a2, "decrypt_threads", &g("gui.set.decrypt_threads"));
-    let a3 = group(None);
+    let a3 = group("gui.set.group_logging", None);
     f.combo(&a3, "log_level", &g("gui.set.log_detail"));
     window.add(&page(
         "gui.tab.advanced",
