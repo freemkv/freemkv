@@ -532,6 +532,13 @@ impl Shell {
         });
         self.gapp.add_action(&reveal);
 
+        let shortcuts = gio::SimpleAction::new(SHORTCUTS_ACTION, None);
+        let me = self.clone();
+        shortcuts.connect_activate(move |_, _| me.show_shortcuts());
+        self.gapp.add_action(&shortcuts);
+        self.gapp
+            .set_accels_for_action(&format!("app.{SHORTCUTS_ACTION}"), &[SHORTCUTS_ACCEL]);
+
         for group in crate::ui::menu_layout(false) {
             for entry in &group.entries {
                 let MenuEntry::Item(mi) = entry else { continue };
@@ -597,6 +604,16 @@ impl Shell {
 
     /// Closing mid-rip must not silently tear the rip down. "Stop & Quit" has
     /// the core cancel and WAIT (bounded) for the worker to put the file down,
+    /// The Keyboard Shortcuts window (Ctrl+?), rebuilt each time so it is in the
+    /// current language.
+    fn show_shortcuts(self: &Rc<Self>) {
+        let builder = gtk::Builder::from_string(&shortcuts_ui());
+        if let Some(w) = builder.object::<gtk::ShortcutsWindow>("shortcuts") {
+            w.set_transient_for(Some(&self.window));
+            w.present();
+        }
+    }
+
     /// then closes; anything else keeps ripping.
     fn confirm_quit(self: &Rc<Self>) {
         let g = crate::strings::get;
@@ -628,47 +645,152 @@ fn show_folder_label() -> String {
     crate::strings::get_or("gui.btn.show_folder", "Show in Folder")
 }
 
-/// Translate `ui::menu_layout` into the hamburger's `gio::Menu`. Each group
-/// becomes titled sections (split at the layout's separators); the App group
-/// (About / Settings / Quit) goes last, per GNOME convention.
+/// The Keyboard Shortcuts window's action (Ctrl+?), outside the shared layout: the
+/// window is a GNOME convention the other shells do not have.
+const SHORTCUTS_ACTION: &str = "shortcuts";
+const SHORTCUTS_ACCEL: &str = "<Primary>question";
+
+fn shortcuts_label() -> String {
+    crate::strings::get_or("gui.menu.shortcuts", "Keyboard Shortcuts")
+}
+
+// One layout row as a menu row bound to its `app.` action, accelerator shown.
+fn menu_row(mi: &crate::ui::MenuItem) -> Option<gio::MenuItem> {
+    let name = glue::action_name_for(&mi.action)?;
+    let item = gio::MenuItem::new(Some(&mi.label), Some(&format!("app.{name}")));
+    if let Some(a) = mi.accel {
+        item.set_attribute_value("accel", Some(&glue::accel_string(&a).to_variant()));
+    }
+    Some(item)
+}
+
+/// Translate `ui::menu_layout` into the hamburger's `gio::Menu`, GNOME-style and
+/// compact: File, Edit, View and Help as submenus (Quit ends File), then Settings,
+/// Keyboard Shortcuts and About. Every action and accelerator is still reachable.
 fn build_menu_model(log_hidden: bool) -> gio::Menu {
-    let menu = gio::Menu::new();
     let layout = crate::ui::menu_layout(log_hidden);
-    let others = layout.iter().filter(|g| g.id != MenuGroupId::App);
-    let app = layout.iter().filter(|g| g.id == MenuGroupId::App);
-    for group in others.chain(app) {
-        let title = (group.id != MenuGroupId::App).then_some(group.title.as_str());
+    let is_quit = |mi: &crate::ui::MenuItem| glue::action_name_for(&mi.action) == Some("quit");
+    let app_items: Vec<&crate::ui::MenuItem> = layout
+        .iter()
+        .filter(|g| g.id == MenuGroupId::App)
+        .flat_map(|g| g.entries.iter())
+        .filter_map(|e| match e {
+            MenuEntry::Item(mi) => Some(mi),
+            MenuEntry::Separator => None,
+        })
+        .collect();
+    let submenus = gio::Menu::new();
+    for group in layout.iter().filter(|g| g.id != MenuGroupId::App) {
+        let sub = gio::Menu::new();
         let mut section = gio::Menu::new();
-        let mut first = true;
         for entry in &group.entries {
             match entry {
-                MenuEntry::Separator => {
-                    if section.n_items() > 0 {
-                        menu.append_section(if first { title } else { None }, &section);
-                        first = false;
-                        section = gio::Menu::new();
-                    }
+                MenuEntry::Separator if section.n_items() > 0 => {
+                    sub.append_section(None, &section);
+                    section = gio::Menu::new();
                 }
+                MenuEntry::Separator => {}
                 MenuEntry::Item(mi) => {
-                    let Some(name) = glue::action_name_for(&mi.action) else {
-                        continue;
-                    };
-                    let item = gio::MenuItem::new(Some(&mi.label), Some(&format!("app.{name}")));
-                    if let Some(a) = mi.accel {
-                        item.set_attribute_value(
-                            "accel",
-                            Some(&glue::accel_string(&a).to_variant()),
-                        );
+                    if let Some(row) = menu_row(mi) {
+                        section.append_item(&row);
                     }
-                    section.append_item(&item);
                 }
             }
         }
         if section.n_items() > 0 {
-            menu.append_section(if first { title } else { None }, &section);
+            sub.append_section(None, &section);
+        }
+        if group.id == MenuGroupId::File {
+            let quit = gio::Menu::new();
+            for mi in app_items.iter().filter(|mi| is_quit(mi)) {
+                if let Some(row) = menu_row(mi) {
+                    quit.append_item(&row);
+                }
+            }
+            sub.append_section(None, &quit);
+        }
+        if sub.n_items() > 0 {
+            submenus.append_submenu(Some(&group.title), &sub);
         }
     }
+    let app = gio::Menu::new();
+    let find = |name: &str| {
+        app_items
+            .iter()
+            .find(|mi| glue::action_name_for(&mi.action) == Some(name))
+    };
+    if let Some(row) = find("settings").and_then(|mi| menu_row(mi)) {
+        app.append_item(&row);
+    }
+    let shortcuts = gio::MenuItem::new(
+        Some(&shortcuts_label()),
+        Some(&format!("app.{SHORTCUTS_ACTION}")),
+    );
+    shortcuts.set_attribute_value("accel", Some(&SHORTCUTS_ACCEL.to_variant()));
+    app.append_item(&shortcuts);
+    if let Some(row) = find("about").and_then(|mi| menu_row(mi)) {
+        app.append_item(&row);
+    }
+    let menu = gio::Menu::new();
+    menu.append_section(None, &submenus);
+    menu.append_section(None, &app);
     menu
+}
+
+// Text for GtkBuilder XML: the five predefined entities.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// The Keyboard Shortcuts window as GtkBuilder XML, built from the same layout as the
+/// menu: one group per menu group, one row per accelerator, so the two cannot drift.
+fn shortcuts_ui() -> String {
+    let mut groups = String::new();
+    let mut add_group = |title: &str, rows: &[(String, String)]| {
+        if rows.is_empty() {
+            return;
+        }
+        groups.push_str(&format!(
+            "<child><object class=\"GtkShortcutsGroup\"><property name=\"title\">{}</property>",
+            xml_escape(title)
+        ));
+        for (label, accel) in rows {
+            groups.push_str(&format!(
+                "<child><object class=\"GtkShortcutsShortcut\"><property name=\"title\">{}</property><property name=\"accelerator\">{}</property></object></child>",
+                xml_escape(label),
+                xml_escape(accel)
+            ));
+        }
+        groups.push_str("</object></child>");
+    };
+    let layout = crate::ui::menu_layout(false);
+    let mut app_rows = Vec::new();
+    for group in &layout {
+        let rows: Vec<(String, String)> = group
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item(mi) if glue::action_name_for(&mi.action).is_some() => {
+                    mi.accel.map(|a| (mi.label.clone(), glue::accel_string(&a)))
+                }
+                _ => None,
+            })
+            .collect();
+        if group.id == MenuGroupId::App {
+            app_rows = rows;
+        } else {
+            add_group(&group.title, &rows);
+        }
+    }
+    app_rows.push((shortcuts_label(), SHORTCUTS_ACCEL.to_string()));
+    add_group("freemkv", &app_rows);
+    format!(
+        "<interface><object class=\"GtkShortcutsWindow\" id=\"shortcuts\"><property name=\"modal\">1</property><child><object class=\"GtkShortcutsSection\"><property name=\"section-name\">main</property>{groups}</object></child></object></interface>"
+    )
 }
 
 #[cfg(test)]
