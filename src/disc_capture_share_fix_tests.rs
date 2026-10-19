@@ -160,7 +160,13 @@ fn a_structure_fold_writes_nested_files_and_zips_them() {
     let zip = crate::info::zip_files(&out, &written).expect("zip");
     let mut a = zip::ZipArchive::new(std::io::Cursor::new(zip)).expect("valid zip");
     let names: Vec<String> = (0..a.len())
-        .map(|i| a.by_index(i).expect("entry").name().to_string())
+        .map(|i| {
+            a.by_index(i)
+                .expect("entry")
+                .name()
+                .expect("name")
+                .into_owned()
+        })
         .collect();
     assert_eq!(names, written);
 }

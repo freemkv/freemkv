@@ -46,7 +46,7 @@ fn scratch_dir(tag: &str) -> std::path::PathBuf {
 fn entries(zip: &[u8]) -> Vec<String> {
     let mut a = zip::ZipArchive::new(std::io::Cursor::new(zip.to_vec())).expect("valid zip");
     (0..a.len())
-        .map(|i| a.by_index(i).unwrap().name().to_string())
+        .map(|i| a.by_index(i).unwrap().name().unwrap().into_owned())
         .collect()
 }
 
