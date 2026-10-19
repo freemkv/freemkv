@@ -1128,14 +1128,12 @@ fn presence_tick(
     (!latched, poll_action(presence, latched, in_cooldown))
 }
 
-// Whether the disc the poll loop last saw in `device` is still the one in it. As in 1.7.7,
-// a medium change (an operator Eject, or the drive's UNIT ATTENTION 28/00) or a probe the
-// drive did not answer ends that insertion, so the next good probe is a new insert: after
-// a fault the operator ejects and re-inserts, and the rip starts again. A medium change
-// also ends a Stop's hold. A probe failure does not end the insertion of a disc whose rip
-// finished: a bus glitch must not re-rip a delivered disc left in the drive; only a real
-// medium change does. A drive a worker holds is never probed, and the insert claim
-// refuses a busy drive, so none of this can start a second rip on it.
+/// Whether the disc the poll loop last saw in `device` is still the one in it. As in 1.7.7,
+/// a medium change (Eject, or the drive's UNIT ATTENTION 28h) or an unanswered probe ends
+/// that insertion, so after a fault an eject and re-insert starts the rip again; a medium
+/// change also ends a Stop's hold. A probe failure never ends a finished rip's insertion,
+/// so a bus glitch cannot re-rip a delivered disc. A drive a worker holds is never probed
+/// and the insert claim refuses a busy drive, so no rip starts twice.
 fn same_insertion(
     device: &str,
     probe: &libfreemkv::Result<libfreemkv::DiscPresence>,
