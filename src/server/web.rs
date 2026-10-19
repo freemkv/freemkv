@@ -3601,7 +3601,7 @@ fn handle_eject(request: tiny_http::Request, device: &str) {
         );
     }
     let device_path = device_path(device);
-    crate::server::ripper::eject_drive(&device_path);
+    ripper::operator_eject(&device_path);
     ripper::update_state(
         device,
         ripper::RipState {

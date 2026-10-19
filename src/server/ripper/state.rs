@@ -377,6 +377,37 @@ pub fn release_stopped_disc(device: &str) {
         .remove(device);
 }
 
+// Devices whose medium changed since the poll loop last probed them.
+static MEDIUM_CHANGED: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// The disc in `device` left it (an operator Eject): that insertion is over, so a Stop's
+/// hold on it ends now and the next disc the poll loop sees is a new insert, even when
+/// no poll caught the drive empty in between.
+pub(super) fn note_medium_changed(device: &str) {
+    release_stopped_disc(device);
+    MEDIUM_CHANGED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(device.into());
+}
+
+/// The last rip on `device` finished and delivered (status `done`).
+pub(super) fn rip_finished(device: &str) -> bool {
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .is_some_and(|row| row.status == "done")
+}
+
+pub(super) fn take_medium_changed(device: &str) -> bool {
+    MEDIUM_CHANGED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(device)
+}
+
 // Some USB drives briefly report no medium while cancellation releases the drive.
 // Require two absent observations before ending a stopped insertion.
 pub(super) fn stopped_disc_presence(
@@ -439,6 +470,7 @@ pub(super) fn is_in_cooldown(device: &str) -> bool {
 /// accumulate stale entries. Recovers poisoned locks before cleanup.
 pub(super) fn forget_device_state(device: &str) {
     release_stopped_disc(device);
+    take_medium_changed(device);
     super::forget_staging_hold(device);
     STOP_COOLDOWNS
         .lock()

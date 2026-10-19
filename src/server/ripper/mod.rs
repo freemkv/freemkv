@@ -1128,6 +1128,88 @@ fn presence_tick(
     (!latched, poll_action(presence, latched, in_cooldown))
 }
 
+// Whether the disc the poll loop last saw in `device` is still the one in it. As in 1.7.7,
+// a medium change (an operator Eject, or the drive's UNIT ATTENTION 28/00) or a probe the
+// drive did not answer ends that insertion, so the next good probe is a new insert: after
+// a fault the operator ejects and re-inserts, and the rip starts again. A medium change
+// also ends a Stop's hold. A probe failure does not end the insertion of a disc whose rip
+// finished: a bus glitch must not re-rip a delivered disc left in the drive; only a real
+// medium change does. A drive a worker holds is never probed, and the insert claim
+// refuses a busy drive, so none of this can start a second rip on it.
+fn same_insertion(
+    device: &str,
+    probe: &libfreemkv::Result<libfreemkv::DiscPresence>,
+    had_disc: bool,
+) -> bool {
+    let changed = state::take_medium_changed(device)
+        || probe.as_ref().is_err_and(|e| {
+            e.scsi_sense()
+                .is_some_and(|s| s.is_unit_attention() && s.asc == ASC_MEDIUM_CHANGED)
+        });
+    if changed {
+        state::release_stopped_disc(device);
+    }
+    let failed = probe.is_err() && !state::rip_finished(device);
+    had_disc && !changed && !failed
+}
+
+// SPC-4 ASC 28h: NOT READY TO READY CHANGE, MEDIUM MAY HAVE CHANGED.
+const ASC_MEDIUM_CHANGED: u8 = 0x28;
+
+/// One probed drive's tick.
+#[derive(Debug)]
+enum ProbedTick<'a> {
+    /// The drive answered: the presence acted on, whether its disc is a new insert, and
+    /// what to do about it.
+    Answered {
+        presence: libfreemkv::DiscPresence,
+        is_new_insert: bool,
+        action: PollAction,
+    },
+    /// The probe failed. `keep`: the insertion it was tracking goes on (a finished
+    /// disc's glitch, `same_insertion`); otherwise it has ended.
+    Failed {
+        error: &'a libfreemkv::Error,
+        keep: bool,
+    },
+}
+
+impl ProbedTick<'_> {
+    /// Carry this device into the next tick's "already seen" set.
+    fn latch(&self) -> bool {
+        match self {
+            ProbedTick::Answered { action, .. } => action.latch(),
+            ProbedTick::Failed { keep, .. } => *keep,
+        }
+    }
+}
+
+fn probed_tick<'a>(
+    device: &str,
+    probe: &'a libfreemkv::Result<libfreemkv::DiscPresence>,
+    had_disc: bool,
+    cfg: &Arc<RwLock<Config>>,
+    now: u64,
+    in_cooldown: bool,
+) -> ProbedTick<'a> {
+    let had_disc = same_insertion(device, probe, had_disc);
+    let presence = match probe {
+        Ok(p) => state::stopped_disc_presence(device, *p),
+        Err(error) => {
+            return ProbedTick::Failed {
+                error,
+                keep: had_disc,
+            };
+        }
+    };
+    let (is_new_insert, action) = presence_tick(device, presence, had_disc, cfg, now, in_cooldown);
+    ProbedTick::Answered {
+        presence,
+        is_new_insert,
+        action,
+    }
+}
+
 fn poll_action(
     presence: libfreemkv::DiscPresence,
     had_disc: bool,
@@ -1323,21 +1405,38 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                 // `Settling` (spin-up, tray closing) changes nothing this tick.
                 let probe = match session::held_drive_presence(&device) {
                     Some(p) => Ok(p),
-                    None => libfreemkv::disc_presence(std::path::Path::new(path)),
-                };
-                let presence = match probe {
-                    Ok(p) => {
-                        probe_fail.clear(&device);
-                        let p = state::stopped_disc_presence(&device, p);
-                        update_state_with(&device, |row| clear_probe_error(row, p));
-                        p
-                    }
-                    Err(e) => {
-                        // Presence unknown, like Settling: keep the latch so a resident disc
-                        // is not re-dispatched as a fresh insert once the drive answers.
-                        if had_disc.contains(&device) {
-                            current_with_disc.insert(device.clone());
+                    None => libfreemkv::disc_presence_probe(std::path::Path::new(path)).map(|p| {
+                        // A 28h the probe re-polled away: the disc may have been swapped.
+                        if p.medium_changed {
+                            state::note_medium_changed(&device);
                         }
+                        p.presence
+                    }),
+                };
+                // One is_in_cooldown read for both halves: asking twice could
+                // straddle the expiry and dispatch without latching.
+                let tick = probed_tick(
+                    &device,
+                    &probe,
+                    had_disc.contains(&device),
+                    cfg,
+                    crate::server::util::epoch_secs(),
+                    is_in_cooldown(&device),
+                );
+                if tick.latch() {
+                    current_with_disc.insert(device.clone());
+                }
+                let (is_new_insert, action) = match tick {
+                    ProbedTick::Answered {
+                        presence,
+                        is_new_insert,
+                        action,
+                    } => {
+                        probe_fail.clear(&device);
+                        update_state_with(&device, |row| clear_probe_error(row, presence));
+                        (is_new_insert, action)
+                    }
+                    ProbedTick::Failed { error: e, .. } => {
                         // A drive gone from the enumeration is unplugged, not wedged: skip
                         // the tile and let the next rescan clean up.
                         let enumerate = || {
@@ -1395,20 +1494,6 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                         continue;
                     }
                 };
-
-                // One is_in_cooldown read for both halves: asking twice could
-                // straddle the expiry and dispatch without latching.
-                let (is_new_insert, action) = presence_tick(
-                    &device,
-                    presence,
-                    had_disc.contains(&device),
-                    cfg,
-                    crate::server::util::epoch_secs(),
-                    is_in_cooldown(&device),
-                );
-                if action.latch() {
-                    current_with_disc.insert(device.clone());
-                }
                 if action.shows_idle() {
                     publish_poll_row(
                         &device,
@@ -5153,7 +5238,8 @@ pub(crate) fn should_auto_eject(auto_eject: bool, device: &str) -> bool {
     auto_eject && !device.starts_with('_')
 }
 
-pub fn eject_drive(device_path: &str) {
+/// Eject the disc in `device_path`; whether the drive took the eject.
+pub fn eject_drive(device_path: &str) -> bool {
     let dev = device_key(device_path);
     let dev = dev.as_str();
     // Halt and drain any in-flight rip on this device BEFORE dropping
@@ -5175,7 +5261,7 @@ pub fn eject_drive(device_path: &str) {
     // disc stayed put, no log line, no idea why". Surface both.
     if let Some(d) = held {
         match libfreemkv::DiscSession::from_drive(d).finish(libfreemkv::Finish::Eject) {
-            Ok(()) => return,
+            Ok(()) => return true,
             Err(e) => {
                 tracing::warn!(device = %dev, error = %e, "eject on the held handle failed; reopening")
             }
@@ -5184,15 +5270,28 @@ pub fn eject_drive(device_path: &str) {
     match freemkv_engine::drive::open(std::path::Path::new(device_path)) {
         Ok(drive) => {
             let session = libfreemkv::DiscSession::from_drive(drive);
-            if let Err(e) = session.finish(libfreemkv::Finish::Eject) {
-                crate::server::log::device_log(dev, &format!("eject failed: {e}"));
-                tracing::warn!(device = %dev, error = %e, "eject command failed");
+            match session.finish(libfreemkv::Finish::Eject) {
+                Ok(()) => true,
+                Err(e) => {
+                    crate::server::log::device_log(dev, &format!("eject failed: {e}"));
+                    tracing::warn!(device = %dev, error = %e, "eject command failed");
+                    false
+                }
             }
         }
         Err(e) => {
             crate::server::log::device_log(dev, &format!("eject skipped — drive open failed: {e}"));
             tracing::warn!(device = %dev, error = %e, "eject skipped — drive open failed");
+            false
         }
+    }
+}
+
+/// The operator's Eject. A disc that left the drive ends its insertion and any Stop's
+/// hold on it, so the next disc in starts on_insert even if no poll saw the drive empty.
+pub fn operator_eject(device_path: &str) {
+    if eject_drive(device_path) {
+        state::note_medium_changed(&device_key(device_path));
     }
 }
 
@@ -6759,6 +6858,10 @@ mod insert_tick_tests;
 #[cfg(test)]
 #[path = "mod_poll_presence_tests.rs"]
 mod poll_presence_tests;
+
+#[cfg(test)]
+#[path = "mod_reinsert_tests.rs"]
+mod reinsert_tests;
 
 #[cfg(test)]
 #[path = "mod_teardown_poison_tests.rs"]
