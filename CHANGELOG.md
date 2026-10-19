@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.8.5] — 2026-10-19
+
+### Fixed
+
+- Server: no failure reads "an unexpected error occurred": every library error shows its own line from the shared catalog, with its code.
+- Server: ejecting and re-inserting a disc after a drive fault or a Stop starts it again, as in 1.7.7. A medium change, an operator Eject or a probe the drive does not answer ends the disc's insertion; a probe glitch never re-rips a disc whose rip finished (#75).
+- With libfreemkv and freemkv-unlock 1.8.5: a drive that faults is no longer commanded until it wedges, its tray is unlocked whenever the server closes it, and a staged disc image re-scans for its resume mux (#75).
+- zip 9, for RUSTSEC-2026-0367, -0368 and -0369, and `inout` off a yanked release.
+
 ## [1.8.4] — 2026-10-11
 
 ### Breaking / Upgrade notes (1.8.3 → 1.8.4)
