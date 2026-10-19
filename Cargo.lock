@@ -413,12 +413,13 @@ dependencies = [
  "ureq",
  "windows",
  "winsafe",
- "zip",
+ "zip 9.0.5",
 ]
 
 [[package]]
 name = "freemkv-engine"
-version = "1.8.5"
+version = "1.8.4"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.4#5585400af0a1ebbcb065c4fba834cae15186be9f"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -431,14 +432,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.8.5"
+version = "1.8.4"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.4#2af22ec363f2d1d4ab70a9d95b86c784a795d341"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.8.5"
+version = "1.8.4"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.4#48f8906495530c27c3161253de51d21607a98856"
 dependencies = [
  "base64",
  "flate2",
@@ -446,12 +449,13 @@ dependencies = [
  "serde_json",
  "tracing",
  "ureq",
- "zip",
+ "zip 8.6.0",
 ]
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.8.5"
+version = "1.8.4"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.4#5a09422c6a8aba667879e569bddaf1f0624ed3c3"
 dependencies = [
  "aes",
  "anyhow",
@@ -1034,7 +1038,8 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libfreemkv"
-version = "1.8.5"
+version = "1.8.4"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.4#2622b3fc5afe8eb4ebcd85f58eb0d498a3f6c743"
 dependencies = [
  "aes",
  "base64",
@@ -1052,7 +1057,7 @@ dependencies = [
  "sha2",
  "socket2",
  "tracing",
- "zip",
+ "zip 8.6.0",
 ]
 
 [[package]]
@@ -2471,6 +2476,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "typed-path",
+ "zopfli",
 ]
 
 [[package]]
