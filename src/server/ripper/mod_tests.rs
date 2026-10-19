@@ -1052,15 +1052,48 @@ fn format_lib_error_decrypt_defers_to_aacs_humanizer() {
 }
 
 #[test]
-fn format_lib_error_never_leaks_bare_code_for_unmapped_variant() {
-    // An unmapped variant (EmptyImage has no arm) must hit the generic arm,
-    // not dump a code or a Debug rendering.
+fn format_lib_error_unmapped_variant_renders_its_catalog_line() {
+    // EmptyImage has no tailored arm: the shared catalog's line, with its code
+    // so a field log names the cause, never a generic "unexpected error".
     let s = format_lib_error("Disc scan", &Error::EmptyImage);
-    assert_eq!(
-        s,
-        "Disc scan failed: an unexpected error occurred. Enable debug logging via \
-             /api/debug for details."
+    assert!(s.starts_with("Disc scan failed: E9060 "), "msg: {s}");
+    assert!(!s.contains("unexpected"), "msg: {s}");
+    assert!(!s.contains("EmptyImage"), "msg leaks Debug: {s}");
+}
+
+// #75: a staged image that does not hold the muxed titles refused the resume mux
+// as "an unexpected error occurred".
+#[test]
+fn format_lib_error_scoped_image_names_the_partial_rip() {
+    let e = Error::ImageScoped {
+        path: "/staging/disc/disc.iso".into(),
+    };
+    let s = format_lib_error("reading the saved disc image", &e);
+    assert!(
+        s.starts_with("reading the saved disc image failed:"),
+        "msg: {s}"
     );
+    assert!(s.contains("does not hold every sector"), "msg: {s}");
+}
+
+#[allow(dead_code)]
+mod variants {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test_support.rs"));
+}
+
+#[test]
+fn no_error_renders_a_generic_line() {
+    for e in variants::all_error_variants() {
+        for s in [
+            format_lib_error("Disc scan", &e),
+            aacs_failure_message(Some(&e)),
+            format_pass_error("Pass 1", &e),
+        ] {
+            assert!(!s.contains("unexpected error"), "{e:?}: {s}");
+            assert!(!s.contains("unrecognized stage"), "{e:?}: {s}");
+            assert!(!s.contains("error.E"), "{e:?} has no catalog entry: {s}");
+        }
+    }
 }
 
 // ── aacs_failure_message dispatch ──────────────────────────────
@@ -1328,20 +1361,13 @@ fn aacs_failure_no_keys_says_all_missing() {
 }
 
 #[test]
-fn aacs_failure_unknown_aacs_code_uses_generic_7xxx_arm() {
-    // Unmapped-but-AACS-range error falls through to the 7xxx
-    // catch-all. E_AACS_AGID_ALLOC (7002) is not in any named arm
-    // and exercises that path.
+fn aacs_failure_unmapped_aacs_code_renders_its_catalog_line() {
+    // E_AACS_AGID_ALLOC (7002) is not in any named arm: the catalog's line, not a
+    // generic "unrecognized stage".
     let e = Error::AacsAgidAlloc;
     let s = aacs_failure_message(Some(&e));
     assert!(s.starts_with("Error: E7002 "), "msg: {s}");
-    assert!(s.contains("unrecognized stage"), "msg: {s}");
-    // Must carry the scheme: a schemeless host never linkifies in the
-    // web UI or in a terminal.
-    assert!(
-        s.contains("https://github.com/freemkv/freemkv/issues"),
-        "msg: {s}"
-    );
+    assert!(s.contains("secure session"), "msg: {s}");
     // No debug-dump leak.
     assert!(!s.contains("AacsAgidAlloc"), "msg: {s}");
 }

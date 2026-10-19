@@ -6146,9 +6146,6 @@ fn aacs_failure_message(err: Option<&libfreemkv::Error>) -> String {
     };
 
     let code = e.code();
-    // Intentional overlap: dedicated arms sit above the `7000..=7999` catch-all;
-    // match-order gives the dispatch we want, so the overlapping-arm lint is a false positive.
-    #[allow(clippy::match_overlapping_arm)]
     match code {
         // E7000 — generic "everything tried, nothing worked" catch-all.
         ec::E_AACS_NO_KEYS => error_line(
@@ -6279,21 +6276,9 @@ fn aacs_failure_message(err: Option<&libfreemkv::Error>) -> String {
              usable. Refresh your key database and try again.",
         ),
 
-        // Other 7xxx — known AACS category but unmapped. Use a
-        // generic-but-honest message rather than `({e:?})` debug-dump.
-        7000..=7999 => error_line(
-            code,
-            "AACS key resolution failed at an unrecognized stage. Please report this \
-             at https://github.com/freemkv/freemkv/issues.",
-        ),
-
-        // Non-AACS code on the aacs_error slot — structurally
-        // unexpected. Preserve the code; drop the `{e:?}` debug dump.
-        _ => error_line(
-            code,
-            "An unexpected error occurred while resolving keys. Enable debug logging \
-             via /api/debug for details.",
-        ),
+        // Any other code (other 7xxx, or a non-AACS code on the aacs_error slot):
+        // the shared catalog's line for it, never a generic one.
+        _ => format!("Error: {}", catalog_message(e)),
     }
 }
 
@@ -6380,11 +6365,10 @@ fn disk_space_required_bytes(
 }
 
 // Short English label for a non-SCSI libfreemkv error variant, used
-// in `format_pass_error`'s no-sense arm. Unmapped variants fall back
-// to a generic phrase so a new libfreemkv variant never breaks the build.
-fn non_scsi_error_label(e: &libfreemkv::Error) -> &'static str {
+// in `format_pass_error`'s no-sense arm. `None` defers to the shared catalog.
+fn non_scsi_error_label(e: &libfreemkv::Error) -> Option<&'static str> {
     use libfreemkv::Error;
-    match e {
+    Some(match e {
         Error::Halted => "rip stopped by user",
         Error::MapfileInvalid { .. } => "recovery mapfile invalid",
         Error::DiscRead { .. } => "disc read error",
@@ -6393,8 +6377,8 @@ fn non_scsi_error_label(e: &libfreemkv::Error) -> &'static str {
         Error::DiscCapacityOverflow | Error::DiscCapacityMalformed => {
             "drive reported unusable disc capacity"
         }
-        _ => "unexpected error",
-    }
+        _ => return None,
+    })
 }
 
 // What the operator can do about a MEDIUM ERROR: this message reports an operation that
@@ -6428,10 +6412,13 @@ fn format_pass_error(pass_label: &str, e: &libfreemkv::Error) -> String {
     let Some(sense) = sense else {
         // Non-SCSI error: libfreemkv's Display is code-only (e.g. "E6010"
         // for Halted). For IoError use the inner io::Error message; for
-        // other variants, prefix a short English label so it names what failed.
+        // other variants, a short English label or the catalog line names what failed.
         let detail = match e {
             libfreemkv::Error::IoError { source } => source.to_string(),
-            other => format!("{} ({})", other, non_scsi_error_label(other)),
+            other => match non_scsi_error_label(other) {
+                Some(label) => format!("{other} ({label})"),
+                None => catalog_message(other),
+            },
         };
         return format!("{}{} failed: {}", pass_label, location, detail);
     };
@@ -6558,6 +6545,17 @@ fn format_lib_error(phase: &str, e: &libfreemkv::Error) -> String {
         }
         Error::MkvInvalid => "the muxed output is not a valid MKV file.",
         Error::Mp4Invalid => "the source MP4 file is malformed or truncated.",
+        Error::ImageScoped { .. } => {
+            "the saved disc image does not hold every sector of the titles being muxed \
+             (its rip read only part of them). Re-insert the disc to finish the rip, or \
+             start a fresh rip."
+        }
+        Error::ImageTruncated { .. }
+        | Error::ImageEndsBeforeRead { .. }
+        | Error::ShortImageRead { .. } => {
+            "the saved disc image is shorter than the disc (truncated, or the staging \
+             volume ran out of space). Check staging free space, then start a fresh rip."
+        }
         Error::Halted => "the rip was stopped.",
         Error::MapfileInvalid { .. } => {
             "the recovery map for a previous attempt is corrupt. Start a fresh rip to \
@@ -6610,14 +6608,24 @@ fn format_lib_error(phase: &str, e: &libfreemkv::Error) -> String {
              enable debug logging via /api/debug and report it."
         }
 
-        // Any other variant: a generic, honest line with no leaked code.
-        _ => {
-            "an unexpected error occurred. Enable debug logging via /api/debug for \
-             details."
-        }
+        // Any other variant: the shared catalog's line for its code, never a generic one.
+        _ => return format!("{phase} failed: {}", catalog_message(e)),
     };
 
     format!("{phase} failed: {detail}")
+}
+
+// The shared catalog's line for `e`, code first (`E6022 This image …`), with the error's own
+// data as `{detail}`. Every published code has an entry, so no failure reads as "unexpected".
+fn catalog_message(e: &libfreemkv::Error) -> String {
+    let code = e.code();
+    let shown = e.to_string();
+    let detail = shown
+        .strip_prefix(&format!("E{code}"))
+        .map(|rest| rest.trim_start_matches(':').trim())
+        .unwrap_or("");
+    let msg = freemkv_i18n::error_message_with(u32::from(code), detail);
+    format!("E{code} {}", msg.strip_prefix("Error: ").unwrap_or(&msg))
 }
 
 // Open a drive during transport-failure recovery with exponential backoff; `None` once
