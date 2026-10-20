@@ -1927,6 +1927,50 @@ jobs:
               --wait "${LINK_WAIT_SECS:-1800}"
           }
 
+          # Discord is the LAST public act of a release. The site deploy no longer posts it:
+          # this waits for every run on the v$VERSION tag in all eight repos and for the
+          # site deploy of the release commit to finish green, then pushes
+          # release-ready/v$VERSION to marketing, whose announce.yml posts once per version.
+          announce_on_discord_last() {
+            say "step 10: announce on Discord once every v$VERSION build and the site deploy are green"
+            if $DRY_RUN; then
+              printf '  [dry-run] wait for the v%s tag runs + site deploy, then push release-ready/v%s to marketing\n' "$VERSION" "$VERSION"
+              return 0
+            fi
+            if [ "${WEBSITE_SKIP:-0}" = "1" ]; then warn "WEBSITE_SKIP=1 — not announcing"; return 0; fi
+            local site_sha; site_sha="$(git -C "$WEBSITE_DIR" rev-parse HEAD)"
+            local deadline=$(( $(date +%s) + ${ANNOUNCE_WAIT_SECS:-5400} ))
+            while :; do
+              local pending="" failed="" runs r
+              for r in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
+                       freemkv-engine "${BINARY_CRATES[@]}"; do
+                runs="$(gh api "repos/$GIT_ORG/$r/actions/runs?branch=v$VERSION&per_page=100" \
+                  -q '.workflow_runs[] | "\(.status)|\(.conclusion)|\(.name)"')" \
+                  || die "cannot read $r's v$VERSION runs — the release is out; re-dispatch to announce"
+                pending+="$(printf '%s\n' "$runs" | awk -F'|' -v r="$r" '$1!="completed"{printf " %s:%s", r, $3}')"
+                failed+="$(printf '%s\n' "$runs" | awk -F'|' -v r="$r" \
+                  '$1=="completed" && $2!="success" && $2!="skipped" && $2!="neutral"{printf " %s:%s(%s)", r, $3, $2}')"
+              done
+              runs="$(gh api "repos/$GIT_ORG/marketing/actions/workflows/pages.yml/runs?head_sha=$site_sha&per_page=5" \
+                -q '.workflow_runs[0] | "\(.status)|\(.conclusion)"')" || runs=""
+              case "$runs" in
+                completed\|success) ;;
+                completed\|*) failed+=" marketing:site-deploy(${runs#*|})" ;;
+                *) pending+=" marketing:site-deploy" ;;
+              esac
+              [ -z "$failed" ] || die "not announcing v$VERSION — failed:$failed. Fix, then re-dispatch (idempotent)."
+              [ -n "$pending" ] || break
+              [ "$(date +%s)" -lt "$deadline" ] || die "not announcing v$VERSION — still running:$pending. Re-dispatch once green (idempotent)."
+              say "waiting for:$pending"
+              sleep 60
+            done
+            ok "every v$VERSION build and the site deploy are green"
+            git -C "$WEBSITE_DIR" tag -f "release-ready/v$VERSION" "$site_sha"
+            git -C "$WEBSITE_DIR" push origin "refs/tags/release-ready/v$VERSION" \
+              || die "could not push release-ready/v$VERSION to marketing — re-dispatch to announce"
+            ok "release-ready/v$VERSION pushed: marketing announces on Discord (once per version)"
+          }
+
           # ───────────────────────────────── main ──────────────────────────────────
           #
           # Dependency-ordered tag cascade (nothing touches crates.io anymore):
@@ -2034,15 +2078,15 @@ jobs:
           done
           [ -z "$adv_fail" ] || die "main advance failed for: $adv_fail — the 8 tags are public; re-dispatch to finish (idempotent)."
 
-          # Step 8 — the PUBLIC ANNOUNCEMENT, DEAD LAST. Publishing the consumer changelog
-          # to marketing main deploys the site and fires RSS→Discord. It runs only
-          # after every tag AND every main pointer is done, so users are never notified of
-          # a release that has not fully landed (the 1.6.12 premature-announce failure).
+          # Step 8 — the site changelog, after every tag AND every main pointer is done
+          # (the 1.6.12 premature-announce failure). Discord is not posted here: it waits
+          # for every build, the site deploy and the link checks (announce_on_discord_last).
           publish_site_changelog          # stage the changelog entry
           update_website_download_version  # stage the download-page version
           commit_and_push_site            # ONE commit + ONE push → single deploy → reliable announce
           verify_website_in_sync
           verify_download_links || die "v$VERSION is published but a download link, checksum or package manifest is wrong (above)"
+          announce_on_discord_last
           fi
 
           if $DRY_RUN; then
