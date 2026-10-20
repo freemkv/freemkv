@@ -113,9 +113,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.8.0"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838"
+checksum = "877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -359,9 +359,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "flate2"
@@ -413,13 +413,13 @@ dependencies = [
  "ureq",
  "windows",
  "winsafe",
- "zip 9.0.5",
+ "zip",
 ]
 
 [[package]]
 name = "freemkv-engine"
-version = "1.8.4"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.4#5585400af0a1ebbcb065c4fba834cae15186be9f"
+version = "1.8.5"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.5#d0beee85362ddc9c3bb975c5e45c664ec14d21f4"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -432,16 +432,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.8.4"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.4#2af22ec363f2d1d4ab70a9d95b86c784a795d341"
+version = "1.8.5"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.5#84b0d683c1e5424349768bbd4182477b0e1eea76"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.8.4"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.4#48f8906495530c27c3161253de51d21607a98856"
+version = "1.8.5"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.5#ba686fea86a584f166c71c23ca3a66accb9f7f50"
 dependencies = [
  "base64",
  "flate2",
@@ -449,13 +449,13 @@ dependencies = [
  "serde_json",
  "tracing",
  "ureq",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.8.4"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.4#5a09422c6a8aba667879e569bddaf1f0624ed3c3"
+version = "1.8.5"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.5#34f1c5697706e0694cd8e29eaea7b9232bb4ce91"
 dependencies = [
  "aes",
  "anyhow",
@@ -1032,14 +1032,14 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libfreemkv"
-version = "1.8.4"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.4#2622b3fc5afe8eb4ebcd85f58eb0d498a3f6c743"
+version = "1.8.5"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.5#0b71ac99a633a76124b20119091ec3b3340f0fd4"
 dependencies = [
  "aes",
  "base64",
@@ -1057,7 +1057,7 @@ dependencies = [
  "sha2",
  "socket2",
  "tracing",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -2092,9 +2092,9 @@ dependencies = [
 
 [[package]]
 name = "ureq-proto"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f86fd172ccca569e458f61b6bdd6220965a9ef36e672a6852953b51a0e1583be"
+checksum = "841583fc36089d7d59419568ae157f43a5a03a2e5a81ba87c77d1596ef46e922"
 dependencies = [
  "base64",
  "http",
@@ -2152,9 +2152,9 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -2476,20 +2476,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "zip"
-version = "8.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap",
- "memchr",
- "typed-path",
- "zopfli",
 ]
 
 [[package]]
