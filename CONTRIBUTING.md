@@ -68,3 +68,9 @@ direction is sketched in [ROADMAP.md](ROADMAP.md).
 ## License
 
 MIT
+
+## Release notes
+
+Describe customer impact, required actions and limitations in public release
+notes. Keep build machinery, CI, test counts, refactors and dependency revisions
+in commits or internal documentation. Unreleased work stays out of stable notes.
