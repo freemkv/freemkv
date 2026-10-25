@@ -1,0 +1,12 @@
+{
+  "version": "1.8.4",
+  "revisions": {
+    "freemkv": "37043e37e3c97d602cffffdebb83d7bc30a6a231",
+    "libfreemkv": "2622b3fc5afe8eb4ebcd85f58eb0d498a3f6c743",
+    "freemkv-engine": "5585400af0a1ebbcb065c4fba834cae15186be9f",
+    "freemkv-keysources": "48f8906495530c27c3161253de51d21607a98856",
+    "freemkv-i18n": "2af22ec363f2d1d4ab70a9d95b86c784a795d341",
+    "freemkv-unlock": "5a09422c6a8aba667879e569bddaf1f0624ed3c3"
+  },
+  "expected_differences": {}
+}

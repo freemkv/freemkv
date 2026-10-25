@@ -143,9 +143,9 @@ class StructureTests(unittest.TestCase):
                 self.assertNotIn('inputs.run_media', self.jobs[name]['if'])
         self.assertEqual(self.jobs['media-verdict']['if'], 'always()')
 
-    def test_only_rc_tag_and_record_write_contents(self):
+    def test_only_tag_record_and_history_jobs_write_contents(self):
         writers = {n for n, j in self.jobs.items() if (j.get('permissions') or {}).get('contents') == 'write'}
-        self.assertEqual(writers, {'rc-tag', 'record-media-evidence'})
+        self.assertEqual(writers, {'rc-tag', 'record-media-evidence', 'archive-release-comparison'})
         self.assertEqual(self.qa['permissions'], {'contents': 'read'})
 
     def test_no_single_stream_iso_fetch(self):

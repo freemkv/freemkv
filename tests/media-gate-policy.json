@@ -15,7 +15,7 @@
   "freemkv_crate_roots": ["src/main.rs", "src/lib.rs"],
   "control_plane": [".github/workflows/qa.yml", ".github/scripts/exact-toolchain.sh", ".github/runner-templates/**",
                     "tests/media_gate.py", "tests/media_perf.py", "tests/media_fetch.py", "tests/media_checks.py",
-                    "tests/media_canary.py",
+                    "tests/media_canary.py", "tests/media_history.py", "tests/media-baseline.json",
                     "tests/media-gate-policy.json", "tests/media-fetch-requirements.txt"],
   "gui_features": ["gui"],
   "rerun_exempt": {

@@ -924,7 +924,10 @@ jobs:
           FMKV_BD_DAMAGE_PATCH="$ISO_DIR/bd-aacs-damage.patch.json" \
           FMKV_KEYDB="$KEYDB_PATH" \
           FMKV_HASHES="$PWD/cli-${{ matrix.os }}.txt" \
-            bash ci/scripts/cli-acceptance.sh 2>&1 | tee "suite-${{ matrix.os }}.log"
+            "$FMKV_PYTHON" freemkv/tests/media_history.py \
+              --binary "$BIN" --harness ci/scripts/cli-acceptance.sh \
+              --plan-directory media-plan --target "${{ matrix.target }}" \
+              --out "release-comparison/${{ matrix.os }}" 2>&1 | tee "suite-${{ matrix.os }}.log"
           rc=${PIPESTATUS[0]}
 
           if [ "$rc" != 0 ]; then
@@ -940,6 +943,14 @@ jobs:
           echo "── hashes recorded on ${{ matrix.os }} ──"
           cat "cli-${{ matrix.os }}.txt"
           exit $rc
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: "release-comparison-${{ matrix.os }}"
+          path: "release-comparison/${{ matrix.os }}"
+          retention-days: 90
+          if-no-files-found: error
+          overwrite: true
       # What record-media-evidence cross-checks against the jobs API and EC2.
       - name: Leg identity
         shell: bash
@@ -1038,6 +1049,21 @@ jobs:
           print(f"\n{len(arts)} artifacts compared across {len(plats)} platforms")
           sys.exit(1 if fail else 0)
           PY
+
+  archive-release-comparison:
+    needs: [plan-media, cli-matrix]
+    if: always() && needs.plan-media.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { pattern: 'release-comparison-*', path: history }
+      - name: Preserve versioned answers in Git
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tests/media_history.py --archive history
 
   # Writes the evidence: an annotated tag media-evidence/<F>/<run_id> on an
   # orphan commit holding evidence.json and the built Cargo.lock.
