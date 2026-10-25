@@ -12,7 +12,8 @@ import media_gate as gate
 
 
 MEDIA = {'.mkv', '.m2ts', '.mp4', '.ts', '.mpg', '.vob', '.evo'}
-METADATA = {'.mpls', '.clpi', '.ifo', '.bup', '.inf', '.bak'}
+METADATA = {'.mpls', '.clpi', '.ifo', '.bup', '.inf', '.bak', '.bdmv', '.bdjo',
+            '.jar', '.png', '.jpg', '.jpeg', '.cer', '.tbl', '.aacs'}
 
 
 def sha256(path):
