@@ -98,11 +98,11 @@ def run_suite(binary, harness, destination, identity):
     # The existing harness retains its scratch files until hashes have been saved, then we clean them.
     destination = destination.resolve()
     with tempfile.TemporaryDirectory(prefix='media-history-') as scratch:
-        env = dict(os.environ, FMKV_BIN=str(binary.resolve()), FMKV_KEEP_SCRATCH='1',
-                   TMPDIR=scratch.replace('\\', '/'), FMKV_HASHES=str(destination / 'raw-hashes.txt'))
+        env = dict(os.environ, FMKV_BIN=binary.resolve().as_posix(), FMKV_KEEP_SCRATCH='1',
+                   TMPDIR=scratch.replace('\\', '/'), FMKV_HASHES=(destination / 'raw-hashes.txt').as_posix())
         destination.mkdir(parents=True, exist_ok=True)
         with (destination / 'suite.log').open('w') as log:
-            with subprocess.Popen(['bash', str(harness.resolve())], env=env,
+            with subprocess.Popen(['bash', harness.resolve().as_posix()], env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as result:
                 for line in result.stdout:
                     log.write(line)
