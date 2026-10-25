@@ -310,7 +310,9 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertEqual(mg.launch_templates(self.perf_policy()), mg.launch_templates(POLICY))
 
     def test_linux_spot_through_the_template_with_the_policy_cap(self):
-        spec, calls = self.spec()
+        policy = json.loads(json.dumps(POLICY))
+        policy['launch']['linux']['on_demand_only'] = False
+        spec, calls = self.spec(policy=policy)
         self.assertEqual((spec['template'], spec['version']), ('freemkv-runner-linux', '7'))
         self.assertEqual([(m['name'], m['template']) for m in spec['markets']], [('spot', True), ('on-demand', False)])
         spot = spec['markets'][0]['options']
@@ -322,6 +324,11 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertEqual(spec['job'], 'cli-matrix (linux)')
         self.assertEqual(calls, [('ec2', 'describe-launch-template-versions', '--launch-template-name',
                                   'freemkv-runner-linux', '--versions', '7')], 'the PINNED version is read')
+
+    def test_long_release_comparison_uses_only_on_demand(self):
+        spec, _ = self.spec()
+        self.assertEqual(spec['markets'], [{'name': 'on-demand', 'options': None, 'template': False}])
+        self.assertNotIn('InstanceMarketOptions', spec['on_demand']['input'])
 
     def test_on_demand_without_the_template(self):
         """Review 2 item 3: the template's Spot options cannot be cleared, so On-Demand does not use it."""
@@ -374,6 +381,7 @@ class LaunchSpecTests(unittest.TestCase):
     def test_spot_only_when_the_policy_says_so(self):
         import copy
         policy = copy.deepcopy(POLICY)
+        policy['launch']['linux']['on_demand_only'] = False
         policy['launch']['linux']['on_demand_fallback'] = False
         spec, calls = self.spec(policy=policy)
         self.assertEqual([m['name'] for m in spec['markets']], ['spot'])
@@ -504,7 +512,9 @@ esac
         return res, runs, json.loads((d / f'launch-{spec["leg"]}-1.json').read_text()) if res.returncode == 0 else None
 
     def spec(self):
-        return mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', LaunchSpecTests.TEMPLATES,
+        policy = json.loads(json.dumps(POLICY))
+        policy['launch']['linux']['on_demand_only'] = False
+        return mg.launch_spec(policy, 'linux', RUN_ID, 'refs/heads/qa', LaunchSpecTests.TEMPLATES,
                               aws=lambda *a: {'LaunchTemplateVersions': [{'LaunchTemplateData': LINUX_TEMPLATE}]})
 
     def arg(self, call, flag):

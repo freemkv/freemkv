@@ -1492,7 +1492,9 @@ def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1):
     version = str(pin['version'])
     types = [policy['perf']['instance_type']] if perf else list(cfg.get('types', []))
     markets = [{'name': 'template', 'options': None, 'template': True}]
-    if cfg.get('spot_max_price'):
+    if cfg.get('on_demand_only'):
+        markets = [{'name': 'on-demand', 'options': None, 'template': False}]
+    elif cfg.get('spot_max_price'):
         markets = [{'name': 'spot', 'template': True, 'options': {'MarketType': 'spot', 'SpotOptions': {
             'MaxPrice': str(cfg['spot_max_price']), 'SpotInstanceType': 'one-time',
             'InstanceInterruptionBehavior': 'terminate'}}}]
