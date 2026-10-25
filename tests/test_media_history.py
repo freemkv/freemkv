@@ -14,7 +14,9 @@ class ComparisonTests(unittest.TestCase):
     def test_build_stamp_changes_do_not_hide_content_or_timing_changes(self):
         old = {'clip.mkv': {'sha256': 'old-container', 'content_timing_sha256': 'same'}}
         new = {'clip.mkv': {'sha256': 'new-container', 'content_timing_sha256': 'same'}}
-        self.assertEqual(history.compare(old, new, {})['unexpected'], [])
+        result = history.compare(old, new, {})
+        self.assertEqual(result['unexpected'], [])
+        self.assertEqual(set(result['container_only']), {'clip.mkv'})
         new['clip.mkv']['content_timing_sha256'] = 'changed-timestamps'
         self.assertEqual(history.compare(old, new, {})['unexpected'], ['clip.mkv'])
 
@@ -68,6 +70,15 @@ class ComparisonTests(unittest.TestCase):
             self.assertNotEqual(history.sha256(fixture), history.sha256(same))
             self.assertEqual(history.content_hash(fixture), history.content_hash(same))
             self.assertNotEqual(history.content_hash(fixture), history.content_hash(shifted))
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg')
+    def test_changed_track_language_cannot_hide_behind_equal_packet_content(self):
+        fixture = Path(__file__).with_name('media-fixtures') / 'cfr.mkv'
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'language.mkv'
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', str(fixture), '-map', '0',
+                            '-c', 'copy', '-metadata:s:a:0', 'language=fra', str(output)], check=True)
+            self.assertNotEqual(history.content_hash(fixture), history.content_hash(output))
 
     def test_baseline_is_the_complete_released_184_set(self):
         spec = json.loads(Path(history.__file__).with_name('media-baseline.json').read_text())

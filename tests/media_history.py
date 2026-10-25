@@ -31,7 +31,16 @@ def content_hash(path):
         if result.returncode or not any(line.strip() and not line.startswith(b'#') for line in output):
             raise ValueError(f'cannot hash media content: {path.name}')
         output.seek(0)
-        return hashlib.file_digest(output, 'sha256').hexdigest()
+        digest = hashlib.file_digest(output, 'sha256')
+        metadata = subprocess.run(['ffprobe', '-v', 'error', '-show_entries',
+                                   'stream=index,codec_name,codec_type,width,height,pix_fmt,sample_rate,'
+                                   'channels,channel_layout:stream_tags=language,title:stream_disposition',
+                                   '-of', 'json', str(path)], capture_output=True)
+        if metadata.returncode:
+            raise ValueError(f'cannot hash stream metadata: {path.name}')
+        digest.update(b'\0streams\0')
+        digest.update(json.dumps(json.loads(metadata.stdout), sort_keys=True).encode())
+        return digest.hexdigest()
 
 
 def snapshot(root):
@@ -52,11 +61,13 @@ def snapshot(root):
 
 
 def compare(baseline, candidate, expected):
-    differences, unexpected = {}, []
+    differences, unexpected, container_only = {}, [], {}
     for name in sorted(baseline.keys() | candidate.keys()):
         old, new = baseline.get(name), candidate.get(name)
         field = 'content_timing_sha256' if Path(name).suffix.lower() in MEDIA else 'sha256'
         if old and new and field in old and field in new and old[field] == new[field]:
+            if old['sha256'] != new['sha256']:
+                container_only[name] = {'baseline': old['sha256'], 'candidate': new['sha256']}
             continue
         if old and new and old.get('error') and new.get('error') and old['sha256'] == new['sha256']:
             continue
@@ -70,7 +81,8 @@ def compare(baseline, candidate, expected):
                 and approval['baseline'] == old_hash and approval['candidate'] == new_hash):
             unexpected.append(name)
     stale = sorted(set(expected) - differences.keys())
-    return {'differences': differences, 'unexpected': unexpected, 'stale_exceptions': stale}
+    return {'differences': differences, 'container_only': container_only,
+            'unexpected': unexpected, 'stale_exceptions': stale}
 
 
 def save(path, data):
@@ -122,6 +134,7 @@ def run(args):
         raise ValueError('baseline must pin all six release revisions')
     plan = json.loads((args.plan_directory / 'evidence.json').read_text())
     identity = {'schema': 1, 'run_id': os.environ.get('GITHUB_RUN_ID'),
+                'hash_method': 'framecrc-copyts-and-stream-metadata-v1',
                 'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'), 'target': args.target,
                 'fixtures': plan['inputs']['externals']['fixtures'],
                 'harness': plan['inputs']['policy']['harness'],
@@ -143,6 +156,7 @@ def run(args):
     comparison = compare(baseline['artifacts'], candidate['artifacts'], spec['expected_differences'])
     save(args.out / 'comparison.json', comparison)
     print(f"Release comparison: {len(comparison['differences'])} changed outputs; "
+          f"{len(comparison['container_only'])} container-only changes; "
           f"{len(comparison['unexpected'])} unexplained changes")
     for name in comparison['unexpected']:
         print(f'UNEXPECTED: {name}')
