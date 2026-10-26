@@ -5933,7 +5933,6 @@ fn plan_episode_outputs(
     let season_num = crate::server::tmdb::season_from_label(disc_name).unwrap_or(1);
     let disc_num = crate::server::tmdb::disc_from_label(disc_name).unwrap_or(1);
     Ok(crate::server::planner::episode_outputs(
-        titles,
         indices,
         season_num,
         disc_num,
