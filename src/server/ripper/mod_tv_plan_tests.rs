@@ -455,15 +455,15 @@ fn a_single_feature_tv_disc_stays_one_output() {
     assert!(plan[0].episode.is_none());
 }
 
-// 1.8.3: TMDB runtimes move a later disc off the uniform guess when they clearly fit better.
+// Metadata runtimes cannot override disc order; First episode can correct an uneven split.
 #[test]
-fn tmdb_runtimes_align_a_later_disc_on_an_uneven_split() {
+fn later_disc_numbering_ignores_tmdb_runtime_and_accepts_manual_first_episode() {
     let ep = |number: u16, runtime_min: u16| crate::server::tmdb::Episode {
         number,
         name: format!("Ep {number}"),
         runtime_min,
     };
-    // Disc 2 of a season whose disc 1 held 3 episodes, not this disc's 2.
+    // Disc 2 may follow an uneven split; only the operator can know that.
     let season = vec![ep(1, 30), ep(2, 30), ep(3, 30), ep(4, 60), ep(5, 90)];
     let titles = vec![title(60.0 * 60.0, 1000), title(90.0 * 60.0, 2000)];
     let plan = plan_episode_outputs(
@@ -477,9 +477,22 @@ fn tmdb_runtimes_align_a_later_disc_on_an_uneven_split() {
     let plan = plan.unwrap();
     assert_eq!(
         plan.iter().map(|o| o.episode).collect::<Vec<_>>(),
+        [Some(3), Some(4)]
+    );
+    assert_eq!(plan[1].episode_name, "Ep 4");
+    let corrected = plan_episode_outputs(
+        &titles,
+        &[0, 1],
+        "Show Season 1 Disc 2",
+        &season,
+        "Show.mkv",
+        Some(4),
+    )
+    .unwrap();
+    assert_eq!(
+        corrected.iter().map(|o| o.episode).collect::<Vec<_>>(),
         [Some(4), Some(5)]
     );
-    assert_eq!(plan[1].episode_name, "Ep 5");
 }
 
 // tv_auto=false holds a TV disc on the single-output path (no auto fan-out).
@@ -605,8 +618,7 @@ fn the_single_pass_plan_line_names_the_muxed_title() {
     assert!(line.contains("Titles([2])"), "{line}");
 }
 
-// TMDB down at capture start: the hand-off plans again once it answers, as 1.8.3 fetched
-// the season there; while it is still down, or the replan fails, the start plan stands.
+// TMDB down at capture start: the hand-off may attach names later, never renumber titles.
 #[test]
 fn the_hand_off_replans_a_start_plan_made_without_tmdb() {
     let ep = |number: u16, runtime_min: u16| crate::server::tmdb::Episode {
@@ -643,7 +655,7 @@ fn the_hand_off_replans_a_start_plan_made_without_tmdb() {
     assert!(start.without_tmdb);
     assert_eq!(
         numbers(handoff_plan(start, || plan_for(season.clone(), None))),
-        [(Some(4), "Ep 4".into()), (Some(5), "Ep 5".into())]
+        [(Some(3), "Ep 3".into()), (Some(4), "Ep 4".into())]
     );
     let still_down = handoff_plan(plan_for(Vec::new(), None), || plan_for(Vec::new(), None));
     assert_eq!(numbers(still_down), disc_order);
@@ -653,10 +665,8 @@ fn the_hand_off_replans_a_start_plan_made_without_tmdb() {
     assert_eq!(numbers(failed), disc_order);
     let named = plan_for(season.clone(), None);
     assert!(!named.without_tmdb);
-    let kept = handoff_plan(named, || {
-        unreachable!("a TMDB-numbered plan is not refetched")
-    });
-    assert_eq!(numbers(kept)[1].1, "Ep 5");
+    let kept = handoff_plan(named, || unreachable!("a TMDB-named plan is not refetched"));
+    assert_eq!(numbers(kept)[1].1, "Ep 4");
 }
 
 // Pass 1 can leave a later episode damaged while the first reads clean: the retry passes

@@ -3892,7 +3892,7 @@ fn build_prefs(
     // Wide enough that the widest label ("Keep encrypted (raw passthrough) :",
     // "Minimum title length (seconds) :") — and its longer translations — fits
     // the label gutter without clipping, while the controls still have room.
-    let (w, h) = (640.0, 470.0);
+    let (w, h) = (640.0, 560.0);
     let win: Retained<NSWindow> = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -4038,6 +4038,20 @@ fn build_prefs(
         "min_title_secs",
         &crate::strings::get("gui.set.min_length"),
         "120",
+        80.0,
+    );
+    t.field(
+        mtm,
+        "tv_season",
+        &crate::strings::get("gui.set.tv_season"),
+        "",
+        80.0,
+    );
+    t.field(
+        mtm,
+        "tv_first_episode",
+        &crate::strings::get("gui.set.tv_first_episode"),
+        "",
         80.0,
     );
     t.note(mtm, &crate::strings::get("gui.set.min_length_note"), tw);

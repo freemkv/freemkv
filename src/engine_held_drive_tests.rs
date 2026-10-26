@@ -29,6 +29,7 @@ fn req(out: &std::path::Path) -> RipRequest {
         raw: false,
         force: false,
         filename_template: String::new(),
+        tv_naming: None,
         decrypt_threads: 0,
         multipass: false,
         max_passes: 0,

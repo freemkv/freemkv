@@ -13,6 +13,11 @@ pub struct Settings {
     pub filename_template: String,
     /// Optional metadata service credential; never required for reading or selection.
     pub tmdb_api_key: String,
+    /// Current source overrides. These never survive a restart or a new open.
+    #[serde(skip)]
+    pub tv_season: String,
+    #[serde(skip)]
+    pub tv_first_episode: String,
     /// Startup choice: Show drives, Open any loaded disc, or Open preferred drive.
     pub startup_mode: String,
     /// Hardware label chosen on the ready screen. Duplicate labels are never opened automatically.
@@ -96,6 +101,8 @@ impl std::fmt::Debug for Settings {
                 },
             )
             .field("keep_iso", &self.keep_iso)
+            .field("tv_season", &self.tv_season)
+            .field("tv_first_episode", &self.tv_first_episode)
             .field("auto_eject", &self.auto_eject)
             .field("notify_when_rip_finished", &self.notify_when_rip_finished)
             .field("selection", &self.selection)
@@ -139,6 +146,8 @@ impl Default for Settings {
             container: "Selected titles → MKV".into(),
             filename_template: "{title}_t{n}".into(),
             tmdb_api_key: String::new(),
+            tv_season: String::new(),
+            tv_first_episode: String::new(),
             startup_mode: "Show drives".into(),
             preferred_drive: String::new(),
             keep_iso: false,
@@ -328,6 +337,8 @@ impl Settings {
             "container" => self.container.clone(),
             "filename_template" => self.filename_template.clone(),
             "tmdb_api_key" => self.tmdb_api_key.clone(),
+            "tv_season" => self.tv_season.clone(),
+            "tv_first_episode" => self.tv_first_episode.clone(),
             "startup_mode" => self.startup_mode.clone(),
             "preferred_drive" => self.preferred_drive.clone(),
             "selection" => self.selection.clone(),
@@ -370,6 +381,8 @@ impl Settings {
             "container" => self.container = v,
             "filename_template" => self.filename_template = v,
             "tmdb_api_key" => self.tmdb_api_key = v,
+            "tv_season" => self.tv_season = v,
+            "tv_first_episode" => self.tv_first_episode = v,
             "startup_mode" => self.startup_mode = v,
             "preferred_drive" => self.preferred_drive = v,
             "selection" => self.selection = v,

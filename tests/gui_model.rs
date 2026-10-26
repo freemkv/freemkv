@@ -1675,6 +1675,7 @@ fn a_failed_run_always_finishes_and_is_reported_as_failed() {
             raw: false,
             force: false,
             filename_template: String::new(),
+            tv_naming: None,
             decrypt_threads: 0,
             multipass: false,
             max_passes: 0,

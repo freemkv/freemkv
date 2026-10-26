@@ -2462,6 +2462,7 @@ fn cli_plan_equals_the_shared_gui_plan_for_the_same_inputs() {
             raw,
             force,
             filename_template: String::new(),
+            tv_naming: None,
             decrypt_threads: 0,
             multipass,
             max_passes: if multipass { 3 } else { 0 },

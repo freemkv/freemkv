@@ -327,6 +327,7 @@ fn dev_harness() -> bool {
                 raw: std::env::var("FMKV_RAW").is_ok(),
                 force: true,
                 filename_template: std::env::var("FMKV_TEMPLATE").unwrap_or_default(),
+                tv_naming: None,
                 decrypt_threads: std::env::var("FMKV_THREADS")
                     .ok()
                     .and_then(|v| v.trim().parse().ok())

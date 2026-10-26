@@ -1637,6 +1637,7 @@ pub enum RunOutcome {
 pub struct RunState {
     pub prog: Mutex<Prog>,
     pub lines: Mutex<Vec<String>>,
+    pub output_target: Mutex<Option<String>>,
     pub cancel: AtomicBool,
     pub finished: AtomicBool,
     /// Titles fully written so far — drives the overall bar.
@@ -2252,6 +2253,9 @@ pub struct RipRequest {
     /// the disc/volume label, `{n}` the title number. Empty or placeholder-free
     /// falls back to `<label>_t<n>`.
     pub filename_template: String,
+    /// Optional names for a proven disc-authored TV roster. The scan's title
+    /// identities are verified again before these ordinal numbers are used.
+    pub tv_naming: Option<TvNamingRequest>,
     /// AACS decrypt thread count (the `decrypt_threads` setting). `0` = auto
     /// (the library sizes its pool itself); `>0` pins the pool to that many.
     pub decrypt_threads: usize,
@@ -2280,6 +2284,14 @@ pub struct RipRequest {
     /// The insert-the-disc Retry after E7034 (KU §4.2 Q4): the `disc://` drive holding
     /// the image's disc, scanned with no key call for its Volume ID.
     pub vid_from: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct TvNamingRequest {
+    pub api_key: String,
+    pub roster: Vec<usize>,
+    pub season: Option<u16>,
+    pub first_episode: Option<u16>,
 }
 
 /// Run the real rip on a worker thread: engine title loop + per-title mux.
@@ -2852,6 +2864,7 @@ fn mux_selected_titles(
     // Demux fans a single title straight into the dest dir but gives each title
     // of a multi-title rip its own subdir so their track files never collide.
     let multi = demux_needs_subdirs(indices.len());
+    let naming = tv_naming_plan(req, disc, &label, sink);
 
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
 
@@ -2865,7 +2878,13 @@ fn mux_selected_titles(
         // Destination per output kind: a per-title file for the container /
         // metadata / index sinks, or a demux directory (its own per-track
         // naming) for separate track files.
-        let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
+        let (dest_url, target) = title_dest(req, kind, &label, idx, multi, &naming);
+        if matches!(kind, OutKind::File(_)) {
+            *state
+                .output_target
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+        }
         let before = output_stamp(&target);
         // Every title reads through the rip's one set (no lookup); an image title is never
         // raw here.
@@ -3746,6 +3765,7 @@ fn run_disc_scanning(
     }
 
     let multi = demux_needs_subdirs(indices.len());
+    let naming = tv_naming_plan(req, &disc, &label, sink);
     // What each selected NUMBER refers to on THIS scan, banked before the
     // drive is released. Each title below re-scans, so the index alone doesn't
     // prove the mux is about to read the title picked. See `verify_title_identity`.
@@ -3760,7 +3780,13 @@ fn run_disc_scanning(
     let partial = std::cell::Cell::new(0usize);
     let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
         let _bars = TitleBars::start(state, idx);
-        let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
+        let (dest_url, target) = title_dest(req, kind, &label, idx, multi, &naming);
+        if matches!(kind, OutKind::File(_)) {
+            *state
+                .output_target
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+        }
         let before = output_stamp(&target);
 
         // KU §3.3: each title reopens the drive with `open_scan` (no key call) and reads
@@ -3916,6 +3942,7 @@ fn mux_staged_titles(
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
     let kind = out_kind(&req.format);
     let multi = demux_needs_subdirs(indices.len());
+    let naming = tv_naming_plan(req, &opened.disc, label, sink);
     let plan = fe::MuxPlan {
         titles: indices.to_vec(),
         explicit_selection: !req.titles.is_empty(),
@@ -3925,7 +3952,16 @@ fn mux_staged_titles(
             .collect(),
         mux: mux_opts(req),
     };
-    let dest = |idx: usize| title_dest(req, kind, label, idx, multi).0;
+    let dest = |idx: usize| {
+        let (url, target) = title_dest(req, kind, label, idx, multi, &naming);
+        if matches!(kind, OutKind::File(_)) {
+            *state
+                .output_target
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(target);
+        }
+        url
+    };
     // The per-title report `mux_selected_titles` makes, from the engine's title events.
     struct Staged<'a> {
         ui: &'a UiSink,
@@ -3933,6 +3969,7 @@ fn mux_staged_titles(
         kind: OutKind,
         label: &'a str,
         multi: bool,
+        naming: &'a std::collections::HashMap<usize, String>,
         written: AtomicUsize,
         partial: AtomicUsize,
     }
@@ -3951,7 +3988,15 @@ fn mux_staged_titles(
             let fe::Event::TitleDone { idx, result, .. } = e else {
                 return;
             };
-            let target = title_dest(self.req, self.kind, self.label, *idx, self.multi).1;
+            let target = title_dest(
+                self.req,
+                self.kind,
+                self.label,
+                *idx,
+                self.multi,
+                self.naming,
+            )
+            .1;
             let mut lines = self.ui.0.lines.lock().unwrap_or_else(|e| e.into_inner());
             match result {
                 Ok(o) if o.halted && !o.output_opened => {
@@ -3981,6 +4026,7 @@ fn mux_staged_titles(
         kind,
         label,
         multi,
+        naming: &naming,
         written: AtomicUsize::new(0),
         partial: AtomicUsize::new(0),
     };
@@ -3994,6 +4040,98 @@ fn mux_staged_titles(
     )
 }
 
+fn tv_naming_plan(
+    req: &RipRequest,
+    disc: &libfreemkv::Disc,
+    label: &str,
+    sink: &UiSink,
+) -> std::collections::HashMap<usize, String> {
+    use freemkv_engine::metadata::tmdb;
+    let Some(tv) = req
+        .tv_naming
+        .as_ref()
+        .filter(|tv| !tv.api_key.trim().is_empty())
+    else {
+        return std::collections::HashMap::new();
+    };
+    if !matches!(out_kind(&req.format), OutKind::File(_))
+        || tv.roster.is_empty()
+        || !req.titles.iter().any(|idx| tv.roster.contains(idx))
+        || tv.roster.iter().any(|&idx| {
+            req.title_ids.get(idx) != disc.titles.get(idx).map(TitleIdentity::of).as_ref()
+        })
+    {
+        return std::collections::HashMap::new();
+    }
+    let client = tmdb::Client::new(&tv.api_key, sink);
+    let Ok(Some(found)) = client.lookup(label) else {
+        fe::Sink::log(
+            sink,
+            fe::Level::Info,
+            "No TMDB show match; using the filename template",
+        );
+        return std::collections::HashMap::new();
+    };
+    if found.media_type != freemkv_engine::metadata::MediaKind::Tv
+        || !tmdb::is_confident_match(label, &found.title, found.year)
+    {
+        fe::Sink::log(
+            sink,
+            fe::Level::Info,
+            "TMDB match is uncertain or not a TV series; using the filename template",
+        );
+        return std::collections::HashMap::new();
+    }
+    let season = tv
+        .season
+        .or_else(|| tmdb::season_from_label(label))
+        .unwrap_or(1);
+    let disc_number = tmdb::disc_from_label(label).unwrap_or(1).max(1);
+    let first = tv.first_episode.or_else(|| {
+        usize::from(disc_number - 1)
+            .checked_mul(tv.roster.len())
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| u16::try_from(n).ok())
+    });
+    let Some(first) = first.filter(|first| {
+        *first > 0 && usize::from(*first) + tv.roster.len() - 1 <= usize::from(u16::MAX)
+    }) else {
+        fe::Sink::log(
+            sink,
+            fe::Level::Warn,
+            "TV episode number exceeds the supported range; using the filename template",
+        );
+        return std::collections::HashMap::new();
+    };
+    let episodes = client.season_episodes(found.tmdb_id, season);
+    tv_names_from_roster(&tv.roster, &found.title, season, first, &episodes)
+}
+
+fn tv_names_from_roster(
+    roster: &[usize],
+    show: &str,
+    season: u16,
+    first: u16,
+    episodes: &[freemkv_engine::metadata::tmdb::Episode],
+) -> std::collections::HashMap<usize, String> {
+    let assignments =
+        freemkv_engine::metadata::tmdb::numbered_episode_names(roster.len(), episodes, first);
+    roster
+        .iter()
+        .copied()
+        .zip(assignments)
+        .map(|(idx, assignment)| {
+            let base = format!("{show}_S{season:02}E{:02}", assignment.episode);
+            let base = if assignment.name.trim().is_empty() {
+                base
+            } else {
+                format!("{base} - {}", assignment.name)
+            };
+            (idx, sanitize_label(&base))
+        })
+        .collect()
+}
+
 /// Title `idx`'s sink URL and the path the log names, for a file or demux output.
 fn title_dest(
     req: &RipRequest,
@@ -4001,10 +4139,14 @@ fn title_dest(
     label: &str,
     idx: usize,
     multi: bool,
+    naming: &std::collections::HashMap<usize, String>,
 ) -> (String, String) {
     match kind {
         OutKind::File(scheme) => {
-            let base = title_basename(&req.filename_template, label, idx + 1);
+            let base = naming
+                .get(&idx)
+                .cloned()
+                .unwrap_or_else(|| title_basename(&req.filename_template, label, idx + 1));
             let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
             (format!("{scheme}://{out}"), out)
         }

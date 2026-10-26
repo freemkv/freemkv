@@ -4,7 +4,8 @@ use super::{
     is_disc_source, is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
     recovery_produced_no_data, recovery_raw, run_disc_scanning, run_stream,
     should_delete_staging_iso, source_scheme, staging_not_kept_note, stream_selection_for,
-    title_options, title_plan, verify_selection_identity, verify_title_identity, whole_image_gate,
+    title_dest, title_options, title_plan, tv_names_from_roster, verify_selection_identity,
+    verify_title_identity, whole_image_gate,
 };
 use std::sync::Arc;
 
@@ -1000,6 +1001,7 @@ fn req() -> RipRequest {
         raw: false,
         force: false,
         filename_template: String::new(),
+        tv_naming: None,
         decrypt_threads: 0,
         multipass: false,
         max_passes: 0,
@@ -1010,6 +1012,37 @@ fn req() -> RipRequest {
         seed: None,
         vid_from: None,
     }
+}
+
+#[test]
+fn tv_names_follow_authored_roster_even_when_only_one_episode_is_ripped() {
+    let names = tv_names_from_roster(
+        &[5, 2, 8],
+        "Kung Fu",
+        1,
+        3,
+        &[freemkv_engine::metadata::tmdb::Episode {
+            number: 4,
+            name: "The Choice".into(),
+            runtime_min: 180,
+        }],
+    );
+    assert_eq!(
+        names.get(&2).map(String::as_str),
+        Some("Kung Fu_S01E04 - The Choice")
+    );
+    let (url, path) = title_dest(&req(), OutKind::File("mkv"), "KUNG_FU", 2, false, &names);
+    assert_eq!(url, format!("mkv://{path}"));
+    assert_eq!(path, "/out/Kung Fu_S01E04 - The Choice.mkv");
+    let (_, unchanged) = title_dest(
+        &req(),
+        OutKind::File("mkv"),
+        "KUNG_FU",
+        2,
+        false,
+        &Default::default(),
+    );
+    assert_eq!(unchanged, "/out/KUNG_FU_t3.mkv");
 }
 
 /// A `disc://` source must route to the live-drive path and nothing else

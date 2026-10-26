@@ -425,10 +425,14 @@ fn optional_metadata_key_round_trips_without_entering_debug_output() {
     assert!(settings.tmdb_api_key.is_empty());
     let selection = settings.selection.clone();
     settings.set("tmdb_api_key", "metadata-private-test-value".into());
+    settings.set("tv_season", "2".into());
+    settings.set("tv_first_episode", "7".into());
     assert_eq!(settings.get("tmdb_api_key"), "metadata-private-test-value");
     let saved = serde_json::to_string(&settings).unwrap();
+    assert!(!saved.contains("tv_season") && !saved.contains("tv_first_episode"));
     let loaded: Settings = serde_json::from_str(&saved).unwrap();
     assert_eq!(loaded.tmdb_api_key, settings.tmdb_api_key);
     assert_eq!(loaded.selection, selection);
+    assert!(loaded.tv_season.is_empty() && loaded.tv_first_episode.is_empty());
     assert!(!format!("{loaded:?}").contains("metadata-private-test-value"));
 }

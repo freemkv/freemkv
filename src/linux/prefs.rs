@@ -314,6 +314,8 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     let s1 = group("gui.set.group_titles", Some(&g("gui.set.min_length_note")));
     f.combo(&s1, "selection", &g("gui.set.default_selection"));
     f.entry(&s1, "min_title_secs", &g("gui.set.min_length"));
+    f.entry(&s1, "tv_season", &g("gui.set.tv_season"));
+    f.entry(&s1, "tv_first_episode", &g("gui.set.tv_first_episode"));
     let s2 = group(
         "gui.set.group_languages",
         Some(&g("gui.set.lang_prefs_note")),

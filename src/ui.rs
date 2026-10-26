@@ -3306,6 +3306,8 @@ impl App {
     // Forget the open source's model without touching an open or probe that may be in flight.
     fn clear_source(&mut self) {
         self.tree = Tree::default();
+        self.settings.tv_season.clear();
+        self.settings.tv_first_episode.clear();
         self.source.clear();
         self.disc_present = None;
         self.disc_label.clear();
@@ -3935,6 +3937,31 @@ impl App {
             );
             return vec![Effect::Redraw];
         }
+        if !self.settings.tmdb_api_key.trim().is_empty() {
+            for (key, value, allow_zero) in [
+                ("gui.set.tv_season", self.settings.tv_season.clone(), true),
+                (
+                    "gui.set.tv_first_episode",
+                    self.settings.tv_first_episode.clone(),
+                    false,
+                ),
+            ] {
+                if !value.trim().is_empty()
+                    && !value
+                        .trim()
+                        .parse::<u16>()
+                        .is_ok_and(|n| allow_zero || n > 0)
+                {
+                    let label = crate::strings::get(key);
+                    self.say(LogKind::Notice, &crate::strings::fmt_or(
+                        "gui.log.bad_number_setting",
+                        "“{name}” must be a whole number, not “{value}”. Fix it in Settings, then start again.",
+                        &[("name", &label), ("value", &value)],
+                    ));
+                    return vec![Effect::Redraw];
+                }
+            }
+        }
         let titles = self.tree.ticked_titles();
         // A disc/ISO scan has title rows; if all are unchecked, refuse rather than
         // silently ripping the main title (the engine maps empty to main movie).
@@ -4034,6 +4061,26 @@ impl App {
         let typed_passes: u32 = self.settings.max_passes.trim().parse().unwrap_or(0);
         let multipass = wants_multipass(&self.settings.rip_mode, typed_passes);
         let max_passes = effective_max_passes(&self.settings.rip_mode, typed_passes);
+        let tv_naming = if !self.settings.tmdb_api_key.trim().is_empty()
+            && matches!(self.pick_mode.as_str(), "Episodes" | "Main film / episodes")
+            && !self.effective_format().starts_with("Whole disc")
+        {
+            self.pick_scan.as_ref().and_then(|sc| {
+                let roster = automatic_titles(
+                    &sc.selection_model,
+                    &freemkv_engine::Selection::Episodes,
+                    &self.pick_prefs,
+                );
+                (!roster.is_empty()).then(|| crate::engine::TvNamingRequest {
+                    api_key: self.settings.tmdb_api_key.clone(),
+                    roster,
+                    season: self.settings.tv_season.trim().parse().ok(),
+                    first_episode: self.settings.tv_first_episode.trim().parse().ok(),
+                })
+            })
+        } else {
+            None
+        };
         crate::engine::start_rip(
             RipRequest {
                 source: self.source.clone(),
@@ -4051,6 +4098,7 @@ impl App {
                 raw,
                 force: self.settings.force,
                 filename_template: self.settings.filename_template.clone(),
+                tv_naming,
                 decrypt_threads: self
                     .settings
                     .decrypt_threads
@@ -4199,6 +4247,14 @@ impl App {
         if let Some(info) = &mut self.info {
             info.read_rate = rate_text(p.speed_bps, true);
             info.output_size = fmt_bytes(p.bytes_done);
+            if let Some(target) = st
+                .output_target
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                info.output_file = target.clone();
+            }
         }
         // Unreadable sectors are the whole reason this tool exists — say so
         // once, when the count first rises, rather than burying it.

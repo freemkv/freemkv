@@ -19,6 +19,7 @@ fn gui_req(source: &str, keys: KeyConfig, raw: bool, multipass: bool) -> RipRequ
         raw,
         force: false,
         filename_template: String::new(),
+        tv_naming: None,
         decrypt_threads: 0,
         multipass,
         max_passes: if multipass { 3 } else { 0 },

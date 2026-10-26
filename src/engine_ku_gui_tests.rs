@@ -19,6 +19,7 @@ fn req(iso: &std::path::Path, out: &std::path::Path, titles: Vec<usize>) -> RipR
         raw: false,
         force: false,
         filename_template: String::new(),
+        tv_naming: None,
         decrypt_threads: 0,
         multipass: false,
         max_passes: 0,

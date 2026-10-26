@@ -1688,6 +1688,20 @@ fn tick_a_run_that_ended(outcome: crate::engine::RunOutcome) -> Vec<Effect> {
     app.tick()
 }
 
+#[test]
+fn information_row_follows_the_workers_resolved_episode_filename() {
+    let mut app = App::new();
+    let state = Arc::new(RunState::default());
+    app.info = Some(InfoRows::starting("/in/Show.iso", "/out/Show_t1.mkv", None));
+    app.run = Some(state.clone());
+    *state.output_target.lock().unwrap() = Some("/out/Show_S01E04 - The Choice.mkv".into());
+    app.tick();
+    assert_eq!(
+        app.info.as_ref().map(|info| info.output_file.as_str()),
+        Some("/out/Show_S01E04 - The Choice.mkv")
+    );
+}
+
 fn notification(fx: &[Effect]) -> Option<(String, Option<String>)> {
     fx.iter().find_map(|e| match e {
         Effect::NotifyRipFinished {

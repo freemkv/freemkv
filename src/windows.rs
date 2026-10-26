@@ -3356,6 +3356,14 @@ impl Prefs {
             "min_title_secs",
             r.field(&g("gui.set.min_length"), &st.min_title_secs, 90),
         ));
+        fields.push((
+            "tv_season",
+            r.field(&g("gui.set.tv_season"), &st.tv_season, 90),
+        ));
+        fields.push((
+            "tv_first_episode",
+            r.field(&g("gui.set.tv_first_episode"), &st.tv_first_episode, 90),
+        ));
         r.note(&g("gui.set.min_length_note"));
         r.gap();
         // Three INDEPENDENT language sets (see `ui::LangPrefs`) decide which
