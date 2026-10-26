@@ -1288,6 +1288,11 @@ fn resume_remux_within<S>(
                 .and_then(|s| s.tmdb_media_type)
                 .unwrap_or_default()
         });
+    // Only durable capture authority proves that no title/episode selection is
+    // needed. A current ISO setting (or a legacy inferred mode) is insufficient.
+    let saved_whole_iso = saved_state.as_ref().is_some_and(|s| {
+        s.output_format.as_deref() == Some(crate::server::config::OUTPUT_FORMAT_ISO)
+    });
     let replan_required = saved_state.as_ref().is_some_and(|s| s.replan_required);
     if let Some(saved) = &saved_state {
         plan_outputs = saved.outputs.clone();
@@ -1311,14 +1316,16 @@ fn resume_remux_within<S>(
         .and_then(|s| s.user_metadata.as_ref())
         .map(|m| m.media_type);
     let plan_label = super::planning_label(&disc_label, operator_kind).to_string();
-    if let Err(error) = check_resume_selection(
-        &disc.titles,
-        &cfg_read,
-        media_type,
-        &plan_label,
-        !plan_outputs.is_empty(),
-        replan_required,
-    ) {
+    if !saved_whole_iso
+        && let Err(error) = check_resume_selection(
+            &disc.titles,
+            &cfg_read,
+            media_type,
+            &plan_label,
+            !plan_outputs.is_empty(),
+            replan_required,
+        )
+    {
         let reason = super::selection_review_message(&error);
         hold_plan_for_review(
             device,
@@ -1329,68 +1336,87 @@ fn resume_remux_within<S>(
         return;
     }
 
+    // Whole-image jobs retain exactly the captured image, regardless of any
+    // saved episode fields. The existing index-zero plumbing remains in use.
+    if saved_whole_iso {
+        plan_outputs = vec![staging::Output {
+            filename: iso_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
+        }];
+    }
     if let Some(saved) = saved_state.filter(|s| s.replan_required) {
-        let title = if saved.title.is_empty() {
-            &display_name
+        let outputs = if saved_whole_iso {
+            plan_outputs.clone()
         } else {
-            &saved.title
+            let title = if saved.title.is_empty() {
+                &display_name
+            } else {
+                &saved.title
+            };
+            let filename = super::staged_output_name(
+                title,
+                super::output_extension_for(&cfg_read.output_format, &disc),
+            );
+            let outputs = match super::plan_mux_outputs(
+                &disc.titles,
+                &cfg_read,
+                saved.media_type,
+                &plan_label,
+                saved.tmdb_id,
+                &filename,
+                saved.episode_start,
+            ) {
+                Ok(outputs) => outputs,
+                Err(error) => {
+                    let reason = super::selection_review_message(&error);
+                    hold_plan_for_review(
+                        device,
+                        (&staging_dir, &iso_path, &mapfile_path),
+                        &display_name,
+                        reason,
+                    );
+                    return;
+                }
+            };
+            match validate_replanned_capture(&disc, &outputs, &iso_path, &mapfile_path) {
+                Ok(()) => {}
+                Err(ReplanRefusal::NeedsDisc(e)) => {
+                    staging::mutate_state_if_present(&staging_dir, |s| s.needs_disc = true);
+                    reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e));
+                    return;
+                }
+                Err(ReplanRefusal::Unusable(e)) => {
+                    crate::server::log::device_log(device, &format!("Auto-resume aborted: {e}"));
+                    crate::server::muxer::record_error(
+                        &staging_dir.to_string_lossy(),
+                        &e,
+                        "The saved ISO, recovery map and outputs are retained; repair staging storage, then retry.",
+                    );
+                    reset_status_after_ripping(device, "error", &display_name, "", "", Some(e));
+                    return;
+                }
+            }
+            outputs
         };
-        let filename = super::staged_output_name(
-            title,
-            super::output_extension_for(&cfg_read.output_format, &disc),
-        );
-        let outputs = match super::plan_mux_outputs(
-            &disc.titles,
-            &cfg_read,
-            saved.media_type,
-            &plan_label,
-            saved.tmdb_id,
-            &filename,
-            saved.episode_start,
-        ) {
-            Ok(outputs) => outputs,
-            Err(error) => {
-                let reason = super::selection_review_message(&error);
-                hold_plan_for_review(
-                    device,
-                    (&staging_dir, &iso_path, &mapfile_path),
-                    &display_name,
-                    reason,
-                );
-                return;
-            }
-        };
-        match validate_replanned_capture(&disc, &outputs, &iso_path, &mapfile_path) {
-            Ok(()) => {}
-            Err(ReplanRefusal::NeedsDisc(e)) => {
-                staging::mutate_state_if_present(&staging_dir, |s| s.needs_disc = true);
-                reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e));
-                return;
-            }
-            Err(ReplanRefusal::Unusable(e)) => {
-                crate::server::log::device_log(device, &format!("Auto-resume aborted: {e}"));
-                crate::server::muxer::record_error(
-                    &staging_dir.to_string_lossy(),
-                    &e,
-                    "The saved ISO, recovery map and outputs are retained; repair staging storage, then retry.",
-                );
-                reset_status_after_ripping(device, "error", &display_name, "", "", Some(e));
-                return;
-            }
-        }
         if let Err(e) =
             staging::save_replanned_outputs(&staging_dir, saved.metadata_revision, outputs.clone())
         {
             reset_status_after_ripping(device, "idle", &display_name, "", "", Some(e.to_string()));
             return;
         }
-        remove_superseded_outputs(
-            device,
-            &staging_dir,
-            &plan_outputs,
-            &outputs,
-            &[&iso_path, &mapfile_path],
-        );
+        if !saved_whole_iso {
+            remove_superseded_outputs(
+                device,
+                &staging_dir,
+                &plan_outputs,
+                &outputs,
+                &[&iso_path, &mapfile_path],
+            );
+        }
         plan_outputs = outputs;
     }
     // Numeric indices belong to the original drive scan. Rebind the entire plan
@@ -1446,7 +1472,9 @@ fn resume_remux_within<S>(
         .and_then(|o| Path::new(&o.filename).file_stem())
         .and_then(|s| s.to_str())
         .unwrap_or(&file_stem);
-    delete_partial_output(&staging_dir, partial_stem);
+    if !saved_whole_iso {
+        delete_partial_output(&staging_dir, partial_stem);
+    }
 
     // Space preflight before the key round-trip: a full staging volume must not cost a
     // key-service call per worker tick. Logged once per (dir, required) until it clears.
@@ -2762,3 +2790,7 @@ fn observe_prepared_resume(
         false
     }
 }
+
+#[cfg(test)]
+#[path = "resume_iso_selection_tests.rs"]
+mod iso_selection_tests;

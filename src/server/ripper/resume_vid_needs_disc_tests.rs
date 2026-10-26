@@ -388,6 +388,8 @@ fn the_resume_loss_gate_scopes_out_of_title_loss_by_output() {
     let (staging, iso, _t, ..) = resume_ripped(Keys::UnitKey, |staging, _, cfg| {
         unreadable_sector_0(staging);
         cfg.output_format = "iso".into();
+        // This fixture captured an ISO; current settings alone do not change a job.
+        staging::mutate_state_if_present(staging, |s| s.output_format = Some("iso".into()));
     });
     assert!(!iso.success, "an ISO output with a hole is not delivered");
     assert!(
@@ -415,6 +417,8 @@ fn a_settled_failed_resume_forgets_the_held_rip_keys() {
             .unwrap();
         map.flush().unwrap();
         cfg.output_format = "iso".into();
+        // This fixture captured an ISO; current settings alone do not change a job.
+        staging::mutate_state_if_present(staging, |s| s.output_format = Some("iso".into()));
     });
     assert!(!outcome.success);
     let iso = staging.join("KU_Disc.iso");

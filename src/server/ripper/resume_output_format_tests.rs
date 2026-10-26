@@ -415,11 +415,6 @@ fn real_resume_prepares_frozen_movie_and_episode_destinations_before_media_io() 
         ("iso", "mkv", "iso"),
     ] {
         for fanout in [false, true] {
-            // Multi-title ISO/TV selection has a separate pre-existing guard
-            // defect; this patch exercises the whole-disc movie path.
-            if saved_format == "iso" && fanout {
-                continue;
-            }
             let tmp = tempfile::tempdir().unwrap();
             let iso = tmp.path().join("Saved.iso");
             let map = tmp.path().join("Saved.iso.mapfile");
@@ -506,7 +501,15 @@ fn real_resume_prepares_frozen_movie_and_episode_destinations_before_media_io() 
                 .take()
                 .unwrap_or_else(|| panic!("resume did not reach media boundary: {row:?}"));
             assert_eq!(format, saved_format);
-            assert_eq!(outputs, saved.outputs);
+            let expected_outputs = if saved_format == "iso" {
+                vec![staging::Output {
+                    filename: "Saved.iso".into(),
+                    ..Default::default()
+                }]
+            } else {
+                saved.outputs.clone()
+            };
+            assert_eq!(outputs, expected_outputs);
             assert_eq!(network, saved_format == "network");
             assert_eq!(settings.read().unwrap().output_format, current);
             assert_eq!(
@@ -532,10 +535,15 @@ fn real_resume_prepares_frozen_movie_and_episode_destinations_before_media_io() 
                     )
                 };
                 assert_eq!(url, expected);
-                assert_eq!(
-                    std::fs::read(tmp.path().join(&output.filename)).unwrap(),
-                    b"retained-output"
-                );
+                if saved_format == "iso" {
+                    assert_eq!(tmp.path().join(&output.filename), iso);
+                    assert!(iso.is_file());
+                } else {
+                    assert_eq!(
+                        std::fs::read(tmp.path().join(&output.filename)).unwrap(),
+                        b"retained-output"
+                    );
+                }
             }
             assert!(iso.exists() && map.exists());
             assert_eq!(
