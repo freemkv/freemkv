@@ -814,3 +814,45 @@ fn an_iso_whose_share_hangs_is_refused_without_waiting_on_it() {
     let answered = iso_stamp_within(&other, &iso, Duration::from_secs(3), move |_| Some(stamp));
     assert_eq!(answered.unwrap(), Some(stamp));
 }
+
+#[test]
+fn partial_sweep_bounds_scheduling_in_a_wide_folder() {
+    let root = tempfile::tempdir().unwrap();
+    for i in 0..12 {
+        let dir = root.path().join(format!("movie-{i}"));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("Movie.MKV.PARTIAL"), b"half").unwrap();
+    }
+    assert!(partials_under_with_limit(root.path(), &[1], 0).is_empty());
+    assert!(partials_under_with_limit(root.path(), &[1], 1).is_empty());
+    let found = partials_under_with_limit(root.path(), &[1], 4);
+    assert_eq!(found.len(), 3, "the root uses one of the four folder slots");
+}
+
+#[test]
+fn partial_sweep_bounds_scheduling_across_breadth_levels() {
+    let root = tempfile::tempdir().unwrap();
+    for i in 0..2 {
+        let show = root.path().join(format!("show-{i}"));
+        std::fs::create_dir(&show).unwrap();
+        std::fs::write(show.join("Show.mkv.partial"), b"half").unwrap();
+        for j in 0..5 {
+            let season = show.join(format!("season-{j}"));
+            std::fs::create_dir(&season).unwrap();
+            std::fs::write(season.join("Episode.mkv.partial"), b"half").unwrap();
+        }
+    }
+    std::fs::write(root.path().join("root.mkv.partial"), b"keep").unwrap();
+    let found = partials_under_with_limit(root.path(), &[1, 2], 4);
+    assert_eq!(found.len(), 3);
+    assert_eq!(
+        found
+            .iter()
+            .filter(|p| p.file_name().unwrap() == "Show.mkv.partial")
+            .count(),
+        2,
+        "both already scheduled shows retain their folder slots"
+    );
+    assert_eq!(partials_under_with_limit(root.path(), &[2], 4).len(), 1);
+    assert_eq!(partials_under(root.path(), &[1, 2]).len(), 12);
+}

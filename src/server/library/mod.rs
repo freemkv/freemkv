@@ -1664,23 +1664,27 @@ impl Library {
     }
 }
 
-/// How many folders a partial sweep looks into at most.
+/// How many folders a partial sweep schedules and looks into at most.
 const SWEEP_FOLDERS: usize = 10_000;
 
 // The `.mkv.partial` files in the folders each of `depths` levels below `root` (not in
 // `root` itself), in one walk that follows no symlink, into at most SWEEP_FOLDERS folders.
 fn partials_under(root: &Path, depths: &[usize]) -> Vec<PathBuf> {
+    partials_under_with_limit(root, depths, SWEEP_FOLDERS)
+}
+
+fn partials_under_with_limit(root: &Path, depths: &[usize], folder_limit: usize) -> Vec<PathBuf> {
+    if folder_limit == 0 {
+        return Vec::new();
+    }
     let deepest = depths.iter().copied().max().unwrap_or(0);
     let mut found = Vec::new();
     let mut level = vec![root.to_path_buf()];
-    let mut visited = 0;
+    // Count all scheduled folders, including pending siblings at this level.
+    let mut scheduled = 1;
     for at in 0..=deepest {
         let mut next = Vec::new();
         for dir in level {
-            if visited == SWEEP_FOLDERS {
-                return found;
-            }
-            visited += 1;
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -1692,8 +1696,13 @@ fn partials_under(root: &Path, depths: &[usize]) -> Vec<PathBuf> {
                     .is_some_and(|n| n.to_ascii_lowercase().ends_with(".mkv.partial"));
                 if partial && depths.contains(&at) {
                     found.push(path);
-                } else if at < deepest && entry.file_type().is_ok_and(|t| t.is_dir()) {
+                } else if at < deepest
+                    && scheduled < folder_limit
+                    && entry.file_type().is_ok_and(|t| t.is_dir())
+                {
                     next.push(path);
+                    scheduled += 1;
+                    debug_assert!(scheduled <= folder_limit);
                 }
             }
         }
