@@ -260,7 +260,15 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
     if let Some((saved, now)) = saved.zip(now) {
         if current {
             let row = episode.then(|| job.target.clone());
-            return attach_corrected_plan(lib, cfg, job, &saved.media, row.as_deref());
+            let source_stamp = now.ok_or_else(source_review)?;
+            return attach_corrected_plan(
+                lib,
+                cfg,
+                job,
+                &saved.media,
+                row.as_deref(),
+                source_stamp,
+            );
         }
         // Confirmed for an earlier disc filed at this ISO path: not this disc's identity.
         // At the same size only the time moved, so it may be the same disc: never guess.
@@ -373,6 +381,7 @@ fn attach_from_lookup(
     let tv_match = found.filter(|m| {
         m.media_type.is_tv() && crate::server::tmdb::is_confident_match(&label, &m.title, m.year)
     });
+    let source_stamp = planning_source_stamp(&job.iso)?;
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
     // TV as the ripper decides it: a TMDB TV match, or a disc label that names a season.
@@ -392,7 +401,7 @@ fn attach_from_lookup(
         if episode {
             return Err(episode_alone(&job.target));
         }
-        return persist_movie_plan(lib, cfg, job, &disc.titles);
+        return persist_movie_plan(lib, cfg, job, &disc.titles, source_stamp);
     }
     let (season, disc_number) = label_numbers(&disc.volume_id, disc.meta_title.as_deref(), &label);
     let (title, year, tmdb_id) = match tv_match {
@@ -420,9 +429,36 @@ fn attach_from_lookup(
         let Some((plan, targets)) = row else {
             return Err(episode_alone(&job.target));
         };
-        return persist_plan(lib, job, plan, Some(targets));
+        return persist_plan(lib, job, plan, Some(targets), source_stamp, &disc.titles);
     }
-    persist_auto_plan(lib, cfg, job, plan)
+    persist_auto_plan(lib, cfg, job, plan, source_stamp, &disc.titles)
+}
+
+fn source_review() -> std::io::Error {
+    std::io::Error::other(
+        "The frozen remux plan cannot prove its source or title selection. Restore the original ISO to continue proven work. To start over for the current disc, finish or discard retained files, use Clear finished in the remux queue, then Remux again. Retained finished files can still be delivered; fresh mux work and old-file removal require proven source identity.",
+    )
+}
+
+fn planning_source_stamp(iso: &Path) -> std::io::Result<crate::server::util::Stamp> {
+    super::links::iso_stamp(iso).ok_or_else(source_review)
+}
+
+fn check_source_stamp(
+    iso: &Path,
+    expected: Option<crate::server::util::Stamp>,
+) -> std::io::Result<()> {
+    match expected {
+        Some(expected) if super::links::iso_stamp(iso) == Some(expected) => Ok(()),
+        _ => Err(source_review()),
+    }
+}
+
+fn scan_titles(iso: &Path) -> std::io::Result<Vec<libfreemkv::DiscTitle>> {
+    let source = freemkv_engine::ImageSource::from_path(iso);
+    freemkv_engine::scan_image(&source)
+        .map(|(disc, _reader)| disc.titles)
+        .map_err(planning_scan_error)
 }
 
 // Keep the OS error and code: finish() classifies storage faults (and their retry) from them.
@@ -435,9 +471,11 @@ fn persist_auto_plan(
     cfg: &Config,
     job: &mut Job,
     plan: crate::server::planner::RemuxPlan,
+    source_stamp: crate::server::util::Stamp,
+    titles: &[libfreemkv::DiscTitle],
 ) -> std::io::Result<()> {
     let targets = tv_destinations(cfg, &plan).map(|(_, targets)| targets);
-    persist_plan(lib, job, plan, targets)
+    persist_plan(lib, job, plan, targets, source_stamp, titles)
 }
 
 fn persist_plan(
@@ -445,10 +483,28 @@ fn persist_plan(
     job: &mut Job,
     plan: crate::server::planner::RemuxPlan,
     targets: Option<Vec<std::path::PathBuf>>,
+    source_stamp: crate::server::util::Stamp,
+    titles: &[libfreemkv::DiscTitle],
 ) -> std::io::Result<()> {
+    check_source_stamp(&job.iso, Some(source_stamp))?;
+    let identities = plan
+        .outputs
+        .iter()
+        .map(|output| {
+            titles
+                .get(output.title_index)
+                .map(|title| {
+                    (
+                        output.id.clone(),
+                        crate::title_identity::TitleIdentity::of(title),
+                    )
+                })
+                .ok_or_else(source_review)
+        })
+        .collect::<std::io::Result<_>>()?;
     if !lib
         .queue
-        .set_plan_targets(job.id, plan, targets)
+        .freeze_plan(job.id, plan, targets, Some(source_stamp), identities)
         .map_err(|e| plan_not_saved(lib, &e))?
     {
         return Err(std::io::Error::other(
@@ -481,9 +537,10 @@ fn plan_not_saved(lib: &Library, e: &std::io::Error) -> std::io::Error {
 }
 
 fn attach_automatic_movie_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::Result<()> {
+    let source_stamp = planning_source_stamp(&job.iso)?;
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
-    persist_movie_plan(lib, cfg, job, &disc.titles)
+    persist_movie_plan(lib, cfg, job, &disc.titles, source_stamp)
 }
 
 fn persist_movie_plan(
@@ -491,6 +548,7 @@ fn persist_movie_plan(
     cfg: &Config,
     job: &mut Job,
     titles: &[libfreemkv::DiscTitle],
+    source_stamp: crate::server::util::Stamp,
 ) -> std::io::Result<()> {
     let plan = crate::server::planner::plan(
         cfg,
@@ -498,7 +556,7 @@ fn persist_movie_plan(
         &crate::server::planner::MediaMetadata::default(),
         &job.target,
     );
-    persist_auto_plan(lib, cfg, job, tv_plan_result(plan)?)
+    persist_auto_plan(lib, cfg, job, tv_plan_result(plan)?, source_stamp, titles)
 }
 
 // Season and disc number from the disc's labels, as automatic TV planning reads them.
@@ -541,12 +599,31 @@ fn attach_corrected_plan(
     job: &mut Job,
     media: &crate::server::planner::MediaMetadata,
     row: Option<&Path>,
+    source_stamp: crate::server::util::Stamp,
+) -> std::io::Result<()> {
+    attach_corrected_plan_with_scan(lib, cfg, job, media, row, source_stamp, |iso| {
+        let source = freemkv_engine::ImageSource::from_path(iso);
+        freemkv_engine::scan_image(&source)
+            .map(|(disc, _reader)| disc)
+            .map_err(planning_scan_error)
+    })
+}
+
+fn attach_corrected_plan_with_scan(
+    lib: &Library,
+    cfg: &Config,
+    job: &mut Job,
+    media: &crate::server::planner::MediaMetadata,
+    row: Option<&Path>,
+    matched_source: crate::server::util::Stamp,
+    scan: impl FnOnce(&Path) -> std::io::Result<libfreemkv::Disc>,
 ) -> std::io::Result<()> {
     if media.kind.is_none() {
         return Err(std::io::Error::other("saved match has no media type"));
     }
-    let source = freemkv_engine::ImageSource::from_path(&job.iso);
-    let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
+    check_source_stamp(&job.iso, Some(matched_source))?;
+    let source_stamp = matched_source;
+    let disc = scan(&job.iso)?;
     let media = &with_label_numbers(
         media,
         &disc.volume_id,
@@ -554,23 +631,7 @@ fn attach_corrected_plan(
         &job.title,
     );
     let (plan, targets) = corrected_plan_for(cfg, &disc.titles, media, row)?;
-    if !lib
-        .queue
-        .set_plan_targets(job.id, plan, Some(targets))
-        .map_err(|e| plan_not_saved(lib, &e))?
-    {
-        return Err(std::io::Error::other(
-            "job changed while preparing corrected match",
-        ));
-    }
-    *job = lib
-        .queue
-        .snapshot()
-        .jobs
-        .into_iter()
-        .find(|j| j.id == job.id)
-        .ok_or_else(|| std::io::Error::other("corrected remux job disappeared"))?;
-    Ok(())
+    persist_plan(lib, job, plan, Some(targets), source_stamp, &disc.titles)
 }
 
 // The corrected plan, or for an episode `row` only the output that lands on it.
@@ -775,8 +836,13 @@ fn execute_staged(
         .job_id
         .saturating_mul(1000)
         .saturating_add(ordinal as u64);
-    let unsaved = || sink.landing_unsaved();
-    deliver::remux_via_stage(request, sink, dir, id, &unsaved, engine).map(|r| r.writing_app)
+    let retention_failure = || {
+        sink.landing_source_changed()
+            .then(|| source_review().to_string())
+            .or_else(|| sink.landing_unsaved())
+    };
+    deliver::remux_via_stage(request, sink, dir, id, &retention_failure, engine)
+        .map(|r| r.writing_app)
 }
 
 fn cancelled_ending(sink: &JobSink<'_>) -> Option<Ending> {
@@ -808,6 +874,21 @@ fn remux_planned_with(
     plan: &crate::server::planner::RemuxPlan,
     cfg: &Config,
     sink: &JobSink<'_>,
+    execute: impl FnMut(
+        &freemkv_engine::RemuxJob,
+        Option<&Path>,
+        usize,
+    ) -> std::io::Result<Option<String>>,
+) -> Ending {
+    remux_planned_with_scan(job, plan, cfg, sink, scan_titles, execute)
+}
+
+fn remux_planned_with_scan(
+    job: &Job,
+    plan: &crate::server::planner::RemuxPlan,
+    cfg: &Config,
+    sink: &JobSink<'_>,
+    scan: impl FnOnce(&Path) -> std::io::Result<Vec<libfreemkv::DiscTitle>>,
     mut execute: impl FnMut(
         &freemkv_engine::RemuxJob,
         Option<&Path>,
@@ -876,26 +957,62 @@ fn remux_planned_with(
     {
         return Ending::Failed(problem_error(&p));
     }
-    let owned = match current.owned.clone() {
-        Some(owned) => owned,
-        None => match capture_owned(job, cfg, &sink.lib.config_dir).and_then(|owned| {
-            sink.lib
-                .queue
-                .set_owned(job.id, owned.clone())
-                .map(|()| owned)
-        }) {
-            Ok(owned) => owned,
-            Err(e) => return Ending::Failed(e),
-        },
+    // Validate every output requiring new media before any fresh write. Keep source
+    // errors deferred so already verified artifacts in a mixed job can still deliver.
+    let source_current = check_source_stamp(&job.iso, job.source_stamp).is_ok();
+    let fresh = plan
+        .outputs
+        .iter()
+        .zip(&targets)
+        .filter(|(output, target)| {
+            let progress = current.outputs.iter().find(|p| p.id == output.id);
+            !progress.is_some_and(|p| {
+                p.state == OutputState::Done || p.staged.is_some() || landed_before(p, target)
+            })
+        })
+        .map(|(output, _)| output.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let validated = if current
+        .outputs
+        .iter()
+        .any(|o| fresh.contains(&o.id) && o.source_unproven)
+    {
+        Err(source_review())
+    } else if fresh.is_empty() {
+        Ok(std::collections::HashMap::new())
+    } else {
+        validate_frozen_titles(job, plan, &fresh, scan)
+    };
+    let (indices, source_error) = match validated {
+        Ok(indices) => (indices, None),
+        Err(error) => (Default::default(), Some(error)),
+    };
+    let owned = if !source_current || source_error.is_some() {
+        Vec::new()
+    } else {
+        match current.owned.clone() {
+            Some(owned) => owned,
+            None => match capture_owned(job, cfg, &sink.lib.config_dir).and_then(|owned| {
+                sink.lib
+                    .queue
+                    .set_owned(job.id, owned.clone())
+                    .map(|()| owned)
+            }) {
+                Ok(owned) => owned,
+                Err(e) => return Ending::Failed(e),
+            },
+        }
     };
     // Every existing target must be ours before anything is written; a staged output
     // defers to its sidecar, which recorded the target as the remux found it.
     for (output, target) in plan.outputs.iter().zip(&targets) {
         let progress = current.outputs.iter().find(|p| p.id == output.id);
-        if progress.is_some_and(|p| p.state == OutputState::Done || p.staged.is_some()) {
+        if source_error.is_some()
+            || progress.is_some_and(|p| p.state == OutputState::Done || p.staged.is_some())
+        {
             continue;
         }
-        if landed_by_this_job(&sink.lib.config_dir, &job.iso, target)
+        if (source_current && landed_by_this_job(&sink.lib.config_dir, &job.iso, target))
             || progress.is_some_and(|p| landed_before(p, target))
         {
             continue;
@@ -910,15 +1027,25 @@ fn remux_planned_with(
             return ending;
         }
         let episode = output.episode.is_some();
+        let output_source = job.source_stamp.filter(|_| {
+            !current
+                .outputs
+                .iter()
+                .any(|p| p.id == output.id && p.source_unproven)
+        });
+        if fresh.contains(&output.id) && source_error.is_some() {
+            continue;
+        }
         if !sink.lib.queue.begin_output(job.id, &output.id) {
             // Done before; its link may not have been written. Never vouch for the file there now.
             if !landed_by_this_job(&sink.lib.config_dir, &job.iso, &targets[ordinal])
-                && let Err(e) = super::links::record_output(
+                && let Err(e) = super::links::record_frozen_output(
                     &sink.lib.config_dir,
                     &targets[ordinal],
                     &job.iso,
                     None,
                     episode,
+                    output_source,
                 )
             {
                 return Ending::Failed(links_not_saved(&targets[ordinal], &e));
@@ -935,12 +1062,13 @@ fn remux_planned_with(
             sink.lib
                 .queue
                 .finish_output(job.id, &output.id, OutputState::Done);
-            if let Err(e) = super::links::record_output(
+            if let Err(e) = super::links::record_frozen_output(
                 &sink.lib.config_dir,
                 &target,
                 &job.iso,
                 Some(landed),
                 episode,
+                output_source,
             ) {
                 return Ending::Failed(links_not_saved(&target, &e));
             }
@@ -949,6 +1077,7 @@ fn remux_planned_with(
         let unowned = !owned.iter().any(|o| o.path == target);
         if unowned
             && target.is_file()
+            && source_current
             && landed_by_this_job(&sink.lib.config_dir, &job.iso, &target)
         {
             sink.lib
@@ -959,7 +1088,7 @@ fn remux_planned_with(
         if let Err(why) = validate(&target) {
             return Ending::Failed(std::io::Error::other(why));
         }
-        let staged = job
+        let staged = current
             .outputs
             .iter()
             .find(|p| p.id == output.id)
@@ -978,7 +1107,12 @@ fn remux_planned_with(
         }
         let request = freemkv_engine::RemuxJob {
             iso: freemkv_engine::ImageSource::from_path(&job.iso),
-            title: Some(output.title_index),
+            title: Some(
+                indices
+                    .get(&output.id)
+                    .copied()
+                    .unwrap_or(output.title_index),
+            ),
             streams: freemkv_engine::StreamChoice::default(),
             target: target.clone(),
             replace,
@@ -992,9 +1126,35 @@ fn remux_planned_with(
             .iter()
             .find(|o| replace && o.path == target)
             .map(|o| o.stamp);
-        sink.expect_landing(&target, &output.id, replaces);
+        if staged.is_none()
+            && let Err(error) = check_source_stamp(&job.iso, job.source_stamp)
+        {
+            return Ending::Failed(error);
+        }
+        let source_proof = staged
+            .is_none()
+            .then(|| job.source_stamp.map(|stamp| (job.iso.clone(), stamp)))
+            .flatten();
+        sink.expect_landing(&target, &output.id, replaces, source_proof);
         writing_app = match execute(&request, staged, ordinal) {
             Ok(app) => app,
+            Err(e)
+                if sink.landing_source_changed()
+                    || (staged.is_none()
+                        && deliver::kept_of(&e).is_some()
+                        && check_source_stamp(&job.iso, job.source_stamp).is_err()) =>
+            {
+                if let Err(error) = keep_unproven_staged(sink, job.id, &output.id, &e) {
+                    sink.lib
+                        .queue
+                        .finish_output(job.id, &output.id, OutputState::Failed);
+                    return Ending::Failed(error);
+                }
+                sink.lib
+                    .queue
+                    .finish_output(job.id, &output.id, OutputState::Failed);
+                return Ending::Failed(source_review());
+            }
             Err(_) if let Some(changed) = sink.landing_refused() => {
                 sink.lib
                     .queue
@@ -1028,13 +1188,35 @@ fn remux_planned_with(
         sink.lib
             .queue
             .finish_output(job.id, &output.id, OutputState::Done);
-        if let Err(e) =
-            super::links::record_output(&sink.lib.config_dir, &target, &job.iso, landed, episode)
-        {
+        if let Err(e) = super::links::record_frozen_output(
+            &sink.lib.config_dir,
+            &target,
+            &job.iso,
+            landed,
+            episode,
+            output_source,
+        ) {
             return Ending::Failed(links_not_saved(&target, &e));
         }
     }
+    if let Some(error) = source_error {
+        return Ending::Failed(error);
+    }
     if job.retire {
+        if sink
+            .lib
+            .queue
+            .snapshot()
+            .jobs
+            .iter()
+            .find(|j| j.id == job.id)
+            .is_some_and(|j| j.outputs.iter().any(|o| o.source_unproven))
+        {
+            return Ending::Failed(source_review());
+        }
+        if let Err(error) = check_source_stamp(&job.iso, job.source_stamp) {
+            return Ending::Failed(error);
+        }
         if !outputs_all_done(&sink.lib.queue.snapshot(), job.id) {
             return Ending::Failed(std::io::Error::other(
                 "not every new file is recorded as done; no old file was removed",
@@ -1061,6 +1243,69 @@ fn remux_planned_with(
         }
     }
     Ending::Done { writing_app }
+}
+
+// Resolve the historic title identity uniquely; names and episode assignments remain frozen.
+fn validate_frozen_titles(
+    job: &Job,
+    plan: &crate::server::planner::RemuxPlan,
+    fresh: &std::collections::HashSet<String>,
+    scan: impl FnOnce(&Path) -> std::io::Result<Vec<libfreemkv::DiscTitle>>,
+) -> std::io::Result<std::collections::HashMap<String, usize>> {
+    check_source_stamp(&job.iso, job.source_stamp)?;
+    let titles = scan(&job.iso)?;
+    check_source_stamp(&job.iso, job.source_stamp)?;
+    let identities = titles
+        .iter()
+        .map(crate::title_identity::TitleIdentity::of)
+        .collect::<Vec<_>>();
+    plan.outputs
+        .iter()
+        .filter(|output| fresh.contains(&output.id))
+        .map(|output| {
+            let expected = job
+                .title_identities
+                .get(&output.id)
+                .ok_or_else(source_review)?;
+            let mut matches = identities
+                .iter()
+                .enumerate()
+                .filter(|(_, identity)| *identity == expected);
+            let (index, _) = matches.next().ok_or_else(source_review)?;
+            if matches.next().is_some() {
+                return Err(source_review());
+            }
+            Ok((output.id.clone(), index))
+        })
+        .collect()
+}
+
+// A newly source-refused artifact is kept, but may never inherit the plan's source
+// authority. If registration fails, preserve the pair for conservative orphan adoption.
+fn keep_unproven_staged(
+    sink: &JobSink<'_>,
+    job_id: u64,
+    output_id: &str,
+    error: &std::io::Error,
+) -> std::io::Result<()> {
+    let Some(kept) = deliver::kept_of(error) else {
+        return Ok(());
+    };
+    let register = || {
+        let info = deliver::read(&kept.path)?;
+        sink.lib.queue.retain_unproven_output(
+            job_id,
+            output_id,
+            StagedFile {
+                path: info.staged,
+                bytes: info.size,
+                attempts: info.attempts,
+            },
+        )
+    };
+    register().map_err(|error: std::io::Error| std::io::Error::new(error.kind(), format!(
+        "The source changed and the new file did not land. The verified artifact is kept at {}, but its unproven source and delivery state could not be saved ({error}). Repair the config folder and restart to adopt it without source ownership.", kept.path.display()
+    )))
 }
 
 // Record the file a failed output's delivery kept, so a Retry only copies it in.
@@ -1997,6 +2242,8 @@ struct Landing {
     /// The owned file it replaces, as captured; `None` when it creates the file.
     replaces: Option<crate::server::util::Stamp>,
     refused: bool,
+    source: Option<(std::path::PathBuf, crate::server::util::Stamp)>,
+    source_changed: bool,
     /// Why the landing could not be recorded durably; it must not land then.
     unsaved: Option<String>,
     /// The new file's stamp as recorded durably just before the rename.
@@ -2010,12 +2257,15 @@ impl JobSink<'_> {
         target: &Path,
         output_id: &str,
         replaces: Option<crate::server::util::Stamp>,
+        source: Option<(std::path::PathBuf, crate::server::util::Stamp)>,
     ) {
         *self.landing.lock().unwrap_or_else(|e| e.into_inner()) = Some(Landing {
             target: target.to_path_buf(),
             output_id: output_id.to_string(),
             replaces,
             refused: false,
+            source,
+            source_changed: false,
             unsaved: None,
             recorded: None,
         });
@@ -2031,6 +2281,14 @@ impl JobSink<'_> {
     fn landing_unsaved(&self) -> Option<String> {
         let landing = self.landing.lock().unwrap_or_else(|e| e.into_inner());
         landing.as_ref().and_then(|l| l.unsaved.clone())
+    }
+
+    fn landing_source_changed(&self) -> bool {
+        self.landing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|l| l.source_changed)
     }
 
     // Whether the last check before landing found the replaced file changed.
@@ -2049,6 +2307,12 @@ impl JobSink<'_> {
         let Some(landing) = guard.as_mut() else {
             return;
         };
+        if let Some((iso, stamp)) = &landing.source
+            && check_source_stamp(iso, Some(*stamp)).is_err()
+        {
+            landing.source_changed = true;
+            return;
+        }
         if let Some(captured) = landing.replaces {
             landing.refused = match super::owned::present(&landing.target) {
                 Ok(super::owned::Present::File(now)) => now != captured,
@@ -2270,6 +2534,7 @@ impl Sink for JobSink<'_> {
             || shutting_down()
             || self.lib.stall_cancel.load(Ordering::SeqCst)
             || self.lib.cancelled(self.job_id)
+            || self.landing_source_changed()
             || self.landing_refused().is_some()
             || self.landing_unsaved().is_some()
     }

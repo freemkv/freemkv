@@ -954,10 +954,10 @@ fn deliver_steps(
 }
 
 // A failure keeps the verified local file unless it was a Stop, or the target appeared. A
-// landing the sink could not record halts it too, and keeps it.
-fn keeps(e: &io::Error, stop: &Stop<'_>, unsaved: bool) -> bool {
+// landing refused for source proof or durable-record failure also halts, but keeps it.
+fn keeps(e: &io::Error, stop: &Stop<'_>, retain_on_halt: bool) -> bool {
     libfreemkv::error_code(e) != Some(libfreemkv::error::E_REMUX_TARGET_EXISTS)
-        && (unsaved || (!libfreemkv::is_halt(e) && !stop.is_cancelled()))
+        && (retain_on_halt || (!libfreemkv::is_halt(e) && !stop.is_cancelled()))
 }
 
 /// A remux whose verified MKV is on local staging, ready to be delivered.
@@ -976,14 +976,15 @@ pub(crate) struct Finished<'a> {
 
 /// Deliver `f.file` to `f.target`. `Ok(replaced)` removes the local file; a storage failure
 /// keeps it with a sidecar and returns the cause wrapped in a [`Kept`]; a Stop or a target
-/// that appeared removes it and returns the error as is. `unsaved` names a landing the sink
-/// halted because it could not record it: a storage failure, so the file is kept.
+/// that appeared removes it and returns the error as is. `retention_failure` names a
+/// landing refusal whose verified artifact must be kept, such as source drift or a
+/// failed durable landing record. Its actual cause is retained in the sidecar.
 pub(crate) fn deliver_finished(
     f: &Finished<'_>,
     sink: &dyn Sink,
     halt: &Halt,
     io: &dyn DeliverIo,
-    unsaved: &dyn Fn() -> Option<String>,
+    retention_failure: &dyn Fn() -> Option<String>,
 ) -> io::Result<bool> {
     let mut local = LocalGuard(Some(f.file.to_path_buf()));
     let size = std::fs::metadata(f.file)?.len();
@@ -1001,11 +1002,11 @@ pub(crate) fn deliver_finished(
             Ok(replaced)
         }
         Err((phase, e)) => {
-            let unsaved = unsaved();
-            if !keeps(&e, &stop, unsaved.is_some()) {
+            let retention_failure = retention_failure();
+            if !keeps(&e, &stop, retention_failure.is_some()) {
                 return Err(e);
             }
-            let cause = unsaved.map_or(e, io::Error::other);
+            let cause = retention_failure.map_or(e, io::Error::other);
             Err(keep(f, &mut local, want, phase, cause, sink))
         }
     }
@@ -1464,13 +1465,13 @@ pub(crate) fn stage_file(stage: &Path, job_id: u64) -> PathBuf {
 
 /// Remux `request` through local staging: `engine` (the engine's remux, with its sink) muxes,
 /// syncs, verifies and lands the MKV in `stage` (as `<job_id>.mkv`), then
-/// [`deliver_finished`] copies it into the library; `unsaved` is passed on to it.
+/// [`deliver_finished`] copies it into the library; `retention_failure` is passed on to it.
 pub(crate) fn remux_via_stage(
     request: &freemkv_engine::RemuxJob,
     sink: &dyn Sink,
     stage: &Path,
     job_id: u64,
-    unsaved: &dyn Fn() -> Option<String>,
+    retention_failure: &dyn Fn() -> Option<String>,
     engine: impl FnOnce(&freemkv_engine::RemuxJob, &dyn Sink) -> io::Result<freemkv_engine::RemuxReport>,
 ) -> io::Result<freemkv_engine::RemuxReport> {
     // Refused before anything is read, as a direct remux refuses it.
@@ -1500,7 +1501,7 @@ pub(crate) fn remux_via_stage(
         verified: &report.verified,
         target_before,
     };
-    report.replaced = deliver_finished(&finished, sink, &Halt::new(), &OsIo, unsaved)?;
+    report.replaced = deliver_finished(&finished, sink, &Halt::new(), &OsIo, retention_failure)?;
     Ok(report)
 }
 

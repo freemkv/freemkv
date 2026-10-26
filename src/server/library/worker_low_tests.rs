@@ -63,7 +63,7 @@ fn a_cleared_field_that_was_already_clear_writes_nothing() {
     let (_t, lib, dirs) = library_with(&["A"]);
     lib.queue.add(vec![NewJob {
         title: "A".into(),
-        iso: "/i/A.iso".into(),
+        iso: dirs.isos.as_ref().unwrap().join("A.iso"),
         target: dirs.library.join("A/A.mkv"),
         replace: true,
     }]);
@@ -89,7 +89,7 @@ fn a_plan_that_cannot_be_saved_says_so_and_keeps_its_storage_fault() {
     let (t, lib, dirs) = library_with(&["A"]);
     lib.queue.add(vec![NewJob {
         title: "A".into(),
-        iso: "/i/A.iso".into(),
+        iso: dirs.isos.as_ref().unwrap().join("A.iso"),
         target: dirs.library.join("A/A.mkv"),
         replace: true,
     }]);
@@ -100,7 +100,15 @@ fn a_plan_that_cannot_be_saved_says_so_and_keeps_its_storage_fault() {
         library_dir: dirs.library.to_string_lossy().into_owned(),
         ..Config::default()
     };
-    let result = persist_auto_plan(&lib, &cfg, &mut job, two_episodes());
+    let stamp = planning_source_stamp(&job.iso).unwrap();
+    let result = persist_auto_plan(
+        &lib,
+        &cfg,
+        &mut job,
+        two_episodes(),
+        stamp,
+        &fixture_titles(3),
+    );
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
     let Err(e) = result else {
         return; // running as a user that ignores modes

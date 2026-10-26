@@ -4,8 +4,6 @@ use crate::server::planner::{MediaMetadata, PlannedOutput, RemuxPlan};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-const ISO: &str = "/i/A.iso";
-
 // A Change match of ISO into `n` episodes under library/Show, with three old episodes
 // linked to it, another ISO's file and an unlinked file beside them.
 struct Correction {
@@ -24,7 +22,7 @@ impl Correction {
         lib.queue.add_fresh(
             vec![NewJob {
                 title: "Show".into(),
-                iso: ISO.into(),
+                iso: dirs.isos.as_ref().unwrap().join("A.iso"),
                 target: dirs.library.join("Show/Show.mkv"),
                 replace: false,
             }],
@@ -43,7 +41,7 @@ impl Correction {
                 })
                 .collect(),
         };
-        assert!(lib.queue.set_plan(claimed.id, plan));
+        assert!(freeze_fixture_plan(&lib, claimed.id, plan, None).unwrap());
         let job = lib.queue.snapshot().jobs[0].clone();
         assert!(job.retire);
         let config = t.path().join("config");
@@ -53,7 +51,7 @@ impl Correction {
         std::fs::create_dir_all(dirs.library.join("Old")).unwrap();
         for (i, path) in old.iter().enumerate() {
             std::fs::write(path, format!("old episode {i}")).unwrap();
-            links::record(&config, path, Path::new(ISO)).unwrap();
+            links::record(&config, path, &job.iso).unwrap();
         }
         let other = dirs.library.join("Other.mkv");
         std::fs::write(&other, b"another disc").unwrap();
@@ -82,7 +80,7 @@ impl Correction {
         let arbiter = Arbiter::new();
         let mut sink = test_sink(&self.lib, &arbiter);
         sink.job_id = self.job.id;
-        remux_planned_with(
+        remux_fixture_with(
             &self.job,
             self.job.plan.as_ref().unwrap(),
             &config_of(&self.dirs),
@@ -129,7 +127,7 @@ fn correction_lands_all_new_outputs_then_removes_exactly_the_three_linked_old_on
     let targets = c.job.output_targets();
     let mut expected: HashMap<PathBuf, PathBuf> = targets
         .iter()
-        .map(|t| (t.clone(), PathBuf::from(ISO)))
+        .map(|t| (t.clone(), c.job.iso.clone()))
         .collect();
     expected.insert(c.other.clone(), "/i/other.iso".into());
     assert_eq!(c.links(), expected);
@@ -171,7 +169,7 @@ fn old_file_changed_after_the_remux_started_is_kept_disowned_and_needs_action() 
     let roots = crate::server::library::owned::roots(&c.dirs);
     let again = crate::server::library::owned::capture(
         &links::read_entries(&c.t.path().join("config")).unwrap(),
-        Path::new(ISO),
+        &c.job.iso,
         &roots,
     )
     .unwrap();
@@ -230,7 +228,7 @@ fn a_stop_during_retire_leaves_the_rest_linked_for_the_next_run() {
     assert!(
         c.old
             .iter()
-            .all(|p| c.links().get(p) == Some(&PathBuf::from(ISO)))
+            .all(|p| c.links().get(p) == Some(&c.job.iso.clone()))
     );
 }
 
@@ -278,7 +276,7 @@ fn correction_failing_at_output_two_keeps_every_old_file_and_resumes_the_kept_fi
     let mut sink = test_sink(&c.lib, &arbiter);
     sink.job_id = retry.id;
     let mut seen = Vec::new();
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &retry,
         retry.plan.as_ref().unwrap(),
         &config_of(&c.dirs),
@@ -331,7 +329,7 @@ fn a_target_this_job_already_landed_is_done_not_reported_as_foreign() {
     let target = c.job.output_targets().remove(0);
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::write(&target, movie()).unwrap();
-    links::record(&c.t.path().join("config"), &target, Path::new(ISO)).unwrap();
+    links::record(&c.t.path().join("config"), &target, &c.job.iso).unwrap();
     c.lib.queue.set_owned(c.job.id, Vec::new()).unwrap();
     let ending = c.run(|_, _, _| panic!("the landed output must not be remuxed again"));
     assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");

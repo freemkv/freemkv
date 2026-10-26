@@ -154,18 +154,6 @@ pub fn record(config_dir: &Path, mkv: &Path, iso: &Path) -> std::io::Result<()> 
     record_many(config_dir, &[(mkv, stamp)], iso, false, true)
 }
 
-/// Remember that `mkv`, landed as `stamp`, was made from `iso`; `episode` when it is one
-/// of several files the disc was split into.
-pub(crate) fn record_output(
-    config_dir: &Path,
-    mkv: &Path,
-    iso: &Path,
-    stamp: Option<Stamp>,
-    episode: bool,
-) -> std::io::Result<()> {
-    record_many(config_dir, &[(mkv, stamp)], iso, episode, true)
-}
-
 /// Forget that `mkv` was made from `iso`; a link to another ISO is left alone.
 pub(super) fn forget(config_dir: &Path, mkv: &Path, iso: &Path) -> std::io::Result<()> {
     let _g = WRITE.lock().unwrap_or_else(|e| e.into_inner());
@@ -203,12 +191,53 @@ fn record_many(
     episode: bool,
     set_aside: bool,
 ) -> std::io::Result<()> {
-    let iso_now = iso_stamp(iso);
+    record_many_from(
+        config_dir,
+        mkvs,
+        iso,
+        episode,
+        set_aside,
+        iso_stamp(iso),
+        true,
+    )
+}
+
+/// Record a frozen job's original provenance, including when delivering an old artifact
+/// after its ISO disappeared or was replaced. Unknown provenance grants no ownership.
+pub(crate) fn record_frozen_output(
+    config_dir: &Path,
+    mkv: &Path,
+    iso: &Path,
+    stamp: Option<Stamp>,
+    episode: bool,
+    source_stamp: Option<Stamp>,
+) -> std::io::Result<()> {
+    let stamp = stamp.filter(|_| source_stamp.is_some());
+    record_many_from(
+        config_dir,
+        &[(mkv, stamp)],
+        iso,
+        episode,
+        true,
+        source_stamp,
+        false,
+    )
+}
+
+fn record_many_from(
+    config_dir: &Path,
+    mkvs: &[(&Path, Option<Stamp>)],
+    iso: &Path,
+    episode: bool,
+    set_aside: bool,
+    iso_now: Option<Stamp>,
+    prune_earlier_sources: bool,
+) -> std::io::Result<()> {
     let _g = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let mut links = read_for_write(config_dir, set_aside)?;
     let before = links.clone();
     // Links from an earlier disc filed at this ISO path name files that disc made.
-    if let Some(now) = iso_now {
+    if prune_earlier_sources && let Some(now) = iso_now {
         links.retain(|_, l| l.iso != iso || l.iso_stamp.is_none_or(|s| s == now));
     }
     for (mkv, stamp) in mkvs {

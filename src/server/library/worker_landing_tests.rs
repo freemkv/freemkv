@@ -26,7 +26,7 @@ fn replacing() -> (tempfile::TempDir, Library, Dirs, Job, PathBuf) {
             filename: "A.mkv".into(),
         }],
     };
-    assert!(lib.queue.set_plan(job.id, plan));
+    assert!(freeze_fixture_plan(&lib, job.id, plan, None).unwrap());
     let job = lib.queue.snapshot().jobs[0].clone();
     (t, lib, dirs, job, target)
 }
@@ -61,7 +61,7 @@ fn a_library_file_changed_during_the_mux_is_not_replaced_at_landing() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg(&dirs),
@@ -89,7 +89,7 @@ fn a_restart_after_the_new_file_landed_but_before_done_finishes_the_output() {
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
     // The rename commits; the process dies before the output is recorded Done.
-    let first = remux_planned_with(
+    let first = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg(&dirs),
@@ -103,7 +103,7 @@ fn a_restart_after_the_new_file_landed_but_before_done_finishes_the_output() {
     assert_eq!(std::fs::read(&target).unwrap(), movie());
     let job = lib.queue.snapshot().jobs[0].clone();
     let mut calls = 0;
-    let again = remux_planned_with(
+    let again = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg(&dirs),
@@ -157,7 +157,7 @@ fn a_landing_that_cannot_be_recorded_durably_is_not_landed() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg(&dirs),
@@ -179,7 +179,7 @@ fn a_landing_that_cannot_be_recorded_durably_is_not_landed() {
 }
 
 // The engine muxing into the remux staging folder: its own "replace" phase lands the local file.
-fn engine_into_stage(
+pub(super) fn engine_into_stage(
     staged: &freemkv_engine::RemuxJob,
     sink: &dyn Sink,
 ) -> std::io::Result<freemkv_engine::RemuxReport> {
@@ -221,7 +221,7 @@ fn a_staged_remux_lands_in_the_library() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg(&dirs),
@@ -241,7 +241,7 @@ fn a_direct_remux_lands_in_the_library() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg(&dirs),
@@ -261,7 +261,7 @@ fn the_link_carries_the_recorded_landing_not_a_later_look() {
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
     let mut landed = None;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg(&dirs),
@@ -292,7 +292,7 @@ fn a_staged_landing_that_cannot_be_recorded_keeps_the_verified_file() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg(&dirs),
@@ -319,4 +319,67 @@ fn a_staged_landing_that_cannot_be_recorded_keeps_the_verified_file() {
     assert_eq!(kept.len(), 1, "the verified remux is kept");
     let staged = lib.queue.snapshot().jobs[0].outputs[0].staged.clone();
     assert_eq!(staged.as_deref(), Some(kept[0].staged.as_path()));
+}
+
+#[test]
+fn frozen_source_refusal_keeps_verified_staging_for_delivery_with_original_provenance() {
+    let (t, lib, dirs, job, target) = replacing();
+    let before = std::fs::read(&target).unwrap();
+    let stage = t.path().join("remux-stage");
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_fixture_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, ordinal| {
+            execute_staged(request, &sink, &stage, ordinal, |staged, capture| {
+                let report = engine_into_stage(staged, capture)?;
+                std::fs::write(&job.iso, b"replacement after local verification")?;
+                Ok(report)
+            })
+        },
+    );
+    assert!(matches!(ending, Ending::Failed(_)), "{ending:?}");
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    let kept = deliver::pending(&stage);
+    assert_eq!(
+        kept.len(),
+        1,
+        "source refusal must retain the verified local artifact"
+    );
+    let retry = lib.queue.snapshot().jobs[0].clone();
+    assert_eq!(
+        retry.outputs[0].staged.as_deref(),
+        Some(kept[0].staged.as_path())
+    );
+    assert_eq!(retry.source_stamp, job.source_stamp);
+    let mut retry_sink = test_sink(&lib, &arbiter);
+    retry_sink.job_id = job.id;
+    let delivered = remux_planned(
+        &retry,
+        retry.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &retry_sink,
+    );
+    assert!(matches!(delivered, Ending::Done { .. }), "{delivered:?}");
+    assert_eq!(std::fs::read(&target).unwrap(), movie());
+    let link = links::read_entries(&t.path().join("config"))
+        .unwrap()
+        .remove(&target)
+        .unwrap();
+    assert!(link.iso_stamp.is_none());
+    assert!(link.stamp.is_none());
+    let linked = links::read_entries(&t.path().join("config")).unwrap();
+    assert!(
+        super::super::super::owned::capture(
+            &linked,
+            &job.iso,
+            &super::super::super::owned::roots(&dirs)
+        )
+        .unwrap()
+        .is_empty()
+    );
 }
