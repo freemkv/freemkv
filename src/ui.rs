@@ -4206,18 +4206,26 @@ impl App {
             show_overall_bar: self.run_titles > 1,
             saving_current: stop_caption(stopping, titles_done, self.run_titles).unwrap_or_else(
                 || {
-                    crate::strings::fmt(
-                        "gui.progress.saving_current",
-                        &[("container", &container_label(&self.effective_format()))],
-                    )
+                    if p.preparation == crate::engine::TitlePreparation::Reading {
+                        crate::strings::get("gui.progress.reading_titles")
+                    } else {
+                        crate::strings::fmt(
+                            "gui.progress.saving_current",
+                            &[("container", &container_label(&self.effective_format()))],
+                        )
+                    }
                 },
             ),
             saving_overall: stop_caption(stopping, titles_done, self.run_titles).unwrap_or_else(
                 || {
-                    crate::strings::fmt(
-                        "gui.progress.saving_overall",
-                        &[("container", &container_label(&self.effective_format()))],
-                    )
+                    if p.preparation != crate::engine::TitlePreparation::NotNeeded {
+                        crate::strings::get("gui.progress.reading_saving_titles")
+                    } else {
+                        crate::strings::fmt(
+                            "gui.progress.saving_overall",
+                            &[("container", &container_label(&self.effective_format()))],
+                        )
+                    }
                 },
             ),
             output_dir: self.output_dir.clone(),

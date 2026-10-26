@@ -1474,6 +1474,15 @@ fn reason_text(r: &fe::Reason) -> String {
     }
 }
 
+/// Whether a title run first reads the selected content into a staging image.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum TitlePreparation {
+    #[default]
+    NotNeeded,
+    Reading,
+    Complete,
+}
+
 /// Progress snapshot handed to the UI thread. Engine-derived; never recomputed.
 #[derive(Default, Clone, Copy)]
 pub struct Prog {
@@ -1490,6 +1499,7 @@ pub struct Prog {
     /// The bottom bar: the run's bytes done over its planned bytes, never decreasing.
     /// `None` when the run planned no titles; `Some(0.0)` while a planned size is unknown.
     pub batch_pct: Option<f64>,
+    pub preparation: TitlePreparation,
 }
 
 /// The two bars' bookkeeping, updated in the worker's event order so the UI never
@@ -1573,6 +1583,11 @@ impl Bars {
     }
 
     fn publish(&self, prog: &mut Prog) {
+        prog.preparation = match &self.read {
+            None => TitlePreparation::NotNeeded,
+            Some(r) if r.over => TitlePreparation::Complete,
+            Some(_) => TitlePreparation::Reading,
+        };
         let planned: u64 = self.sizes.iter().map(|&(_, s)| s).sum();
         prog.title_pct = match self.current {
             Some((_, _, f)) => f * 100.0,

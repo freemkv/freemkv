@@ -2629,6 +2629,38 @@ fn a_multipass_read_counts_toward_the_bottom_bar_and_never_rewinds_it() {
 }
 
 #[test]
+fn preparing_three_titles_is_labelled_as_a_read_before_the_first_mkv() {
+    let mut b = Bars::new(&[1000, 1000, 1000]);
+    b.st.begin_read();
+    assert_eq!(b.tick("sweep", 1440, 3000), (48.0, 24.0));
+    let reading = b.app.view();
+    assert_eq!(
+        reading.saving_current,
+        crate::strings::get_or(
+            "gui.progress.reading_titles",
+            "Reading selected titles from disc"
+        )
+    );
+    assert_eq!(
+        reading.saving_overall,
+        crate::strings::get_or(
+            "gui.progress.reading_saving_titles",
+            "Reading and saving all titles"
+        )
+    );
+    b.tick("sweep", 3000, 3000);
+    b.st.title_start(0);
+    assert_eq!(b.sample(), (0.0, 50.0));
+    assert_ne!(b.app.view().saving_current, reading.saving_current);
+    assert_eq!(b.app.view().saving_overall, reading.saving_overall);
+    b.title(0, 1000);
+    b.title(1, 1000);
+    b.title(2, 1000);
+    b.assert_overall_monotonic();
+    b.assert_full_only_at_end();
+}
+
+#[test]
 fn an_unknown_title_size_shows_no_batch_percentage() {
     let mut b = Bars::new(&[0, 1000]);
     b.title(0, 0);
