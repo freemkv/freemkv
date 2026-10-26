@@ -2505,6 +2505,144 @@ fn a_prune_unlinks_outside_the_state_lock() {
     );
 }
 
+#[test]
+fn prune_reports_missing_and_unreadable_state_but_not_absent_captures() {
+    #[derive(Clone, Default)]
+    struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Log {
+        type Writer = Log;
+        fn make_writer(&'a self) -> Log {
+            self.clone()
+        }
+    }
+    let log = Log::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .finish();
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+    tracing::subscriber::with_default(subscriber, || {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("Heat.iso");
+        let map = dir.path().join("Heat.iso.mapfile");
+        assert!(prune_unless_replan_required(dir.path(), &[&iso, &map]).is_none());
+        assert!(
+            log.0.lock().unwrap().is_empty(),
+            "no warning for already moved captures"
+        );
+        fs::write(&iso, b"image").unwrap();
+        assert!(prune_unless_replan_required(dir.path(), &[&iso, &map]).is_none());
+        let absent = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(absent.contains("state.json is absent"), "{absent}");
+        log.0.lock().unwrap().clear();
+        fs::write(state_path(dir.path()), b"{ torn").unwrap();
+        assert!(prune_unless_replan_required(dir.path(), &[&iso, &map]).is_none());
+        let corrupt = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(corrupt.contains("state.json is unparseable"), "{corrupt}");
+        assert!(corrupt.contains("capture retained"), "{corrupt}");
+    });
+}
+
+// A missing or unreadable plan cannot authorize destroying the capture needed to replan.
+#[test]
+fn prune_preserves_capture_without_trusted_state() {
+    for fault in ["absent", "corrupt", "foreign", "directory", "replan"] {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("Heat.iso");
+        let map = dir.path().join("Heat.iso.mapfile");
+        fs::write(&iso, b"exact image bytes").unwrap();
+        fs::write(&map, b"exact map bytes").unwrap();
+        match fault {
+            "absent" => {}
+            "corrupt" => fs::write(state_path(dir.path()), b"{ torn").unwrap(),
+            "directory" => fs::create_dir(state_path(dir.path())).unwrap(),
+            "foreign" | "replan" => {
+                let mut st = DiscState::new(StagingState::Done);
+                if fault == "foreign" {
+                    st.schema = DISC_STATE_SCHEMA + 1;
+                } else {
+                    st.replan_required = true;
+                }
+                fs::write(state_path(dir.path()), serde_json::to_vec(&st).unwrap()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before: std::collections::BTreeSet<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            prune_with(dir.path(), &[&iso, &map], |_| {
+                panic!("unlink attempted for {fault}")
+            })
+            .is_none(),
+            "{fault}"
+        );
+        assert_eq!(fs::read(&iso).unwrap(), b"exact image bytes", "{fault}");
+        assert_eq!(fs::read(&map).unwrap(), b"exact map bytes", "{fault}");
+        let after: std::collections::BTreeSet<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(before, after, "no renamed captures for {fault}");
+    }
+}
+
+#[test]
+fn prune_preserves_an_acknowledged_correction_when_state_becomes_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("Heat.iso");
+    let map = dir.path().join("Heat.iso.mapfile");
+    fs::write(&iso, b"image").unwrap();
+    fs::write(&map, b"map").unwrap();
+    let mut st = DiscState::new(StagingState::Review);
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.mapfile_path = map.to_string_lossy().into_owned();
+    st.max_retries = 1;
+    try_write_state(dir.path(), &st).unwrap();
+    let revision = save_review_metadata(
+        dir.path(),
+        UserMetadata {
+            title: "Heat".into(),
+            year: 1995,
+            media_type: crate::server::planner::MediaKind::Tv,
+            episode_start: Some(3),
+            tmdb_id: 949,
+            poster_url: String::new(),
+            overview: String::new(),
+        },
+    )
+    .unwrap();
+    let saved = fs::read(state_path(dir.path())).unwrap();
+    assert!(read_state(dir.path()).unwrap().replan_required);
+    fs::remove_file(state_path(dir.path())).unwrap();
+    fs::create_dir(state_path(dir.path())).unwrap();
+    assert!(
+        prune_with(dir.path(), &[&iso, &map], |_| {
+            panic!("an acknowledged correction's capture must survive")
+        })
+        .is_none()
+    );
+    fs::remove_dir(state_path(dir.path())).unwrap();
+    fs::write(state_path(dir.path()), &saved).unwrap();
+    let restored = read_state(dir.path()).unwrap();
+    assert!(restored.replan_required);
+    assert_eq!(restored.metadata_revision, revision);
+    assert_eq!(restored.user_metadata.unwrap().episode_start, Some(3));
+    assert_eq!(fs::read(&iso).unwrap(), b"image");
+    assert_eq!(fs::read(&map).unwrap(), b"map");
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+}
+
 // An unreadable state.json is a storage failure, not a conflict with the job's state:
 // the error keeps its own kind so the web layer does not answer 409.
 #[test]

@@ -2810,7 +2810,8 @@ fn surface_interrupted_reset(dir: &Path, finished: io::Result<bool>) {
 }
 
 /// Delete a finished capture's ISO and map (`files`) unless a correction asked for a
-/// replan from them; `None` when kept, else each file's outcome. Under the state lock
+/// replan from them. Only readable, valid state can authorize deletion; `None` when
+/// kept, else each file's outcome. Under the state lock
 /// that commits corrections they are renamed aside, so a correction then finds no saved
 /// image and is refused; the multi-GB unlinks run after the lock is released.
 pub(super) fn prune_unless_replan_required(
@@ -2827,7 +2828,18 @@ fn prune_with(
 ) -> Option<Vec<(PathBuf, io::Result<()>)>> {
     let lock = state_lock(dir);
     let state_owner = lock.lock().unwrap_or_else(|e| e.into_inner());
-    if read_state(dir).is_some_and(|s| s.replan_required) {
+    let held_reason = match read_state_checked(dir) {
+        StateRead::Valid(st) if !st.replan_required => None,
+        StateRead::Valid(_) => return None,
+        StateRead::Absent => Some("state.json is absent".to_string()),
+        StateRead::Unreadable(u) => Some(u.log_text()),
+    };
+    if let Some(reason) = held_reason {
+        // The mover may already have removed the capture or its whole directory.
+        // Warn only if files remain (or their presence cannot be checked).
+        if files.iter().any(|file| file.try_exists().unwrap_or(true)) {
+            tracing::warn!(path = %dir.display(), %reason, "intermediate capture retained: prune requires valid state.json");
+        }
         return None;
     }
     let marked: Vec<(PathBuf, io::Result<PathBuf>)> = files
