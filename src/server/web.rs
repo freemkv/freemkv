@@ -2001,18 +2001,15 @@ fn get_state_json_with_cards(
     staging_dir: &str,
     cards: impl Fn(&str) -> Option<Vec<ripper::card_plan::CardEpisode>>,
 ) -> String {
-    // Recover-and-proceed on poison, like every other STATE consumer. This
-    // was the ONE site that bailed with `Err(_) => "{}"`, forever returning
-    // a blank dashboard with a permanently green HEALTHCHECK; it's still readable.
+    // Recover poisoned STATE locks; returning "{}" left a blank dashboard
+    // with a permanently green HEALTHCHECK.
     let state = ripper::STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    // The owned snapshot keeps device/job associations consistent while card
-    // decoration and serialization run without the global progress/control lock.
-    // `_move` is now an ARRAY of per-artifact bars (movie file + companion ISO
-    // get one each); clone the whole Vec (empty = nothing moving). Recover on
-    // poison (MOVE_STATE convention) — `.ok()` would drop live bars process-wide.
+    // Snapshot card/job associations under the progress lock; clone per-artifact
+    // move bars and serialize after releasing the lock. Recover on poison as
+    // MOVE_STATE does—dropping live bars would hide active moves.
     let move_state = crate::server::mover::MOVE_STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -3681,11 +3678,9 @@ fn prepare_stop(device: &str) -> Option<u64> {
 }
 
 fn handle_stop(request: tiny_http::Request, device: &str) {
-    // Stop halts and drains the rip thread and collapses the row to idle,
-    // preserving partial staging for resume. A claim made after `entry_gen`
-    // (insert dispatch or a Rip POST during the drain) is a new rip: left alone.
-    // Armed before the drain, which can take up to 60s, so the poll loop does
-    // not re-dispatch the drive the operator is stopping; refreshed after it.
+    // Stop drains the rip thread and preserves partial staging. Work claimed
+    // after `entry_gen` is new work and remains untouched. Arm cooldown before
+    // the up-to-60s drain to prevent poll-loop redispatch, then refresh it.
     let entry_gen = prepare_stop(device);
 
     // Cancel the halt and drain (ripper::stop_and_drain). A timed-out drain

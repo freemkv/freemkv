@@ -1020,10 +1020,9 @@ fn resume_config(mut cfg: Config, saved: Option<&staging::DiscState>) -> Result<
         cfg.output_format.clone_from(format);
         return Ok(cfg);
     }
-    // Historical network captures have MKV-shaped names too: suffixes cannot
-    // recover their mode. Keep the existing explicit network setting for these
-    // untagged jobs. An empty old plan likewise carries no format evidence (it
-    // can be an interrupted ISO capture); retain current-format compatibility.
+    // Untagged network captures also have MKV-shaped names, so keep the current
+    // explicit network setting; empty legacy plans carry no format evidence.
+    // Both cases must remain compatible with the caller's format selection.
     if cfg.output_format == "network" || saved.outputs.is_empty() {
         return Ok(cfg);
     }
