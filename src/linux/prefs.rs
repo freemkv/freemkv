@@ -426,7 +426,10 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     // Focus also leaves while the window is torn down; that is not an edit.
     for (_, r) in &prefs.entries {
         let (me, p) = (shell.clone(), prefs.clone());
-        r.connect_entry_activated(move |_| p.commit(&me));
+        r.connect_entry_activated(move |_| {
+            p.commit(&me);
+            gtk::prelude::GtkWindowExt::set_focus(&p.window, None::<&gtk::Widget>);
+        });
         let focus = gtk::EventControllerFocus::new();
         let (me, p) = (shell.clone(), prefs.clone());
         focus.connect_leave(move |_| {
@@ -436,6 +439,22 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
         });
         r.add_controller(focus);
     }
+    // Blank space has no focus target of its own. Finish editing there too,
+    // without claiming the gesture: buttons and other fields still receive it.
+    let click = gtk::GestureClick::new();
+    click.set_button(1);
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let p = Rc::downgrade(&prefs);
+    click.connect_pressed(move |_, _, x, y| {
+        let Some(p) = p.upgrade() else { return };
+        let focused = gtk::prelude::GtkWindowExt::focus(&p.window);
+        let editing = focused.is_some_and(|w| in_entry_row(&w));
+        let target = p.window.pick(x, y, gtk::PickFlags::DEFAULT);
+        if editing && !target.is_some_and(|w| in_entry_row(&w)) {
+            gtk::prelude::GtkWindowExt::set_focus(&p.window, None::<&gtk::Widget>);
+        }
+    });
+    prefs.window.add_controller(click);
     // Connected after `populate`, so filling the form is not a language pick.
     let (me, p) = (shell.clone(), prefs.clone());
     language.connect_selected_notify(move |_| {
@@ -452,6 +471,17 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
 
     *shell.prefs.borrow_mut() = Some(prefs);
     window.present();
+}
+
+fn in_entry_row(widget: &gtk::Widget) -> bool {
+    let mut at = Some(widget.clone());
+    while let Some(widget) = at {
+        if widget.is::<adw::EntryRow>() {
+            return true;
+        }
+        at = widget.parent();
+    }
+    false
 }
 
 impl Prefs {
