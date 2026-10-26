@@ -83,18 +83,22 @@ fn an_unreadable_sibling_is_skipped_unless_required() {
         .map(|p| (p.clone(), link(p, &iso)))
         .collect();
     let dir = locked.parent().unwrap();
+    let permissions = std::fs::metadata(dir).unwrap().permissions();
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Probe before restoring access, independently of either capture result.
+    let ignores_modes = std::fs::symlink_metadata(&locked).is_ok();
     let roots = std::slice::from_ref(&root);
     let lenient = capture_with(&links, &iso, roots, |p| p == good);
     let strict = capture(&links, &iso, roots);
     let target_required = capture_with(&links, &iso, roots, |_| true);
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    if std::fs::symlink_metadata(&locked).is_ok() && strict.is_ok() {
+    std::fs::set_permissions(dir, permissions).unwrap();
+    if ignores_modes {
         return; // running as a user that ignores modes
     }
     let paths: Vec<_> = lenient.unwrap().into_iter().map(|o| o.path).collect();
     assert_eq!(paths, vec![good]);
-    assert!(strict.is_err() && target_required.is_err());
+    assert!(strict.is_err(), "capture must require every linked sibling");
+    assert!(target_required.is_err());
 }
 
 #[test]

@@ -95,16 +95,20 @@ fn a_plan_that_cannot_be_saved_says_so_and_keeps_its_storage_fault() {
     }]);
     let mut job = lib.queue.claim_next().unwrap();
     let config = t.path().join("config");
+    let permissions = std::fs::metadata(&config).unwrap().permissions();
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Probe the filesystem independently of the behavior under test, while locked.
+    let ignores_modes = std::fs::write(config.join("permission-probe"), b"").is_ok();
     let cfg = Config {
         library_dir: dirs.library.to_string_lossy().into_owned(),
         ..Config::default()
     };
     let result = persist_auto_plan(&lib, &cfg, &mut job, two_episodes());
-    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let Err(e) = result else {
+    std::fs::set_permissions(&config, permissions).unwrap();
+    if ignores_modes {
         return; // running as a user that ignores modes
-    };
+    }
+    let e = result.expect_err("saving a plan must fail in an unwritable config directory");
     assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
     assert!(e.to_string().contains("library-queue.json"), "{e}");
 }
