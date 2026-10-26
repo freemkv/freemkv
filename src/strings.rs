@@ -113,6 +113,6 @@ pub fn presentation_language_unknown(value: &str) -> String {
     fmt_or(
         "error.presentation_language_unknown",
         "Unknown presentation language \"{value}\". Use an ISO 639 language code such as en, de or fra.",
-        &[("value", value)],
+        &[("value", &sanitize_display(value))],
     )
 }
