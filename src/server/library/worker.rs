@@ -932,9 +932,6 @@ fn remux_planned_with(
                 .landing
                 .filter(|_| landed_before(progress, &target))
         {
-            sink.lib
-                .queue
-                .finish_output(job.id, &output.id, OutputState::Done);
             if let Err(e) = super::links::record_output(
                 &sink.lib.config_dir,
                 &target,
@@ -944,6 +941,9 @@ fn remux_planned_with(
             ) {
                 return Ending::Failed(links_not_saved(&target, &e));
             }
+            sink.lib
+                .queue
+                .finish_output(job.id, &output.id, OutputState::Done);
             continue;
         }
         let unowned = !owned.iter().any(|o| o.path == target);
@@ -1025,14 +1025,15 @@ fn remux_planned_with(
         sink.lib.note_landed(&target, writing_app.clone());
         sink.lib.queue.set_output_staged(job.id, &output.id, None);
         sink.lib.queue.set_staged(job.id, None);
-        sink.lib
-            .queue
-            .finish_output(job.id, &output.id, OutputState::Done);
+        // Keep the queue's landing proof until its stamped link is durable.
         if let Err(e) =
             super::links::record_output(&sink.lib.config_dir, &target, &job.iso, landed, episode)
         {
             return Ending::Failed(links_not_saved(&target, &e));
         }
+        sink.lib
+            .queue
+            .finish_output(job.id, &output.id, OutputState::Done);
     }
     if job.retire {
         if !outputs_all_done(&sink.lib.queue.snapshot(), job.id) {
@@ -1818,7 +1819,9 @@ fn safe_text(job: &Job) -> String {
             "server.library.safe.retire_pending",
             "The source ISO is retained. Old files made from this ISO are removed only after every new file is in place, and only if unchanged; run Change match again to finish.",
         )
-    } else if job.plan.as_ref().is_some_and(|plan| plan.outputs.len() > 1) {
+    } else if job.plan.as_ref().is_some_and(|plan| plan.outputs.len() > 1)
+        || job.outputs.iter().any(|o| o.landing.is_some())
+    {
         get_or(
             "server.library.safe.outputs",
             "The source ISO is retained. Completed outputs remain in the library; unfinished outputs can be retried.",
