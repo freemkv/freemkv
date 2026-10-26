@@ -109,6 +109,39 @@ jobs:
           "$venv/bin/python" -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: \
             -r freemkv/tests/media-fetch-requirements.txt
           "$venv/bin/python" freemkv/tests/media_canary.py --bucket "$B" --externals externals.json --out canary.json
+      - name: Diagnose hosted key-service transport
+        if: github.ref == 'refs/heads/qa'
+        env:
+          FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
+          FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, socket, urllib.error, urllib.parse, urllib.request
+          if not os.path.isfile('canary.json'):
+              print('no canary report to diagnose')
+              raise SystemExit(0)
+          if json.load(open('canary.json')).get('ok'):
+              raise SystemExit(0)
+          url = os.environ['FMKV_KEY_URL']
+          auth = os.environ['FMKV_KEY_AUTH'].strip()
+          host = urllib.parse.urlsplit(url).hostname
+          print('key-service host:', host)
+          print('token fingerprint:', hashlib.sha256(auth.encode()).hexdigest()[:12])
+          print('HTTPS proxy configured:', bool(os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy')))
+          try:
+              print('DNS addresses:', sorted({item[4][0] for item in socket.getaddrinfo(host, 443)}))
+              request = urllib.request.Request(url, data=b'{}', method='POST', headers={
+                  'Content-Type': 'application/json', 'Authorization': 'Bearer ' + auth})
+              with urllib.request.urlopen(request, timeout=8) as response:
+                  print('short HTTPS probe status:', response.status)
+          except urllib.error.HTTPError as error:
+              print('short HTTPS probe status:', error.code)
+              error.close()
+          except Exception as error:
+              reason = getattr(error, 'reason', None)
+              print('short HTTPS probe error:', type(error).__name__, type(reason).__name__,
+                    getattr(reason, 'errno', None))
+          PY
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         continue-on-error: true
         with:
