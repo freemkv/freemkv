@@ -3034,6 +3034,8 @@ impl App {
     // URL the engine would later reject. The host lookup runs off the UI thread.
     fn test_keyserver(&mut self, url: &str) -> Vec<Effect> {
         use crate::strings::get_or;
+        // A later check replaces one still running, including an immediate verdict.
+        self.keyserver_check = None;
         if url.trim().is_empty() {
             let msg = get_or("gui.log.no_keyserver", "No key service URL set.");
             self.keyserver_verdict_is(LogKind::Result, msg);
@@ -3049,7 +3051,6 @@ impl App {
             keyserver_check_line(&owned, check(&owned))
         }) {
             Ok(rx) => {
-                // A later check replaces one still running; its verdict is the one shown.
                 self.keyserver_check = Some(rx);
                 self.keyserver_verdict = None;
                 vec![Effect::Redraw, Effect::StartTicking]

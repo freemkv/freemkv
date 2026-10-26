@@ -3602,6 +3602,79 @@ fn settings_subtitle_languages_end_a_remembered_no_subtitles_mode() {
     assert_eq!(app.settings.subtitle_mode, "forced");
 }
 
+// A superseded receiver may already have a verdict queued, or its worker may have
+// disconnected. Neither may replace a newer immediate verdict when the UI polls.
+fn immediate_keyserver_check_replaces_old_receiver(url: &str, expected: (LogKind, String)) {
+    for queued in [true, false] {
+        let mut app = App::new();
+        app.keyserver_fn = |_| Err("offline fallback verdict".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        if queued {
+            tx.send((LogKind::Result, "superseded verdict".into()))
+                .unwrap();
+        }
+        drop(tx);
+        app.keyserver_check = Some(rx);
+
+        assert_eq!(
+            app.dispatch(Cmd::TestKeyserver(url.into())),
+            vec![Effect::Redraw]
+        );
+        assert_eq!(app.keyserver_verdict(), Some(expected.1.as_str()));
+        let lines = app.log.len();
+        assert!(app.poll_keyserver().is_empty());
+        assert_eq!(app.keyserver_verdict(), Some(expected.1.as_str()));
+        assert_eq!(app.log.len(), lines, "the old check must not log a result");
+        assert_eq!(
+            app.log.last().map(|line| (line.kind, line.text.as_str())),
+            Some((expected.0, expected.1.as_str()))
+        );
+        assert!(app.keyserver_check.is_none());
+        assert!(app.tick().contains(&Effect::StopTicking));
+
+        let (_save_tx, save_rx) = std::sync::mpsc::channel();
+        app.saving = Some((save_rx, true));
+        assert!(!app.tick().contains(&Effect::StopTicking));
+    }
+}
+
+#[test]
+fn empty_keyserver_check_replaces_old_receiver() {
+    immediate_keyserver_check_replaces_old_receiver(
+        " \t ",
+        (
+            LogKind::Result,
+            crate::strings::get_or("gui.log.no_keyserver", "No key service URL set."),
+        ),
+    );
+}
+
+#[test]
+fn invalid_keyserver_check_replaces_old_receiver() {
+    let url = "file:///keys";
+    let rejection = freemkv_keysources::check_keyserver_url_static(url).unwrap_err();
+    immediate_keyserver_check_replaces_old_receiver(
+        url,
+        keyserver_check_line(url, Err(rejection.message)),
+    );
+}
+
+#[test]
+fn fallback_keyserver_check_replaces_old_receiver() {
+    struct RestoreSpawn(bool);
+    impl Drop for RestoreSpawn {
+        fn drop(&mut self) {
+            SPAWN_FAILS.with(|f| f.set(self.0));
+        }
+    }
+    let _restore = RestoreSpawn(SPAWN_FAILS.with(|f| f.replace(true)));
+    let url = "https://keys.example/";
+    immediate_keyserver_check_replaces_old_receiver(
+        url,
+        keyserver_check_line(url, Err("offline fallback verdict".into())),
+    );
+}
+
 // The key-service check resolves the host: it runs on a worker, and the tick logs it.
 #[test]
 fn the_key_service_check_resolves_off_the_ui_thread() {
