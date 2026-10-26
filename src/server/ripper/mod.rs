@@ -3594,6 +3594,7 @@ fn rip_disc_inner(
     // stamped the identity); without it a crash mid-sweep leaves the dir ungoverned.
     if let Err(e) = staging::start_sweep(std::path::Path::new(&staging), |s| {
         staging::stamp_capture_label(s, &disc_name);
+        s.output_format = Some(output_format.clone());
         superseded = staging::stamp_capture_plan(s, capture_plan.as_ref().map(|p| &p.outputs));
         s.origin_device = device.to_string();
         s.title = display_name.clone();

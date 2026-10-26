@@ -1616,8 +1616,16 @@ fn check_and_move(cfg: &Config) {
         // Find ripped files. `keep_iso=false` means don't promote the
         // intermediate ISO (pre-0.25.10 moved 90+ GB ISOs live); filtered
         // here, except `output_format == "iso"`, where it IS the deliverable.
-        let move_iso =
-            cfg.keep_iso || crate::server::ripper::output_is_iso_image(&cfg.output_format);
+        let move_iso = cfg.keep_iso
+            || marker["output_format"].as_str().map_or_else(
+                || {
+                    // Legacy handoffs have no saved mode. An explicit ISO
+                    // deliverable is authoritative; otherwise keep the old fallback.
+                    state_outputs.iter().any(|o| is_iso_file(&o.filename))
+                        || crate::server::ripper::output_is_iso_image(&cfg.output_format)
+                },
+                crate::server::ripper::output_is_iso_image,
+            );
         let (mut ripped_files, listing_complete): (Vec<std::path::PathBuf>, bool) =
             match std::fs::read_dir(&dir) {
                 Ok(entries) => collect_ripped_files(
@@ -2590,6 +2598,7 @@ fn mover_marker_value(st: &crate::server::ripper::staging::DiscState) -> serde_j
         "title": st.title,
         "disc_name": st.disc_name,
         "format": st.disc_format,
+        "output_format": st.output_format,
         "year": st.year,
         "media_type": st.media_type,
         "tmdb_id": st.tmdb_id,
