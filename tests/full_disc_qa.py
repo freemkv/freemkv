@@ -104,6 +104,21 @@ def check_libbluray(executable, folder, log):
     return {'title_count': sum(map(int, titles)), 'aacs_detected': False}
 
 
+def check_3d_folder_limit(binary, folder, destination, log, title, empty_keydb):
+    """The synthetic UDF reader must refuse SSIF aliases until it can model them."""
+    source = url('dir', folder)
+    target = url('mkv', destination)
+    print(f'CHECK known 3D folder limit {source}', flush=True)
+    with log.open('w') as output:
+        result = subprocess.run([str(binary), source, target, '-t', str(title),
+                                 '--keydb', str(empty_keydb)], stdout=output,
+                                stderr=subprocess.STDOUT)
+    answer = log.read_text(errors='replace')
+    if result.returncode == 0 or 'E9061' not in answer or destination.exists():
+        raise RuntimeError('3D folder did not refuse unsupported SSIF extents cleanly: '
+                           + answer[-2000:])
+
+
 def check_family(binary, family, source, key_args, output, bd_info=None):
     if not source.is_file():
         raise RuntimeError(f'{family} fixture missing: {source}')
@@ -131,11 +146,16 @@ def check_family(binary, family, source, key_args, output, bd_info=None):
 
         title = smallest_title(binary, url('iso', source))
         title_hashes = {}
+        ssif = any(name.startswith('BDMV/STREAM/SSIF/') for name in direct)
         for label, input_url, options in (
                 ('source', url('iso', source), key_args),
                 ('decrypted_iso', url('iso', decrypted_iso), ['--keydb', str(empty_keydb)]),
                 ('folder', url('dir', direct_folder), ['--keydb', str(empty_keydb)])):
             mkv = root / f'{label}.mkv'
+            if label == 'folder' and ssif:
+                check_3d_folder_limit(binary, direct_folder, mkv, root / 'folder.log',
+                                      title, empty_keydb)
+                continue
             run(binary, input_url, url('mkv', mkv), root / f'{label}.log', '-t', str(title), *options)
             title_hashes[label] = {'bytes': mkv.stat().st_size, 'sha256': sha256(mkv),
                                    'content_timing_sha256': content_hash(mkv)}
@@ -154,7 +174,8 @@ def check_family(binary, family, source, key_args, output, bd_info=None):
         check_navigation(iso_folder, from_iso)
         return {'fixture_bytes': source.stat().st_size, 'decrypted_iso_sha256': sha256(decrypted_iso),
                 'files': direct, 'file_count': len(direct), 'navigation_counts': navigation,
-                'title': title, 'title_hashes': title_hashes, 'libbluray': external}
+                'title': title, 'title_hashes': title_hashes, 'folder_title_status':
+                '3d-ssif-unsupported-E9061' if ssif else 'matched', 'libbluray': external}
 
 
 def main():
@@ -177,7 +198,8 @@ def main():
             report['families'][name] = check_family(args.binary.resolve(), name, source.resolve(),
                                                     key_args, args.out.resolve(), args.bd_info)
             print(f"PASS {name}: {report['families'][name]['file_count']} matching files, "
-                  f"valid navigation, title {report['families'][name]['title']} matches source keylessly",
+                  f"valid navigation, title {report['families'][name]['title']} "
+                  f"folder status {report['families'][name]['folder_title_status']}",
                   flush=True)
     except Exception as error:
         report['error'] = str(error)

@@ -205,6 +205,14 @@ suite previously defaulted to a branched one specifically to exercise the
 multi-clip seam join; swapping `uhd.iso` for a branched disc restores that
 coverage without any CI change.
 
+**3D folders as `dir://` inputs.** The Blu-ray fixture has `BDMV/STREAM/SSIF`.
+The folder backup is checked for exact file parity, valid navigation, and
+libbluray recognition on Linux, but freemkv's synthetic UDF reader explicitly
+rejects 3D folders with E9061 because it cannot represent the shared SSIF
+extents. The QA gate asserts that refusal rather than claiming a keyless
+`dir://` title rip succeeded. It still compares source and decrypted ISO title
+content, and requires folder title parity for fixtures without SSIF.
+
 Both are stated here rather than left implicit, because a green `qa` should
 mean a known thing. The two most recent shipped defects — multi-clip A/V
 drift, and a CSS false-positive that silently destroyed a DVD's title table —
