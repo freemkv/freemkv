@@ -123,7 +123,9 @@ pub(crate) fn redirect_target(base: &str, location: &str) -> Option<String> {
     if location.is_empty() {
         return None;
     }
-    if location.contains("://") {
+    // A scheme can only precede the first path/query/fragment delimiter. URI
+    // text in a query (for example `?source=https://cdn.test/k`) is not a scheme.
+    if location.split(['/', '?', '#']).next()?.contains(':') {
         return split_http_scheme(location).map(|_| location.to_string());
     }
     let (scheme, rest) = split_http_scheme(base)?;

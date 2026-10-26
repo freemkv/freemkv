@@ -250,6 +250,46 @@ fn redirect_target_resolves_every_reference_form() {
 }
 
 #[test]
+fn redirect_target_keeps_uris_in_relative_reference_queries() {
+    let base = "https://keydb-mirror.test/export/start?lang=eng";
+    for (location, want) in [
+        (
+            "/download?source=https://cdn.example/keydb",
+            "https://keydb-mirror.test/download?source=https://cdn.example/keydb",
+        ),
+        (
+            "download?source=http://cdn.example/keydb",
+            "https://keydb-mirror.test/export/download?source=http://cdn.example/keydb",
+        ),
+        (
+            "?source=https://cdn.example/keydb",
+            "https://keydb-mirror.test/export/start?source=https://cdn.example/keydb",
+        ),
+    ] {
+        assert_eq!(
+            redirect_target(base, location).as_deref(),
+            Some(want),
+            "{location}"
+        );
+    }
+}
+
+#[test]
+fn redirect_target_accepts_only_absolute_http_schemes() {
+    let base = "https://keydb-mirror.test/start";
+    for location in ["http://cdn.example/keydb", "https://cdn.example/keydb"] {
+        assert_eq!(redirect_target(base, location).as_deref(), Some(location));
+    }
+    for location in [
+        "ftp://cdn.example/keydb",
+        "mailto:keys@example.test",
+        "data:text/plain,keydb",
+    ] {
+        assert_eq!(redirect_target(base, location), None, "{location}");
+    }
+}
+
+#[test]
 fn an_https_to_http_redirect_is_a_downgrade() {
     assert!(is_downgrade("https://a.test/k", "http://a.test/k"));
     assert!(!is_downgrade("http://a.test/k", "https://a.test/k"));
