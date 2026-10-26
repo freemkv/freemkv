@@ -69,7 +69,7 @@ permissions:
 # incomplete forever.
 jobs:
   web-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: node --experimental-vm-modules --test tests/web/*.test.mjs
@@ -81,7 +81,7 @@ jobs:
   # Hard-fails on main (and PRs targeting main); warns elsewhere so an
   # in-progress dev/qa branch whose entry isn't written yet is not blocked.
   media-harness-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # tests/media_gate.py reads TOML with tomllib (Python 3.11+).
@@ -93,7 +93,7 @@ jobs:
       - run: python3 -m unittest discover -s tests -p 'test_gui*.py' -v
 
   changelog:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require a CHANGELOG entry for the crate version on main
@@ -289,7 +289,7 @@ jobs:
   # The app build's gtk4/libadwaita build.rs probe pkg-config, hence the
   # apt-get. The musl CLI release binaries are built in release.yml.
   cli-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -300,9 +300,10 @@ jobs:
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - name: Install GTK4 + libadwaita development headers
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install --no-install-recommends -y \
             libgtk-4-dev \
             libadwaita-1-dev \
             build-essential
@@ -338,7 +339,7 @@ jobs:
   # The CLI build must link no UI crate on any target. `--target all` resolves
   # every platform's deps from one Linux runner.
   cli-has-no-ui-deps:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -372,7 +373,7 @@ jobs:
   # The server crates (web server, JSON log sink) belong to the server build
   # only: the CLI and app builds must link none of them, on any target.
   no-server-deps-outside-server:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -420,7 +421,7 @@ jobs:
   # resolves the freemkv crates from their dev tips via the generated
   # .cargo/config.toml, exactly as the build jobs do.
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -443,7 +444,7 @@ jobs:
   # it fails here long before the Windows shell exists to notice. Checked
   # without the gui feature, so no GTK4 headers are needed.
   core-is-portable:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -473,7 +474,7 @@ jobs:
   # the release-time check becomes a formality rather than a gate anyone can
   # arrive at too late.
   version-consistency:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Cargo.toml and Info.plist must agree
@@ -509,7 +510,7 @@ jobs:
   # machine, not a release. Uploads with CODECOV_TOKEN (empty on forks, where
   # Codecov falls back to its tokenless mode) and never fails CI.
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -520,9 +521,10 @@ jobs:
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - name: Install GTK4 + libadwaita development headers
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libgtk-4-dev libadwaita-1-dev build-essential
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install --no-install-recommends -y libgtk-4-dev libadwaita-1-dev build-essential
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable

@@ -197,7 +197,8 @@ pass by comparing unlike inputs.
 For an explicitly requested Linux/Windows validation, dispatch `qa.yml` with
 `skip_macos: true`. The default remains full hosted coverage. The run's inputs
 record this choice; Linux/Windows tests and the real-media gates still run.
-Dependency installation has a five-minute deadline and bounded network retries.
+CI and QA use Ubuntu 24.04 explicitly. Dependency installation has a five-minute
+deadline and bounded network retries.
 
 If the hosted key-service canary fails only at the transport layer, QA requires
 a fresh EC2 media run, even if older media evidence exists. The acceptance and

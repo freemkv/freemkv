@@ -51,7 +51,7 @@ jobs:
   # classification guards, fingerprints the rip-affecting inputs and decides:
   # reuse green evidence, or run the full-disc matrix.
   plan-media:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -185,7 +185,7 @@ jobs:
     # Only a qa push is a candidate; a dispatch (e.g. a media run on dev) must
     # not mint an rc tag.
     if: github.event_name == 'push' && github.ref_name == 'qa'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     outputs:
@@ -227,7 +227,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.skip_macos && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest"]') }}
+        os: ${{ fromJSON(inputs.skip_macos && '["ubuntu-24.04"]' || '["ubuntu-24.04","macos-latest"]') }}
         # CLI build, then the app build.
         features: ['', '--features gui']
     runs-on: ${{ matrix.os }}
@@ -379,7 +379,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.skip_macos && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest"]') }}
+        os: ${{ fromJSON(inputs.skip_macos && '["ubuntu-24.04"]' || '["ubuntu-24.04","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -509,7 +509,7 @@ jobs:
   launch:
     needs: [plan-media, release-tests, windows-build, cli-integration]
     if: needs.plan-media.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
       id-token: write
@@ -1042,7 +1042,7 @@ jobs:
   compare-cli-matrix:
     needs: [plan-media, cli-matrix]
     if: always() && needs.plan-media.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: "cli-matrix-*", path: hashes }
@@ -1115,7 +1115,7 @@ jobs:
   archive-release-comparison:
     needs: [plan-media, cli-matrix]
     if: always() && needs.plan-media.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -1134,7 +1134,7 @@ jobs:
       && needs.cli-matrix.result == 'success'
       && needs.compare-cli-matrix.result == 'success'
       && needs.record-media-evidence.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -1158,7 +1158,7 @@ jobs:
     if: >-
       always() && needs.plan-media.outputs.run == 'true' && needs.launch.result == 'success'
       && needs.cli-matrix.result == 'success' && needs.compare-cli-matrix.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       actions: read
@@ -1192,7 +1192,7 @@ jobs:
   media-verdict:
     needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence, publish-media-history, gui-gate]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
