@@ -885,7 +885,8 @@ class VerdictTests(unittest.TestCase):
         ok = {'PLAN_RESULT': 'success', 'GUI': 'success'}
         cases = [
             (dict(ok, STATUS='reuse', EVIDENCE_URL='u'), True),
-            (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success'), True),
+            (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success', PUBLISH='success'), True),
+            (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success', PUBLISH='failure'), False),
             (dict(ok, STATUS='run', MATRIX='failure', COMPARE='success', RECORD='skipped'), False),
             (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='failure'), False),
             (dict(ok, STATUS='run', MATRIX='cancelled', COMPARE='cancelled', RECORD='skipped'), False),

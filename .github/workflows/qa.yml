@@ -894,6 +894,7 @@ jobs:
         id: suite
         shell: bash
         env:
+          B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
           FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
           FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
         run: |
@@ -926,7 +927,7 @@ jobs:
           FMKV_HASHES="$PWD/cli-${{ matrix.os }}.txt" \
             "$FMKV_PYTHON" freemkv/tests/media_history.py \
               --binary "$BIN" --harness ci/scripts/cli-acceptance.sh \
-              --bucket "${{ secrets.FMKV_FIXTURES_BUCKET }}" \
+              --bucket "$B" \
               --plan-directory media-plan --target "${{ matrix.target }}" \
               --out "release-comparison/${{ matrix.os }}" 2>&1 | tee "suite-${{ matrix.os }}.log"
           rc=${PIPESTATUS[0]}
