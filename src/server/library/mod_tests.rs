@@ -798,6 +798,7 @@ fn an_iso_whose_share_hangs_is_refused_without_waiting_on_it() {
         None
     };
     let e = iso_stamp_within(&d, &iso, Duration::from_millis(100), hung).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "the caller did not wait"

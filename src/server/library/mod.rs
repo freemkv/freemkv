@@ -719,7 +719,14 @@ impl Library {
         media: crate::server::planner::MediaMetadata,
     ) -> std::io::Result<(matches::SavedMatch, usize)> {
         let d = dirs(cfg);
-        let disc = self.iso_stamp_bounded(&d, source)?;
+        // New corrections need a verified disc identity; an unstamped legacy match
+        // applies to any disc later filed at this path.
+        let disc = self.iso_stamp_bounded(&d, source)?.ok_or_else(|| {
+            std::io::Error::other(format!(
+                "Could not verify the source ISO {}. The correction was not saved. Check or restore the source and retry. Nothing was queued.",
+                source.display()
+            ))
+        })?;
         let _gate = self.match_gate.lock().unwrap_or_else(|e| e.into_inner());
         self.require_indexed_source(&d, source)?;
         if let Some(reason) = self.queue_block(&d, true) {
@@ -736,7 +743,7 @@ impl Library {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "source ISO is not indexed")
             })?;
         let saved = self.queue.with_idle_source(source, || {
-            store.save_for(source, expected_revision, media, disc)
+            store.save_for(source, expected_revision, media, Some(disc))
         })?;
         self.touch_index();
         // Keyed by the source path, so two ISOs of one title never share a queue identity;
