@@ -3905,6 +3905,14 @@ fn build_prefs(
         ),
         true,
     );
+    t.gap();
+    t.field_secure(
+        mtm,
+        "tmdb_api_key",
+        &crate::strings::get("gui.set.tmdb_api_key"),
+        "",
+        300.0,
+    );
     add_tab(&crate::strings::get("gui.tab.output"), t);
 
     // ── Selection ── engine Job.selection

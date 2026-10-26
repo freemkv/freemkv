@@ -3228,6 +3228,12 @@ impl Prefs {
             )),
         ));
 
+        r.gap();
+        fields.push((
+            "tmdb_api_key",
+            r.field_secure(&g("gui.set.tmdb_api_key"), &st.tmdb_api_key, 320),
+        ));
+
         // ── Selection ── engine Job.selection
         let mut r = Rows::new(&pages[1], dpi);
         combos.push((

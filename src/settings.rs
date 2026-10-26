@@ -11,6 +11,8 @@ pub struct Settings {
     pub dest_dir: String,
     pub container: String,
     pub filename_template: String,
+    /// Optional metadata service credential; never required for reading or selection.
+    pub tmdb_api_key: String,
     pub keep_iso: bool,
     /// Eject the disc when the rip finishes reading it (mirrors autorip's
     /// `auto_eject`; default on).
@@ -69,7 +71,7 @@ pub struct Settings {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-// Redacts only `keyserver_token`; unknown `extra` values may be secret, so only their keys print.
+// Redacts credentials; unknown `extra` values may be secret, so only their keys print.
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let token = if self.keyserver_token.is_empty() {
@@ -81,6 +83,14 @@ impl std::fmt::Debug for Settings {
             .field("dest_dir", &self.dest_dir)
             .field("container", &self.container)
             .field("filename_template", &self.filename_template)
+            .field(
+                "tmdb_api_key",
+                &if self.tmdb_api_key.is_empty() {
+                    ""
+                } else {
+                    "<redacted>"
+                },
+            )
             .field("keep_iso", &self.keep_iso)
             .field("auto_eject", &self.auto_eject)
             .field("notify_when_rip_finished", &self.notify_when_rip_finished)
@@ -124,6 +134,7 @@ impl Default for Settings {
             // select it. (An older "Matroska (.mkv)" default matched none, blank.)
             container: "Selected titles → MKV".into(),
             filename_template: "{title}_t{n}".into(),
+            tmdb_api_key: String::new(),
             keep_iso: false,
             // Mirror autorip's auto_eject default (on): pop the disc when the
             // read phase completes so the user can grab it / load the next.
@@ -310,6 +321,7 @@ impl Settings {
             "dest_dir" => self.dest_dir.clone(),
             "container" => self.container.clone(),
             "filename_template" => self.filename_template.clone(),
+            "tmdb_api_key" => self.tmdb_api_key.clone(),
             "selection" => self.selection.clone(),
             "min_title_secs" => self.min_title_secs.clone(),
             "audio_langs" => self.audio_langs.clone(),
@@ -349,6 +361,7 @@ impl Settings {
             "dest_dir" => self.dest_dir = v,
             "container" => self.container = v,
             "filename_template" => self.filename_template = v,
+            "tmdb_api_key" => self.tmdb_api_key = v,
             "selection" => self.selection = v,
             "min_title_secs" => self.min_title_secs = v,
             "audio_langs" => self.audio_langs = v,

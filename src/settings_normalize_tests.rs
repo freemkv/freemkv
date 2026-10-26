@@ -418,3 +418,17 @@ fn normalize_drops_a_presentation_language_that_is_not_a_language() {
         assert_eq!(s.presentation_language, kept, "{saved:?}");
     }
 }
+
+#[test]
+fn optional_metadata_key_round_trips_without_entering_debug_output() {
+    let mut settings: Settings = serde_json::from_str("{}").unwrap();
+    assert!(settings.tmdb_api_key.is_empty());
+    let selection = settings.selection.clone();
+    settings.set("tmdb_api_key", "metadata-private-test-value".into());
+    assert_eq!(settings.get("tmdb_api_key"), "metadata-private-test-value");
+    let saved = serde_json::to_string(&settings).unwrap();
+    let loaded: Settings = serde_json::from_str(&saved).unwrap();
+    assert_eq!(loaded.tmdb_api_key, settings.tmdb_api_key);
+    assert_eq!(loaded.selection, selection);
+    assert!(!format!("{loaded:?}").contains("metadata-private-test-value"));
+}
