@@ -609,6 +609,32 @@ fn info_share_on_a_folder_honours_help() {
     assert!(!s.0.join("disc-profile-backup").exists(), "captured anyway");
 }
 
+#[test]
+fn presentation_language_diagnostic_cannot_inject_terminal_controls() {
+    let out = freemkv()
+        .args([
+            "iso://unused.iso",
+            "mkv://unused.mkv",
+            "--presentation-language",
+            "xx\u{1b}[31m\r\nforged\t\u{7f}\u{85}\u{202e}\u{2066}\u{2069}",
+        ])
+        .output()
+        .expect("failed to run");
+    let combined = combined_output(&out);
+    assert_eq!(out.status.code(), Some(1), "{combined:?}");
+    assert!(
+        combined.contains("Unknown presentation language \"xx[31mforged\""),
+        "{combined:?}"
+    );
+    assert!(
+        !combined
+            .trim_end_matches('\n')
+            .chars()
+            .any(freemkv::strings::is_unsafe_display_char),
+        "{combined:?}"
+    );
+}
+
 // `--presentation-language` is checked as the flag is read; it is a title selection flag,
 // so a stream source (no titles) refuses it like -t/-a/-s.
 #[test]
