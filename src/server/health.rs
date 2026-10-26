@@ -222,6 +222,9 @@ pub struct Mount {
     // replaces a newer one, whichever is published last.
     #[serde(skip)]
     observed: u64,
+    // Raw remount epoch captured before this probe's I/O (not MountKey's normalized epoch).
+    #[serde(skip)]
+    probe_generation: Option<u64>,
     // A real write test failed here: access() cannot clear it, only another write test that
     // passes (`write_passed`); kept across every other verdict until then.
     #[serde(skip)]
@@ -242,6 +245,7 @@ impl Mount {
         let now = crate::server::util::epoch_secs();
         Mount {
             observed: observed_now(),
+            probe_generation: None,
             write_failed: false,
             write_passed: false,
             role,
@@ -294,6 +298,11 @@ impl Mount {
         m.message = Some(checking_message(role));
         m.hint = Some(CHECKING_HINT.into());
         m
+    }
+
+    fn with_probe_generation(mut self, generation: u64) -> Self {
+        self.probe_generation = Some(generation);
+        self
     }
 
     // Ranked as evidence seen at `seq` (the start of the probe it is about).
@@ -660,6 +669,7 @@ struct Probe {
     // Evidence order when it started: a verdict drawn from this probe being out ranks below
     // the probe's own answer, whenever either is published.
     seq: u64,
+    generation: u64,
 }
 
 impl Probe {
@@ -689,19 +699,19 @@ fn release(id: u64) {
 }
 
 // How long the probe of `path` on `mount` has been out, and its start's evidence order.
-fn in_flight_for(path: &Path, mount: MountKey) -> Option<(Duration, u64)> {
+fn in_flight_for(path: &Path, mount: MountKey) -> Option<(Duration, u64, u64)> {
     IN_FLIGHT
         .probes
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .find(|p| p.path == path && p.mount == mount)
-        .map(|p| (p.age(), p.seq))
+        .map(|p| (p.age(), p.seq, p.generation))
 }
 
 // The probe of `path` on `mount` in flight for at least `hang_after`.
-fn hung_for(path: &Path, mount: MountKey, hang_after: Duration) -> Option<(Duration, u64)> {
-    in_flight_for(path, mount).filter(|(age, _)| *age >= hang_after)
+fn hung_for(path: &Path, mount: MountKey, hang_after: Duration) -> Option<(Duration, u64, u64)> {
+    in_flight_for(path, mount).filter(|(age, _, _)| *age >= hang_after)
 }
 
 // Whether the server is stopping: a waiting caller gives up at once. Tests drive their own
@@ -770,6 +780,14 @@ where
     begin_keyed(key, mount_key(key), wait, hang_after, probe)
 }
 
+fn begin_with_origin<T, F>(key: &Path, wait: Wait, hang_after: Duration, probe: F) -> Pending<T>
+where
+    T: Send + 'static,
+    F: FnOnce(u64) -> T + Send + 'static,
+{
+    begin_keyed_origin(key, mount_key(key), wait, hang_after, probe)
+}
+
 // [`begin_with`] on the mount given: the seam the tests use.
 fn begin_keyed<T, F>(
     key: &Path,
@@ -781,6 +799,20 @@ fn begin_keyed<T, F>(
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
+{
+    begin_keyed_origin(key, mount, wait, hang_after, move |_| probe())
+}
+
+fn begin_keyed_origin<T, F>(
+    key: &Path,
+    mount: MountKey,
+    wait: Wait,
+    hang_after: Duration,
+    probe: F,
+) -> Pending<T>
+where
+    T: Send + 'static,
+    F: FnOnce(u64) -> T + Send + 'static,
 {
     let called = Instant::now();
     // The whole call, waiting for an earlier probe included, is bounded by one deadline.
@@ -799,6 +831,7 @@ where
         mount,
     };
     let id = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+    let generation;
     {
         let mut held = IN_FLIGHT.probes.lock().unwrap_or_else(|e| e.into_inner());
         while let Some(age) = held
@@ -826,7 +859,9 @@ where
         if stopping() {
             return refused(false);
         }
+        generation = probe_generation();
         held.push(Probe {
+            generation,
             id,
             path: key.to_path_buf(),
             mount,
@@ -845,7 +880,7 @@ where
                 }
             }
             let guard = Release(id);
-            let out = probe();
+            let out = probe(generation);
             // Answer before leaving the in-flight list, so a caller that finds the probe gone
             // also finds its answer.
             let _ = tx.send(out);
@@ -992,17 +1027,27 @@ where
 struct StaleReports {
     generation: u64,
     paths: std::collections::HashSet<PathBuf>,
+    renewed: std::collections::HashMap<PathBuf, u64>,
 }
 
 impl StaleReports {
     fn record(&mut self, generation: u64, path: &Path, fault: Option<Fault>) {
-        if generation == self.generation && fault == Some(Fault::Stale) {
+        if self.admits(generation, path) && fault == Some(Fault::Stale) {
             self.paths.insert(path.to_path_buf());
         }
     }
 
+    fn admits(&self, generation: u64, path: &Path) -> bool {
+        !self
+            .renewed
+            .iter()
+            .any(|(mountpoint, epoch)| path.starts_with(mountpoint) && generation < *epoch)
+    }
+
     fn renewed(&mut self, mountpoint: &Path) {
         self.generation = self.generation.wrapping_add(1);
+        self.renewed
+            .insert(mountpoint.to_path_buf(), self.generation);
         self.paths.retain(|p| !p.starts_with(mountpoint));
     }
 }
@@ -1026,8 +1071,17 @@ fn report_fault(generation: u64, path: &Path, fault: Option<Fault>) {
 
 // `check` for one folder, reporting a stale handle even when the caller gave up on it.
 fn check_reporting(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
+    check_reporting_with(role, path, want_write, check)
+}
+
+fn check_reporting_with(
+    role: &'static str,
+    path: PathBuf,
+    want_write: bool,
+    check: impl FnOnce(&'static str, &Path, bool) -> Mount,
+) -> Mount {
     let generation = probe_generation();
-    let result = answered(check(role, &path, want_write));
+    let result = answered(check(role, &path, want_write)).with_probe_generation(generation);
     report_fault(generation, &path, result.fault);
     tracing::debug!(role, path = %path.display(), fault = ?result.fault, "folder probe completed");
     result
@@ -1055,15 +1109,30 @@ fn check_folders(
         .zip(results)
         .map(|((role, path, _), (r, mount))| match r {
             Bounded::Done(m) => Some(m),
-            Bounded::TimedOut | Bounded::Busy => match in_flight_for(path, mount) {
-                Some((age, seq)) if age >= hang_after => {
-                    Some(not_responding(role, path, age).ranked_at(seq))
-                }
-                Some((age, seq)) if age >= wait => Some(Mount::checking(role, path).ranked_at(seq)),
-                _ => None,
-            },
+            Bounded::TimedOut | Bounded::Busy => {
+                pending_verdict(role, path, mount, wait, hang_after)
+            }
         })
         .collect()
+}
+
+// A timeout verdict belongs to the probe that supplied its age and evidence rank.
+fn pending_verdict(
+    role: &'static str,
+    path: &Path,
+    mount: MountKey,
+    wait: Duration,
+    hang_after: Duration,
+) -> Option<Mount> {
+    let (age, seq, generation) = in_flight_for(path, mount)?;
+    let row = if age >= hang_after {
+        not_responding(role, path, age)
+    } else if age >= wait {
+        Mount::checking(role, path)
+    } else {
+        return None;
+    };
+    Some(row.ranked_at(seq).with_probe_generation(generation))
 }
 
 fn not_responding(role: &'static str, path: &Path, after: Duration) -> Mount {
@@ -1190,6 +1259,9 @@ fn publish(results: Vec<Mount>, replace_all: bool) {
 }
 
 fn publish_slots(results: Vec<Slot>, replace_all: bool) {
+    // Renewal and admission share one boundary. Always lock reports before LAST; neither
+    // lock covers probe I/O, queue waits or the remount itself.
+    let reports = STALE_REPORTS.lock().unwrap_or_else(|e| e.into_inner());
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     let shape = |v: &[Mount]| -> Vec<(PathBuf, State, Option<String>)> {
         v.iter()
@@ -1209,6 +1281,13 @@ fn publish_slots(results: Vec<Slot>, replace_all: bool) {
             }
         };
         let previous = last.iter().find(|p| p.path == m.path);
+        if m.probe_generation
+            .is_some_and(|g| !reports.admits(g, &m.path))
+        {
+            // In a full refresh this is Keep(path), preserving the current mount's row.
+            merged.extend(previous.cloned());
+            continue;
+        }
         // Evidence older than the row's (a hang verdict reached just before the late answer
         // that is already shown) never replaces it, whichever was published last.
         if let Some(newer) = previous.filter(|p| p.observed > m.observed) {
@@ -1232,6 +1311,8 @@ fn publish_slots(results: Vec<Slot>, replace_all: bool) {
         }
         merged.push(merge(previous, m));
     }
+    #[cfg(test)]
+    tests::publication_committing(&merged);
     if replace_all {
         *last = merged;
     } else {
@@ -1251,6 +1332,7 @@ fn publish_slots(results: Vec<Slot>, replace_all: bool) {
         GENERATION.fetch_add(1, Ordering::SeqCst);
     }
     drop(last);
+    drop(reports);
     for line in lines {
         crate::server::log::syslog(&line);
     }
@@ -1550,7 +1632,7 @@ impl Problem {
 }
 
 // A preflight under way: refused up front, or its probe running.
-type Started = Result<Pending<std::io::Result<()>>, Problem>;
+type Started = Result<Pending<std::io::Result<()>>, Box<(Problem, u64)>>;
 
 // The probe publishes its own answer, however late: the folder's verdict is the answer, not
 // whether this caller was still waiting for it.
@@ -1564,30 +1646,39 @@ fn preflight_begin<F>(
 where
     F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
 {
+    let generation = probe_generation();
     if share_unmounted(dir) {
-        return Err(Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into()));
+        return Err(Box::new((
+            Problem::new(role, dir, Fault::Unmounted, UNMOUNTED.into()),
+            generation,
+        )));
     }
     let owned = dir.to_path_buf();
-    let generation = probe_generation();
-    Ok(begin_with(dir, wait, hang_after, move || {
-        let started = Instant::now();
-        let result = probe(&owned);
-        report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
-        publish_answer(match &result {
-            Ok(()) => {
-                let mut m = Mount::blank(role, &owned).passed();
-                m.latency_ms = Some(started.elapsed().as_millis() as u64);
-                m.write_passed = true;
-                m
-            }
-            Err(e) => {
-                let mut m = Problem::new(role, &owned, Fault::of(e), e.to_string()).mount();
-                m.write_failed = true;
-                m
-            }
-        });
-        result
-    }))
+    Ok(begin_with_origin(
+        dir,
+        wait,
+        hang_after,
+        move |generation| {
+            let started = Instant::now();
+            let result = probe(&owned);
+            report_fault(generation, &owned, result.as_ref().err().map(Fault::of));
+            let m = match &result {
+                Ok(()) => {
+                    let mut m = Mount::blank(role, &owned).passed();
+                    m.latency_ms = Some(started.elapsed().as_millis() as u64);
+                    m.write_passed = true;
+                    m
+                }
+                Err(e) => {
+                    let mut m = Problem::new(role, &owned, Fault::of(e), e.to_string()).mount();
+                    m.write_failed = true;
+                    m
+                }
+            };
+            publish_answer(m.with_probe_generation(generation));
+            result
+        },
+    ))
 }
 
 fn preflight_finish(
@@ -1600,8 +1691,9 @@ fn preflight_finish(
     let unresponsive = |detail: String| Problem::new(role, dir, Fault::Unresponsive, detail);
     let pending = match begun {
         Ok(pending) => pending,
-        Err(p) => {
-            publish_answer(p.mount());
+        Err(refused) => {
+            let (p, generation) = *refused;
+            publish_answer(p.mount().with_probe_generation(generation));
             return Err(p);
         }
     };
@@ -1612,9 +1704,9 @@ fn preflight_finish(
         Bounded::Done(Err(e)) => Err(Problem::new(role, dir, Fault::of(&e), e.to_string())),
         // A probe out for the hang bound is the verdict; a shorter wait is only this caller's.
         Bounded::TimedOut | Bounded::Busy => match hung_for(dir, mount, hang_after) {
-            Some((age, seq)) => {
+            Some((age, seq, generation)) => {
                 let p = unresponsive(no_answer_for(age));
-                publish_answer(p.mount().ranked_at(seq));
+                publish_answer(p.mount().ranked_at(seq).with_probe_generation(generation));
                 Err(p)
             }
             None if stopping() => Err(unresponsive(STOPPED.into())),

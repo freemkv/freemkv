@@ -26,7 +26,14 @@ pub(crate) fn sweep_starting(dir: &Path) {
 // Folders some caller has waited on for an earlier probe.
 static WAITED_ON: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+static WAITING_SIGNAL: Mutex<Option<(PathBuf, std::sync::mpsc::Sender<()>)>> = Mutex::new(None);
+
 pub(crate) fn waiting(key: &Path) {
+    let mut signal = WAITING_SIGNAL.lock().unwrap();
+    if signal.as_ref().is_some_and(|(path, _)| path == key) {
+        signal.take().unwrap().1.send(()).unwrap();
+    }
+    drop(signal);
     let mut w = WAITED_ON.lock().unwrap_or_else(|e| e.into_inner());
     if !w.iter().any(|p| p == key) {
         w.push(key.to_path_buf());
@@ -149,7 +156,9 @@ pub(crate) fn hung_probe(path: &Path) -> HungProbe {
 // A probe of `path` on `mount` out since `started` (`None`: longer than any bound).
 fn stuck_probe(path: &Path, mount: MountKey, started: Option<Instant>) -> HungProbe {
     let id = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+    let generation = probe_generation();
     IN_FLIGHT.probes.lock().unwrap().push(Probe {
+        generation,
         id,
         path: path.to_path_buf(),
         mount,
@@ -1346,4 +1355,356 @@ fn a_write_test_answers_before_its_sweep() {
         "the answer waited for the sweep"
     );
     eventually("swept after the answer", || !stale.exists());
+}
+
+// A detached preflight may answer after recovery; its completion rank cannot make its
+// old-mount evidence current again.
+#[test]
+fn remount_rejects_detached_preflight_answers() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = Path::new("/test/recovered-share/movies");
+    for late_failure in [true, false] {
+        set_mounts(vec![ok_mount("Movies", path)]);
+        let (entered, running) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let pending = preflight_begin(
+            "output",
+            path,
+            Wait::Until(Instant::now()),
+            HANG_AFTER,
+            move |_| {
+                entered.send(()).unwrap();
+                gate.recv().unwrap();
+                if late_failure {
+                    Err(std::io::ErrorKind::StaleNetworkFileHandle.into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        let mount = pending.as_ref().unwrap().mount;
+        running.recv().unwrap();
+        assert!(preflight_finish("output", path, Duration::ZERO, HANG_AFTER, pending).is_err());
+        STALE_REPORTS
+            .lock()
+            .unwrap()
+            .renewed(Path::new("/test/recovered-share"));
+        let fresh = if late_failure {
+            ok_mount("Movies", path)
+        } else {
+            bad_mount("Movies", path, Fault::Denied)
+        };
+        let observed = fresh.observed;
+        publish(vec![fresh], false);
+        release.send(()).unwrap();
+        assert_eq!(
+            begin_keyed(
+                path,
+                mount,
+                Wait::Until(Instant::now() + Duration::from_secs(5)),
+                HANG_AFTER,
+                || ()
+            )
+            .wait(),
+            Bounded::Done(())
+        );
+        let current = status_for(path).unwrap();
+        assert_eq!(
+            current.observed, observed,
+            "old preflight replaced recovered health"
+        );
+        assert!(!current.write_failed && !current.write_passed);
+        assert_eq!(current.ok, late_failure);
+        assert!(!STALE_REPORTS.lock().unwrap().paths.contains(path));
+    }
+    set_mounts(Vec::new());
+}
+
+// Pause one named publication at the commit boundary, with its production locks held.
+struct HeldPublication {
+    path: PathBuf,
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+static HELD_PUBLICATION: Mutex<Option<HeldPublication>> = Mutex::new(None);
+
+pub(crate) fn publication_committing(rows: &[Mount]) {
+    let gate = {
+        let mut held = HELD_PUBLICATION.lock().unwrap();
+        if held
+            .as_ref()
+            .is_some_and(|gate| rows.iter().any(|m| m.path == gate.path))
+        {
+            held.take()
+        } else {
+            None
+        }
+    };
+    if let Some(gate) = gate {
+        gate.entered.send(()).unwrap();
+        gate.release.recv().unwrap();
+    }
+}
+
+#[test]
+fn remount_publication_and_renewal_have_one_commit_boundary() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = PathBuf::from("/test/atomic-renewal/movies");
+    let old = ok_mount("Movies", &path).with_probe_generation(probe_generation());
+    let (entered, inside) = std::sync::mpsc::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    *HELD_PUBLICATION.lock().unwrap() = Some(HeldPublication {
+        path: path.clone(),
+        entered,
+        release: gate,
+    });
+    let publish = std::thread::spawn(move || publish(vec![old], false));
+    inside.recv().unwrap();
+    let reports_locked = matches!(
+        STALE_REPORTS.try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    );
+    let last_locked = matches!(LAST.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+    release.send(()).unwrap();
+    publish.join().unwrap();
+    assert!(
+        reports_locked && last_locked,
+        "renewal must not pass an admitted publication before its LAST commit"
+    );
+    assert!(
+        status_for(&path).unwrap().ok,
+        "publication won the boundary"
+    );
+    STALE_REPORTS
+        .lock()
+        .unwrap()
+        .renewed(Path::new("/test/atomic-renewal"));
+    let current =
+        bad_mount("Movies", &path, Fault::Denied).with_probe_generation(probe_generation());
+    publish_slots(vec![Slot::New(Box::new(current))], false);
+    let observed = status_for(&path).unwrap().observed;
+    let obsolete = ok_mount("Movies", &path).with_probe_generation(probe_generation() - 1);
+    publish_slots(vec![Slot::New(Box::new(obsolete))], false);
+    assert_eq!(
+        status_for(&path).unwrap().observed,
+        observed,
+        "renewal won the boundary"
+    );
+    set_mounts(Vec::new());
+}
+
+#[test]
+fn remount_rejected_refresh_slots_keep_current_rows_and_other_roots() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mp = Path::new("/test/refreshed-share");
+    let p = mp.join("movies");
+    let absent = mp.join("absent");
+    let other = Path::new("/test/unaffected-share/movies");
+    let epoch = probe_generation();
+    let obsolete = bad_mount("Movies", &p, Fault::Stale).with_probe_generation(epoch);
+    let obsolete_absent = bad_mount("ISOs", &absent, Fault::Stale).with_probe_generation(epoch);
+    STALE_REPORTS.lock().unwrap().renewed(mp);
+    let current = ok_mount("Movies", &p).with_probe_generation(probe_generation());
+    let observed = current.observed;
+    set_mounts(vec![current, ok_mount("TV", other)]);
+    let unaffected = bad_mount("TV", other, Fault::Denied).with_probe_generation(epoch);
+    // Completion-time order would otherwise make these detached answers win.
+    let obsolete = answered(obsolete);
+    publish(vec![obsolete.clone()], false);
+    let before = generation();
+    publish_slots(
+        vec![
+            Slot::New(Box::new(obsolete)),
+            Slot::New(Box::new(unaffected)),
+            Slot::New(Box::new(obsolete_absent)),
+        ],
+        true,
+    );
+    assert_eq!(status_for(&p).unwrap().observed, observed);
+    assert_eq!(status_for(other).unwrap().fault, Some(Fault::Denied));
+    assert!(status_for(&absent).is_none());
+    assert_eq!(
+        mounts().len(),
+        2,
+        "rejected requested slots keep their place"
+    );
+    assert!(
+        generation() > before,
+        "unaffected old-origin answers are admitted"
+    );
+    let current = bad_mount("Movies", &p, Fault::Io).with_probe_generation(probe_generation());
+    publish(vec![current], false);
+    assert_eq!(status_for(&p).unwrap().fault, Some(Fault::Io));
+    // No MountKey or kernel identity is required for these path-scoped decisions.
+    assert_eq!(key_for(epoch, None).mount, None);
+    set_mounts(Vec::new());
+}
+
+#[test]
+fn remount_rejects_deferred_unmounted_preflight_refusals() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = Path::new("/test/deferred-refusal/movies");
+    let problem = Problem::new("output", path, Fault::Unmounted, UNMOUNTED.into());
+    let deferred: Started = Err(Box::new((problem.clone(), probe_generation())));
+    STALE_REPORTS
+        .lock()
+        .unwrap()
+        .renewed(Path::new("/test/deferred-refusal"));
+    let current = ok_mount("Movies", path).with_probe_generation(probe_generation());
+    let observed = current.observed;
+    set_mounts(vec![current]);
+    assert_eq!(
+        preflight_finish("output", path, Duration::ZERO, HANG_AFTER, deferred),
+        Err(problem)
+    );
+    assert_eq!(status_for(path).unwrap().observed, observed);
+    set_mounts(Vec::new());
+}
+
+#[test]
+fn remount_timeout_verdicts_keep_the_origin_and_rank_of_the_in_flight_probe() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mp = Path::new("/test/timeout-origin");
+    let path = mp.join("movies");
+    let key = key_for(0, Some(991));
+    let old = stuck_probe(&path, key, Some(Instant::now()));
+    STALE_REPORTS.lock().unwrap().renewed(mp);
+    // No newer answer is needed for an obsolete timeout verdict to be refused.
+    set_mounts(Vec::new());
+    WATCHED.lock().unwrap().push(("Movies", path.clone()));
+    let pending = Pending {
+        rx: None,
+        deadline: Instant::now(),
+        hung: true,
+        mount: key,
+    };
+    assert!(
+        preflight_finish("Movies", &path, Duration::ZERO, Duration::ZERO, Ok(pending)).is_err()
+    );
+    assert!(status_for(&path).is_none());
+    for hang in [HANG_AFTER, Duration::ZERO] {
+        let row = pending_verdict("Movies", &path, key, Duration::ZERO, hang).unwrap();
+        publish_slots(vec![Slot::New(Box::new(row))], true);
+        assert!(status_for(&path).is_none());
+    }
+    drop(old);
+    let current = stuck_probe(&path, key, Some(Instant::now()));
+    let (_, seq, _) = in_flight_for(&path, key).unwrap();
+    for (hang, state) in [
+        (HANG_AFTER, State::Checking),
+        (Duration::ZERO, State::Unresponsive),
+    ] {
+        let row = pending_verdict("Movies", &path, key, Duration::ZERO, hang).unwrap();
+        publish_slots(vec![Slot::New(Box::new(row))], true);
+        let shown = status_for(&path).unwrap();
+        assert_eq!(shown.observed, seq);
+        assert_eq!(shown.state, state);
+    }
+    WATCHED.lock().unwrap().retain(|(_, p)| *p != path);
+    drop(current);
+    set_mounts(Vec::new());
+}
+
+#[test]
+fn remount_rejects_actual_check_answer_in_both_publication_routes() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = PathBuf::from("/test/check-origin/movies");
+    let (entered, inside) = std::sync::mpsc::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let checking = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            check_reporting_with("Movies", path, true, |role, path, _| {
+                entered.send(()).unwrap();
+                gate.recv().unwrap();
+                bad_mount(role, path, Fault::Stale)
+            })
+        })
+    };
+    inside.recv().unwrap();
+    STALE_REPORTS
+        .lock()
+        .unwrap()
+        .renewed(Path::new("/test/check-origin"));
+    let current = ok_mount("Movies", &path).with_probe_generation(probe_generation());
+    let observed = current.observed;
+    set_mounts(vec![current]);
+    let generation = generation();
+    release.send(()).unwrap();
+    let detached = checking.join().unwrap();
+    assert!(
+        detached.observed > observed,
+        "completion rank is intentionally retained"
+    );
+    publish_answer(detached.clone());
+    publish_slots(vec![Slot::New(Box::new(detached))], true);
+    assert_eq!(status_for(&path).unwrap().observed, observed);
+    assert_eq!(
+        super::generation(),
+        generation,
+        "obsolete answers change no UI generation"
+    );
+    assert!(!STALE_REPORTS.lock().unwrap().paths.contains(&path));
+    assert!(!wants_remount(
+        &mounts(),
+        Path::new("/test/check-origin"),
+        true,
+        None,
+        Instant::now()
+    ));
+    set_mounts(Vec::new());
+}
+
+#[test]
+fn remount_queued_probe_captures_its_origin_after_the_queue() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = Path::new("/test/queued-origin/movies");
+    let key = key_for(0, Some(993));
+    let stuck = stuck_probe(path, key, Some(Instant::now()));
+    let (entered, queued) = std::sync::mpsc::channel();
+    *WAITING_SIGNAL.lock().unwrap() = Some((path.to_path_buf(), entered));
+    let pending = std::thread::spawn(move || {
+        begin_keyed_origin(
+            path,
+            key,
+            Wait::Until(Instant::now() + Duration::from_secs(5)),
+            HANG_AFTER,
+            |generation| generation,
+        )
+    });
+    queued.recv().unwrap();
+    STALE_REPORTS
+        .lock()
+        .unwrap()
+        .renewed(Path::new("/test/queued-origin"));
+    let expected = probe_generation();
+    drop(stuck);
+    assert_eq!(pending.join().unwrap().wait(), Bounded::Done(expected));
+}
+
+#[test]
+fn remount_completed_preflight_results_are_returned_without_republication() {
+    let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = Path::new("/test/completed-preflight/movies");
+    set_mounts(vec![ok_mount("Movies", path)]);
+    let observed = status_for(path).unwrap().observed;
+    for error in [false, true] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(if error {
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        } else {
+            Ok(())
+        })
+        .unwrap();
+        let pending = Pending {
+            rx: Some(rx),
+            deadline: Instant::now() + Duration::from_secs(5),
+            hung: false,
+            mount: key_for(0, None),
+        };
+        let result = preflight_finish("output", path, Duration::ZERO, HANG_AFTER, Ok(pending));
+        assert_eq!(result.is_err(), error);
+        assert_eq!(status_for(path).unwrap().observed, observed);
+    }
+    set_mounts(Vec::new());
 }
