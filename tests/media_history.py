@@ -91,6 +91,12 @@ def save(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
 
 
+def download_manifest(bucket, key, destination):
+    # The fixture-fetch venv has pinned boto3 on both EC2 operating systems.
+    import boto3
+    boto3.client('s3', region_name='us-west-2').download_file(bucket, key, str(destination))
+
+
 def historical_manifest(bucket, spec, target, identity, destination):
     pin = spec['manifests'][target]
     digest = pin['sha256']
@@ -98,9 +104,7 @@ def historical_manifest(bucket, spec, target, identity, destination):
         raise ValueError(f"invalid historical SHA-256 for {spec['version']} {target}")
     key = f"media-history/v1/{spec['version']}/{target}/{digest}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(['aws', 's3api', 'get-object', '--bucket', bucket, '--key', key,
-                    str(destination), '--region', 'us-west-2', '--query', 'ContentLength',
-                    '--output', 'text'], check=True)
+    download_manifest(bucket, key, destination)
     if sha256(destination) != digest:
         raise ValueError(f'historical SHA-256 mismatch: {key}')
     report = json.loads(destination.read_text())

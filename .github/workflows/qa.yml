@@ -870,6 +870,7 @@ jobs:
           echo "ISO_DIR=$ISO_DIR" >> "$GITHUB_ENV"
           echo "KEYDB_PATH=$ISO_DIR/keydb.cfg" >> "$GITHUB_ENV"
           "$FMKV_PYTHON" -m venv "$venv"
+          echo "FMKV_FETCH_PYTHON=$venv_py" >> "$GITHUB_ENV"
           "$venv_py" -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: \
             -r freemkv/tests/media-fetch-requirements.txt
           # The fixture pins plan-media fingerprinted; resolve afresh only if it could not read them.
@@ -925,7 +926,7 @@ jobs:
           FMKV_BD_DAMAGE_PATCH="$ISO_DIR/bd-aacs-damage.patch.json" \
           FMKV_KEYDB="$KEYDB_PATH" \
           FMKV_HASHES="$PWD/cli-${{ matrix.os }}.txt" \
-            "$FMKV_PYTHON" freemkv/tests/media_history.py \
+            "$FMKV_FETCH_PYTHON" freemkv/tests/media_history.py \
               --binary "$BIN" --harness ci/scripts/cli-acceptance.sh \
               --bucket "$B" \
               --plan-directory media-plan --target "${{ matrix.target }}" \

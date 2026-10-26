@@ -522,7 +522,8 @@ class SuiteDiagnosticsTests(unittest.TestCase):
                  'freemkv/tests/media_history.py': 'import subprocess\nraise SystemExit(subprocess.call(["bash", "ci/scripts/cli-acceptance.sh"]))\n',
                  'ci/scripts/cli-acceptance.sh': 'echo "  FAIL dvd remux"\nexit 3\n'}
         env = {'B': 'fixture-test-bucket', 'FMKV_KEY_URL': 'u', 'FMKV_KEY_AUTH': 'a', 'ISO_DIR': '/nonexistent',
-               'KEYDB_PATH': '/nonexistent', 'FMKV_PYTHON': sys.executable}
+               'KEYDB_PATH': '/nonexistent', 'FMKV_PYTHON': sys.executable,
+               'FMKV_FETCH_PYTHON': sys.executable}
         result, temp = self.run_suite('qa.yml', 'Run the full CLI acceptance suite', 'linux', files, env,
                                       target='x86_64-unknown-linux-musl')
         self.assertEqual(result.returncode, 3, result.stderr)

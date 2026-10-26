@@ -123,9 +123,9 @@ class ComparisonTests(unittest.TestCase):
                     'manifests': {report['target']: {'sha256': pin}}}
             identity = {field: report[field] for field in
                         ('schema', 'target', 'fixtures', 'harness', 'hash_method', 'rustc', 'ffmpeg')}
-            def fetch(command, **kwargs):
-                Path(command[command.index('--key') + 2]).write_bytes(source.read_bytes())
-            with patch.object(history.subprocess, 'run', fetch):
+            def fetch(bucket, key, destination):
+                destination.write_bytes(source.read_bytes())
+            with patch.object(history, 'download_manifest', fetch):
                 dest = Path(directory) / 'manifest.json'
                 self.assertEqual(history.historical_manifest('bucket', spec, report['target'],
                                                              identity, dest)['artifacts'], report['artifacts'])
