@@ -2560,11 +2560,13 @@ impl App {
         let target = match self.settings.startup_mode.as_str() {
             "Open any loaded disc" if loaded.len() == 1 => Some(loaded[0]),
             "Open preferred drive" => {
-                let preferred: Vec<_> = loaded
-                    .into_iter()
+                let preferred: Vec<_> = drives
+                    .iter()
                     .filter(|d| d.label == self.settings.preferred_drive)
                     .collect();
-                (preferred.len() == 1).then(|| preferred[0])
+                (preferred.len() == 1)
+                    .then(|| preferred[0])
+                    .filter(|d| d.present == Some(true))
             }
             _ => None,
         }
