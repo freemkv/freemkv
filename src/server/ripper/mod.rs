@@ -3230,6 +3230,7 @@ fn rip_disc_inner(
     let _sweeping_guard = SweepingGuard {
         staging: job_path.clone(),
     };
+    let card_revision = saved_state.as_ref().map_or(0, |s| s.metadata_revision);
     let episode_start = saved_state.as_ref().and_then(|s| s.episode_start);
     let overridden = saved_state
         .as_ref()
@@ -3624,7 +3625,18 @@ fn rip_disc_inner(
             &filename,
             std::path::Path::new(&mapfile_path_str),
             outputs,
+            card_plan::Correction {
+                cfg: cfg_read.clone(),
+                revision: card_revision,
+                kind: tmdb_media_type,
+                tmdb_id,
+                start: episode_start,
+            },
         );
+        // A correction can commit before the cache entry exists. Its handler
+        // publishes STATE before enqueueing, so reconciling after publication
+        // closes that gap without holding STATE while entering the card cache.
+        card_plan::reconcile(&cfg_read, device, &job_id);
     }
     let keep: Vec<String> = match capture_plan.as_ref().map(|p| &p.outputs) {
         Some(Ok(plan)) => plan.iter().map(|o| o.filename.clone()).collect(),

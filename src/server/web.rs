@@ -660,7 +660,14 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
         );
     });
     let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    ripper::card_plan::replan(snapshot, expected_job, media_type, tmdb_id, episode_start);
+    ripper::card_plan::replan(
+        snapshot,
+        expected_job,
+        revision,
+        media_type,
+        tmdb_id,
+        episode_start,
+    );
     json_response(request, 200, r#"{"ok":true}"#);
 }
 
@@ -1987,10 +1994,22 @@ fn build_queue_views_cached(staging_dir: &str) -> (Vec<String>, Vec<String>, usi
 }
 
 fn get_state_json(staging_dir: &str) -> String {
+    get_state_json_with_cards(staging_dir, ripper::card_plan::episodes)
+}
+
+fn get_state_json_with_cards(
+    staging_dir: &str,
+    cards: impl Fn(&str) -> Option<Vec<ripper::card_plan::CardEpisode>>,
+) -> String {
     // Recover-and-proceed on poison, like every other STATE consumer. This
     // was the ONE site that bailed with `Err(_) => "{}"`, forever returning
     // a blank dashboard with a permanently green HEALTHCHECK; it's still readable.
-    let state = ripper::STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = ripper::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    // The owned snapshot keeps device/job associations consistent while card
+    // decoration and serialization run without the global progress/control lock.
     // `_move` is now an ARRAY of per-artifact bars (movie file + companion ISO
     // get one each); clone the whole Vec (empty = nothing moving). Recover on
     // poison (MOVE_STATE convention) — `.ok()` would drop live bars process-wide.
@@ -2001,20 +2020,16 @@ fn get_state_json(staging_dir: &str) -> String {
     // Mux progress rides on the synthetic `_mux` device key in STATE (a
     // RipState seeded by the mux worker), serialized as part of `state`.
     // There is no separate live MuxState struct.
-    let mut obj = serde_json::to_value(&*state).unwrap_or_else(|_| serde_json::json!({}));
+    let mut obj = serde_json::to_value(&state).unwrap_or_else(|_| serde_json::json!({}));
     // A TV disc's card lists the episodes its capture plan names.
     for (device, row) in state.iter() {
-        if let Some(episodes) = ripper::card_plan::episodes(&row.job_id) {
+        if let Some(episodes) = cards(&row.job_id) {
             obj[device.as_str()]["episodes"] = serde_json::to_value(episodes).unwrap_or_default();
         }
     }
     if !move_state.is_empty() {
         obj["_move"] = serde_json::to_value(&move_state).unwrap_or_default();
     }
-    // Release the STATE lock before the staging-dir scan below: it does
-    // filesystem I/O, and holding STATE across it would serialize the
-    // ripper's once-per-tick progress writes against this once-per-second scan.
-    drop(state);
     // SINGLE-SOURCE STAGE VIEW (fix C): Mux/Move queues ride the SAME state
     // payload as the per-device tiles, pushed every SSE tick, so all three
     // views derive from one consistent snapshot — no more stale/disagreeing queues.
@@ -3652,21 +3667,26 @@ fn handle_eject(request: tiny_http::Request, device: &str) {
     json_response(request, 200, r#"{"ok":true}"#);
 }
 
-fn handle_stop(request: tiny_http::Request, device: &str) {
-    // Stop halts and drains the rip thread and collapses the row to idle,
-    // preserving partial staging for resume. A claim made after `entry_gen`
-    // (insert dispatch or a Rip POST during the drain) is a new rip: left alone.
+fn prepare_stop(device: &str) -> Option<u64> {
     let entry_gen = ripper::STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(device)
         .map(|rs| rs.claim_gen);
-    // Armed before the drain, which can take up to 60s, so the poll loop does
-    // not re-dispatch the drive the operator is stopping; refreshed after it.
     if entry_gen.is_some() {
         ripper::hold_stopped_disc(device);
         ripper::set_stop_cooldown(device);
     }
+    entry_gen
+}
+
+fn handle_stop(request: tiny_http::Request, device: &str) {
+    // Stop halts and drains the rip thread and collapses the row to idle,
+    // preserving partial staging for resume. A claim made after `entry_gen`
+    // (insert dispatch or a Rip POST during the drain) is a new rip: left alone.
+    // Armed before the drain, which can take up to 60s, so the poll loop does
+    // not re-dispatch the drive the operator is stopping; refreshed after it.
+    let entry_gen = prepare_stop(device);
 
     // Cancel the halt and drain (ripper::stop_and_drain). A timed-out drain
     // is not a stop — the worker still owns the drive — so report what

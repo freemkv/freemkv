@@ -4875,3 +4875,58 @@ fn audit_stop_all_dialog_says_audits_stay_stopped_until_resume() {
     assert!(!library.contains("queue again on their own"));
     assert!(library.contains("Audits stay stopped until you press Resume"));
 }
+
+#[test]
+fn card_decoration_releases_state_before_entry_and_stop_can_claim_and_cancel() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let device = "card-state-lock-regression-device";
+    let job = "card-state-lock-regression-job";
+    ripper::STATE.lock().unwrap().insert(
+        device.into(),
+        ripper::RipState {
+            job_id: job.into(),
+            claim_gen: 23,
+            status: "ripping".into(),
+            ..Default::default()
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let staging = dir.path().to_string_lossy().into_owned();
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    let poll = std::thread::spawn(move || {
+        get_state_json_with_cards(&staging, |seen| {
+            if seen == job {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+            None
+        })
+    });
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Use a bounded response channel so a regression does not strand the test
+    // behind the intentionally paused callback. Unrelated STATE users may still
+    // briefly take the mutex while this test runs in the wider suite.
+    let (control_tx, control_rx) = mpsc::channel();
+    let control = std::thread::spawn(move || {
+        ripper::update_state_with(device, |s| s.progress_pct = 51);
+        let claim = prepare_stop(device);
+        let drained = ripper::stop_and_drain(device, Duration::ZERO);
+        ripper::release_stopped_drive(device, claim);
+        control_tx.send((claim, drained)).unwrap();
+    });
+    let control_result = control_rx.recv_timeout(Duration::from_secs(5));
+    release.send(()).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&poll.join().unwrap()).unwrap();
+    control.join().unwrap();
+    assert_eq!(
+        control_result.expect("web card decoration retained STATE"),
+        (Some(23), true)
+    );
+    // The payload remains one consistent owned device/job snapshot even while
+    // the live state progresses and Stop acquires its cancellation claim.
+    assert_eq!(payload[device]["job_id"], job);
+    assert_eq!(payload[device]["progress_pct"], 0);
+    ripper::STATE.lock().unwrap().remove(device);
+}
