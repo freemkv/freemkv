@@ -37,7 +37,10 @@ MAX_FILE = 64 << 20             # libfreemkv udf MAX_FILE_BYTES: a larger Unit_K
 MKB_START = 16 << 20            # libfreemkv Disc::read_mkb_content START_BYTES
 MAX_MKB = 64 << 20              # libfreemkv Disc::read_mkb_content MAX_BYTES (= OnlineSource MAX_MKB_BYTES)
 MAX_RESPONSE = 1 << 20          # OnlineSource MAX_RESPONSE_BYTES
-TIMEOUT = 180                   # OnlineSource TIMEOUT_SECS
+# A preflight should fail fast enough to avoid tying up a hosted runner when
+# only that runner's route to the service is broken. The real media leg retries
+# with OnlineSource's normal timeout.
+TIMEOUT = 30
 AACS_IV = bytes.fromhex('0BA0F8DDFEA61FB3D8DF9F566A050F78')
 POLICY = Path(__file__).with_name('media-gate-policy.json')
 
@@ -578,6 +581,9 @@ def run(policy, pins, url, auth, open_image, post=post_decode, log=print):
             entry.update(probe(Udf(open_image(fixture, pin)), url, auth, post), ok=True, reason='known key returned')
         except CanaryError as exc:
             entry['reason'] = str(exc)
+            entry['failure_kind'] = ('transport' if isinstance(exc, Transient)
+                                     and str(exc).startswith('the key service is unreachable')
+                                     else 'key-or-service')
         except Exception as exc:  # noqa: BLE001 — its text may quote the token or the URL: type only
             entry['reason'] = f'unexpected {type(exc).__name__}'
         result['probes'].append(entry)

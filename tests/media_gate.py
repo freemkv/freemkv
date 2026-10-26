@@ -1288,6 +1288,18 @@ def canary(policy, result, ref):
     return True, '', None
 
 
+def hosted_canary_transport_fallback(policy, result, env):
+    """Only an explicit QA media dispatch may defer a network-only canary to EC2."""
+    if env.get('GITHUB_REF') != 'refs/heads/qa' or env.get('RUN_MEDIA') != 'true':
+        return False
+    probes = [p['fixture'] for p in policy['canary'].get('probes', [])]
+    if not probes or not isinstance(result, dict) or result.get('ok') is not False:
+        return False
+    got = {p.get('fixture'): p for p in result.get('probes') or [] if isinstance(p, dict)}
+    return all((got.get(f) or {}).get('ok') is False and
+               (got.get(f) or {}).get('failure_kind') == 'transport' for f in probes)
+
+
 # ── Plan artifact: seal and restore ────────────────────────────────────────
 
 def seal(plan_dir, run_id, sha):
@@ -1353,6 +1365,11 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_
         warnings.append('the key-service canary has no probes configured (policy canary.probes); '
                         'decision 15 is not enforced until one is added')
     canary_ok, canary_why, note = canary(policy, canary_result, env.get('GITHUB_REF', ''))
+    ec2_key_proof = hosted_canary_transport_fallback(policy, canary_result, env)
+    if ec2_key_proof:
+        canary_ok = True
+        warnings.append('hosted key-service canary could not connect; this explicit media run '
+                        'must prove keys in the EC2 acceptance and full-disc suites')
     if note:
         notices.append(note)
     proven = find_evidence(f, policy, request, perf_check, download=download) if canary_ok else None
@@ -1360,9 +1377,12 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_
                                 env.get('SKIP_MEDIA') == 'true' or '[skip-media]' in env.get('HEAD_MESSAGE', ''),
                                 env.get('SKIP_REASON') or ('[skip-media]' if '[skip-media]' in env.get('HEAD_MESSAGE', '') else ''),
                                 canary_ok, env.get('SUPERSEDED') == 'true', canary_why)
+    if ec2_key_proof and status == 'run':
+        reason = 'explicit EC2 key proof after hosted canary transport failure'
     if proven:
         warnings += proven['warnings']
     evidence = {'schema': SCHEMA, 'fingerprint': f, 'inputs': inputs, 'revisions': revisions,
+                'hosted_canary_transport_fallback': ec2_key_proof,
                 'lock_sha256': sha256(lock_text.encode()), 'run_id': int(env['GITHUB_RUN_ID'])}
     outputs = {'status': status, 'run': str(go).lower(), 'fingerprint': f, 'reason': reason,
                'revisions': json.dumps(revisions, sort_keys=True), 'toolchain': inputs['toolchain'],

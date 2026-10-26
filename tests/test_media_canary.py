@@ -339,7 +339,8 @@ class ProbeTests(unittest.TestCase):
             return Resp(b'{"UK": "00"}')
         self.assertEqual(mc.post_decode('https://k/d', 'tok', {'a': 1}, opener), {'UK': '00'})
         req, timeout = seen[0]
-        self.assertEqual((req.get_method(), req.get_header('Authorization'), timeout), ('POST', 'Bearer tok', 180))
+        self.assertEqual((req.get_method(), req.get_header('Authorization'), timeout),
+                         ('POST', 'Bearer tok', mc.TIMEOUT))
         self.assertEqual(json.loads(req.data), {'a': 1})
         with self.assertRaises(mc.CanaryError):
             mc.post_decode('http://k/d', 'tok', {}, opener)
@@ -521,6 +522,17 @@ class RedirectTests(unittest.TestCase):
                 mc.post_decode('https://k/d', 't', {}, sleep=lambda s: None)
         self.assertEqual(len(seen), mc.ATTEMPTS)
         self.assertIs(mc.no_redirect_opener, real)
+
+    def test_network_failure_is_marked_for_explicit_ec2_proof(self):
+        policy = {'canary': {'probes': [{'fixture': 'uhd.iso'}]}}
+        pins = {'uhd.iso': {'etag': 'pinned'}}
+        with unittest.mock.patch.object(mc, 'Udf', lambda read: object()), \
+             unittest.mock.patch.object(mc, 'probe', side_effect=mc.Transient(
+                'the key service is unreachable (URLError)')):
+            result = mc.run(policy, pins, 'https://example.com/decode', 'token',
+                            lambda key, pin: lambda offset, length: b'')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['probes'][0]['failure_kind'], 'transport')
 
     def test_the_default_opener_has_no_following_redirect_handler(self):
         """Python 3.12 docs, build_opener: "Instances of the following classes will be in front of

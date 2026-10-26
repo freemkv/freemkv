@@ -881,6 +881,20 @@ class LegAndRecordTests(unittest.TestCase):
 
 
 class VerdictTests(unittest.TestCase):
+    def test_only_explicit_transport_failure_can_use_ec2_key_proof(self):
+        policy = {'canary': {'probes': [{'fixture': 'uhd.iso'}]}}
+        env = {'GITHUB_REF': 'refs/heads/qa', 'RUN_MEDIA': 'true'}
+        result = {'ok': False, 'probes': [{'fixture': 'uhd.iso', 'ok': False,
+                  'failure_kind': 'transport'}]}
+        self.assertTrue(mg.hosted_canary_transport_fallback(policy, result, env))
+        self.assertFalse(mg.hosted_canary_transport_fallback(policy, result,
+                         dict(env, RUN_MEDIA='false')))
+        result['probes'][0]['failure_kind'] = 'key-or-service'
+        self.assertFalse(mg.hosted_canary_transport_fallback(policy, result, env))
+        result['probes'][0]['failure_kind'] = 'transport'
+        self.assertFalse(mg.hosted_canary_transport_fallback(policy, result,
+                         dict(env, GITHUB_REF='refs/heads/dev')))
+
     def test_i1(self):
         ok = {'PLAN_RESULT': 'success', 'GUI': 'success'}
         cases = [
