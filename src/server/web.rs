@@ -1419,31 +1419,7 @@ impl ureq::unversioned::resolver::Resolver for PinnedResolver {
     }
 }
 
-// A short, URL-FREE description of a ureq failure: these summaries reach
-// syslog/autorip.jsonl/unauthenticated endpoints, so each variant maps to a fixed label instead
-// of ever formatting the error.
-pub(crate) fn ureq_error_kind(e: &ureq::Error) -> String {
-    match e {
-        ureq::Error::StatusCode(code) => format!("HTTP {code}"),
-        ureq::Error::Io(io) => match io.raw_os_error() {
-            // An OS-generated error (has an errno): its Display is the
-            // syscall's own message, derived purely from the errno and never
-            // the URL — surface it instead of the useless generic label.
-            Some(_) => format!("io: {io}"),
-            // No errno — a ureq/std-synthesized io error whose payload we do
-            // NOT trust to be URL-free. Fall back to the ErrorKind's fixed
-            // description, which is a constant string and never the URL.
-            None => format!("io: {}", io.kind()),
-        },
-        ureq::Error::Timeout(_) => "timeout".to_string(),
-        ureq::Error::HostNotFound => "host not found".to_string(),
-        ureq::Error::ConnectionFailed => "connection failed".to_string(),
-        ureq::Error::TooManyRedirects => "too many redirects".to_string(),
-        ureq::Error::Tls(_) => "tls error".to_string(),
-        ureq::Error::BodyExceedsLimit(_) => "body exceeds limit".to_string(),
-        _ => "transport error".to_string(),
-    }
-}
+pub(crate) use freemkv_engine::metadata::transport_error_kind as ureq_error_kind;
 
 // Rolling stall detector (re-armed on every read that returns bytes): no progress for this long
 // means the peer is dead. Replaces the ureq 2 timeout_read knob the 2→3 migration dropped.

@@ -426,8 +426,10 @@ dependencies = [
  "isolang",
  "libfreemkv",
  "serde",
+ "serde_json",
  "sha2",
  "tracing",
+ "ureq",
 ]
 
 [[package]]

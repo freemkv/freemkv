@@ -8,73 +8,7 @@ use libfreemkv::DiscTitle;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Serialises as "movie"/"tv". Strict here; persisted records read it through
-/// `lenient`, where unknown, empty or missing is Movie.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaKind {
-    Tv,
-    #[default]
-    Movie,
-}
-
-/// `deserialize_with` for persisted media types: unknown or null is Movie.
-pub fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<MediaKind, D::Error> {
-    let raw: Option<String> = Deserialize::deserialize(d)?;
-    Ok(MediaKind::parse(raw.as_deref().unwrap_or("")))
-}
-
-impl MediaKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MediaKind::Tv => "tv",
-            MediaKind::Movie => "movie",
-        }
-    }
-
-    /// Lenient parse: trims and ignores case; unknown or empty is Movie.
-    pub fn parse(raw: &str) -> Self {
-        if raw.trim().eq_ignore_ascii_case("tv") {
-            MediaKind::Tv
-        } else {
-            MediaKind::Movie
-        }
-    }
-
-    pub fn is_tv(self) -> bool {
-        self == MediaKind::Tv
-    }
-}
-
-impl From<&str> for MediaKind {
-    fn from(raw: &str) -> Self {
-        MediaKind::parse(raw)
-    }
-}
-
-impl std::fmt::Display for MediaKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl PartialEq<&str> for MediaKind {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MediaMetadata {
-    pub title: String,
-    pub year: u16,
-    pub tmdb_id: u64,
-    pub season: Option<u16>,
-    pub disc: Option<u16>,
-    #[serde(default)]
-    pub episode_start: Option<u16>,
-    pub kind: Option<MediaKind>,
-}
+pub use freemkv_engine::metadata::{MediaKind, MediaMetadata, lenient};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedOutput {
