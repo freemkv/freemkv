@@ -97,6 +97,13 @@ class StructureTests(unittest.TestCase):
         self.assertNotIn('launch', needs)
         self.assertEqual(self.jobs['launch']['needs'], needs, 'launch and its leg start together')
 
+    def test_sparse_launch_checkout_includes_shared_launcher(self):
+        checkout = next(s for s in self.jobs['launch']['steps']
+                        if s.get('uses', '').startswith('actions/checkout@'))
+        selected = checkout['with']['sparse-checkout'].splitlines()
+        self.assertIn('.github/scripts', selected)
+        self.assertTrue((ROOT / '.github/scripts/launch-media-runner.sh').is_file())
+
     def test_launch_has_deadline_watch_cancel_and_teardown(self):
         launch = self.jobs['launch']
         names = [s.get('name', '') for s in launch['steps']]
