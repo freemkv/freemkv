@@ -159,6 +159,7 @@ pub enum SubPick {
 /// Stored title modes. "Episodes" is offered only when the shared selection
 /// model returns an executable episode selection, not review-only candidates.
 pub const PICK_TITLES: &[&str] = &[
+    "Main film / episodes",
     "Main film only",
     "Episodes",
     "Longest title",
@@ -169,6 +170,7 @@ pub const PICK_TITLES: &[&str] = &[
 // A title choice's label in the active locale.
 fn pick_title_label(mode: &str) -> String {
     match mode {
+        "Main film / episodes" => crate::strings::get("gui.pick.main_or_episodes"),
         "Episodes" => crate::strings::get_or("gui.pick.episodes", "Episodes"),
         "Longest title" => crate::strings::get("gui.set.sel_longest"),
         "All titles" => crate::strings::get("gui.set.sel_all"),
@@ -215,7 +217,7 @@ pub fn automatic_titles(
 // Episodes is a per-disc choice offered when a roster exists, never inherited.
 fn open_picks(settings: &crate::settings::Settings) -> (String, LangPrefs, f64) {
     let mode = match settings.selection.as_str() {
-        "Episodes" => PICK_TITLES[0].to_string(),
+        "Episodes" => "Main film only".to_string(),
         saved => saved.to_string(),
     };
     let min_secs = settings.min_title_secs.trim().parse::<f64>().unwrap_or(0.0);
@@ -416,8 +418,19 @@ impl Tree {
         // Select against the full evidence snapshot before applying visibility. Hiding the
         // main feature must not promote an unrelated title. Review candidates remain
         // available for manual ticking, but never become automatic executable choices.
-        let automatic = automatic_titles(&sc.selection_model, &selection, prefs);
-        let episode_order = if matches!(selection, freemkv_engine::Selection::Episodes) {
+        let automatic = if sel_mode == "Main film / episodes" {
+            sc.selection_model
+                .main_or_episodes(
+                    &lang_filter(&prefs.audio),
+                    prefs.presentation_language.as_deref(),
+                )
+                .unwrap_or_default()
+        } else {
+            automatic_titles(&sc.selection_model, &selection, prefs)
+        };
+        let episode_order = if sel_mode == "Main film / episodes"
+            || matches!(selection, freemkv_engine::Selection::Episodes)
+        {
             automatic.clone()
         } else {
             Vec::new()
@@ -1760,6 +1773,7 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     let g = crate::strings::get;
     match key {
         "selection" => vec![
+            ("Main film / episodes", g("gui.pick.main_or_episodes")),
             ("Main film only", g("gui.set.sel_main")),
             ("All titles", g("gui.set.sel_all")),
             ("Longest title", g("gui.set.sel_longest")),

@@ -140,7 +140,7 @@ impl Default for Settings {
             // read phase completes so the user can grab it / load the next.
             auto_eject: true,
             notify_when_rip_finished: true,
-            selection: "Main film only".into(),
+            selection: "Main film / episodes".into(),
             min_title_secs: "120".into(),
             // Empty = no preference = exactly the pre-1.6.2 behaviour: a
             // ticked title ticks every one of its streams.

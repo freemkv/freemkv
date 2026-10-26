@@ -399,6 +399,8 @@ fn the_selection_bar_picks_episodes_and_the_film_in_the_chosen_languages() {
         ..Default::default()
     };
     let ticked = |mode: &str, p: &LangPrefs| Tree::from_scan(&sc, mode, 0.0, p).ticked_titles();
+    assert_eq!(ticked("Main film / episodes", &langs(&["deu"])), vec![3, 5]);
+    assert_eq!(ticked("Main film / episodes", &langs(&[])), vec![2, 4]);
     assert_eq!(ticked("Episodes", &langs(&["deu"])), vec![3, 5]);
     assert_eq!(ticked("Episodes", &langs(&["eng", "deu"])), vec![2, 4]);
     assert_eq!(ticked("Main film only", &langs(&["deu"])), vec![1]);
@@ -416,6 +418,7 @@ fn the_open_preflight_covers_the_titles_the_settings_tick() {
     let mut settings = crate::settings::Settings::default();
     for (selection, audio, want) in [
         ("Main film only", "", vec![0]),
+        ("Main film / episodes", "", vec![2, 4]),
         ("Episodes", "", vec![0]),
         ("Main film only", "deu", vec![1]),
         ("No titles", "", vec![]),
@@ -2705,6 +2708,9 @@ fn whole_disc_progress_is_one_operation_despite_selected_episode_count() {
                         b.tick(pass, 100, 100);
                     }
                     let mut b = Bars::new(&[]);
+                    b.app.source = "disc://test".into();
+                    b.app.format = format.into();
+                    b.app.settings.raw = raw;
                     b.app.run_titles = selected;
                     b.tick(phases[0], 40, 100);
                     b.st.cancel.store(true, Ordering::Relaxed);

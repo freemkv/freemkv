@@ -1157,7 +1157,12 @@ fn every_settings_dropdown_stores_a_canonical_value_the_code_matches_on() {
     let expect: &[(&str, &[&str])] = &[
         (
             "selection",
-            &["Main film only", "All titles", "Longest title"],
+            &[
+                "Main film / episodes",
+                "Main film only",
+                "All titles",
+                "Longest title",
+            ],
         ),
         ("rip_mode", &["Multi-pass", "Single pass"]),
         (
@@ -1178,25 +1183,20 @@ fn every_settings_dropdown_stores_a_canonical_value_the_code_matches_on() {
 
 #[test]
 fn the_selection_dropdown_offers_exactly_the_modes_the_tree_implements() {
-    // A mode on offer that `Tree::from_scan` does not implement falls into its
-    // catch-all and silently behaves as "Main film only" — a setting that
-    // appears to work and does not.
     let sc = disc(&[(600.0, 1), (5400.0, 1)]);
     let main = tree(&sc, "Main film only", 0.0).ticked_titles();
     let distinct: Vec<Vec<usize>> = enum_options("selection")
         .iter()
         .map(|(canon, _)| tree(&sc, canon, 0.0).ticked_titles())
         .collect();
-    assert_eq!(distinct.len(), 3);
-    assert_eq!(distinct[0], main);
-    assert_ne!(
-        distinct[1], main,
-        "\"All titles\" behaves identically to \"Main film only\""
+    assert_eq!(distinct.len(), 4);
+    assert_eq!(
+        distinct[0], main,
+        "a disc without episode evidence keeps the film"
     );
-    assert_ne!(
-        distinct[2], main,
-        "\"Longest title\" behaves identically to \"Main film only\""
-    );
+    assert_eq!(distinct[1], main);
+    assert_ne!(distinct[2], main, "All titles must select every title");
+    assert_ne!(distinct[3], main, "Longest title must pick by duration");
 }
 
 #[test]
@@ -1435,6 +1435,13 @@ fn the_second_progress_bar_appears_only_for_a_multi_title_run() {
     app.run_titles = 1;
     assert!(!app.view().show_overall_bar);
     app.run_titles = 2;
+    assert!(
+        !app.view().show_overall_bar,
+        "selection alone is not a batch"
+    );
+    let state = std::sync::Arc::new(freemkv::engine::RunState::default());
+    state.plan_titles(vec![(0, 100), (1, 100)]);
+    app.run = Some(state);
     assert!(app.view().show_overall_bar);
 }
 
