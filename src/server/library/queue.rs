@@ -450,8 +450,9 @@ fn load(path: &Path) -> (QueueFile, Option<String>) {
 pub struct Queue {
     path: PathBuf,
     state: Mutex<QueueFile>,
-    // Serialises writers and remembers the newest generation on disk, so an
-    // older snapshot can never land after a newer one.
+    // Gate for writers and mutation commits; always acquire before state when
+    // holding both. Readers need only state, so a slow writer leaves them free.
+    // Remembers the newest disk generation to reject older snapshots.
     saved: Mutex<u64>,
     generation: AtomicU64,
     durability_pending: AtomicBool,
@@ -519,6 +520,7 @@ impl Queue {
         let Some((lock, existed)) = partial_target(path).and_then(|t| try_artifact_lock(&t)) else {
             return false;
         };
+        let _gate = self.saved.lock().unwrap_or_else(|e| e.into_inner());
         let f = self.lock();
         let running = f
             .jobs
@@ -593,6 +595,7 @@ impl Queue {
             return false;
         }
         {
+            let _gate = self.saved.lock().unwrap_or_else(|e| e.into_inner());
             let mut state = self.lock();
             *state = file;
             self.generation.fetch_add(1, Ordering::SeqCst);
@@ -653,6 +656,7 @@ impl Queue {
         source: &Path,
         save: impl FnOnce() -> std::io::Result<T>,
     ) -> std::io::Result<T> {
+        let _gate = self.saved.lock().unwrap_or_else(|e| e.into_inner());
         let state = self.lock();
         if state
             .jobs
@@ -1279,6 +1283,7 @@ impl Queue {
     // anything, and nothing is bumped or written when it did not.
     fn mutate_if<T: Default>(&self, f: impl FnOnce(&mut QueueFile) -> (T, bool)) -> T {
         let (out, changed) = {
+            let _gate = self.saved.lock().unwrap_or_else(|e| e.into_inner());
             let mut g = self.lock();
             if self.is_unreadable() {
                 return T::default();
@@ -1299,6 +1304,7 @@ impl Queue {
     // a change made meanwhile would be lost. `held` is the answer then.
     fn mutate_or<T>(&self, held: T, f: impl FnOnce(&mut QueueFile) -> T) -> T {
         let out = {
+            let _gate = self.saved.lock().unwrap_or_else(|e| e.into_inner());
             let mut g = self.lock();
             if self.is_unreadable() {
                 return held;
@@ -1329,25 +1335,33 @@ impl Queue {
         f: impl FnOnce(&mut QueueFile) -> std::io::Result<T>,
         write: impl FnOnce(&Path, &[u8]) -> Result<(), (bool, std::io::Error)>,
     ) -> std::io::Result<T> {
+        // Serialize candidate construction through reconciliation, excluding all
+        // other mutations without holding state across the filesystem write.
+        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = self.unreadable() {
             return Err(std::io::Error::other(why));
         }
-        let mut state = self.lock();
-        let mut next = state.clone();
-        let out = f(&mut next)?;
-        if next == *state && !self.durability_pending.load(Ordering::SeqCst) {
-            return Ok(out);
-        }
-        let json = serde_json::to_vec_pretty(&next).map_err(std::io::Error::other)?;
-        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        let (next, out, json) = {
+            let state = self.lock();
+            let mut next = state.clone();
+            let out = f(&mut next)?;
+            if next == *state && !self.durability_pending.load(Ordering::SeqCst) {
+                return Ok(out);
+            }
+            let json = serde_json::to_vec_pretty(&next).map_err(std::io::Error::other)?;
+            (next, out, json)
+        };
         let result = write(&self.path, &json);
         if let Err((false, error)) = result {
             return Err(error);
         }
-        *state = next;
-        *saved = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        self.durability_pending
-            .store(result.is_err(), Ordering::SeqCst);
+        {
+            let mut state = self.lock();
+            *state = next;
+            *saved = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            self.durability_pending
+                .store(result.is_err(), Ordering::SeqCst);
+        }
         if let Err((_, error)) = result {
             return Err(std::io::Error::new(
                 error.kind(),
@@ -1375,10 +1389,10 @@ impl Queue {
         json: &[u8],
         write: impl FnOnce(&Path, &[u8]) -> Result<(), (bool, std::io::Error)>,
     ) {
+        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
         if self.is_unreadable() {
             return;
         }
-        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
         if generation < *saved
             || (generation == *saved && !self.durability_pending.load(Ordering::SeqCst))
         {

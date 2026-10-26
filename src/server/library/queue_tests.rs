@@ -1,5 +1,128 @@
 use super::*;
 
+// Channels control the writer; timeouts only bound a regression's failure rather
+// than advance the scenario. Always release it before asserting or joining.
+fn blocked_durable_write_preserves_reads_and_mutations(failure: Option<bool>) {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    let t = tempfile::tempdir().unwrap();
+    let q = Arc::new(Queue::open(t.path()));
+    let original = q.snapshot();
+    let (writing, entered) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let durable = {
+        let q = q.clone();
+        std::thread::spawn(move || {
+            q.try_mutate_durable_with(
+                |f| {
+                    f.debug_log = true;
+                    Ok(())
+                },
+                |path, bytes| {
+                    writing.send(()).unwrap();
+                    released.recv().unwrap();
+                    match failure {
+                        None => write_queue_durable(path, bytes),
+                        Some(false) => Err((false, std::io::Error::other("before publish"))),
+                        Some(true) => fail_directory_sync(path, bytes),
+                    }
+                },
+            )
+        })
+    };
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (starting, started) = mpsc::channel();
+    let (committing, committed) = mpsc::channel();
+    let ordinary = {
+        let q = q.clone();
+        std::thread::spawn(move || {
+            starting.send(()).unwrap();
+            q.mutate(|f| {
+                committing.send(()).unwrap();
+                f.paused = true;
+            });
+        })
+    };
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (reading, read) = mpsc::channel();
+    let reader = {
+        let q = q.clone();
+        std::thread::spawn(move || reading.send(q.snapshot()).unwrap())
+    };
+    let visible = read.recv_timeout(Duration::from_secs(2));
+    let premature_mutation = committed.try_recv();
+    release.send(()).unwrap();
+    let result = durable.join().unwrap();
+    ordinary.join().unwrap();
+    reader.join().unwrap();
+    assert_eq!(
+        visible.expect("snapshot blocked behind durable writer"),
+        original
+    );
+    assert!(matches!(premature_mutation, Err(mpsc::TryRecvError::Empty)));
+    assert_eq!(result.is_err(), failure.is_some());
+    assert!(q.snapshot().paused, "ordinary mutation was lost");
+    assert_eq!(q.snapshot().debug_log, failure != Some(false));
+    assert_eq!(Queue::open(t.path()).snapshot(), q.snapshot());
+}
+
+#[test]
+fn blocked_durable_success_keeps_readers_available_and_both_mutations() {
+    blocked_durable_write_preserves_reads_and_mutations(None);
+}
+
+#[test]
+fn blocked_durable_before_publish_failure_keeps_readers_available_and_ordinary_mutation() {
+    blocked_durable_write_preserves_reads_and_mutations(Some(false));
+}
+
+#[test]
+fn blocked_durable_after_publish_failure_keeps_readers_available_and_both_mutations() {
+    blocked_durable_write_preserves_reads_and_mutations(Some(true));
+}
+
+#[test]
+fn before_publish_failure_preserves_state_generations_and_pending_durability() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    for pending in [false, true] {
+        q.durability_pending.store(pending, Ordering::SeqCst);
+        let before = q.snapshot();
+        let generation = q.generation();
+        let saved = *q.saved.lock().unwrap();
+        let result = q.try_mutate_durable_with(
+            |f| {
+                f.debug_log = true;
+                Ok(())
+            },
+            |_, _| Err((false, std::io::Error::other("before publish"))),
+        );
+        assert!(result.is_err());
+        assert_eq!(q.snapshot(), before);
+        assert_eq!(q.generation(), generation);
+        assert_eq!(*q.saved.lock().unwrap(), saved);
+        assert_eq!(q.durability_pending.load(Ordering::SeqCst), pending);
+    }
+}
+
+#[test]
+fn successful_durable_commit_rejects_an_old_snapshot_before_writing() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let generation = q.generation();
+    let bytes = serde_json::to_vec(&q.snapshot()).unwrap();
+    q.try_mutate_durable(|f| {
+        f.debug_log = true;
+        Ok(())
+    })
+    .unwrap();
+    q.persist_snapshot(generation, &bytes, |_, _| {
+        panic!("stale snapshot reached writer")
+    });
+    assert!(Queue::open(t.path()).snapshot().debug_log);
+}
+
 #[test]
 fn postrename_failure_preserves_landed_queue_before_legacy_persist() {
     let t = tempfile::tempdir().unwrap();
