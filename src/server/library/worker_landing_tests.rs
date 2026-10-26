@@ -320,3 +320,266 @@ fn a_staged_landing_that_cannot_be_recorded_keeps_the_verified_file() {
     let staged = lib.queue.snapshot().jobs[0].outputs[0].staged.clone();
     assert_eq!(staged.as_deref(), Some(kept[0].staged.as_path()));
 }
+
+// A links-only failure must leave the queue's pre-rename proof durable until the link is saved.
+#[test]
+fn failed_link_write_preserves_landing_across_restarts_and_retries() {
+    let (t, lib, dirs, job, target) = replacing();
+    let file = t.path().join("config").join(links::LINKS_FILE);
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let first = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| {
+            let app = land_like_the_engine(&sink, &request.target, &movie())?;
+            std::fs::remove_file(&file)?;
+            std::fs::create_dir(&file)?;
+            Ok(app)
+        },
+    );
+    assert!(
+        matches!(first, Ending::Failed(ref e) if e.to_string().contains("is in place")),
+        "{first:?}"
+    );
+    let original = crate::server::util::Stamp::read(&target).unwrap();
+    assert_eq!(
+        lib.queue.snapshot().jobs[0].outputs[0].landing,
+        Some(original)
+    );
+    assert_ne!(
+        lib.queue.snapshot().jobs[0].outputs[0].state,
+        OutputState::Done
+    );
+    let current = lib.queue.snapshot().jobs[0].clone();
+    let text = failure_message("links could not be saved", None, None, &current, None);
+    assert!(!text.contains("No MKV was written"), "{text}");
+    assert!(!text.contains("existing MKV is unchanged"), "{text}");
+    assert_eq!(std::fs::read(&target).unwrap(), movie());
+    drop(sink);
+    drop(lib);
+    // Fail the recovery branch's link write as well; it must retain the same proof.
+    for repaired in [false, true] {
+        if repaired {
+            std::fs::remove_dir(&file).unwrap();
+        }
+        let lib = Library::open(&t.path().join("config"), &t.path().join("logs"));
+        let job = lib.queue.claim_next().unwrap();
+        assert_eq!(job.outputs[0].landing, Some(original));
+        let mut sink = test_sink(&lib, &arbiter);
+        sink.job_id = job.id;
+        let again = remux_planned_with(
+            &job,
+            job.plan.as_ref().unwrap(),
+            &cfg(&dirs),
+            &sink,
+            |_, _, _| panic!("a landed output must never execute again"),
+        );
+        assert_eq!(
+            lib.landed.load(Ordering::SeqCst),
+            0,
+            "recovery must not notify another landing"
+        );
+        if repaired {
+            assert!(matches!(again, Ending::Done { .. }), "{again:?}");
+            assert_eq!(link_stamp(&t, &target), Some(original));
+            assert_eq!(
+                lib.queue.snapshot().jobs[0].outputs[0].state,
+                OutputState::Done
+            );
+            assert_eq!(lib.queue.snapshot().jobs[0].outputs[0].landing, None);
+        } else {
+            assert!(matches!(again, Ending::Failed(_)), "{again:?}");
+            assert_eq!(
+                lib.queue.snapshot().jobs[0].outputs[0].landing,
+                Some(original)
+            );
+        }
+    }
+}
+
+#[test]
+fn retained_landing_cannot_vouch_for_a_replacement_file_or_directory() {
+    for directory in [false, true] {
+        let (t, lib, dirs, job, target) = replacing();
+        let file = t.path().join("config").join(links::LINKS_FILE);
+        let arbiter = Arbiter::new();
+        let mut sink = test_sink(&lib, &arbiter);
+        sink.job_id = job.id;
+        let first = remux_planned_with(
+            &job,
+            job.plan.as_ref().unwrap(),
+            &cfg(&dirs),
+            &sink,
+            |request, _, _| {
+                let app = land_like_the_engine(&sink, &request.target, &movie())?;
+                std::fs::remove_file(&file)?;
+                std::fs::create_dir(&file)?;
+                Ok(app)
+            },
+        );
+        assert!(matches!(first, Ending::Failed(_)));
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        if directory {
+            std::fs::create_dir(&target).unwrap();
+        } else {
+            std::fs::write(&target, b"another application's replacement").unwrap();
+        }
+        let job = lib.queue.snapshot().jobs[0].clone();
+        let again = remux_planned_with(
+            &job,
+            job.plan.as_ref().unwrap(),
+            &cfg(&dirs),
+            &sink,
+            |_, _, _| panic!("a replacement must not be overwritten"),
+        );
+        assert!(matches!(again, Ending::Failed(_)), "{again:?}");
+        assert!(
+            !links::read_entries(&t.path().join("config"))
+                .unwrap()
+                .contains_key(&target)
+        );
+        assert_ne!(
+            lib.queue.snapshot().jobs[0].outputs[0].state,
+            OutputState::Done
+        );
+    }
+}
+
+#[test]
+fn legacy_done_without_landing_still_cannot_acquire_ownership() {
+    let (t, lib, dirs, job, target) = replacing();
+    std::fs::remove_file(t.path().join("config").join(links::LINKS_FILE)).unwrap();
+    lib.queue.finish_output(job.id, "main", OutputState::Done);
+    let job = lib.queue.snapshot().jobs[0].clone();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |_, _, _| panic!("Done must not execute"),
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(link_stamp(&t, &target), None);
+}
+
+#[test]
+fn a_durable_link_before_done_completes_without_another_landing() {
+    let (t, lib, dirs, job, target) = replacing();
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let first = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| {
+            land_like_the_engine(&sink, &request.target, &movie())?;
+            Err(std::io::Error::other("killed after rename"))
+        },
+    );
+    assert!(matches!(first, Ending::Failed(_)));
+    let original = lib.queue.snapshot().jobs[0].outputs[0].landing.unwrap();
+    links::record(&t.path().join("config"), &target, &job.iso).unwrap();
+    let job = lib.queue.snapshot().jobs[0].clone();
+    let again = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |_, _, _| panic!("durably linked output must not execute"),
+    );
+    assert!(matches!(again, Ending::Done { .. }), "{again:?}");
+    assert_eq!(lib.landed.load(Ordering::SeqCst), 0);
+    assert_eq!(link_stamp(&t, &target), Some(original));
+    assert_eq!(
+        lib.queue.snapshot().jobs[0].outputs[0].state,
+        OutputState::Done
+    );
+}
+
+#[test]
+fn first_output_link_failure_stops_later_outputs_until_recovery() {
+    let (t, lib, dirs) = library_with(&["A"]);
+    let target = dirs.library.join("A/A.mkv");
+    let iso = dirs.isos.as_ref().unwrap().join("A.iso");
+    links::record(&t.path().join("config"), &target, &iso).unwrap();
+    lib.queue.add(vec![NewJob {
+        title: "A".into(),
+        iso,
+        target: target.clone(),
+        replace: true,
+    }]);
+    let job = lib.queue.claim_next().unwrap();
+    let outputs = ["A.mkv", "B.mkv"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| PlannedOutput {
+            id: format!("title-{i}"),
+            title_index: i,
+            episode: None,
+            episode_name: String::new(),
+            filename: (*name).into(),
+        })
+        .collect();
+    assert!(lib.queue.set_plan(
+        job.id,
+        RemuxPlan {
+            media: MediaMetadata::default(),
+            outputs
+        }
+    ));
+    let job = lib.queue.snapshot().jobs[0].clone();
+    let file = t.path().join("config").join(links::LINKS_FILE);
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let mut calls = Vec::new();
+    let first = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, ordinal| {
+            calls.push(ordinal);
+            let app = land_like_the_engine(&sink, &request.target, &movie())?;
+            std::fs::remove_file(&file)?;
+            std::fs::create_dir(&file)?;
+            Ok(app)
+        },
+    );
+    assert!(matches!(first, Ending::Failed(_)));
+    assert_eq!(calls, vec![0]);
+    assert!(!target.with_file_name("B.mkv").exists());
+    let original = lib.queue.snapshot().jobs[0].outputs[0].landing.unwrap();
+    std::fs::remove_dir(&file).unwrap();
+    let job = lib.queue.snapshot().jobs[0].clone();
+    let again = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, ordinal| {
+            calls.push(ordinal);
+            land_like_the_engine(&sink, &request.target, &movie())
+        },
+    );
+    assert!(matches!(again, Ending::Done { .. }), "{again:?}");
+    assert_eq!(calls, vec![0, 1]);
+    assert_eq!(link_stamp(&t, &target), Some(original));
+    assert!(
+        lib.queue.snapshot().jobs[0]
+            .outputs
+            .iter()
+            .all(|o| o.state == OutputState::Done)
+    );
+    assert_eq!(lib.landed.load(Ordering::SeqCst), 2);
+}
