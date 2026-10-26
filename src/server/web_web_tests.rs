@@ -4475,19 +4475,22 @@ mod http {
 
     // Run `name` (in `http`) alone in a child process with `env` applied: a reboot sets
     // the process-wide SHUTDOWN, which refuses every rip spawn.
-    // `keep_alive`: the job's LaunchAgent plist in the child's HOME sets KeepAlive so.
+    // `loaded_policy` supplies diagnostic output; no test queries the real launchd.
     fn reboot_route_in_child(
         name: &str,
         env: Option<&str>,
         ppid: &str,
-        keep_alive: Option<bool>,
+        loaded_policy: Option<&str>,
     ) -> bool {
         const CHILD: &str = "FREEMKV_TEST_REBOOT_ROUTE_CHILD";
         if std::env::var_os(CHILD).is_some() {
             return true;
         }
         let home = tempfile::tempdir().unwrap();
-        if let (Some(label), Some(keep)) = (env, keep_alive) {
+        if let Some(label) = env {
+            // Deliberately disagree with runtime: stale true disk must refuse;
+            // loaded unconditional true must work even with a false disk policy.
+            let keep = loaded_policy != Some(include_str!("testdata/launchd/unconditional.txt"));
             let agents = home.path().join("Library/LaunchAgents");
             std::fs::create_dir_all(&agents).unwrap();
             std::fs::write(
@@ -4506,6 +4509,10 @@ mod http {
             ])
             .env(CHILD, "1")
             .env("FREEMKV_TEST_PPID", ppid);
+        match loaded_policy {
+            Some(out) => child.env("FREEMKV_TEST_LAUNCHCTL", out),
+            None => child.env_remove("FREEMKV_TEST_LAUNCHCTL"),
+        };
         match env {
             Some(label) => child.env("XPC_SERVICE_NAME", label),
             None => child.env_remove("XPC_SERVICE_NAME"),
@@ -4551,7 +4558,7 @@ mod http {
             "system_reboot_requests_a_relaunch",
             Some("io.freemkv.library"),
             "1",
-            Some(true),
+            Some(include_str!("testdata/launchd/unconditional.txt")),
         ) {
             return;
         }
@@ -4573,7 +4580,7 @@ mod http {
         assert!(!v["error"].as_str().unwrap_or_default().is_empty());
     }
 
-    // A launchd job whose plist lacks KeepAlive is not started again after the exit.
+    // A stale true plist cannot authorize a loaded job with no restart policy.
     #[cfg(target_os = "macos")]
     #[test]
     fn system_reboot_is_refused_when_launchd_would_not_restart_the_job() {
@@ -4581,7 +4588,7 @@ mod http {
             "system_reboot_is_refused_when_launchd_would_not_restart_the_job",
             Some("io.freemkv.library"),
             "1",
-            Some(false),
+            Some(include_str!("testdata/launchd/stale-disk-true.txt")),
         ) {
             return;
         }
@@ -4590,6 +4597,63 @@ mod http {
         assert_eq!(code, 409, "{body}");
         assert!(!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
         assert!(!crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+        assert!(LAST_REBOOT.lock().unwrap().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_reboot_loaded_conditional_policy_relaunches() {
+        if !reboot_route_in_child(
+            "system_reboot_loaded_conditional_policy_relaunches",
+            Some("io.freemkv.library"),
+            "1",
+            Some(include_str!("testdata/launchd/conditional-before.txt")),
+        ) {
+            return;
+        }
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
+        assert_eq!(code, 202, "{body}");
+        assert!(crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
+        assert!(crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_reboot_unavailable_runtime_refuses_without_claiming_slot() {
+        if !reboot_route_in_child(
+            "system_reboot_unavailable_runtime_refuses_without_claiming_slot",
+            Some("io.freemkv.library"),
+            "1",
+            None,
+        ) {
+            return;
+        }
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
+        assert_eq!(code, 409, "{body}");
+        assert!(!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+        assert!(LAST_REBOOT.lock().unwrap().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_reboot_absent_runtime_refuses_without_claiming_slot() {
+        if !reboot_route_in_child(
+            "system_reboot_absent_runtime_refuses_without_claiming_slot",
+            Some("io.freemkv.library"),
+            "1",
+            Some("not-loaded"),
+        ) {
+            return;
+        }
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let (code, body) = roundtrip(&cfg, "POST", "/api/system/reboot", None, &[]);
+        assert_eq!(code, 409, "{body}");
+        assert!(!crate::server::REBOOT.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire));
+        assert!(LAST_REBOOT.lock().unwrap().is_none());
     }
 
     // A bare macOS run has no launchd job to start it again, so a reboot would only stop it.
@@ -4622,7 +4686,7 @@ mod http {
             "system_reboot_is_refused_when_the_parent_is_not_launchd",
             Some("io.freemkv.library"),
             "4242",
-            Some(true),
+            Some(include_str!("testdata/launchd/unconditional.txt")),
         ) {
             return;
         }

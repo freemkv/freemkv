@@ -69,9 +69,10 @@ else
   echo 'Library started. Open http://localhost:8080/drives (or your configured PORT).'
 fi
 # Reboot library exits 75: launchd starts the job again only for KeepAlive true or
-# KeepAlive conditions with SuccessfulExit false (the server checks the same rule).
+# KeepAlive conditions with SuccessfulExit false in the loaded job definition.
 keepalive=$(/usr/bin/plutil -extract KeepAlive raw "$plist" 2>/dev/null || true)
 on_failure=$(/usr/bin/plutil -extract KeepAlive.SuccessfulExit raw "$plist" 2>/dev/null || true)
 if [[ $keepalive != true && $on_failure != false ]]; then
-  echo 'Note: this service would not be started again after it exits, so Reboot library is refused. Set KeepAlive to true to allow it.'
+  echo 'Note: the configuration on disk does not restart Library after exit 75. Set KeepAlive to true to configure reboot support.'
+  echo 'After active jobs finish, reload the job (log out/in or bootout/bootstrap) to apply configuration changes. Reboot library checks the loaded policy.'
 fi

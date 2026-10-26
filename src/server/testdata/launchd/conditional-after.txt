@@ -1,0 +1,71 @@
+gui/501/io.freemkv.library = {
+	active count = 1
+	path = /fixtures/io.freemkv.library.plist
+	type = LaunchAgent
+	state = running
+
+	program = /bin/sh
+	arguments = {
+		/bin/sh
+		/fixtures/worker.sh
+	}
+
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => io.freemkv.library
+	}
+
+	domain = gui/501 [100015]
+	asid = 100015
+	minimum runtime = 1
+	exit timeout = 5
+	runs = 2
+	pid = 5557
+	immediate reason = semaphore
+	forks = 16
+	execs = 2
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = 75: EX_TEMPFAIL
+
+	semaphores = {
+		successful exit => 0
+	}
+
+	resource coalition = {
+		ID = 198908
+		type = resource
+		state = active
+		active count = 1
+		name = io.freemkv.library
+	}
+
+	jetsam coalition = {
+		ID = 198909
+		type = jetsam
+		state = active
+		active count = 1
+		name = io.freemkv.library
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	sanitizer flags = 0x0
+
+	properties = runatload | inferred program
+}
