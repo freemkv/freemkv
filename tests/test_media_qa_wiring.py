@@ -118,15 +118,21 @@ class StructureTests(unittest.TestCase):
         self.assertIn('--filters "$filters"', teardown['run'])
         self.assertIn('{Name: "tag:runner-labels", Values: [$l]}', teardown['run'])
         self.assertNotRegex(teardown['run'], r'Name=tag:runner-labels,Values=[^"]', 'shorthand splits the value on commas')
-        launch_run = next(s for s in launch['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
+        launch_run = (ROOT / '.github/scripts/launch-media-runner.sh').read_text()
         self.assertIn('{Key: "runner-labels", Value: $l}', launch_run)
         self.assertIn('launched-by', launch_run)
         self.assertIn('--user-data "file://$userdata"', launch_run)
         self.assertIn('Version=$version', launch_run)
 
     def test_launch_attests_and_leg_uploads_survive_reruns(self):
-        launch_run = next(s for s in self.jobs['launch']['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
+        launch_run = (ROOT / '.github/scripts/launch-media-runner.sh').read_text()
         self.assertIn('launch-$LEG-$ATTEMPT.json', launch_run)
+        steps = self.jobs['launch']['steps']
+        watch = next(i for i, s in enumerate(steps) if s.get('name') == 'Watch the leg')
+        upload = next(i for i, s in enumerate(steps)
+                      if s.get('with', {}).get('name', '').startswith('launch-'))
+        self.assertGreater(upload, watch, 'publish the replacement record after bootstrap recovery')
+        self.assertIn('always()', steps[upload]['if'])
         for job in ('launch', 'cli-matrix'):
             for step in self.jobs[job]['steps']:
                 if 'upload-artifact' in step.get('uses', ''):
@@ -283,7 +289,7 @@ class LaunchWiringTests(unittest.TestCase):
 
     def test_everything_run_instances_gets_comes_from_the_spec(self):
         self.assertIn('media_gate.py launch-spec --leg "$LEG"', self.step('Launch spec')['run'])
-        run = self.step('Launch the ephemeral runner')['run']
+        run = (ROOT / '.github/scripts/launch-media-runner.sh').read_text()
         for want in ('--instance-market-options "$options"', '--block-device-mappings "$bdm"',
                      "jq -c '.markets[]'", '--instance-type "$t"'):
             self.assertIn(want, run)
@@ -536,8 +542,7 @@ esac
         (d / 'bin' / 'aws').write_text(self.FAKE_AWS)
         (d / 'bin' / 'aws').chmod(0o755)
         (d / 'freemkv').symlink_to(ROOT)
-        script = next(s for s in load()['jobs']['launch']['steps']
-                      if s.get('name') == 'Launch the ephemeral runner')['run']
+        script = (ROOT / '.github/scripts/launch-media-runner.sh').read_text()
         env = {'PATH': f'{d / "bin"}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin', 'AWS_LOG': str(d / 'aws.log'),
                'GITHUB_OUTPUT': str(d / 'out'), 'SPEC': json.dumps(spec), 'PARAM': '/freemkv-ci/runner-reg/1-1-linux',
                'REPO': 'freemkv/freemkv', 'RUN_ID': str(RUN_ID), 'ATTEMPT': '1', 'LEG': spec['leg']}
@@ -587,6 +592,76 @@ esac
         self.assertEqual(tags['runner-labels'], f'freemkv-media,linux,run-{RUN_ID}')
         self.assertEqual(tags['Name'], 'freemkv-runner-linux')
         self.assertEqual(att['market'], 'on-demand')
+
+
+@unittest.skipUnless(shutil.which('bash') and shutil.which('jq'), 'bash and jq')
+class BootstrapRetryTests(unittest.TestCase):
+    def watch(self, always_dead=False):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / 'bin').mkdir()
+        (d / 'freemkv').symlink_to(ROOT)
+        scripts = {
+            'gh': r'''#!/bin/bash
+printf '%s\n' "$*" >> "$GH_LOG"
+if [[ "$*" == *'/attempts/'* ]]; then
+  n=$(cat "$STATE_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$STATE_COUNT"
+  if [ -n "${ALWAYS_DEAD:-}" ] || [ "$n" = 1 ]; then echo 'queued none'
+  elif [ "$n" = 2 ]; then echo 'in_progress none'
+  else echo 'completed success'; fi
+elif [[ "$*" == *'registration-token'* ]]; then echo test-registration-token
+else echo '{}'; fi
+''',
+            'aws': r'''#!/bin/bash
+printf '%s\n' "$*" >> "$AWS_LOG"
+case "$2" in
+ describe-instances) echo terminated ;;
+ describe-vpcs) echo vpc-1 ;;
+ describe-subnets) echo subnet-a ;;
+ run-instances) echo i-0123456789abcdef0 ;;
+ *) echo '{}' ;;
+esac
+''',
+            'sleep': '#!/bin/bash\nexit 0\n',
+        }
+        for name, body in scripts.items():
+            p = d / 'bin' / name
+            p.write_text(body)
+            p.chmod(0o755)
+        spec = {'leg': 'windows', 'os': 'windows', 'template': 'freemkv-runner-windows',
+                'version': '3', 'labels': f'freemkv-media,windows,run-{RUN_ID}',
+                'user_data': '.github/runner-templates/user-data-windows.ps1',
+                'block_device_mappings': None, 'types': [],
+                'markets': [{'name': 'template', 'options': None, 'template': True}]}
+        env = dict(os.environ, PATH=str(d / 'bin') + os.pathsep + os.environ['PATH'],
+                   GH_LOG=str(d / 'gh.log'), AWS_LOG=str(d / 'aws.log'), STATE_COUNT=str(d / 'count'),
+                   INSTANCE='i-dead', JOB='cli-matrix (windows)', LEG='windows',
+                   REPO='freemkv/freemkv', RUN_ID=str(RUN_ID), ATTEMPT='1',
+                   SPEC=json.dumps(spec), PARAM='/freemkv-ci/runner-reg/test',
+                   REGISTRATION_AUTH='test-only', RUNNER_TEMP=str(d), GITHUB_OUTPUT=str(d / 'out'))
+        if always_dead:
+            env['ALWAYS_DEAD'] = '1'
+        step = next(s for s in load()['jobs']['launch']['steps'] if s.get('name') == 'Watch the leg')
+        result = subprocess.run(['bash', '-c', step['run']], cwd=d, env=env,
+                                capture_output=True, text=True, timeout=15)
+        return d, result
+
+    def test_dead_bootstrap_retries_without_cancel_and_attests_replacement(self):
+        d, result = self.watch()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('/cancel', (d / 'gh.log').read_text())
+        calls = (d / 'aws.log').read_text()
+        self.assertEqual(calls.count('ec2 run-instances'), 1)
+        self.assertEqual(calls.count('ssm put-parameter'), 1)
+        record = json.loads((d / 'launch-windows-1.json').read_text())
+        self.assertEqual(record['instance_id'], 'i-0123456789abcdef0')
+        self.assertEqual(record['launched_by'], RUN_ID)
+
+    def test_second_dead_bootstrap_fails_instead_of_retrying_forever(self):
+        d, result = self.watch(always_dead=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((d / 'aws.log').read_text().count('ec2 run-instances'), 1)
+        self.assertIn('/cancel', (d / 'gh.log').read_text())
 
 
 class LeakGuardTests(unittest.TestCase):

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 import media_gate as gate
 
@@ -45,17 +46,22 @@ def content_hash(path):
 
 
 def snapshot(root):
-    answers = {}
-    for path in sorted(root.rglob('*')):
-        if not path.is_file() or path.suffix.lower() not in MEDIA | METADATA:
-            continue
+    paths = [path for path in sorted(root.rglob('*'))
+             if path.is_file() and path.suffix.lower() in MEDIA | METADATA]
+
+    def inspect(path):
         answer = {'bytes': path.stat().st_size, 'sha256': sha256(path)}
         if path.suffix.lower() in MEDIA:
             try:
                 answer['content_timing_sha256'] = content_hash(path)
             except ValueError as error:
                 answer['error'] = str(error)
-        answers[path.relative_to(root).as_posix()] = answer
+        return path.relative_to(root).as_posix(), answer
+
+    # The hash method stays identical; independent files can share the runner's
+    # CPU and disk bandwidth instead of serializing every full-feature scan.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        answers = dict(pool.map(inspect, paths))
     if not answers:
         raise ValueError('the media suite produced no artifacts to compare')
     return answers

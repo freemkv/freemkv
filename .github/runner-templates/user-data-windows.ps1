@@ -3,6 +3,7 @@
 # Same two mechanisms as Linux: --ephemeral de-registers, and
 # `Stop-Computer` + InstanceInitiatedShutdownBehavior=terminate deletes.
 Start-Transcript -Path C:\freemkv-runner.log -Append
+$ProgressPreference = "SilentlyContinue"
 
 # Hard deadline so a hung job cannot bill indefinitely.
 Start-Job { Start-Sleep -Seconds 14400; Stop-Computer -Force }
@@ -10,6 +11,11 @@ Start-Job { Start-Sleep -Seconds 14400; Stop-Computer -Force }
 $ErrorActionPreference = "Stop"
 # Every exit path, including a setup error, reaches the finally and powers off.
 try {
+# The base AMI disables this service. Enable diagnostics before installing tools.
+try {
+  Set-Service AmazonSSMAgent -StartupType Automatic
+  Start-Service AmazonSSMAgent
+} catch { Write-Warning "SSM diagnostics unavailable: $($_.Exception.Message)" }
 $tok  = Invoke-RestMethod -Method PUT -Uri "http://169.254.169.254/latest/api/token" -Headers @{"X-aws-ec2-metadata-token-ttl-seconds"="300"}
 $iid  = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/instance-id" -Headers @{"X-aws-ec2-metadata-token"=$tok}
 
@@ -97,15 +103,40 @@ $reg = (aws ssm get-parameter --region $region --name $param --with-decryption -
 aws ssm delete-parameter --region $region --name $param 2>$null
 if (-not $reg) { throw "registration token not found in SSM ($param)" }
 
-$rv = (Invoke-RestMethod -Uri "https://api.github.com/repos/actions/runner/releases/latest").tag_name.TrimStart("v")
+$rv = "2.338.2"
+$runnerSha = "a1f17aa987fc8158bc7521d284912267a0d01b7c2c4684b33c86783b5e8221cc"
 New-Item -ItemType Directory -Force -Path C:\actions-runner | Out-Null
 Set-Location C:\actions-runner
-Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$rv/actions-runner-win-x64-$rv.zip" -OutFile r.zip
+Invoke-WebRequest -UseBasicParsing -TimeoutSec 180 -Uri "https://github.com/actions/runner/releases/download/v$rv/actions-runner-win-x64-$rv.zip" -OutFile r.zip
+if ((Get-FileHash r.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $runnerSha) { throw "runner SHA256 mismatch" }
 Expand-Archive -Path r.zip -DestinationPath . -Force; Remove-Item r.zip
 
 .\config.cmd --url "https://github.com/$repo" --token $reg --name "ephemeral-windows$kind-$iid" --labels $labels --unattended --ephemeral
+if ($LASTEXITCODE -ne 0) { throw "Runner registration failed with exit $LASTEXITCODE" }
 .\run.cmd
+if ($LASTEXITCODE -ne 0) { throw "Runner exited with code $LASTEXITCODE" }
+} catch {
+  Write-Host ("BOOTSTRAP FAILED: " + $_.Exception.Message)
+  throw
 } finally {
+  Stop-Transcript
+  # Keep a redacted transcript when a failed bootstrap destroys its root disk.
+  try {
+    $aws = Get-Command aws -ErrorAction SilentlyContinue
+    if ($aws -and $iid) {
+      $account = (aws sts get-caller-identity --query Account --output text).Trim()
+      foreach ($bootLog in @("C:\freemkv-runner.log", "C:\ProgramData\chocolatey\logs\chocolatey.log")) {
+        if (-not (Test-Path $bootLog)) { continue }
+        $text = Get-Content $bootLog -Raw
+        if ($reg) { $text = $text.Replace($reg, "[redacted]") }
+        $text = $text -replace '(?i)(--token\s+)\S+', '$1[redacted]'
+        $leaf = Split-Path $bootLog -Leaf
+        $redacted = Join-Path $env:TEMP ("redacted-" + $leaf)
+        Set-Content $redacted $text -Encoding UTF8
+        aws s3 cp $redacted "s3://freemkv-build-$account/runner-bootstrap/$iid/$leaf" --region $region --only-show-errors
+      }
+    }
+  } catch { Write-Warning "Could not preserve bootstrap transcript" }
   Stop-Computer -Force
 }
 </powershell>

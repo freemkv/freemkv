@@ -12,6 +12,21 @@ import media_history as history
 
 
 class ComparisonTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg')
+    def test_parallel_snapshot_preserves_exact_sequential_hashes(self):
+        fixture = Path(__file__).with_name('media-fixtures') / 'cfr.mkv'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = {}
+            for name in ('a.mkv', 'b.mkv', 'c.mkv'):
+                path = root / name
+                shutil.copyfile(fixture, path)
+                expected[name] = {'bytes': path.stat().st_size,
+                                  'sha256': history.sha256(path),
+                                  'content_timing_sha256': history.content_hash(path)}
+            self.assertEqual(history.snapshot(root), expected)
+            self.assertEqual(list(history.snapshot(root)), sorted(expected))
+
     def test_build_stamp_changes_do_not_hide_content_or_timing_changes(self):
         old = {'clip.mkv': {'sha256': 'old-container', 'content_timing_sha256': 'same'}}
         new = {'clip.mkv': {'sha256': 'new-container', 'content_timing_sha256': 'same'}}

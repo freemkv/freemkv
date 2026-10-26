@@ -206,6 +206,13 @@ a fresh EC2 media run, even if older media evidence exists. The acceptance and
 full-disc suites must prove the service and decrypted outputs there. An HTTP
 authentication error, wrong key, or malformed response still fails preflight.
 
+A runner that stops before taking its media job is replaced once using the same
+launch path, a fresh registration token, and a refreshed launch record. This
+keeps a transient bootstrap failure from immediately canceling the other leg.
+Windows enables SSM diagnostics, verifies a pinned runner download, and saves a
+redacted bootstrap transcript in the build bucket before shutdown. Media hash
+collection processes four independent files at a time with the same hash method.
+
 **macOS, on full-size media.** EC2 Mac requires a Dedicated Host with a
 24-hour minimum allocation, which is not worth it per qa push. macOS is still
 compared on hosted runners by `hash-matrix.yml`, against synthetic media and a
