@@ -116,6 +116,7 @@ jobs:
           pathlib.Path('revisions.json').write_text(json.dumps(revisions, indent=2) + '\n')
           PY
       - name: Install Ubuntu 24.04 build and package tools
+        timeout-minutes: 5
         env:
           APP: ${{ matrix.app }}
           CROSS: ${{ matrix.cross }}
@@ -125,8 +126,7 @@ jobs:
           if [ "$APP" = true ]; then pkgs+=(libgtk-4-dev libadwaita-1-dev); fi
           # Native musl legs compile C with musl-gcc; the armhf leg strips with the cross binutils.
           if [ "$CROSS" = true ]; then pkgs+=(binutils-arm-linux-gnueabihf); else pkgs+=(musl-tools); fi
-          sudo apt-get update
-          sudo apt-get install -y "${pkgs[@]}"
+          bash freemkv/.github/scripts/install-linux-deps.sh "${pkgs[@]}"
           # cc-rs calls <arch>-linux-musl-gcc for any non-x86_64 musl target, even a
           # native one; musl-tools only ships the musl-gcc wrapper.
           arch=$(uname -m)
