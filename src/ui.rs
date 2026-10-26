@@ -2789,6 +2789,9 @@ impl App {
             Cmd::Open => vec![Effect::PickSource],
             Cmd::SetOutput => vec![Effect::PickOutputDir],
             Cmd::Close => {
+                if self.source.is_empty() && self.probe.is_none() && !self.opening() {
+                    return vec![Effect::Redraw];
+                }
                 self.opening = None;
                 self.close_source();
                 self.say(
