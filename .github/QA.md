@@ -194,6 +194,16 @@ pass by comparing unlike inputs.
 
 ### What this gate does NOT cover
 
+For an explicitly requested Linux/Windows validation, dispatch `qa.yml` with
+`skip_macos: true`. The default remains full hosted coverage. The run's inputs
+record this choice; Linux/Windows tests and the real-media gates still run.
+Dependency installation has a five-minute deadline and bounded network retries.
+
+If the hosted key-service canary fails only at the transport layer, QA requires
+a fresh EC2 media run, even if older media evidence exists. The acceptance and
+full-disc suites must prove the service and decrypted outputs there. An HTTP
+authentication error, wrong key, or malformed response still fails preflight.
+
 **macOS, on full-size media.** EC2 Mac requires a Dedicated Host with a
 24-hour minimum allocation, which is not worth it per qa push. macOS is still
 compared on hosted runners by `hash-matrix.yml`, against synthetic media and a

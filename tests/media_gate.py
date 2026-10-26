@@ -1289,8 +1289,8 @@ def canary(policy, result, ref):
 
 
 def hosted_canary_transport_fallback(policy, result, env):
-    """Only an explicit QA media dispatch may defer a network-only canary to EC2."""
-    if env.get('GITHUB_REF') != 'refs/heads/qa' or env.get('RUN_MEDIA') != 'true':
+    """A hosted transport failure requires fresh key proof on the QA EC2 runners."""
+    if env.get('GITHUB_REF') != 'refs/heads/qa':
         return False
     probes = [p['fixture'] for p in policy['canary'].get('probes', [])]
     if not probes or not isinstance(result, dict) or result.get('ok') is not False:
@@ -1368,17 +1368,17 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_
     ec2_key_proof = hosted_canary_transport_fallback(policy, canary_result, env)
     if ec2_key_proof:
         canary_ok = True
-        warnings.append('hosted key-service canary could not connect; this explicit media run '
+        warnings.append('hosted key-service canary could not connect; this media run '
                         'must prove keys in the EC2 acceptance and full-disc suites')
     if note:
         notices.append(note)
     proven = find_evidence(f, policy, request, perf_check, download=download) if canary_ok else None
-    status, go, reason = decide(proven is not None, env.get('RUN_MEDIA') == 'true',
+    status, go, reason = decide(proven is not None, env.get('RUN_MEDIA') == 'true' or ec2_key_proof,
                                 env.get('SKIP_MEDIA') == 'true' or '[skip-media]' in env.get('HEAD_MESSAGE', ''),
                                 env.get('SKIP_REASON') or ('[skip-media]' if '[skip-media]' in env.get('HEAD_MESSAGE', '') else ''),
                                 canary_ok, env.get('SUPERSEDED') == 'true', canary_why)
     if ec2_key_proof and status == 'run':
-        reason = 'explicit EC2 key proof after hosted canary transport failure'
+        reason = 'fresh EC2 key proof after hosted canary transport failure'
     if proven:
         warnings += proven['warnings']
     evidence = {'schema': SCHEMA, 'fingerprint': f, 'inputs': inputs, 'revisions': revisions,

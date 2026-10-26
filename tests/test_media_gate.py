@@ -1198,6 +1198,18 @@ class PlanTests(unittest.TestCase):
         self.assertFalse([w for w in out['warnings'] if 'canary' in w])
         self.assertTrue(any('qa branch only' in n for n in out['notices']))
 
+    def test_hosted_transport_failure_requires_fresh_ec2_despite_saved_evidence(self):
+        e = Evidence(self)
+        env = {'REVISIONS': json.dumps(SIB_SHA), 'GITHUB_RUN_ID': str(RUN_ID),
+               'GITHUB_REF': 'refs/heads/qa', 'RUN_MEDIA': 'false'}
+        result = {'ok': False, 'probes': [{'fixture': 'uhd.iso', 'ok': False,
+                  'failure_kind': 'transport', 'reason': 'connection timeout'}]}
+        out = mg.plan(self.ws.root, POLICY, env, EXTERNALS, request=e.request,
+                      download=e.download, run=self.run, canary_result=result,
+                      tree=lambda root, k, run: FEATURES)[0]
+        self.assertEqual((out['status'], out['run']), ('run', 'true'))
+        self.assertIn('fresh EC2 key proof', out['reason'])
+
     def test_plan_names_the_legs_to_launch(self):
         self.assertEqual(json.loads(self.plan()['legs']), ['linux', 'windows'])
 
