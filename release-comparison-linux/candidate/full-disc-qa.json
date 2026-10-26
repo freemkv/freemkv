@@ -1,0 +1,5 @@
+{
+  "error": "dir:///home/ubuntu/actions-runner/_work/freemkv/freemkv/release-comparison/linux/candidate/freemkv-bd-disc-lwxn2ozq/direct-folder -> mkv:///home/ubuntu/actions-runner/_work/freemkv/freemkv/release-comparison/linux/candidate/freemkv-bd-disc-lwxn2ozq/folder.mkv exited 1:\nfreemkv 1.8.5\n\nOpening dir:///home/ubuntu/actions-runner/_work/freemkv/freemkv/release-comparison/linux/candidate/freemkv-bd-disc-lwxn2ozq/direct-folder...OK\nError: E9061 Error: this folder holds a 3D disc (BDMV/STREAM/SSIF), which dir:// cannot read yet. Rip from the disc or an ISO instead.\n",
+  "families": {},
+  "schema": 1
+}

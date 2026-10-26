@@ -1,0 +1,95 @@
+{
+  "container_only": {
+    "a1_dvd.mkv": {
+      "baseline": "a95249904e0cc7b4bbda515549a6099defd592cbfbd9d6807bf19d556803fdfd",
+      "candidate": "4e16c1689afdcf0cb58bfb17c36d85e247096ea9908b083b1ef65f888d0f0d8d"
+    },
+    "a1_mpg.mkv": {
+      "baseline": "bc8c723e895bca687341834c637cf2deff8f5db4928d1fcade07617d6312aa1a",
+      "candidate": "5af8bc2e5d8b31d6119c70c9652a8d2b6383678aec89b05a42681b3f2012e27b"
+    },
+    "a3_adts.mkv": {
+      "baseline": "dbc6a9864a521d2a0a115599f4872467f4449e46002c2a1d81a28f4adbb7ce84",
+      "candidate": "f2d859b61954f195c95d408198cdfdfe19ab406758e3bad1a23099014d90a192"
+    },
+    "a4_lpcm.mkv": {
+      "baseline": "24a85dda853c3eedf4fcfb21de14c40d96ff39d25b9907eca559cfe84a1136a9",
+      "candidate": "6c5a1cdb2136691152b2e0c4ab2da37d9894b5d792566a15f9ece23eec0d85f2"
+    },
+    "a6_damaged.mkv": {
+      "baseline": "724dd7d2a43c82e01e61ccef7b1e041c88be16e1788d47940eda514e9fc08772",
+      "candidate": "9b761b703fb98226925474cbf98f07c6bdfc7c1c1bac9641da9c9bccb25610ff"
+    },
+    "a8_adts_pipe.mkv": {
+      "baseline": "b5f478ed5b4fed0fe2ce5f03f65e86e3c16dcd7080ee5f22af6dc5e4026ec5b1",
+      "candidate": "0dcb63928f2b5f5ed01044facf6a207c17947f1175d80949cb5314ec0c3d9ebb"
+    },
+    "a8_lpcm_pipe.mkv": {
+      "baseline": "24a85dda853c3eedf4fcfb21de14c40d96ff39d25b9907eca559cfe84a1136a9",
+      "candidate": "6c5a1cdb2136691152b2e0c4ab2da37d9894b5d792566a15f9ece23eec0d85f2"
+    },
+    "bd.mkv": {
+      "baseline": "3da3f797d78c959664f7177c95b3a1fd40fb94555a9baa1c227122691eb26abc",
+      "candidate": "17a3a59459fa8233ab21a43fad2d39100d77e73d876bb487af003678a3f39978"
+    },
+    "dir_t2.mkv": {
+      "baseline": "a95249904e0cc7b4bbda515549a6099defd592cbfbd9d6807bf19d556803fdfd",
+      "candidate": "4e16c1689afdcf0cb58bfb17c36d85e247096ea9908b083b1ef65f888d0f0d8d"
+    },
+    "dvd.mkv": {
+      "baseline": "11eef771ad1c7746f3e050dce0e9e4d3535ae1173a9a53868f5bf36c903b9d03",
+      "candidate": "efaa089a73a04f4ece64d770f93efdfb3cb69d6af4bffbc00b197217ff218563"
+    },
+    "hddvd.mkv": {
+      "baseline": "e854fb375c0ebc86304b388abacb8bc00e7718691058f6935c60bed433bd4042",
+      "candidate": "30e86c456f852998e9798d3464d4ea657cc8c331867d8fa93e2b528d8a265685"
+    },
+    "iso_t2.mkv": {
+      "baseline": "a95249904e0cc7b4bbda515549a6099defd592cbfbd9d6807bf19d556803fdfd",
+      "candidate": "4e16c1689afdcf0cb58bfb17c36d85e247096ea9908b083b1ef65f888d0f0d8d"
+    },
+    "rt_stdio.mkv": {
+      "baseline": "c4a49816a2385a5d53e8b70d0b9bf67fda5901a4479fbc84bf615cbf194e728e",
+      "candidate": "a24f58eb4588dfca92fc6671813b1dacc2b48c8dfc540f207d81b31ca2e091cb"
+    },
+    "rtsrc.mkv": {
+      "baseline": "c8f4f7158f47ad897754915b11b46d5069cf3f6e27e12131852170bcc1a4e86c",
+      "candidate": "ed94161314b8486c0446e1ca5bf8124662de12e3f247757e48d8e9ce660660e8"
+    },
+    "sel_aeng.mkv": {
+      "baseline": "a95249904e0cc7b4bbda515549a6099defd592cbfbd9d6807bf19d556803fdfd",
+      "candidate": "4e16c1689afdcf0cb58bfb17c36d85e247096ea9908b083b1ef65f888d0f0d8d"
+    },
+    "sel_anone.mkv": {
+      "baseline": "c53c87e4ee399ba06f1b29d2cf8b5a11f3b5d0c5e99ba9dff21f9ac80c2524a6",
+      "candidate": "cd6f9f6ff43f15c5e157dd1278bd52818a322897208bcfc5df9bd8ca5d58b54e"
+    },
+    "sel_multi_t3.mkv": {
+      "baseline": "e63789626ec62737bb374fb2527163a05498f4987e8de3f12f16f00c2874f81f",
+      "candidate": "9ae72906734f13afd01ef80392268d35dfdc707dbd5aea1ae4027db5258f862d"
+    },
+    "sel_multi_t4.mkv": {
+      "baseline": "e259aa2bbaca2fa214bbc1b4c4f0a84f81b17b2b629142c724e91310cc8ee233",
+      "candidate": "6d31e6162f129fc2f587e1441f667e35b2053d768229acfaef823187540c1543"
+    },
+    "sel_seng.mkv": {
+      "baseline": "e9dc0098e235bf0945f4b90f13140146917700666710676849d95986a501512a",
+      "candidate": "2142b8a1bd94f4f2610a1ae3bc0b0308375e4c8bcbe004a224d514920ce29e4c"
+    },
+    "sel_snone.mkv": {
+      "baseline": "c8f4f7158f47ad897754915b11b46d5069cf3f6e27e12131852170bcc1a4e86c",
+      "candidate": "ed94161314b8486c0446e1ca5bf8124662de12e3f247757e48d8e9ce660660e8"
+    },
+    "sel_sspa.mkv": {
+      "baseline": "9d2fc67a01ea1400c78b61f65952210b7b9b65ca72bd2715701fe97fa33011b8",
+      "candidate": "94c3e1ffdaa557aadbbcff47f1a9a5bbb5950a4c9c4b97cd58ec6a56dbac1d01"
+    },
+    "uhd.mkv": {
+      "baseline": "cc1d1a09cf6e794e6618b69a5b798e21f7c461b3823b7d5e139fe5020b329c65",
+      "candidate": "74925ba5e1a9cfcce35981a6c602a0cf2cb188a019c6f4f1bf2f9adc0245fbce"
+    }
+  },
+  "differences": {},
+  "stale_exceptions": [],
+  "unexpected": []
+}
