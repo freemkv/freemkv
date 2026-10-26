@@ -943,6 +943,21 @@ jobs:
           echo "── hashes recorded on ${{ matrix.os }} ──"
           cat "cli-${{ matrix.os }}.txt"
           exit $rc
+      - name: Verify decrypted Blu-ray and UHD ISO/folder outputs
+        shell: bash
+        env:
+          FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
+          FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
+        run: |
+          set -euo pipefail
+          BIN="$PWD/freemkv/target/${{ matrix.target }}/release/freemkv"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            BIN="$(cygpath -m "$PWD")/freemkv/target/${{ matrix.target }}/release/freemkv.exe"
+          fi
+          "$FMKV_PYTHON" freemkv/tests/full_disc_qa.py \
+            --binary "$BIN" --bd-iso "$ISO_DIR/bd.iso" --uhd-iso "$ISO_DIR/uhd.iso" \
+            --keydb "$KEYDB_PATH" --key-url "$FMKV_KEY_URL" --key-auth "$FMKV_KEY_AUTH" \
+            --out "release-comparison/${{ matrix.os }}/candidate"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
