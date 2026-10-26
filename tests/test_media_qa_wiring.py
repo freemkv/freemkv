@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -27,6 +28,42 @@ def load(path=QA):
 
 def steps_text(job):
     return '\n'.join(json.dumps(s) for s in job.get('steps', []))
+
+
+@unittest.skipUnless(shutil.which('bash') and shutil.which('sed'), 'bash and sed')
+class DependencyInstallerTests(unittest.TestCase):
+    def test_github_mirror_list_and_direct_sources_use_https_archive(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            apt = root / 'apt'
+            sources = apt / 'sources.list.d'
+            sources.mkdir(parents=True)
+            mirror = apt / 'apt-mirrors.txt'
+            mirror.write_text('http://azure.archive.ubuntu.com/ubuntu\n')
+            (sources / 'ubuntu.sources').write_text(
+                'URIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble\n')
+            direct = apt / 'sources.list'
+            direct.write_text('deb http://azure.archive.ubuntu.com/ubuntu noble main\n')
+            commands = root / 'bin'
+            commands.mkdir()
+            for name, body in {
+                'sudo': '#!/usr/bin/env bash\nexec "$@"\n',
+                'apt-get': '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$APT_TEST_LOG"\n',
+            }.items():
+                path = commands / name
+                path.write_text(body)
+                path.chmod(0o755)
+            log = root / 'commands.log'
+            env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ['PATH'],
+                       FMKV_APT_CONFIG_DIR=str(apt), APT_TEST_LOG=str(log))
+            subprocess.run(['bash', str(ROOT / '.github/scripts/install-linux-deps.sh'),
+                            'libgtk-4-dev', 'libadwaita-1-dev'], env=env, check=True)
+            self.assertEqual(mirror.read_text(), 'https://archive.ubuntu.com/ubuntu\n')
+            self.assertIn('deb https://archive.ubuntu.com/ubuntu noble main', direct.read_text())
+            calls = log.read_text().splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertIn('Acquire::Retries=2', calls[0])
+            self.assertIn('install --no-install-recommends -y libgtk-4-dev libadwaita-1-dev', calls[1])
 
 
 @unittest.skipUnless(shutil.which('python3'), 'python3')
