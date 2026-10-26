@@ -283,6 +283,12 @@ fn prune_removes_iso_and_mapfile_when_keep_iso_false() {
     std::fs::write(&iso, b"iso").unwrap();
     std::fs::write(&map, b"map").unwrap();
 
+    staging::try_write_state(
+        tmp.path(),
+        &staging::DiscState::new(staging::StagingState::Done),
+    )
+    .unwrap();
+
     prune_intermediate_iso(
         "sr0", &iso, &map, /* max_retries */ 1, /* keep_iso */ false,
     );
