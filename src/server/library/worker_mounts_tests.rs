@@ -67,11 +67,7 @@ fn queued_tv_job(lib: &Library, cfg: &Config, d: &Dirs) -> Job {
     let job = lib.queue.claim_next().unwrap();
     let plan = tv_plan();
     let (_, targets) = tv_destinations(cfg, &plan).unwrap();
-    assert!(
-        lib.queue
-            .set_plan_targets(job.id, plan, Some(targets))
-            .unwrap()
-    );
+    assert!(freeze_fixture_plan(lib, job.id, plan, Some(targets)).unwrap());
     lib.queue.requeue(job.id, JobNote::Interrupted);
     lib.queue.snapshot().jobs[0].clone()
 }

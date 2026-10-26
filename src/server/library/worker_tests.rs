@@ -48,7 +48,17 @@ fn presentation_preference_single_output_is_frozen_in_queue() {
         &job.target,
     )
     .unwrap();
-    persist_auto_plan(&lib, &cfg, &mut job, plan).unwrap();
+    std::fs::write(&job.iso, b"source").unwrap();
+    let stamp = planning_source_stamp(&job.iso).unwrap();
+    persist_auto_plan(
+        &lib,
+        &cfg,
+        &mut job,
+        plan,
+        stamp,
+        &crate::selection_test_fixtures::variant_titles(),
+    )
+    .unwrap();
     assert_eq!(
         job.plan
             .as_ref()
@@ -661,6 +671,8 @@ fn job_for(dir: &Path, id: u64) -> Job {
         iso: dir.join("missing.iso"),
         target: dir.join("A/A.mkv"),
         plan: None,
+        source_stamp: None,
+        title_identities: Default::default(),
         outputs: Vec::new(),
         owned: None,
         retire: false,
@@ -1730,4 +1742,85 @@ fn kept_files_are_adopted_once_an_unreadable_queue_file_loads() {
         "the kept file is adopted once the queue loads"
     );
     assert_eq!(jobs[0].staged.as_deref(), Some(kept.as_path()));
+}
+
+#[path = "worker_source_tests.rs"]
+mod source_tests;
+
+// Existing lifecycle tests use synthetic scans and explicit frozen provenance, so
+// their injected executors never need real optical media.
+fn fixture_titles(count: usize) -> Vec<libfreemkv::DiscTitle> {
+    let mut titles = crate::selection_test_fixtures::variant_titles();
+    while titles.len() < count {
+        let mut title = libfreemkv::DiscTitle::empty();
+        title.playlist_id = titles.len() as u16 + 10;
+        title.playlist = format!("fixture-{}", titles.len());
+        titles.push(title);
+    }
+    titles.truncate(count);
+    titles
+}
+
+fn freeze_fixture_plan(
+    lib: &Library,
+    id: u64,
+    plan: crate::server::planner::RemuxPlan,
+    targets: Option<Vec<std::path::PathBuf>>,
+) -> std::io::Result<bool> {
+    let job = lib
+        .queue
+        .snapshot()
+        .jobs
+        .into_iter()
+        .find(|job| job.id == id)
+        .unwrap();
+    assert!(job.iso.starts_with(lib.config_dir.parent().unwrap()));
+    if !job.iso.exists() {
+        std::fs::create_dir_all(job.iso.parent().unwrap())?;
+        std::fs::write(&job.iso, b"synthetic ISO source")?;
+    }
+    let titles = fixture_titles(
+        plan.outputs
+            .iter()
+            .map(|o| o.title_index + 1)
+            .max()
+            .unwrap_or(0),
+    );
+    let identities = plan
+        .outputs
+        .iter()
+        .map(|output| {
+            (
+                output.id.clone(),
+                crate::title_identity::TitleIdentity::of(&titles[output.title_index]),
+            )
+        })
+        .collect();
+    lib.queue.freeze_plan(
+        id,
+        plan,
+        targets,
+        super::super::links::iso_stamp(&job.iso),
+        identities,
+    )
+}
+
+fn remux_fixture_with(
+    job: &Job,
+    plan: &crate::server::planner::RemuxPlan,
+    cfg: &Config,
+    sink: &JobSink<'_>,
+    execute: impl FnMut(
+        &freemkv_engine::RemuxJob,
+        Option<&Path>,
+        usize,
+    ) -> std::io::Result<Option<String>>,
+) -> Ending {
+    let count = plan
+        .outputs
+        .iter()
+        .map(|o| o.title_index + 1)
+        .max()
+        .unwrap_or(0);
+    remux_planned_with_scan(job, plan, cfg, sink, |_| Ok(fixture_titles(count)), execute)
 }

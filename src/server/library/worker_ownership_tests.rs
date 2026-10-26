@@ -38,7 +38,7 @@ fn planned_job(lib: &Library, iso: &Path, target: &Path, replace: bool, retire: 
     }
     let job = lib.queue.claim_next().unwrap();
     let name = target.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(lib.queue.set_plan(job.id, one_output(&name)));
+    assert!(freeze_fixture_plan(lib, job.id, one_output(&name), None).unwrap());
     lib.queue
         .snapshot()
         .jobs
@@ -52,7 +52,7 @@ fn run(lib: &Library, dirs: &Dirs, job: &Job) -> (Ending, usize) {
     let mut sink = test_sink(lib, &arbiter);
     sink.job_id = job.id;
     let mut calls = 0;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         job,
         job.plan.as_ref().unwrap(),
         &config_of(dirs),

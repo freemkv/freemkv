@@ -23,7 +23,7 @@ fn planned(lib: &Library, dirs: &Dirs, replace: bool) -> Job {
         replace,
     }]);
     let job = lib.queue.claim_next().unwrap();
-    assert!(lib.queue.set_plan(job.id, one_output()));
+    assert!(freeze_fixture_plan(lib, job.id, one_output(), None).unwrap());
     lib.queue.snapshot().jobs[0].clone()
 }
 
@@ -63,7 +63,7 @@ fn links_that_cannot_be_saved_after_landing_say_the_file_is_in_place() {
         library_dir: dirs.library.to_string_lossy().into_owned(),
         ..Config::default()
     };
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &cfg,
@@ -138,6 +138,7 @@ fn a_change_match_console_names_its_iso_and_planned_files_not_its_queue_key() {
             state: OutputState::Pending,
             staged: None,
             landing: None,
+            source_unproven: false,
         })
         .collect();
     let planned = command_line(&job);
@@ -175,6 +176,7 @@ fn a_kept_file_console_names_its_iso_and_output_not_the_queue_key() {
             state: OutputState::Pending,
             staged: (e == 2).then(|| kept.clone()),
             landing: None,
+            source_unproven: false,
         })
         .collect();
     let planned = kept_line(&job, &kept);

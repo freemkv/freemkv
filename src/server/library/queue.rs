@@ -65,6 +65,10 @@ pub struct OutputProgress {
     /// The new file as it was about to land: found at the target, it landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<crate::server::util::Stamp>,
+    /// The retained artifact's source could not be proven. Copying it never grants
+    /// ownership or permission to retire the source's old files.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_unproven: bool,
 }
 
 /// One queued remux.
@@ -78,6 +82,13 @@ pub struct Job {
     /// movie job shape and is deliberately retained for schema compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<RemuxPlan>,
+    /// Source proof captured around the scan that froze this plan. Absent legacy proof
+    /// cannot be reconstructed by scanning the file at this pathname today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_stamp: Option<crate::server::util::Stamp>,
+    /// Selected title identity keyed by frozen output ID; rescans may change indices only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub title_identities: BTreeMap<String, crate::title_identity::TitleIdentity>,
     /// Mutable execution state kept separately from the immutable plan.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputProgress>,
@@ -752,19 +763,22 @@ impl Queue {
                 });
                 Some((
                     plan,
+                    j.source_stamp,
+                    j.title_identities.clone(),
                     vec![OutputProgress {
                         id: output.id.clone(),
                         target: item.target.clone(),
                         state: OutputState::Pending,
                         staged: None,
                         landing,
+                        source_unproven: output.source_unproven,
                     }],
                     owned,
                 ))
             });
-            let (plan, outputs, owned) = match prior {
-                Some((p, o, owned)) => (Some(p), o, owned),
-                None => (None, Vec::new(), None),
+            let (plan, source_stamp, title_identities, outputs, owned) = match prior {
+                Some((p, stamp, identities, o, owned)) => (Some(p), stamp, identities, o, owned),
+                None => (None, None, BTreeMap::new(), Vec::new(), None),
             };
             replaced.insert(item.target.clone());
             f.next_id += 1;
@@ -774,6 +788,8 @@ impl Queue {
                 iso: item.iso,
                 target: item.target,
                 plan,
+                source_stamp,
+                title_identities,
                 outputs,
                 owned,
                 retire,
@@ -846,11 +862,24 @@ impl Queue {
     /// Attach the immutable plan produced for a claimed job before its first output, so
     /// a restart resumes the same source/output decisions instead of planning again.
     /// `None` targets derive from `job.target` (its folder for several outputs).
+    #[cfg(test)]
     pub(crate) fn set_plan_targets(
         &self,
         id: u64,
         plan: RemuxPlan,
         targets: Option<Vec<PathBuf>>,
+    ) -> std::io::Result<bool> {
+        self.freeze_plan(id, plan, targets, None, BTreeMap::new())
+    }
+
+    /// Freeze decisions and the proof from their planning scan in one durable transaction.
+    pub(crate) fn freeze_plan(
+        &self,
+        id: u64,
+        plan: RemuxPlan,
+        targets: Option<Vec<PathBuf>>,
+        source_stamp: Option<crate::server::util::Stamp>,
+        title_identities: BTreeMap<String, crate::title_identity::TitleIdentity>,
     ) -> std::io::Result<bool> {
         self.mutate_durable(|f| {
             let Some(job) = f.jobs.iter_mut().find(|j| j.id == id) else {
@@ -885,9 +914,12 @@ impl Queue {
                     state: OutputState::Pending,
                     staged: None,
                     landing: None,
+                    source_unproven: false,
                 })
                 .collect();
             job.plan = Some(plan);
+            job.source_stamp = source_stamp;
+            job.title_identities = title_identities;
             true
         })
     }
@@ -970,6 +1002,33 @@ impl Queue {
                 output.landing = Some(landing);
             }
         })
+    }
+
+    /// Register a source-refused verified pair and its uncertainty together. On failure
+    /// the pair remains an orphan; adoption must not infer proof from the ISO pathname.
+    pub(crate) fn retain_unproven_output(
+        &self,
+        id: u64,
+        output_id: &str,
+        staged: StagedFile,
+    ) -> std::io::Result<()> {
+        let saved = self.mutate_durable(|f| {
+            let Some(job) = f.jobs.iter_mut().find(|j| j.id == id) else {
+                return false;
+            };
+            let Some(output) = job.outputs.iter_mut().find(|o| o.id == output_id) else {
+                return false;
+            };
+            output.source_unproven = true;
+            output.staged = Some(staged.path.clone());
+            output.state = OutputState::Failed;
+            job.set_staged(Some(staged));
+            true
+        })?;
+        if !saved {
+            return Err(std::io::Error::other("remux output no longer exists"));
+        }
+        Ok(())
     }
 
     pub fn set_output_staged(&self, id: u64, output_id: &str, staged: Option<PathBuf>) {
@@ -1170,6 +1229,11 @@ impl Queue {
                 }) {
                     if j.state != JobState::Running {
                         let output = &mut j.outputs[at];
+                        // A matching pathname is not historic source proof. Only a pair
+                        // already durably associated with this output keeps its authority.
+                        if output.staged.as_ref() != Some(&staged.path) {
+                            output.source_unproven = true;
+                        }
                         output.staged = Some(staged.path.clone());
                         output.state = OutputState::Pending;
                         j.state = JobState::Queued;
@@ -1204,6 +1268,8 @@ impl Queue {
                     iso: item.iso,
                     target: item.target,
                     plan: None,
+                    source_stamp: None,
+                    title_identities: BTreeMap::new(),
                     outputs: Vec::new(),
                     owned: None,
                     retire: false,

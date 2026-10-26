@@ -1230,7 +1230,8 @@ fn row_reenqueue_transfers_only_selected_failed_output_and_ownership_after_reope
             target: targets[1].clone(),
             state: OutputState::Pending,
             staged: None,
-            landing: old.outputs[1].landing
+            landing: old.outputs[1].landing,
+            source_unproven: old.outputs[1].source_unproven,
         }]
     );
     assert_eq!(

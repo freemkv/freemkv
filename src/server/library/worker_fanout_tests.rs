@@ -9,7 +9,7 @@ fn presentation_preference_frozen_movie_and_single_tv_execute_audio_all_after_pr
         let (_t, lib, dirs) = library_with(&["B"]);
         lib.queue.add(vec![NewJob {
             title: "Feature".into(),
-            iso: "/i/feature.iso".into(),
+            iso: dirs.isos.as_ref().unwrap().join("feature.iso"),
             target: dirs.library.join("Feature/Feature.mkv"),
             replace: false,
         }]);
@@ -29,7 +29,17 @@ fn presentation_preference_frozen_movie_and_single_tv_execute_audio_all_after_pr
             &job.target,
         )
         .unwrap();
-        persist_auto_plan(&lib, &cfg, &mut job, plan).unwrap();
+        std::fs::write(&job.iso, b"source").unwrap();
+        let stamp = planning_source_stamp(&job.iso).unwrap();
+        persist_auto_plan(
+            &lib,
+            &cfg,
+            &mut job,
+            plan,
+            stamp,
+            &crate::selection_test_fixtures::variant_titles(),
+        )
+        .unwrap();
         // A changed preference must not reinterpret an already-frozen job.
         cfg.presentation_language = "en".into();
         maybe_attach_tv_plan(&lib, &cfg, &mut job).unwrap();
@@ -37,7 +47,7 @@ fn presentation_preference_frozen_movie_and_single_tv_execute_audio_all_after_pr
         let mut sink = test_sink(&lib, &arbiter);
         sink.job_id = job.id;
         let mut calls = 0;
-        let ending = remux_planned_with(
+        let ending = remux_fixture_with(
             &job,
             job.plan.as_ref().unwrap(),
             &cfg,
@@ -67,7 +77,7 @@ fn planned_output_count_mismatch_is_rejected_before_execution() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(&job, &plan, &config(&dirs), &sink, |_, _, _| {
+    let ending = remux_fixture_with(&job, &plan, &config(&dirs), &sink, |_, _, _| {
         panic!("mismatched plan must not execute")
     });
     assert!(matches!(ending, Ending::Failed(_)));
@@ -76,7 +86,7 @@ fn planned_output_count_mismatch_is_rejected_before_execution() {
 fn planned(lib: &Library, dirs: &Dirs) -> Job {
     lib.queue.add(vec![NewJob {
         title: "Show".into(),
-        iso: "/i/A.iso".into(),
+        iso: dirs.isos.as_ref().unwrap().join("A.iso"),
         target: dirs.library.join("Show/Show.mkv"),
         replace: false,
     }]);
@@ -93,7 +103,7 @@ fn planned(lib: &Library, dirs: &Dirs) -> Job {
             })
             .collect(),
     };
-    assert!(lib.queue.set_plan(job.id, plan));
+    assert!(freeze_fixture_plan(lib, job.id, plan, None).unwrap());
     lib.queue.snapshot().jobs[0].clone()
 }
 
@@ -143,11 +153,7 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
         replace: false,
     }]);
     let claimed = lib.queue.claim_next().unwrap();
-    assert!(
-        lib.queue
-            .set_plan_targets(claimed.id, plan, Some(targets.clone()))
-            .unwrap()
-    );
+    assert!(freeze_fixture_plan(&lib, claimed.id, plan, Some(targets.clone())).unwrap());
     let job = lib.queue.snapshot().jobs[0].clone();
     for target in &targets {
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -173,7 +179,7 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(&job, job.plan.as_ref().unwrap(), &cfg, &sink, |r, _, _| {
+    let ending = remux_fixture_with(&job, job.plan.as_ref().unwrap(), &cfg, &sink, |r, _, _| {
         std::fs::write(&r.target, movie()).unwrap();
         Ok(Some(current_stamp()))
     });
@@ -250,7 +256,7 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
     assert_eq!(redo.plan.as_ref().unwrap().outputs[0].title_index, 1);
     let mut redo_sink = test_sink(&lib, &arbiter);
     redo_sink.job_id = redo.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &redo,
         redo.plan.as_ref().unwrap(),
         &cfg,
@@ -268,7 +274,7 @@ fn tv_outputs_use_mover_names_and_tv_root_and_survive_rescan() {
         tv_dir: "elsewhere".into(),
         ..cfg
     };
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &changed,
@@ -288,7 +294,7 @@ fn fanout_delivers_indexes_links_and_audits_each_output_and_protects_active_part
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
     let mut calls = Vec::new();
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -339,7 +345,7 @@ fn fanout_restart_adopts_retained_episode_once_and_real_delivery_needs_no_iso() 
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
     let stage = t.path().join("stage");
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -356,6 +362,11 @@ fn fanout_restart_adopts_retained_episode_once_and_real_delivery_needs_no_iso() 
                 &movie(),
                 crate::server::util::epoch_secs(),
             );
+            let sidecar = kept.with_extension("json");
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+            record["iso"] = serde_json::to_value(&job.iso).unwrap();
+            std::fs::write(sidecar, serde_json::to_vec(&record).unwrap()).unwrap();
             Err(kept_error(&kept, std::io::Error::other("delivery failed")))
         },
     );
@@ -364,6 +375,7 @@ fn fanout_restart_adopts_retained_episode_once_and_real_delivery_needs_no_iso() 
     assert_eq!(lib.queue.staged_total().0, 1);
     let first = job.output_targets()[0].clone();
     let stamp = std::fs::metadata(&first).unwrap().modified().unwrap();
+    std::fs::remove_file(&job.iso).unwrap();
     drop(sink);
     drop(lib);
     let lib = Library::open(&t.path().join("config"), &t.path().join("logs"));
@@ -410,7 +422,7 @@ fn fanout_preemption_requeues_without_repeating_completed_episode() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -431,7 +443,7 @@ fn fanout_preemption_requeues_without_repeating_completed_episode() {
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = retry.id;
     let mut called = Vec::new();
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &retry,
         retry.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -453,7 +465,7 @@ fn fanout_stop_preserves_retained_episode_for_retry_or_discard() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -519,7 +531,7 @@ fn planned_and_legacy_targets_both_obey_current_library_root() {
         library_dir: t.path().join("new-library").to_string_lossy().into_owned(),
         ..Config::default()
     };
-    let ending = remux_planned_with(&job, job.plan.as_ref().unwrap(), &cfg, &sink, |_, _, _| {
+    let ending = remux_fixture_with(&job, job.plan.as_ref().unwrap(), &cfg, &sink, |_, _, _| {
         panic!("must not execute")
     });
     assert!(matches!(ending, Ending::Failed(_)));
@@ -555,7 +567,7 @@ fn planned_target_cannot_escape_through_symlink() {
     std::fs::create_dir(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, job.target.parent().unwrap()).unwrap();
     let arbiter = Arbiter::new();
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -590,7 +602,7 @@ fn planned_outputs_never_inherit_job_replace_for_unowned_files() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -618,7 +630,7 @@ fn planned_output_linked_to_this_source_may_be_replaced() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -640,7 +652,7 @@ fn unlinked_file_at_a_new_target_fails_already_exists_before_any_output() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -668,7 +680,7 @@ fn a_file_that_appears_at_a_target_after_capture_stops_that_output_only() {
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
     let mut calls = 0;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
@@ -699,7 +711,7 @@ fn a_linked_target_changed_after_capture_is_not_overwritten() {
     let arbiter = Arbiter::new();
     let mut sink = test_sink(&lib, &arbiter);
     sink.job_id = job.id;
-    let ending = remux_planned_with(
+    let ending = remux_fixture_with(
         &job,
         job.plan.as_ref().unwrap(),
         &config(&dirs),
