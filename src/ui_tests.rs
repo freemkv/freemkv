@@ -3902,3 +3902,107 @@ fn home_drive_choice_obeys_explicit_source_and_unique_loaded_drive() {
         "a late discovery cannot replace an explicit open"
     );
 }
+
+#[test]
+fn home_preferred_drive_requires_unique_hardware_label() {
+    let mut opened = Vec::new();
+    for other_presence in [Some(false), None, Some(true)] {
+        let mut app = App::new();
+        app.settings.startup_mode = "Open preferred drive".into();
+        app.settings.preferred_drive = "Same hardware".into();
+        let drives = vec![
+            HomeDrive {
+                device: "loaded".into(),
+                label: "Same hardware".into(),
+                present: Some(true),
+            },
+            HomeDrive {
+                device: "other".into(),
+                label: "Same hardware".into(),
+                present: other_presence,
+            },
+        ];
+        app.apply_home_drives(drives.clone(), true);
+        opened.push(app.probe.as_ref().map(|p| p.path.clone()));
+        assert_eq!(app.home_drives, drives);
+        assert_eq!(app.disc_present, Some(true));
+    }
+    assert_eq!(
+        opened,
+        vec![None, None, None],
+        "duplicate hardware labels must need a choice with false, unknown, or true presence"
+    );
+}
+
+#[test]
+fn home_preferred_drive_opens_only_the_unique_loaded_match() {
+    for (preferred_presence, preferred_label, auto_open, opens) in [
+        (Some(true), "Preferred", true, true),
+        (Some(false), "Preferred", true, false),
+        (None, "Preferred", true, false),
+        (Some(true), "Missing", true, false),
+        (Some(true), "Preferred", false, false),
+    ] {
+        let mut app = App::new();
+        app.settings.startup_mode = "Open preferred drive".into();
+        app.settings.preferred_drive = preferred_label.into();
+        let drives = vec![
+            HomeDrive {
+                device: "preferred".into(),
+                label: "Preferred".into(),
+                present: preferred_presence,
+            },
+            HomeDrive {
+                device: "empty".into(),
+                label: "Unrelated empty".into(),
+                present: Some(false),
+            },
+            HomeDrive {
+                device: "unknown".into(),
+                label: "Unrelated unknown".into(),
+                present: None,
+            },
+            HomeDrive {
+                device: "loaded".into(),
+                label: "Unrelated loaded".into(),
+                present: Some(true),
+            },
+        ];
+        app.apply_home_drives(drives.clone(), auto_open);
+        assert_eq!(
+            app.probe.as_ref().map(|p| p.path.as_str()),
+            opens.then_some("disc://preferred"),
+            "presence {preferred_presence:?}, label {preferred_label}, auto_open {auto_open}"
+        );
+        assert_eq!(app.home_drives, drives);
+    }
+}
+
+#[test]
+fn home_any_loaded_disc_ignores_duplicate_hardware_labels() {
+    for other_presence in [Some(false), None] {
+        for auto_open in [false, true] {
+            let mut app = App::new();
+            app.settings.startup_mode = "Open any loaded disc".into();
+            app.apply_home_drives(
+                vec![
+                    HomeDrive {
+                        device: "loaded".into(),
+                        label: "Same hardware".into(),
+                        present: Some(true),
+                    },
+                    HomeDrive {
+                        device: "other".into(),
+                        label: "Same hardware".into(),
+                        present: other_presence,
+                    },
+                ],
+                auto_open,
+            );
+            assert_eq!(
+                app.probe.as_ref().map(|p| p.path.as_str()),
+                auto_open.then_some("disc://loaded")
+            );
+        }
+    }
+}
