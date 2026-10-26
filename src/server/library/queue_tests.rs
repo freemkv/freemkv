@@ -1046,3 +1046,151 @@ fn a_partial_lock_that_cannot_be_opened_is_logged() {
     let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
     assert!(out.contains("its lock could not be taken"), "{out}");
 }
+
+fn failed_landing_donor(q: &Queue, dir: &Path) -> (Job, Vec<PathBuf>) {
+    let (job, targets) = planned_two(q, dir);
+    let mut owned = Vec::new();
+    for (output, target) in job.outputs.iter().zip(&targets) {
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, output.id.as_bytes()).unwrap();
+        let stamp = crate::server::util::Stamp::read(target).unwrap();
+        owned.push(super::super::owned::Owned {
+            path: target.clone(),
+            stamp,
+        });
+        q.set_output_landing(job.id, &output.id, stamp).unwrap();
+        q.finish_output(job.id, &output.id, OutputState::Failed);
+    }
+    owned.push(super::super::owned::Owned {
+        path: dir.join("obsolete.mkv"),
+        stamp: owned[0].stamp,
+    });
+    q.set_owned(job.id, owned).unwrap();
+    q.finish(
+        job.id,
+        JobResult::Failed {
+            code: None,
+            message: "links failed".into(),
+            finished_at: 1,
+        },
+    );
+    q.mutate(|f| f.jobs[0].retire = true);
+    (q.snapshot().jobs[0].clone(), targets)
+}
+
+#[test]
+fn row_reenqueue_transfers_only_selected_failed_output_and_ownership_after_reopen() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (old, targets) = failed_landing_donor(&q, t.path());
+    assert_eq!(
+        q.add(vec![NewJob {
+            title: "second".into(),
+            iso: old.iso.clone(),
+            target: targets[1].clone(),
+            replace: true
+        }]),
+        1
+    );
+    drop(q);
+    let q = Queue::open(t.path());
+    let new = q.claim_next().unwrap();
+    assert_ne!(new.id, old.id);
+    assert_eq!(
+        new.plan.as_ref().unwrap().outputs,
+        vec![old.plan.as_ref().unwrap().outputs[1].clone()]
+    );
+    assert_eq!(
+        new.outputs,
+        vec![OutputProgress {
+            id: old.outputs[1].id.clone(),
+            target: targets[1].clone(),
+            state: OutputState::Pending,
+            staged: None,
+            landing: old.outputs[1].landing
+        }]
+    );
+    assert_eq!(
+        new.owned,
+        Some(vec![old.owned.as_ref().unwrap()[1].clone()])
+    );
+    assert!(!new.retire);
+    assert_eq!(new.attempts, 0);
+}
+
+#[test]
+fn row_reenqueue_does_not_transfer_ineligible_or_misaligned_landing() {
+    for case in [
+        "source",
+        "target",
+        "no-landing",
+        "done",
+        "output-stage",
+        "job-stage",
+        "missing-id",
+        "duplicate-id",
+        "fresh",
+    ] {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        let (old, targets) = failed_landing_donor(&q, t.path());
+        let mut item = NewJob {
+            title: "second".into(),
+            iso: old.iso.clone(),
+            target: targets[1].clone(),
+            replace: true,
+        };
+        match case {
+            "source" => item.iso = t.path().join("other.iso"),
+            "target" => item.target = t.path().join("other.mkv"),
+            "no-landing" => q.mutate(|f| f.jobs[0].outputs[1].landing = None),
+            "done" => q.mutate(|f| f.jobs[0].state = JobState::Done),
+            "output-stage" => {
+                q.set_output_staged(old.id, &old.outputs[1].id, Some(t.path().join("kept.mkv")))
+            }
+            "job-stage" => q.mutate(|f| f.jobs[0].staged = Some(t.path().join("kept.mkv"))),
+            "missing-id" => {
+                q.mutate(|f| f.jobs[0].plan.as_mut().unwrap().outputs[1].id = "unrelated".into())
+            }
+            "duplicate-id" => q.mutate(|f| {
+                let plan = f.jobs[0].plan.as_mut().unwrap();
+                plan.outputs.push(plan.outputs[1].clone());
+            }),
+            "fresh" => {}
+            _ => unreachable!(),
+        }
+        let count = if case == "fresh" {
+            q.add_fresh(vec![item], false)
+        } else {
+            q.add(vec![item])
+        };
+        if case == "job-stage" {
+            assert_eq!(count, 0);
+            continue;
+        }
+        assert_eq!(count, 1, "{case}");
+        let new = q.snapshot().jobs.last().unwrap().clone();
+        assert!(new.outputs.iter().all(|o| o.landing.is_none()), "{case}");
+        assert!(new.owned.is_none(), "{case}");
+    }
+}
+
+#[test]
+fn row_reenqueue_keeps_an_empty_baseline_when_donor_has_no_captured_ownership() {
+    let t = tempfile::tempdir().unwrap();
+    let q = Queue::open(t.path());
+    let (old, targets) = failed_landing_donor(&q, t.path());
+    q.mutate(|f| f.jobs[0].owned = None);
+    assert_eq!(
+        q.add(vec![NewJob {
+            title: "second".into(),
+            iso: old.iso,
+            target: targets[1].clone(),
+            replace: true
+        }]),
+        1
+    );
+    drop(q);
+    let q = Queue::open(t.path());
+    assert_eq!(q.claim_next().unwrap().owned, Some(Vec::new()));
+}

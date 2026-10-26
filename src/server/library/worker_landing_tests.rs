@@ -320,3 +320,234 @@ fn a_staged_landing_that_cannot_be_recorded_keeps_the_verified_file() {
     let staged = lib.queue.snapshot().jobs[0].outputs[0].staged.clone();
     assert_eq!(staged.as_deref(), Some(kept[0].staged.as_path()));
 }
+
+// Model the persisted Failed state left by a links-only failure, independently of
+// the worker change that retains landing until the link is durable.
+fn failed_row_landing(
+    originally_owned: bool,
+    renamed: bool,
+) -> (tempfile::TempDir, Library, Dirs, Job, PathBuf) {
+    let (t, lib, dirs, job, target) = replacing();
+    std::fs::remove_file(t.path().join("config").join(links::LINKS_FILE)).unwrap();
+    let owned = if originally_owned {
+        vec![Owned {
+            path: target.clone(),
+            stamp: crate::server::util::Stamp::read(&target).unwrap(),
+        }]
+    } else {
+        std::fs::remove_file(&target).unwrap();
+        Vec::new()
+    };
+    lib.queue.set_owned(job.id, owned).unwrap();
+    let partial = super::super::super::queue::partial_path(&target);
+    std::fs::write(&partial, movie()).unwrap();
+    lib.queue
+        .set_output_landing(
+            job.id,
+            "main",
+            crate::server::util::Stamp::read(&partial).unwrap(),
+        )
+        .unwrap();
+    if renamed {
+        std::fs::rename(&partial, &target).unwrap();
+    } else {
+        std::fs::remove_file(partial).unwrap();
+    }
+    lib.queue.finish_output(job.id, "main", OutputState::Failed);
+    lib.queue.finish(
+        job.id,
+        JobResult::Failed {
+            code: None,
+            message: "landed file's links could not be saved".into(),
+            finished_at: 1,
+        },
+    );
+    let failed = lib.queue.snapshot().jobs[0].clone();
+    assert_eq!(failed.state, JobState::Failed);
+    assert!(failed.outputs[0].landing.is_some());
+    (t, lib, dirs, failed, target)
+}
+
+fn reenqueue_row(t: &tempfile::TempDir, lib: Library, old: &Job) -> (Library, Job) {
+    assert_eq!(
+        lib.queue.add(vec![NewJob {
+            title: old.title.clone(),
+            iso: old.iso.clone(),
+            target: old.target.clone(),
+            replace: true,
+        }]),
+        1
+    );
+    drop(lib);
+    let lib = Library::open(&t.path().join("config"), &t.path().join("logs"));
+    let job = lib.queue.claim_next().unwrap();
+    (lib, job)
+}
+
+#[test]
+fn row_reenqueue_repairs_retained_landing_without_another_mux_or_notification() {
+    for originally_owned in [false, true] {
+        let (t, lib, dirs, old, target) = failed_row_landing(originally_owned, true);
+        let bytes = std::fs::read(&target).unwrap();
+        let (lib, job) = reenqueue_row(&t, lib, &old);
+        assert_eq!(job.outputs[0].state, OutputState::Pending);
+        assert_eq!(job.outputs[0].landing, old.outputs[0].landing);
+        assert_eq!(job.owned, old.owned);
+        assert_eq!(job.plan, old.plan);
+        assert!(!job.retire);
+        let arbiter = Arbiter::new();
+        let mut sink = test_sink(&lib, &arbiter);
+        sink.job_id = job.id;
+        let mut calls = 0;
+        let ending = remux_planned_with(
+            &job,
+            job.plan.as_ref().unwrap(),
+            &cfg(&dirs),
+            &sink,
+            |_, _, _| {
+                calls += 1;
+                Ok(None)
+            },
+        );
+        assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+        assert_eq!(calls, 0);
+        assert_eq!(lib.landed.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert_eq!(link_stamp(&t, &target), old.outputs[0].landing);
+        assert_eq!(
+            lib.queue.snapshot().jobs[0].outputs[0].state,
+            OutputState::Done
+        );
+    }
+}
+
+fn assert_row_reenqueue_cannot_recapture_replacement(originally_owned: bool) {
+    let (t, lib, dirs, old, target) = failed_row_landing(originally_owned, true);
+    std::fs::write(&target, b"someone else's replacement").unwrap();
+    let (lib, job) = reenqueue_row(&t, lib, &old);
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let mut calls = 0;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| {
+            calls += 1;
+            land_like_the_engine(&sink, &request.target, &movie())
+        },
+    );
+    let Ending::Failed(e) = ending else {
+        panic!("{ending:?}")
+    };
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        calls, 0,
+        "replace:true must not capture a fresh ownership baseline"
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"someone else's replacement"
+    );
+    assert!(
+        links::read_entries(&t.path().join("config"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn row_reenqueue_cannot_recapture_originally_unowned_replacement() {
+    assert_row_reenqueue_cannot_recapture_replacement(false);
+}
+
+#[test]
+fn row_reenqueue_cannot_recapture_originally_owned_replacement() {
+    assert_row_reenqueue_cannot_recapture_replacement(true);
+}
+
+#[test]
+fn row_reenqueue_reruns_when_original_owned_file_never_got_the_rename() {
+    let (t, lib, dirs, old, target) = failed_row_landing(true, false);
+    let (lib, job) = reenqueue_row(&t, lib, &old);
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let mut calls = 0;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| {
+            calls += 1;
+            assert!(request.replace);
+            land_like_the_engine(&sink, &request.target, &movie())
+        },
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(calls, 1);
+    assert_eq!(std::fs::read(target).unwrap(), movie());
+}
+
+#[test]
+fn row_reenqueue_reruns_when_retained_landing_target_is_missing() {
+    let (t, lib, dirs, old, target) = failed_row_landing(false, true);
+    std::fs::remove_file(&target).unwrap();
+    let (lib, job) = reenqueue_row(&t, lib, &old);
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let mut calls = 0;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| {
+            calls += 1;
+            assert!(!request.replace);
+            land_like_the_engine(&sink, &request.target, &movie())
+        },
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(calls, 1);
+    assert_eq!(std::fs::read(target).unwrap(), movie());
+}
+
+#[test]
+fn row_reenqueue_of_done_output_still_performs_requested_remux() {
+    let (t, lib, dirs, old, target) = failed_row_landing(false, true);
+    lib.queue.finish_output(old.id, "main", OutputState::Done);
+    lib.queue.finish(
+        old.id,
+        JobResult::Done {
+            size_bytes: movie().len() as u64,
+            secs: 1,
+            finished_at: 1,
+            writing_app: Some(current_stamp()),
+        },
+    );
+    let (lib, job) = reenqueue_row(&t, lib, &old);
+    assert!(job.outputs[0].landing.is_none());
+    assert!(job.owned.is_none());
+    let arbiter = Arbiter::new();
+    let mut sink = test_sink(&lib, &arbiter);
+    sink.job_id = job.id;
+    let mut calls = 0;
+    let ending = remux_planned_with(
+        &job,
+        job.plan.as_ref().unwrap(),
+        &cfg(&dirs),
+        &sink,
+        |request, _, _| {
+            calls += 1;
+            land_like_the_engine(&sink, &request.target, &movie())
+        },
+    );
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(calls, 1);
+    assert_eq!(std::fs::read(target).unwrap(), movie());
+}
