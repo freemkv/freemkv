@@ -222,11 +222,13 @@ jobs:
           (cd snap-package && sha256sum -c freemkv-amd64.snap.sha256)
           sudo snap install --dangerous ./snap-package/freemkv-amd64.snap
           snap list freemkv
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { path: src, persist-credentials: false }
       - name: Desktop app claims its bus name and opens a window
+        timeout-minutes: 5
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb x11-utils libglib2.0-bin
+          bash src/.github/scripts/install-linux-deps.sh xvfb x11-utils libglib2.0-bin
           # `snap run` moves the app into a scope via the user's systemd, so start
           # a real user session rather than a bare dbus-run-session bus.
           sudo loginctl enable-linger "$USER"
@@ -261,8 +263,6 @@ jobs:
           $owned || { echo "::error::org.freemkv.FreeMKV never appeared on the session bus"; exit 1; }
           $window || { echo "::error::no visible freemkv window larger than 1x1 was mapped"; exit 1; }
           $alive || { echo "::error::the app exited before the check finished"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { path: src, persist-credentials: false }
       - name: Store review checks (review-tools)
         run: |
           set -euo pipefail

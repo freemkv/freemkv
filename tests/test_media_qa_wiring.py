@@ -103,6 +103,8 @@ class StructureTests(unittest.TestCase):
         selected = checkout['with']['sparse-checkout'].splitlines()
         self.assertIn('.github/scripts', selected)
         self.assertTrue((ROOT / '.github/scripts/launch-media-runner.sh').is_file())
+        self.assertEqual(mg.classify('freemkv', '.github/scripts/launch-media-runner.sh', POLICY),
+                         'required', 'launcher changes must invalidate earlier media evidence')
 
     def test_launch_has_deadline_watch_cancel_and_teardown(self):
         launch = self.jobs['launch']

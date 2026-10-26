@@ -13,7 +13,7 @@
   "freemkv_modules": ["pipe", "keydb_fetch", "file_identity", "title_identity", "disc_copy_verdict", "sources", "rip_keys", "cli_stop", "artifact_lock", "plan_core"],
   "freemkv_test_modules": ["selection_test_fixtures"],
   "freemkv_crate_roots": ["src/main.rs", "src/lib.rs"],
-  "control_plane": [".github/workflows/qa.yml", ".github/scripts/exact-toolchain.sh", ".github/runner-templates/**",
+  "control_plane": [".github/workflows/qa.yml", ".github/scripts/exact-toolchain.sh", ".github/scripts/launch-media-runner.sh", ".github/runner-templates/**",
                     "tests/media_gate.py", "tests/media_perf.py", "tests/media_fetch.py", "tests/media_checks.py",
                     "tests/media_canary.py", "tests/media_history.py", "tests/full_disc_qa.py", "tests/media-baseline.json",
                     "tests/media-gate-policy.json", "tests/media-fetch-requirements.txt"],
