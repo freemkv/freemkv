@@ -72,6 +72,70 @@ fn iso_of(dirs: &Dirs, title: &str) -> PathBuf {
 }
 
 #[test]
+fn a_fresh_plan_cannot_accept_a_landed_output_from_a_replaced_source() {
+    for same_size in [false, true] {
+        let (t, lib, dirs) = library_with(&["A"]);
+        let target = dirs.library.join("A/A.mkv");
+        let original = std::fs::read(&target).unwrap();
+        let iso = iso_of(&dirs, "A");
+        links::record(&t.path().join("config"), &target, &iso).unwrap();
+        let before = links::iso_stamp(&iso).unwrap();
+        if same_size {
+            std::fs::File::options()
+                .write(true)
+                .open(&iso)
+                .unwrap()
+                .set_modified(before.modified + Duration::from_secs(60))
+                .unwrap();
+        } else {
+            std::fs::write(&iso, b"a different disc at the same source path").unwrap();
+        }
+        assert_ne!(links::iso_stamp(&iso), Some(before));
+        // Plan only after replacement: no frozen-plan provenance is needed to reject this.
+        let job = planned_job(&lib, &iso, &target, false, false);
+        let (ending, calls) = run(&lib, &dirs, &job);
+        let Ending::Failed(error) = ending else {
+            panic!("accepted prior-disc output: {ending:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(calls, 0);
+        assert!(!outputs_all_done(&lib.queue.snapshot(), job.id));
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+    }
+}
+
+#[test]
+fn landed_link_source_proof_preserves_unchanged_and_unknown_source_semantics() {
+    let (t, lib, dirs) = library_with(&["A"]);
+    let config = t.path().join("config");
+    let target = dirs.library.join("A/A.mkv");
+    let iso = iso_of(&dirs, "A");
+    links::record(&config, &target, &iso).unwrap();
+    assert!(landed_by_this_job(&config, &iso, &target));
+    let job = planned_job(&lib, &iso, &target, false, false);
+    lib.queue.set_owned(job.id, Vec::new()).unwrap();
+    let (ending, calls) = run(&lib, &dirs, &job);
+    assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+    assert_eq!(calls, 0);
+    assert!(outputs_all_done(&lib.queue.snapshot(), job.id));
+
+    std::fs::remove_file(&iso).unwrap();
+    assert!(!landed_by_this_job(&config, &iso, &target));
+    // Existing links with an MKV stamp but no source stamp retain owned::proof semantics.
+    links::record(&config, &target, &iso).unwrap();
+    assert!(links::entries(&config)[&target].iso_stamp.is_none());
+    assert!(landed_by_this_job(&config, &iso, &target));
+    // A path-only 1.8.3 link cannot vouch for the MKV itself.
+    std::fs::write(
+        config.join(links::LINKS_FILE),
+        serde_json::to_vec(&serde_json::json!({ target.to_string_lossy(): iso.to_string_lossy() }))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!landed_by_this_job(&config, &iso, &target));
+}
+
+#[test]
 fn a_remux_never_overwrites_a_linked_file_another_tool_replaced_in_place() {
     let (t, lib, dirs) = library_with(&["A"]);
     let target = dirs.library.join("A/A.mkv");
