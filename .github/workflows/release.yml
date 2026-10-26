@@ -356,8 +356,8 @@ jobs:
           BACKFILL: ${{ github.event_name == 'workflow_dispatch' }}
           LEGS: |
             {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-musl", "asset": "freemkv-cli-x86_64-linux", "legacy": "freemkv-x86_64-linux", "ext": ""}
-            {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-musl", "asset": "freemkv-cli-aarch64-linux", "legacy": "freemkv-aarch64-linux", "ext": ""}
-            {"os": "ubuntu-latest", "target": "armv7-unknown-linux-musleabihf", "asset": "freemkv-cli-armv7-linux", "ext": "", "backfill": true}
+            {"os": "ubuntu-24.04", "target": "aarch64-unknown-linux-musl", "asset": "freemkv-cli-aarch64-linux", "legacy": "freemkv-aarch64-linux", "ext": ""}
+            {"os": "ubuntu-24.04", "target": "armv7-unknown-linux-musleabihf", "asset": "freemkv-cli-armv7-linux", "ext": "", "backfill": true}
             {"os": "macos-latest", "target": "aarch64-apple-darwin", "asset": "freemkv-cli-aarch64-macos", "legacy": "freemkv-aarch64-macos", "ext": ""}
             {"os": "macos-latest", "target": "x86_64-apple-darwin", "asset": "freemkv-cli-x86_64-macos", "legacy": "freemkv-x86_64-macos", "ext": ""}
             {"os": "windows-latest", "target": "x86_64-pc-windows-msvc", "asset": "freemkv-cli-x86_64-windows", "legacy": "freemkv-x86_64-windows", "ext": ".exe"}
