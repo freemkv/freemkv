@@ -242,6 +242,7 @@ class ClassificationTests(unittest.TestCase):
                                           'res/freemkv.manifest',
                                           '.github/workflows/qa.yml', 'tests/media_gate.py',
                                           'tests/media-gate-policy.json', 'tests/media_checks.py',
+                                          'tests/full_disc_qa.py',
                                           '.github/runner-templates/user-data-linux.sh',
                                           '.github/scripts/exact-toolchain.sh')]
         cases += [(r, 'assets/x') for r in POLICY['libraries']]
