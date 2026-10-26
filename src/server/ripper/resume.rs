@@ -1013,6 +1013,55 @@ pub(super) fn check_resume_state(saved: &staging::DiscState) -> Result<(), Strin
     Ok(())
 }
 
+// Adopt the capture's format before selection, replanning or muxing.
+fn resume_config(mut cfg: Config, saved: Option<&staging::DiscState>) -> Result<Config, String> {
+    let Some(saved) = saved else { return Ok(cfg) };
+    if let Some(format) = &saved.output_format {
+        cfg.output_format.clone_from(format);
+        return Ok(cfg);
+    }
+    // Historical network captures have MKV-shaped names too: suffixes cannot
+    // recover their mode. Keep the existing explicit network setting for these
+    // untagged jobs. An empty old plan likewise carries no format evidence (it
+    // can be an interrupted ISO capture); retain current-format compatibility.
+    if cfg.output_format == "network" || saved.outputs.is_empty() {
+        return Ok(cfg);
+    }
+    let mut inferred = None;
+    for output in &saved.outputs {
+        let format = match Path::new(&output.filename)
+            .extension().and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase).as_deref()
+        {
+            Some("mkv" | "mk3d") => "mkv",
+            Some("m2ts") => "m2ts",
+            Some("iso") => "iso",
+            _ => return Err("Saved output format is unknown; review this capture before resuming. The saved image and outputs are unchanged.".into()),
+        };
+        if inferred.is_some_and(|previous| previous != format) {
+            return Err("Saved outputs disagree on output format; review this capture before resuming. The saved image and outputs are unchanged.".into());
+        }
+        inferred = Some(format);
+    }
+    if let Some(format) = inferred {
+        cfg.output_format = format.to_string();
+    }
+    Ok(cfg)
+}
+
+fn resume_destination(cfg: &Config, output_path: &str) -> String {
+    if staging::is_network_output(&cfg.output_format, &cfg.network_target) {
+        format!("network://{}", cfg.network_target)
+    } else {
+        // `.mk3d` is a filename convention; the container scheme remains mkv.
+        format!(
+            "{}://{}",
+            super::output_scheme_for(&cfg.output_format),
+            output_path
+        )
+    }
+}
+
 pub(super) fn check_resume_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
@@ -1216,6 +1265,18 @@ fn resume_remux_within<S>(
             return;
         }
     };
+    let cfg_read = match resume_config(cfg_read, saved_state.as_ref()) {
+        Ok(cfg) => cfg,
+        Err(reason) => {
+            hold_plan_for_review(
+                device,
+                (&staging_dir, &iso_path, &mapfile_path),
+                &display_name,
+                reason,
+            );
+            return;
+        }
+    };
     let media_type = saved_state
         .as_ref()
         .map(|s| s.media_type)
@@ -1368,6 +1429,12 @@ fn resume_remux_within<S>(
             "the saved disc image has no usable selected title; start a fresh rip to rebuild it"
                 .to_string();
         reset_status_after_ripping(device, "error", &display_name, "", "", Some(reason));
+        return;
+    }
+
+    // Tests can inspect the real prepared plan before media/key I/O or cleanup.
+    #[cfg(test)]
+    if observe_prepared_resume(&cfg_read, &disc, &plan_outputs) {
         return;
     }
 
@@ -1573,17 +1640,7 @@ fn resume_remux_within<S>(
     let filename = primary_output.filename.clone();
     let staging_str = staging_dir.to_string_lossy().into_owned();
     let output_path = format!("{}/{}", staging_str, filename);
-    let dest_url = if staging::is_network_output(&output_format, &cfg_read.network_target) {
-        format!("network://{}", cfg_read.network_target)
-    } else {
-        // Scheme is the container (mkv/m2ts), NOT the `.mk3d` filename extension —
-        // a 3D rip muxes through `mkv://` (libfreemkv has no `mk3d://` scheme).
-        format!(
-            "{}://{}",
-            super::output_scheme_for(&output_format),
-            output_path
-        )
-    };
+    let dest_url = resume_destination(&cfg_read, &output_path);
 
     let total_bytes = if disc.capacity_bytes > 0 {
         disc.capacity_bytes
@@ -2139,11 +2196,7 @@ fn resume_remux_within<S>(
                     return Err(std::io::Error::other("title not on the disc").into());
                 };
                 let ep_bps: f64 = freemkv_engine::title_bytes_per_sec(&ep_title);
-                let ep_dest_url = format!(
-                    "{}://{}",
-                    super::output_scheme_for(&output_format),
-                    ep_output_path
-                );
+                let ep_dest_url = resume_destination(&cfg_read, &ep_output_path);
                 let ep_inputs = super::mux::MuxInputs {
                     device,
                     display_name: display_name.clone(),
@@ -2681,4 +2734,31 @@ fn note_lease_waiter(device: &str) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(device.to_string());
+}
+
+#[cfg(test)]
+#[path = "resume_output_format_tests.rs"]
+mod output_format_tests;
+
+#[cfg(test)]
+type PreparedResumeObserver = Box<dyn FnOnce(&Config, &libfreemkv::Disc, &[staging::Output])>;
+
+#[cfg(test)]
+thread_local! {
+    static PREPARED_RESUME_OBSERVER: std::cell::RefCell<Option<PreparedResumeObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_prepared_resume(
+    cfg: &Config,
+    disc: &libfreemkv::Disc,
+    outputs: &[staging::Output],
+) -> bool {
+    let observer = PREPARED_RESUME_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer(cfg, disc, outputs);
+        true
+    } else {
+        false
+    }
 }

@@ -306,6 +306,10 @@ pub struct DiscState {
     pub rip: RipStats,
 
     // --- deliverables ------------------------------------------------------
+    /// Execution mode chosen when capture started (the Config output_format vocabulary).
+    /// None is an older job whose local plan may supply the container on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<String>,
     /// One entry per output. Movies = 1; TV = N episodes. The mover files each.
     #[serde(default)]
     pub outputs: Vec<Output>,
@@ -355,6 +359,7 @@ impl DiscState {
             abort_on_lost_secs: 0,
             origin_device: String::new(),
             rip: RipStats::default(),
+            output_format: None,
             outputs: Vec::new(),
             date: String::new(),
             resumed: false,
@@ -544,6 +549,11 @@ fn try_write_state_inner(staging_disc_dir: &Path, st: &DiscState) -> io::Result<
             ));
         }
         StateRead::Valid(saved) => {
+            // A lifecycle snapshot cannot change capture identity. Fresh capture
+            // stamps its mode through start_sweep's mutation; reset clears it.
+            if saved.output_format.is_some() {
+                st.output_format = saved.output_format;
+            }
             st.user_metadata = saved.user_metadata;
             st.metadata_revision = saved.metadata_revision;
             st.replan_required = saved.replan_required;

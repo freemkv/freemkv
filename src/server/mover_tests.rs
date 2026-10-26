@@ -4047,3 +4047,103 @@ fn a_stop_during_the_folder_check_records_nothing() {
         "no error row for a stop"
     );
 }
+
+#[test]
+fn saved_output_format_controls_iso_delivery_after_settings_change() {
+    let _guard = errors_guard();
+    for (saved_format, current_format, keep_iso, expect_iso) in [
+        ("iso", "mkv", false, true),
+        ("mkv", "iso", false, false),
+        ("mkv", "iso", true, true),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let movie_dir = tmp.path().join("output/Movies");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&movie_dir).unwrap();
+        let mut cfg = cfg_for_staging(&staging, movie_dir.to_str().unwrap(), keep_iso);
+        cfg.output_format = current_format.into();
+        cfg.autorip_dir = tmp.path().join("autorip").to_string_lossy().into_owned();
+        let disc_dir = staging.join("Frozen");
+        std::fs::create_dir_all(&disc_dir).unwrap();
+        let mut st = crate::server::ripper::staging::DiscState::new(
+            crate::server::ripper::staging::StagingState::Done,
+        );
+        st.title = "Frozen".into();
+        st.year = 2024;
+        st.outputs = vec![ep_output(
+            if saved_format == "iso" {
+                "Frozen.iso"
+            } else {
+                "Frozen.mkv"
+            },
+            None,
+            "",
+        )];
+        let mut json = serde_json::to_value(st).unwrap();
+        json["output_format"] = saved_format.into();
+        std::fs::write(
+            disc_dir.join("state.json"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+        let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
+        mkv.extend_from_slice(&[0xAA; 1024]);
+        if saved_format != "iso" {
+            std::fs::write(disc_dir.join("Frozen.mkv"), &mkv).unwrap();
+        }
+        std::fs::write(disc_dir.join("Frozen.iso"), vec![0x22; 4096]).unwrap();
+        // Interrupt after the durable plan lands. The next tick must retain
+        // both the format decision and the journal's exact output ownership.
+        super::test_hooks::PLAN_SAVE_FAULTS
+            .lock()
+            .unwrap()
+            .push(disc_dir.clone());
+        check_and_move(&cfg);
+        super::test_hooks::PLAN_SAVE_FAULTS
+            .lock()
+            .unwrap()
+            .retain(|dir| dir != &disc_dir);
+        let journal = super::manifest::Manifest::load(&disc_dir)
+            .unwrap()
+            .expect("delivery plan frozen before injected save error");
+        assert_eq!(journal.marker["output_format"], saved_format);
+        assert_eq!(
+            journal.outputs[0].filename,
+            if saved_format == "iso" {
+                "Frozen.iso"
+            } else {
+                "Frozen.mkv"
+            }
+        );
+        let planned = journal.moves();
+        assert_eq!(
+            planned
+                .iter()
+                .filter(|(source, _)| is_iso_file(source.to_str().unwrap()))
+                .count(),
+            usize::from(expect_iso)
+        );
+        cfg.output_format = "m2ts".into();
+        check_and_move(&cfg);
+        let dest = movie_dir.join("Frozen (2024)");
+        assert_eq!(
+            dest.join("Frozen (2024).iso").exists(),
+            expect_iso,
+            "saved={saved_format}, current={current_format}, keep={keep_iso}"
+        );
+        if saved_format != "iso" {
+            assert_eq!(std::fs::read(dest.join("Frozen (2024).mkv")).unwrap(), mkv);
+        }
+        // Delivered files are not renamed, copied again or requeued after another switch.
+        cfg.output_format = if current_format == "iso" {
+            "m2ts"
+        } else {
+            "iso"
+        }
+        .into();
+        check_and_move(&cfg);
+        assert!(!dest.join("Frozen (2024)_2.iso").exists());
+        assert!(!dest.join("Frozen (2024)_2.mkv").exists());
+    }
+}
