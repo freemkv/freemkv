@@ -1110,6 +1110,9 @@ fn landed_by_this_job(config_dir: &Path, iso: &Path, target: &Path) -> bool {
         return false;
     };
     link.iso == iso
+        && link
+            .iso_stamp
+            .is_none_or(|then| Some(then) == super::links::iso_stamp(iso))
         && link.stamp.is_some()
         && matches!(super::owned::present(target), Ok(super::owned::Present::File(s)) if Some(s) == link.stamp)
 }
