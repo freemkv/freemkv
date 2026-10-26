@@ -1,10 +1,11 @@
+use super::resume_production_source;
+
 // Regression: resume_remux's success path must fire the completion webhook like rip_disc
 // does (both cold auto-resume and the _mux hand-off go through it). Pinned at source level.
+
 #[test]
 fn success_path_fires_completion_webhook() {
-    let src = crate::server::util::source_lf(include_str!("resume.rs"));
-    // Production code only: this test names the literals it looks for.
-    let src = &src[..src.find("#[cfg(test)]").expect("this file has tests")];
+    let src = resume_production_source();
     let start = src
         .find("Auto-resume complete")
         .expect("resume.rs should log \"Auto-resume complete\" on the success path");

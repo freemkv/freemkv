@@ -1,4 +1,4 @@
-use super::resume_effective_abort;
+use super::{resume_effective_abort, resume_production_source};
 
 // Catches the mutation that recomputes the abort threshold from raw config at one loss gate
 // while the other honours.accept-loss — the two-gates-one-run disagreement.
@@ -32,10 +32,7 @@ fn the_accept_loss_override_raises_the_threshold_for_every_resume_gate() {
 // effective_abort_secs may be named exactly once (comments stripped).
 #[test]
 fn resume_has_exactly_one_threshold_computation() {
-    let src = crate::server::util::source_lf(include_str!("resume.rs"));
-    // Production code only: the test modules below name these same
-    // functions, and counting them would make this pin count itself.
-    let src = &src[..src.find("#[cfg(test)]").expect("this file has tests")];
+    let src = resume_production_source();
     let code: String = src
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
@@ -57,10 +54,7 @@ fn resume_has_exactly_one_threshold_computation() {
 // follow ITS OWN path's completion-marker write, with nothing risky between.
 #[test]
 fn the_accept_loss_marker_is_consumed_only_once_the_rip_is_delivered() {
-    let src = crate::server::util::source_lf(include_str!("resume.rs"));
-    // Production code only: the test modules below name these same
-    // functions, and counting them would make this pin count itself.
-    let src = &src[..src.find("#[cfg(test)]").expect("this file has tests")];
+    let src = resume_production_source();
     let code: String = src
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))

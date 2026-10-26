@@ -2508,12 +2508,10 @@ fn the_keydb_update_handler_masks_its_ureq_error() {
 #[test]
 fn get_state_json_recovers_a_poisoned_state_lock() {
     let src = crate::server::util::source_lf(include_str!("web.rs"));
-    // Anchored on the DEFINITION (leading newline) so this test's own
-    // mention of the name cannot match, and both ends are `expect`ed so a
-    // stale anchor fails loudly instead of silently widening the slice.
+    // Anchor the helper that owns the STATE lock, not the public wrapper.
     let start = src
-        .find("\nfn get_state_json(staging_dir: &str) -> String {")
-        .expect("web.rs must define get_state_json");
+        .find("\nfn get_state_json_with_cards(")
+        .expect("web.rs must define get_state_json_with_cards");
     let end = start
         + src[start..]
             .find("\n    let move_state =")
@@ -2521,18 +2519,19 @@ fn get_state_json_recovers_a_poisoned_state_lock() {
     // Comment lines are stripped: this function's own comment quotes the
     // defective arm verbatim (house style), so a naive substring search
     // would otherwise match the explanation of the fix, not the fix.
-    let body: String = src[start..end]
+    let code: String = src[start..end]
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    let code: String = code.split_whitespace().collect();
     assert!(
-        body.contains("STATE.lock().unwrap_or_else(|e| e.into_inner())"),
+        code.contains("ripper::STATE.lock().unwrap_or_else(|e|e.into_inner())"),
         "get_state_json must recover a poisoned STATE guard, like every \
              other STATE consumer in the crate"
     );
     assert!(
-        !body.contains("Err(_) =>"),
+        !code.contains("Err(_)=>"),
         "get_state_json must not have an abandon-on-poison arm: it turns \
              one panic into a permanently blank dashboard served with 200, \
              which run_healthcheck reads as healthy forever"

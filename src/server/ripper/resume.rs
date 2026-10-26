@@ -2793,3 +2793,14 @@ fn observe_prepared_resume(
 #[cfg(test)]
 #[path = "resume_iso_selection_tests.rs"]
 mod iso_selection_tests;
+
+#[cfg(test)]
+fn resume_production_source() -> String {
+    let src = crate::server::util::source_lf(include_str!("resume.rs"));
+    let boundary =
+        "\n#[cfg(test)]\n#[path = \"resume_remux_space_tests.rs\"]\nmod remux_space_tests;";
+    let end = src
+        .find(boundary)
+        .expect("resume.rs test-module declaration marks the production-source boundary");
+    src[..end].to_owned()
+}
