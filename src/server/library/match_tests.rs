@@ -84,6 +84,96 @@ fn confirming_a_match_for_an_idle_source_saves_it_and_queues_one_remux() {
 }
 
 #[test]
+fn an_unverified_source_match_saves_nothing_and_queues_nothing() {
+    let (t, cfg, mut lib, sources) = corrected_library(&["Castaway"]);
+    lib.iso_stat = Arc::new(|_| None);
+    let generation = lib.index_generation();
+    let error = lib
+        .confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .unwrap_err();
+    assert_ne!(error.kind(), io::ErrorKind::TimedOut);
+    let message = error.to_string();
+    assert!(
+        message.contains(&sources[0].display().to_string()),
+        "{message}"
+    );
+    for text in ["not saved", "Nothing was queued", "retry"] {
+        assert!(message.contains(text), "{message}");
+    }
+    assert!(!t.path().join("config/library-matches.json").exists());
+    assert_eq!(lib.source_match(&sources[0]).unwrap(), None);
+    assert!(lib.queue.snapshot().jobs.is_empty());
+    assert_eq!(lib.index_generation(), generation);
+}
+
+#[test]
+fn an_unverified_source_match_preserves_the_previous_correction_and_revision() {
+    let (t, cfg, mut lib, sources) = corrected_library(&["Castaway"]);
+    let stamp = links::iso_stamp(&sources[0]).unwrap();
+    let old = lib
+        .match_store()
+        .unwrap()
+        .save_for(&sources[0], 0, show(), Some(stamp))
+        .unwrap();
+    let path = t.path().join("config/library-matches.json");
+    let bytes = std::fs::read(&path).unwrap();
+    let generation = lib.index_generation();
+    lib.iso_stat = Arc::new(|_| None);
+    let mut changed = show();
+    changed.title = "Corrected title".into();
+    lib.confirm_match_and_queue(&cfg, &sources[0], old.revision, changed.clone())
+        .unwrap_err();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(lib.source_match(&sources[0]).unwrap(), Some(old.clone()));
+    assert_eq!(
+        matches::MatchStore::open(&lib.config_dir)
+            .unwrap()
+            .get(&sources[0]),
+        Some(old.clone())
+    );
+    assert!(lib.queue.snapshot().jobs.is_empty());
+    assert_eq!(lib.index_generation(), generation);
+    // A successful bounded observation allows the unchanged expected revision to retry.
+    lib.iso_stat = Arc::new(move |_| Some(stamp));
+    let (saved, queued) = lib
+        .confirm_match_and_queue(&cfg, &sources[0], old.revision, changed.clone())
+        .unwrap();
+    assert_eq!(saved.revision, old.revision + 1);
+    assert_eq!(saved.media, changed);
+    assert_eq!(saved.iso_stamp, Some(stamp));
+    assert_eq!(queued, 1);
+    assert!(saved.is_for(Some(stamp)));
+    let other = crate::server::util::Stamp {
+        size: stamp.size + 1,
+        ..stamp
+    };
+    assert!(!saved.is_for(Some(other)));
+    assert_eq!(
+        matches::MatchStore::open(&lib.config_dir)
+            .unwrap()
+            .get(&sources[0]),
+        Some(saved)
+    );
+}
+
+#[test]
+fn a_legacy_unstamped_match_still_opens_and_matches_any_source_stamp() {
+    let (t, _cfg, lib, sources) = corrected_library(&["Castaway"]);
+    let path = t.path().join("config/library-matches.json");
+    let record = serde_json::json!({
+        sources[0].to_string_lossy().to_string(): {"revision": 1, "media": show()}
+    });
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let saved = matches::MatchStore::open(&lib.config_dir)
+        .unwrap()
+        .get(&sources[0])
+        .unwrap();
+    assert_eq!(saved.iso_stamp, None);
+    assert!(saved.is_for(None));
+    assert!(saved.is_for(links::iso_stamp(&sources[0])));
+}
+
+#[test]
 fn same_title_corrections_from_two_discs_each_get_their_own_job() {
     let (_t, cfg, lib, sources) = corrected_library(&["Show Disc 1", "Show Disc 2"]);
     for source in &sources {
