@@ -164,6 +164,9 @@ pub struct MainLayout {
     pub btn_open_disc: Rect,
     /// "Open file or ISO…" — the right half.
     pub btn_open: Rect,
+    pub home_list: Rect,
+    pub home_open: Rect,
+    pub home_prefer: Rect,
 
     // titles page
     /// The selection bar: each chooser's label and the chooser itself.
@@ -272,6 +275,10 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
     let open_h = s.px(30);
     let btn_open_disc = Rect::new(cw / 2 - open_gap / 2 - open_w, open_y, open_w, open_h);
     let btn_open = Rect::new(cw / 2 + open_gap / 2, open_y, open_w, open_h);
+    let home_y = open_y + open_h + s.px(12);
+    let home_list = Rect::new(cw / 2 - s.px(325), home_y, s.px(440), s.px(122));
+    let home_open = Rect::new(cw / 2 + s.px(125), home_y, s.px(200), s.px(30));
+    let home_prefer = Rect::new(cw / 2 + s.px(125), home_y + s.px(38), s.px(200), s.px(30));
 
     // ── titles page ──
     // The selection bar: label, chooser, gap, for each of the three.
@@ -372,6 +379,9 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
         empty_sub,
         btn_open_disc,
         btn_open,
+        home_list,
+        home_open,
+        home_prefer,
         pick_titles_lbl,
         pick_titles,
         pick_audio_lbl,

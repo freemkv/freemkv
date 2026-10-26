@@ -644,6 +644,9 @@ struct Ivars {
     page_empty: RefCell<Option<Retained<NSView>>>,
     empty_head: RefCell<Option<Retained<NSTextField>>>,
     empty_sub: RefCell<Option<Retained<NSTextField>>>,
+    empty_open_disc: RefCell<Option<Retained<NSButton>>>,
+    home_rows: RefCell<Option<Retained<NSView>>>,
+    home_sig: RefCell<Option<(Vec<crate::ui::HomeDrive>, String, String)>>,
     /// Signature of the tree rows last painted, so a 200 ms progress tick does
     /// not force a full `reloadData` + re-expand of the (usually hidden)
     /// titles outline when nothing about the title list moved — the same
@@ -912,13 +915,28 @@ define_class!(
             self.open_disc(true);
         }
 
+        #[unsafe(method(onHomeOpen:))]
+        fn on_home_open(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            let button: &NSButton = unsafe { &*(sender as *const AnyObject as *const NSButton) };
+            let source = self.ivars().app.borrow().home_drive_source(button.tag() as usize);
+            if let Some(source) = source { self.step(|a| a.open(&source)); }
+        }
+
+        #[unsafe(method(onHomePreferred:))]
+        fn on_home_preferred(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            let button: &NSButton = unsafe { &*(sender as *const AnyObject as *const NSButton) };
+            self.step(|a| a.prefer_home_drive(button.tag() as usize));
+        }
+
         /// The launch probe, fired once off a one-shot timer after the window
         /// is on screen. See `Controller::open_disc`.
         #[unsafe(method(onLaunchProbe:))]
         fn on_launch_probe(&self, _s: Option<&AnyObject>) {
             match freemkv::app_entry::launch_source() {
                 Some(src) => self.step(|a| a.open(src)),
-                None => self.open_disc(false),
+                None => self.step(|a| a.discover_home()),
             }
         }
 
@@ -1551,6 +1569,71 @@ impl Controller {
                 v.disc_present,
             )));
         }
+        if let Some(open) = iv.empty_open_disc.borrow().as_ref() {
+            open.setHidden(!v.home_drives.is_empty());
+        }
+        let home = (
+            v.home_drives.clone(),
+            v.preferred_drive.clone(),
+            v.startup_mode.clone(),
+        );
+        if iv.home_sig.borrow().as_ref() != Some(&home) {
+            if let Some(rows) = iv.home_rows.borrow().as_ref() {
+                let children: Vec<Retained<NSView>> = rows.subviews().iter().collect();
+                for child in children {
+                    child.removeFromSuperview();
+                }
+                let mtm = MainThreadMarker::new().unwrap();
+                rows.setFrame(r(
+                    0.0,
+                    0.0,
+                    700.0,
+                    (v.home_drives.len() as f64 * 38.0).max(180.0),
+                ));
+                for (index, drive) in v.home_drives.iter().enumerate() {
+                    let y = rows.frame().size.height - (index as f64 + 1.0) * 38.0;
+                    let status = match drive.present {
+                        Some(true) => crate::strings::get_or("gui.home.loaded", "Disc inserted"),
+                        Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
+                        None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
+                    };
+                    let label = text(
+                        mtm,
+                        &format!(
+                            "{} — {status}",
+                            crate::strings::sanitize_display(&drive.label)
+                        ),
+                        r(0.0, y, 360.0, 26.0),
+                        false,
+                        false,
+                    );
+                    rows.addSubview(&label);
+                    let open = btn(
+                        mtm,
+                        &crate::strings::get_or("gui.home.open", "Open"),
+                        r(370.0, y, 110.0, 28.0),
+                        self,
+                        sel!(onHomeOpen:),
+                    );
+                    open.setTag(index as isize);
+                    rows.addSubview(&open);
+                    let prefer = btn(
+                        mtm,
+                        &crate::strings::get_or("gui.home.use_startup", "Use at startup"),
+                        r(490.0, y, 170.0, 28.0),
+                        self,
+                        sel!(onHomePreferred:),
+                    );
+                    prefer.setTag(index as isize);
+                    prefer.setEnabled(
+                        !(v.startup_mode == "Open preferred drive"
+                            && v.preferred_drive == drive.label),
+                    );
+                    rows.addSubview(&prefer);
+                }
+            }
+            *iv.home_sig.borrow_mut() = Some(home);
+        }
         {
             if let Some(x) = iv.page_empty.borrow().as_ref() {
                 x.setHidden(v.page != Page::Empty);
@@ -1952,6 +2035,7 @@ impl Controller {
         // still describes the OLD one's rows. Left alone, `render()` below
         // finds them equal, skips `apply`, and the disc comes back empty.
         self.ivars().tree_sig.set(None);
+        *self.ivars().home_sig.borrow_mut() = None;
         // Same for the log: the new text view holds only the build-time line.
         *self.ivars().log_shown.borrow_mut() = None;
         self.ivars().log_lens.borrow_mut().clear();
@@ -2499,6 +2583,18 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         );
         page_empty.addSubview(&b_disc);
         page_empty.addSubview(&b);
+        *c.ivars().empty_open_disc.borrow_mut() = Some(b_disc.clone());
+
+        let home_scroll = NSScrollView::initWithFrame(
+            NSScrollView::alloc(mtm),
+            r((W - 700.0) / 2.0, eh * 0.55 - 270.0, 700.0, 180.0),
+        );
+        home_scroll.setHasVerticalScroller(true);
+        home_scroll.setDrawsBackground(false);
+        let home_rows = NSView::initWithFrame(NSView::alloc(mtm), r(0.0, 0.0, 700.0, 180.0));
+        home_scroll.setDocumentView(Some(&home_rows));
+        page_empty.addSubview(&home_scroll);
+        *c.ivars().home_rows.borrow_mut() = Some(home_rows);
 
         // `relayout` resizes `page_empty`, but a subview keeps its build-time
         // frame unless told to track the parent, or centred text would drift
@@ -3910,6 +4006,20 @@ fn build_prefs(
         mtm,
         "tmdb_api_key",
         &crate::strings::get("gui.set.tmdb_api_key"),
+        "",
+        300.0,
+    );
+    t.gap();
+    t.combo(
+        mtm,
+        "startup_mode",
+        &crate::strings::get("gui.set.startup_mode"),
+        220.0,
+    );
+    t.field(
+        mtm,
+        "preferred_drive",
+        &crate::strings::get("gui.set.preferred_drive"),
         "",
         300.0,
     );

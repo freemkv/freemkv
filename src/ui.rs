@@ -1778,6 +1778,11 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
             ("All titles", g("gui.set.sel_all")),
             ("Longest title", g("gui.set.sel_longest")),
         ],
+        "startup_mode" => vec![
+            ("Show drives", g("gui.set.startup_show")),
+            ("Open any loaded disc", g("gui.set.startup_any")),
+            ("Open preferred drive", g("gui.set.startup_preferred")),
+        ],
         "rip_mode" => vec![
             ("Multi-pass", g("gui.set.mode_multi")),
             ("Single pass", g("gui.set.mode_single")),
@@ -2196,6 +2201,8 @@ pub struct App {
     pub tree: Tree,
     pub settings: Settings,
     pub page: Page,
+    /// Ready-screen drive choices. Discovery never opens or scans a disc.
+    pub home_drives: Vec<HomeDrive>,
     pub log: Arc<Vec<LogLine>>,
     /// Sequence number of `log[0]`; bumps on every trim or clear, so a shell
     /// that appended incrementally knows its rendered lines went stale.
@@ -2309,6 +2316,9 @@ pub struct App {
     keyserver_check: Option<std::sync::mpsc::Receiver<(LogKind, String)>>,
     /// The full key-service URL check the worker runs — a seam so tests never resolve DNS.
     keyserver_fn: fn(&str) -> Result<(), String>,
+    home_discovery: Option<(u64, bool, std::sync::mpsc::Receiver<Vec<HomeDrive>>)>,
+    home_generation: u64,
+    home_fn: fn() -> Vec<HomeDrive>,
     /// A Settings write in flight, and whether its success is reported.
     saving: Option<(std::sync::mpsc::Receiver<Result<(), String>>, bool)>,
     /// Another write of the latest settings after the one in flight (and whether reported).
@@ -2327,6 +2337,34 @@ pub struct App {
     /// not repeated on every 100 ms tick.
     reported_bad: u64,
 }
+
+/// One ready-screen optical drive; `None` means presence could not be determined.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HomeDrive {
+    pub device: String,
+    pub label: String,
+    pub present: Option<bool>,
+}
+
+#[cfg(not(test))]
+fn discover_home_drives() -> Vec<HomeDrive> {
+    crate::engine::list_optical_drives()
+        .into_iter()
+        .map(|drive| {
+            let present = crate::engine::disc_present(&format!("disc://{}", drive.device));
+            HomeDrive {
+                device: drive.device,
+                label: drive.label,
+                present,
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(test))]
+const HOME_DISCOVERY: fn() -> Vec<HomeDrive> = discover_home_drives;
+#[cfg(test)]
+const HOME_DISCOVERY: fn() -> Vec<HomeDrive> = Vec::new;
 
 /// The launch probe's handoff: a worker thread writes the scan result once,
 /// and `App::tick` picks it up on the UI thread.
@@ -2479,6 +2517,96 @@ pub(crate) fn disc_open_plan(
 }
 
 impl App {
+    /// List connected drives and tray presence off the UI thread.
+    pub fn discover_home(&mut self) -> Vec<Effect> {
+        self.discover_home_with_auto(true)
+    }
+
+    fn discover_home_with_auto(&mut self, auto_open: bool) -> Vec<Effect> {
+        if self.home_discovery.is_some() || !self.source.is_empty() || self.opening() {
+            return Vec::new();
+        }
+        match spawn_worker("home-drives", self.home_fn) {
+            Ok(rx) => {
+                self.home_discovery = Some((self.home_generation, auto_open, rx));
+                vec![Effect::StartTicking]
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The ready screen's Open action always names the chosen drive.
+    pub fn home_drive_source(&self, index: usize) -> Option<String> {
+        self.home_drives
+            .get(index)
+            .map(|d| format!("disc://{}", d.device))
+    }
+
+    /// Remember this hardware label for the next startup. Duplicate labels
+    /// never qualify for an unattended open.
+    pub fn prefer_home_drive(&mut self, index: usize) -> Vec<Effect> {
+        let Some(drive) = self.home_drives.get(index) else {
+            return Vec::new();
+        };
+        self.settings.preferred_drive = drive.label.clone();
+        self.settings.startup_mode = "Open preferred drive".into();
+        let mut fx = self.save_settings(false);
+        fx.push(Effect::Redraw);
+        fx
+    }
+
+    fn apply_home_drives(&mut self, drives: Vec<HomeDrive>, auto_open: bool) -> Vec<Effect> {
+        let loaded: Vec<_> = drives.iter().filter(|d| d.present == Some(true)).collect();
+        let target = match self.settings.startup_mode.as_str() {
+            "Open any loaded disc" if loaded.len() == 1 => Some(loaded[0]),
+            "Open preferred drive" => {
+                let preferred: Vec<_> = loaded
+                    .into_iter()
+                    .filter(|d| d.label == self.settings.preferred_drive)
+                    .collect();
+                (preferred.len() == 1).then(|| preferred[0])
+            }
+            _ => None,
+        }
+        .filter(|_| auto_open)
+        .map(|d| d.device.clone());
+        self.disc_present = if drives.iter().any(|d| d.present == Some(true)) {
+            Some(true)
+        } else if drives.iter().all(|d| d.present == Some(false)) {
+            Some(false)
+        } else {
+            None
+        };
+        self.home_drives = drives;
+        if let Some(device) = target {
+            let mut fx = self.open_probe(&format!("disc://{device}"));
+            fx.push(Effect::Redraw);
+            return fx;
+        }
+        vec![Effect::Redraw]
+    }
+
+    fn poll_home(&mut self) -> Vec<Effect> {
+        let answer = match self.home_discovery.as_ref().map(|(_, _, rx)| rx.try_recv()) {
+            Some(Ok(drives)) => drives,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Vec::new(),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return Vec::new(),
+        };
+        let (generation, auto_open) = self
+            .home_discovery
+            .take()
+            .map(|(generation, auto_open, _)| (generation, auto_open))
+            .unwrap_or((u64::MAX, false));
+        if generation != self.home_generation
+            || !self.source.is_empty()
+            || self.opening()
+            || self.run.is_some()
+        {
+            return Vec::new();
+        }
+        self.apply_home_drives(answer, auto_open)
+    }
+
     pub fn new() -> Self {
         let settings = Settings::load();
         let output_dir = settings.dest_dir.clone();
@@ -2489,6 +2617,7 @@ impl App {
             settings_form: settings.clone(),
             settings,
             page: Page::Empty,
+            home_drives: Vec::new(),
             log: Arc::default(),
             log_first: 0,
             source: String::new(),
@@ -2538,6 +2667,9 @@ impl App {
             keyserver_verdict: None,
             keyserver_check: None,
             keyserver_fn: KEYSERVER_CHECK,
+            home_discovery: None,
+            home_generation: 0,
+            home_fn: HOME_DISCOVERY,
             saving: None,
             save_queued: None,
             settings_unsaved: false,
@@ -2663,7 +2795,9 @@ impl App {
                     LogKind::Result,
                     &crate::strings::get("gui.log.source_closed"),
                 );
-                vec![Effect::Redraw]
+                let mut fx = self.discover_home_with_auto(false);
+                fx.push(Effect::Redraw);
+                fx
             }
             Cmd::Run => {
                 // No presence check may overlap the rip's drive open.
@@ -3024,6 +3158,8 @@ impl App {
         if self.ejecting.is_some() {
             return vec![Effect::Redraw];
         }
+        self.home_generation = self.home_generation.wrapping_add(1);
+        self.home_discovery = None;
         self.opening = None;
         if let Some(tok) = self.open_token.take() {
             tok.halt.cancel();
@@ -3047,6 +3183,8 @@ impl App {
         if self.running() || self.opening() || self.ejecting.is_some() {
             return vec![];
         }
+        self.home_generation = self.home_generation.wrapping_add(1);
+        self.home_discovery = None;
         if let Some(fx) = self.wait_for_probe(path, true) {
             return fx;
         }
@@ -3151,6 +3289,9 @@ impl App {
 
     // Forget the open source (Close, or after its disc was ejected).
     fn close_source(&mut self) {
+        self.home_generation = self.home_generation.wrapping_add(1);
+        self.home_discovery = None;
+        self.home_drives.clear();
         self.stop_opens();
         // The drive Open held for Start is released now, not at its idle timeout.
         crate::engine::release_held_drive();
@@ -3242,11 +3383,13 @@ impl App {
             )),
         };
         let ejected = self.ejecting.take().map(|(src, _)| src);
+        let mut refresh = false;
         match verdict {
             Ok(device) => {
                 // Only the ejected disc is stale; never wipe a source opened since.
                 if ejected.as_deref() == Some(self.source.as_str()) {
                     self.close_source();
+                    refresh = true;
                 }
                 self.say(
                     LogKind::Result,
@@ -3266,7 +3409,13 @@ impl App {
                 ),
             ),
         }
-        vec![Effect::Redraw]
+        let mut fx = if refresh {
+            self.discover_home_with_auto(false)
+        } else {
+            Vec::new()
+        };
+        fx.push(Effect::Redraw);
+        fx
     }
 
     // The disc watch runs only for an idle open disc: never during a rip, open, probe or eject.
@@ -3330,7 +3479,13 @@ impl App {
         if page == Page::Result {
             self.page = Page::Result;
         }
-        vec![Effect::Redraw]
+        let mut fx = if self.page == Page::Empty {
+            self.discover_home_with_auto(false)
+        } else {
+            Vec::new()
+        };
+        fx.push(Effect::Redraw);
+        fx
     }
 
     // Done and Start act on the disc's presence now, not on the watch's next verdict. A
@@ -3489,6 +3644,8 @@ impl App {
         if self.probe.is_some() || self.opening() || self.running() || self.ejecting.is_some() {
             return vec![Effect::Redraw];
         }
+        self.home_generation = self.home_generation.wrapping_add(1);
+        self.home_discovery = None;
         let state = Arc::new(ProbeState::new(path, self.probe_window));
         // Everything the scan needs is copied out HERE, on the UI thread. The
         // worker gets no reference to `App`.
@@ -3975,7 +4132,8 @@ impl App {
     /// Poll a running job. Called on the shell's timer; returns the effects to
     /// apply. All progress arithmetic is the engine's — never recomputed here.
     pub fn tick(&mut self) -> Vec<Effect> {
-        let mut probe_fx = self.poll_probe();
+        let mut probe_fx = self.poll_home();
+        probe_fx.extend(self.poll_probe());
         probe_fx.extend(self.poll_eject());
         probe_fx.extend(self.poll_update());
         probe_fx.extend(self.poll_keydb());
@@ -4087,7 +4245,8 @@ impl App {
 
     // A worker whose answer only the tick collects is still out: the timer must keep running.
     fn workers_out(&self) -> bool {
-        self.probe.is_some()
+        self.home_discovery.is_some()
+            || self.probe.is_some()
             || self.opening()
             || self.ejecting.is_some()
             || self.update_check.is_some()
@@ -4104,7 +4263,13 @@ impl App {
         } else {
             Page::Titles
         };
-        vec![Effect::Redraw]
+        let mut fx = if self.page == Page::Empty {
+            self.discover_home_with_auto(false)
+        } else {
+            Vec::new()
+        };
+        fx.push(Effect::Redraw);
+        fx
     }
 
     /// Everything a shell needs to draw the current state.
@@ -4206,7 +4371,19 @@ impl App {
             .is_some_and(|st| st.cancel.load(Ordering::Relaxed));
         View {
             page: self.page,
-            disc_present: self.disc_present,
+            disc_present: self.disc_present.or_else(|| {
+                self.home_drives
+                    .iter()
+                    .any(|d| d.present == Some(true))
+                    .then_some(true)
+            }),
+            home_drives: if self.page == Page::Empty {
+                self.home_drives.clone()
+            } else {
+                Vec::new()
+            },
+            preferred_drive: self.settings.preferred_drive.clone(),
+            startup_mode: self.settings.startup_mode.clone(),
             title_rows: self.rows(),
             pick: self.pick_view(),
             info: self
@@ -4732,6 +4909,9 @@ pub(crate) fn empty_description(disc_present: Option<bool>) -> String {
 /// makes no decisions of its own.
 pub struct View {
     pub page: Page,
+    pub home_drives: Vec<HomeDrive>,
+    pub preferred_drive: String,
+    pub startup_mode: String,
     /// Whether a live optical source is currently known to contain media.
     /// `None` means the launch probe has not answered yet.
     pub disc_present: Option<bool>,

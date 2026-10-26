@@ -1164,6 +1164,14 @@ fn every_settings_dropdown_stores_a_canonical_value_the_code_matches_on() {
                 "Longest title",
             ],
         ),
+        (
+            "startup_mode",
+            &[
+                "Show drives",
+                "Open any loaded disc",
+                "Open preferred drive",
+            ],
+        ),
         ("rip_mode", &["Multi-pass", "Single pass"]),
         (
             "key_source",

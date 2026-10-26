@@ -23,14 +23,18 @@ pub(super) struct Memo {
     /// The free-space line last shown.
     hint_shown: Option<String>,
     log: LogMemo,
+    home: Option<(Vec<crate::ui::HomeDrive>, String, String)>,
 }
 
 pub(super) struct MainView {
+    shell: std::rc::Weak<Shell>,
     pub root: gtk::Box,
     stack: gtk::Stack,
     pick_bar: PickBar,
     tree: TitleTree,
     empty: adw::StatusPage,
+    open_disc: gtk::Button,
+    drive_rows: gtk::Box,
     out_entry: gtk::Entry,
     out_hint: gtk::Label,
     fmt_drop: gtk::DropDown,
@@ -136,11 +140,16 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     buttons.set_halign(gtk::Align::Center);
     buttons.append(&open_disc);
     buttons.append(&open_file);
+    let drive_rows = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let home_actions = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    home_actions.set_halign(gtk::Align::Center);
+    home_actions.append(&drive_rows);
+    home_actions.append(&buttons);
     let empty = adw::StatusPage::builder()
         .icon_name("media-optical-symbolic")
         .title(g("gui.page.empty_title"))
         .description(glib::markup_escape_text(&g("gui.page.empty_subtitle")))
-        .child(&buttons)
+        .child(&home_actions)
         .vexpand(true)
         .build();
     stack.add_named(&empty, Some(glue::page_name(crate::ui::Page::Empty)));
@@ -330,10 +339,13 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     root.append(&log_scroll);
 
     Rc::new(MainView {
+        shell: Rc::downgrade(shell),
         root,
         stack,
         pick_bar,
         empty,
+        open_disc,
+        drive_rows,
         tree,
         out_entry,
         out_hint,
@@ -369,10 +381,63 @@ impl MainView {
     /// Assign the view. Computes nothing the core already decided.
     pub(super) fn render(&self, v: &View, memo: &mut Memo) {
         self.stack.set_visible_child_name(glue::page_name(v.page));
+        self.open_disc.set_visible(v.home_drives.is_empty());
         self.empty
             .set_title(&crate::ui::empty_heading(v.disc_present));
         self.empty
             .set_description(Some(&crate::ui::empty_description(v.disc_present)));
+        let home = (
+            v.home_drives.clone(),
+            v.preferred_drive.clone(),
+            v.startup_mode.clone(),
+        );
+        if memo.home.as_ref() != Some(&home) {
+            while let Some(child) = self.drive_rows.first_child() {
+                self.drive_rows.remove(&child);
+            }
+            for (index, drive) in v.home_drives.iter().enumerate() {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                let status = match drive.present {
+                    Some(true) => crate::strings::get_or("gui.home.loaded", "Disc inserted"),
+                    Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
+                    None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
+                };
+                let label = gtk::Label::new(Some(&format!(
+                    "{} — {status}",
+                    crate::strings::sanitize_display(&drive.label)
+                )));
+                label.set_xalign(0.0);
+                label.set_hexpand(true);
+                row.append(&label);
+                let open = gtk::Button::with_label(&crate::strings::get("gui.btn.open_disc"));
+                let shell = self.shell.clone();
+                open.connect_clicked(move |_| {
+                    if let Some(shell) = shell.upgrade() {
+                        let source = shell.app.borrow().home_drive_source(index);
+                        if let Some(source) = source {
+                            shell.open_path(&source);
+                        }
+                    }
+                });
+                row.append(&open);
+                let prefer = gtk::Button::with_label(&crate::strings::get_or(
+                    "gui.home.use_startup",
+                    "Use at startup",
+                ));
+                prefer.set_sensitive(
+                    !(v.startup_mode == "Open preferred drive" && v.preferred_drive == drive.label),
+                );
+                let shell = self.shell.clone();
+                prefer.connect_clicked(move |_| {
+                    if let Some(shell) = shell.upgrade() {
+                        shell.apply(|a| a.prefer_home_drive(index));
+                    }
+                });
+                row.append(&prefer);
+                self.drive_rows.append(&row);
+            }
+            memo.home = Some(home);
+        }
         let log_fills = glue::log_fills(v.page) && !v.log_hidden;
         self.stack.set_vexpand(!log_fills);
         self.log_scroll.set_vexpand(log_fills);

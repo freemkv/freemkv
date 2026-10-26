@@ -636,6 +636,10 @@ struct Shell {
     /// about, not only "Open file or ISO…".
     btn_open_disc: gui::Button,
     btn_open: gui::Button,
+    home_list: gui::ListBox,
+    home_open: gui::Button,
+    home_prefer: gui::Button,
+    home_sig: RefCell<Option<(Vec<crate::ui::HomeDrive>, String, String)>>,
 
     // titles page
     tree: gui::TreeView<usize>,
@@ -691,6 +695,19 @@ struct Shell {
 }
 
 impl Shell {
+    fn selected_home_drive(&self) -> Option<usize> {
+        unsafe { self.home_list.hwnd().SendMessage(msg::LbGetCurSel {}) }
+            .map(|index| index as usize)
+    }
+
+    fn open_selected_home_drive(&self) {
+        let source = self
+            .selected_home_drive()
+            .and_then(|index| self.app.borrow().home_drive_source(index));
+        if let Some(source) = source {
+            self.perform(self.app_mut(|a| a.open(&source)));
+        }
+    }
     fn new() -> Self {
         let app = App::new();
         let settings = app.settings.clone();
@@ -761,6 +778,31 @@ impl Shell {
                 width: s.px(180),
                 height: s.px(30),
                 ctrl_id: ID_OPEN_EMPTY,
+                ..Default::default()
+            },
+        );
+        let home_list = gui::ListBox::new(
+            &wnd,
+            gui::ListBoxOpts {
+                size: (s.px(440), s.px(122)),
+                ..Default::default()
+            },
+        );
+        let home_open = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: &crate::strings::get_or("gui.home.open", "Open"),
+                width: s.px(200),
+                height: s.px(30),
+                ..Default::default()
+            },
+        );
+        let home_prefer = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: &crate::strings::get_or("gui.home.use_startup", "Use at startup"),
+                width: s.px(200),
+                height: s.px(30),
                 ..Default::default()
             },
         );
@@ -1054,6 +1096,10 @@ impl Shell {
             lbl_empty_sub,
             btn_open_disc,
             btn_open,
+            home_list,
+            home_open,
+            home_prefer,
+            home_sig: RefCell::new(None),
             tree,
             tree_head,
             tree_head_text: Rc::new(RefCell::new(Vec::new())),
@@ -1263,6 +1309,9 @@ impl Shell {
         put(&self.lbl_empty_sub, l.empty_sub);
         put(&self.btn_open_disc, l.btn_open_disc);
         put(&self.btn_open, l.btn_open);
+        put(&self.home_list, l.home_list);
+        put(&self.home_open, l.home_open);
+        put(&self.home_prefer, l.home_prefer);
 
         // ── titles page ──
         for (lbl, r) in
@@ -1746,6 +1795,35 @@ impl Shell {
             .lbl_empty_sub
             .hwnd()
             .SetWindowText(&crate::ui::empty_description(v.disc_present));
+        let home = (
+            v.home_drives.clone(),
+            v.preferred_drive.clone(),
+            v.startup_mode.clone(),
+        );
+        if self.home_sig.borrow().as_ref() != Some(&home) {
+            self.home_list.items().delete_all();
+            let labels: Vec<String> = v
+                .home_drives
+                .iter()
+                .map(|d| {
+                    let status = match d.present {
+                        Some(true) => crate::strings::get_or("gui.home.loaded", "Disc inserted"),
+                        Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
+                        None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
+                    };
+                    format!("{} — {status}", crate::strings::sanitize_display(&d.label))
+                })
+                .collect();
+            let _ = self.home_list.items().add(&labels);
+            if !labels.is_empty() {
+                let _ = unsafe {
+                    self.home_list
+                        .hwnd()
+                        .SendMessage(msg::LbSetCurSel { index: Some(0) })
+                };
+            }
+            *self.home_sig.borrow_mut() = Some(home);
+        }
 
         // Format list depends on source kind, so it's re-derived every render,
         // not just at build time — a real macOS bug had "Whole disc → ISO image"
@@ -1757,9 +1835,15 @@ impl Shell {
         for c in [&self.lbl_empty_head, &self.lbl_empty_sub] {
             show(c, p == Page::Empty);
         }
-        for c in [&self.btn_open_disc, &self.btn_open] {
-            show(c, p == Page::Empty);
-        }
+        show(
+            &self.btn_open_disc,
+            p == Page::Empty && v.home_drives.is_empty(),
+        );
+        show(&self.btn_open, p == Page::Empty);
+        let homes_visible = p == Page::Empty && !v.home_drives.is_empty();
+        show(&self.home_list, homes_visible);
+        show(&self.home_open, homes_visible);
+        show(&self.home_prefer, homes_visible);
 
         show(&self.tree, p == Page::Titles);
         show(&self.tree_head, p == Page::Titles);
@@ -2421,7 +2505,7 @@ impl Shell {
             let _ = me.wnd.hwnd().KillTimer(TIMER_LAUNCH_PROBE);
             match crate::app_entry::launch_source() {
                 Some(src) => me.perform(me.app_mut(|a| a.open(src))),
-                None => me.open_disc(false),
+                None => me.perform(me.app_mut(|a| a.discover_home())),
             }
             Ok(())
         });
@@ -2574,6 +2658,24 @@ impl Shell {
         let me = self.clone();
         self.btn_open_disc.on().bn_clicked(move || {
             me.open_disc(true);
+            Ok(())
+        });
+        let me = self.clone();
+        self.home_list.on().lbn_dbl_clk(move || {
+            me.open_selected_home_drive();
+            Ok(())
+        });
+        let me = self.clone();
+        self.home_open.on().bn_clicked(move || {
+            me.open_selected_home_drive();
+            Ok(())
+        });
+        let me = self.clone();
+        self.home_prefer.on().bn_clicked(move || {
+            if let Some(index) = me.selected_home_drive() {
+                let fx = me.app_mut(|a| a.prefer_home_drive(index));
+                me.perform(fx);
+            }
             Ok(())
         });
         let me = self.clone();
@@ -3232,6 +3334,16 @@ impl Prefs {
         fields.push((
             "tmdb_api_key",
             r.field_secure(&g("gui.set.tmdb_api_key"), &st.tmdb_api_key, 320),
+        ));
+
+        r.gap();
+        combos.push((
+            "startup_mode",
+            r.combo("startup_mode", &g("gui.set.startup_mode"), 320),
+        ));
+        fields.push((
+            "preferred_drive",
+            r.field(&g("gui.set.preferred_drive"), &st.preferred_drive, 320),
         ));
 
         // ── Selection ── engine Job.selection
@@ -3980,6 +4092,7 @@ impl Shell {
     // be replaced post-creation); everything else is re-texted in place.
     fn relocalize(&self) {
         let g = crate::strings::get;
+        *self.home_sig.borrow_mut() = None;
         // Grab the menu the window currently owns BEFORE replacing it: `SetMenu`
         // does not free the old `HMENU`, so it must be destroyed by hand or it
         // leaks on every language change.

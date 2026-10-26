@@ -13,6 +13,10 @@ pub struct Settings {
     pub filename_template: String,
     /// Optional metadata service credential; never required for reading or selection.
     pub tmdb_api_key: String,
+    /// Startup choice: Show drives, Open any loaded disc, or Open preferred drive.
+    pub startup_mode: String,
+    /// Hardware label chosen on the ready screen. Duplicate labels are never opened automatically.
+    pub preferred_drive: String,
     pub keep_iso: bool,
     /// Eject the disc when the rip finishes reading it (mirrors autorip's
     /// `auto_eject`; default on).
@@ -135,6 +139,8 @@ impl Default for Settings {
             container: "Selected titles → MKV".into(),
             filename_template: "{title}_t{n}".into(),
             tmdb_api_key: String::new(),
+            startup_mode: "Show drives".into(),
+            preferred_drive: String::new(),
             keep_iso: false,
             // Mirror autorip's auto_eject default (on): pop the disc when the
             // read phase completes so the user can grab it / load the next.
@@ -322,6 +328,8 @@ impl Settings {
             "container" => self.container.clone(),
             "filename_template" => self.filename_template.clone(),
             "tmdb_api_key" => self.tmdb_api_key.clone(),
+            "startup_mode" => self.startup_mode.clone(),
+            "preferred_drive" => self.preferred_drive.clone(),
             "selection" => self.selection.clone(),
             "min_title_secs" => self.min_title_secs.clone(),
             "audio_langs" => self.audio_langs.clone(),
@@ -362,6 +370,8 @@ impl Settings {
             "container" => self.container = v,
             "filename_template" => self.filename_template = v,
             "tmdb_api_key" => self.tmdb_api_key = v,
+            "startup_mode" => self.startup_mode = v,
+            "preferred_drive" => self.preferred_drive = v,
             "selection" => self.selection = v,
             "min_title_secs" => self.min_title_secs = v,
             "audio_langs" => self.audio_langs = v,
@@ -480,6 +490,7 @@ impl Settings {
             }
         };
         snap(&mut self.selection, "selection", &d.selection);
+        snap(&mut self.startup_mode, "startup_mode", &d.startup_mode);
         snap(&mut self.rip_mode, "rip_mode", &d.rip_mode);
         snap(&mut self.key_source, "key_source", &d.key_source);
         snap(&mut self.log_level, "log_level", &d.log_level);

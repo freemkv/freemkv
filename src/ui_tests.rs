@@ -2884,10 +2884,15 @@ fn a_disc_removed_while_idle_on_its_titles_resets_to_the_start_screen() {
     assert_eq!(app.page, Page::Empty);
     assert_eq!(app.view().disc_present, Some(false));
     assert!(app.source.is_empty() && app.tree.arena.is_empty());
-    assert!(
-        app.tick().contains(&Effect::StopTicking),
-        "nothing left to watch"
-    );
+    let mut stopped = false;
+    for _ in 0..200 {
+        if app.tick().contains(&Effect::StopTicking) {
+            stopped = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(stopped, "discovery finishes before the idle timer stops");
 }
 
 #[test]
@@ -3742,4 +3747,71 @@ fn a_queued_save_writes_the_latest_settings() {
         "{written:?}: one write in flight, one queued"
     );
     assert_eq!(written.last(), Some(&app.settings.audio_langs));
+}
+
+#[test]
+fn home_drive_choice_obeys_explicit_source_and_unique_loaded_drive() {
+    let drives = || {
+        vec![
+            HomeDrive {
+                device: "drive-a".into(),
+                label: "Drive A".into(),
+                present: Some(true),
+            },
+            HomeDrive {
+                device: "drive-b".into(),
+                label: "Drive B".into(),
+                present: Some(true),
+            },
+        ]
+    };
+    let mut app = App::new();
+    app.settings.startup_mode = "Show drives".into();
+    app.apply_home_drives(drives(), true);
+    assert!(app.probe.is_none());
+    assert_eq!(app.home_drive_source(1).as_deref(), Some("disc://drive-b"));
+
+    app.settings.startup_mode = "Open any loaded disc".into();
+    app.apply_home_drives(drives(), false);
+    assert!(app.probe.is_none(), "returning home does not reopen a disc");
+    app.apply_home_drives(drives(), true);
+    assert!(app.probe.is_none(), "two loaded drives need a choice");
+    let mut one = drives();
+    one[1].present = Some(false);
+    app.apply_home_drives(one, true);
+    assert_eq!(
+        app.probe.as_ref().map(|p| p.path.as_str()),
+        Some("disc://drive-a")
+    );
+
+    let mut app = App::new();
+    app.settings.startup_mode = "Open preferred drive".into();
+    app.settings.preferred_drive = "Drive B".into();
+    app.apply_home_drives(drives(), true);
+    assert_eq!(
+        app.probe.as_ref().map(|p| p.path.as_str()),
+        Some("disc://drive-b")
+    );
+
+    let mut app = App::new();
+    app.settings.startup_mode = "Open preferred drive".into();
+    app.settings.preferred_drive = "Drive A".into();
+    let mut duplicates = drives();
+    duplicates[1].label = "Drive A".into();
+    app.apply_home_drives(duplicates, true);
+    assert!(
+        app.probe.is_none(),
+        "an ambiguous hardware label must not pick a drive"
+    );
+
+    let mut app = App::new();
+    app.home_generation = 3;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.home_discovery = Some((2, true, rx));
+    tx.send(drives()).unwrap();
+    assert!(app.poll_home().is_empty());
+    assert!(
+        app.home_drives.is_empty(),
+        "a late discovery cannot replace an explicit open"
+    );
 }
