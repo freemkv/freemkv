@@ -733,6 +733,23 @@ impl Queue {
                 let output = j.outputs.iter().find(|o| o.target == item.target)?;
                 let mut plan = j.plan.clone()?;
                 plan.outputs.retain(|o| o.id == output.id);
+                // Only a failed delivery carries recovery evidence into a new row job.
+                // Preserve its original overwrite baseline too: recapturing ownership
+                // could authorize a different file now sitting at the landed target.
+                let landing = output.landing.filter(|_| {
+                    j.state == JobState::Failed
+                        && j.staged.is_none()
+                        && output.staged.is_none()
+                        && plan.outputs.len() == 1
+                });
+                let owned = landing.map(|_| {
+                    j.owned
+                        .iter()
+                        .flatten()
+                        .filter(|o| o.path == item.target)
+                        .cloned()
+                        .collect()
+                });
                 Some((
                     plan,
                     vec![OutputProgress {
@@ -740,13 +757,14 @@ impl Queue {
                         target: item.target.clone(),
                         state: OutputState::Pending,
                         staged: None,
-                        landing: None,
+                        landing,
                     }],
+                    owned,
                 ))
             });
-            let (plan, outputs) = match prior {
-                Some((p, o)) => (Some(p), o),
-                None => (None, Vec::new()),
+            let (plan, outputs, owned) = match prior {
+                Some((p, o, owned)) => (Some(p), o, owned),
+                None => (None, Vec::new(), None),
             };
             replaced.insert(item.target.clone());
             f.next_id += 1;
@@ -757,7 +775,7 @@ impl Queue {
                 target: item.target,
                 plan,
                 outputs,
-                owned: None,
+                owned,
                 retire,
                 replace: item.replace,
                 state: JobState::Queued,
