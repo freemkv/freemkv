@@ -2677,6 +2677,95 @@ fn a_single_title_shows_one_bar_with_the_bottom_mirroring_it() {
 }
 
 #[test]
+fn whole_disc_progress_is_one_operation_despite_selected_episode_count() {
+    for format in ["Whole disc → ISO image", "Whole disc → decrypted folder"] {
+        for selected in [1, 3] {
+            for passes in [0, 1, 3] {
+                for raw in [false, true] {
+                    if raw && !format.contains("ISO") {
+                        continue;
+                    }
+                    let mut b = Bars::new(&[]);
+                    b.app.source = "disc://test".into();
+                    b.app.format = format.into();
+                    b.app.settings.raw = raw;
+                    b.app.run_titles = selected;
+                    assert_eq!(b.app.effective_format(), format);
+                    let phases: &[&str] = match passes {
+                        0 => &["copy"],
+                        1 => &["sweep"],
+                        _ => &["sweep", "patch-scrape", "patch-trim"],
+                    };
+                    for &pass in phases {
+                        assert_eq!(b.tick(pass, 25, 100).0, 25.0);
+                        assert!(
+                            !b.app.view().show_overall_bar,
+                            "{format}, selected={selected}, raw={raw}, pass={pass}"
+                        );
+                        b.tick(pass, 100, 100);
+                    }
+                    let mut b = Bars::new(&[]);
+                    b.app.run_titles = selected;
+                    b.tick(phases[0], 40, 100);
+                    b.st.cancel.store(true, Ordering::Relaxed);
+                    let v = b.app.view();
+                    assert_eq!(v.bar_current, 40.0, "Stop must not invent completion");
+                    assert_eq!(
+                        v.saving_current,
+                        crate::strings::get_or("stop.stopping", "Stopping …")
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn title_progress_matrix_covers_all_offered_sinks_and_recovery_pass_counts() {
+    let formats = output_formats(
+        true,
+        Fit {
+            mp4: true,
+            mpg: true,
+        },
+    );
+    for format in formats
+        .into_iter()
+        .flatten()
+        .filter(|f| !f.starts_with("Whole disc"))
+    {
+        for sizes in [vec![1000], vec![1000, 1000, 1000], vec![100, 300, 600]] {
+            for passes in [0, 1, 3] {
+                let mut b = Bars::new(&sizes);
+                b.app.source = "disc://test".into();
+                b.app.format = format.into();
+                assert_eq!(b.app.effective_format(), format);
+                assert_eq!(b.app.view().show_overall_bar, sizes.len() > 1);
+                if passes > 0 {
+                    let total = sizes.iter().sum::<u64>();
+                    b.st.begin_read();
+                    b.tick("sweep", total / 2, total);
+                    b.tick("sweep", total, total);
+                    for pass in ["patch-scrape", "patch-trim", "patch-scrape"]
+                        .into_iter()
+                        .take(passes - 1)
+                    {
+                        assert_eq!(b.tick(pass, 0, 100), (0.0, 50.0));
+                        b.tick(pass, 50, 100);
+                        b.tick(pass, 100, 100);
+                    }
+                }
+                for (idx, size) in sizes.iter().copied().enumerate() {
+                    b.title(idx, size);
+                }
+                b.assert_overall_monotonic();
+                b.assert_full_only_at_end();
+            }
+        }
+    }
+}
+
+#[test]
 fn the_eject_button_shows_for_an_idle_disc_source_only() {
     let mut app = App::new();
     app.source = "disc://".into();

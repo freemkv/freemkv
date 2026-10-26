@@ -4203,7 +4203,9 @@ impl App {
             bar_overall: overall,
             caption_current: bar_caption(pct, title_elapsed, p.eta_secs),
             caption_overall: bar_caption(overall, elapsed, None),
-            show_overall_bar: self.run_titles > 1,
+            // Only title jobs plan a batch. An ISO/folder backup is one operation,
+            // even when several titles were checked before choosing that output.
+            show_overall_bar: self.run_titles > 1 && p.batch_pct.is_some(),
             saving_current: stop_caption(stopping, titles_done, self.run_titles).unwrap_or_else(
                 || {
                     if p.preparation == crate::engine::TitlePreparation::Reading {
