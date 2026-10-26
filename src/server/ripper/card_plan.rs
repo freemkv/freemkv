@@ -196,24 +196,15 @@ impl Cache {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn publish(
         self: &Arc<Self>,
         job: &str,
-        titles: &[libfreemkv::DiscTitle],
-        label: &str,
-        filename: &str,
-        mapfile: &Path,
+        inputs: Inputs,
         outputs: &[super::staging::Output],
         initial: Correction,
     ) {
-        let inputs = Arc::new(Inputs {
-            titles: titles.to_vec(),
-            label: label.into(),
-            filename: filename.into(),
-            mapfile: mapfile.into(),
-        });
-        let episodes = card_episodes(titles, label, outputs);
+        let episodes = card_episodes(&inputs.titles, &inputs.label, outputs);
+        let inputs = Arc::new(inputs);
         let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
         let latest = plans
             .entries
@@ -426,7 +417,6 @@ impl Task {
 }
 
 /// Record the revision used to compute the capture plan along with its rows.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     job: &str,
     titles: &[libfreemkv::DiscTitle],
@@ -436,7 +426,13 @@ pub(crate) fn publish(
     outputs: &[super::staging::Output],
     initial: Correction,
 ) {
-    PLANS.publish(job, titles, label, filename, mapfile, outputs, initial);
+    let inputs = Inputs {
+        titles: titles.to_vec(),
+        label: label.into(),
+        filename: filename.into(),
+        mapfile: mapfile.into(),
+    };
+    PLANS.publish(job, inputs, outputs, initial);
 }
 
 /// Reconcile a correction acknowledged before the capture plan was published.

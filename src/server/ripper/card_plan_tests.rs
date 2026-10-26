@@ -167,10 +167,12 @@ fn publish_test(cache: &Arc<Cache>, job: &str) {
     let titles = episode_disc();
     cache.publish(
         job,
-        &titles,
-        "Show Season 2 Disc 2",
-        "Show.mkv",
-        Path::new(job),
+        Inputs {
+            titles: titles.clone(),
+            label: "Show Season 2 Disc 2".into(),
+            filename: "Show.mkv".into(),
+            mapfile: job.into(),
+        },
         &tv_plan(&titles, Some(4)),
         Correction {
             cfg: Config::default(),
@@ -425,10 +427,12 @@ fn republishing_retains_newer_correction_and_rejects_old_scan_completion() {
     let titles = episode_disc();
     cache.publish(
         "job",
-        &titles,
-        "Show Season 5 Disc 2",
-        "New.mkv",
-        Path::new("new-map"),
+        Inputs {
+            titles: titles.clone(),
+            label: "Show Season 5 Disc 2".into(),
+            filename: "New.mkv".into(),
+            mapfile: "new-map".into(),
+        },
         &tv_plan(&titles, Some(4)),
         Correction {
             cfg: Config::default(),
@@ -481,10 +485,12 @@ fn prepublication_correction_is_reconciled_and_old_capture_revision_is_ignored()
     let titles = episode_disc();
     cache.publish(
         job,
-        &titles,
-        "Show Season 2",
-        "Show.mkv",
-        Path::new(job),
+        Inputs {
+            titles: titles.clone(),
+            label: "Show Season 2".into(),
+            filename: "Show.mkv".into(),
+            mapfile: job.into(),
+        },
         &tv_plan(&titles, Some(30)),
         Correction {
             cfg: Config::default(),
@@ -631,10 +637,12 @@ fn capture_revision_retains_matching_payload_for_later_older_republication() {
     let titles = episode_disc();
     cache.publish(
         "job",
-        &titles,
-        "Show Season 2",
-        "Show.mkv",
-        Path::new("job"),
+        Inputs {
+            titles: titles.clone(),
+            label: "Show Season 2".into(),
+            filename: "Show.mkv".into(),
+            mapfile: "job".into(),
+        },
         &tv_plan(&titles, Some(30)),
         Correction {
             cfg: Config::default(),
