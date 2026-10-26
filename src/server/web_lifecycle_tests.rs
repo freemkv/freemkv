@@ -185,124 +185,100 @@ fn reboots_are_spaced_a_minute_apart() {
     );
 }
 
-// KeepAlive true, or conditions with SuccessfulExit false, as plutil extracts them: a
-// condition dict is no raw scalar, so only its SuccessfulExit answers.
+// Sanitized complete diagnostic snapshots from the owned-job measurement. No tests
+// query launchd or read a plist: the loaded policy alone authorizes the exit-75 reboot.
 #[test]
-fn only_keepalive_true_or_a_failed_exit_condition_restarts_the_job() {
-    assert!(keep_alive_restarts(Some("true"), None));
-    assert!(keep_alive_restarts(None, Some("false")));
-    for (keep, exit) in [(Some("false"), None), (None, None), (None, Some("true"))] {
-        assert!(!keep_alive_restarts(keep, exit), "{keep:?} {exit:?}");
+fn launchd_measured_loaded_policies() {
+    for (out, expected) in [
+        (include_str!("testdata/launchd/loaded-false.txt"), false),
+        (include_str!("testdata/launchd/stale-disk-true.txt"), false),
+        (include_str!("testdata/launchd/unconditional.txt"), true),
+        (
+            include_str!("testdata/launchd/conditional-before.txt"),
+            true,
+        ),
+        (include_str!("testdata/launchd/conditional-after.txt"), true),
+        (include_str!("testdata/launchd/successful-true.txt"), false),
+    ] {
+        assert_eq!(
+            launchd_restarts(&Launchctl::Loaded(out.into())),
+            expected,
+            "{out}"
+        );
     }
+    assert!(!launchd_restarts(&Launchctl::Unavailable));
+    assert!(!launchd_restarts(&Launchctl::NotLoaded));
 }
 
-// Only KeepAlive true (or conditions) makes launchd start the job again after it exits.
-#[cfg(target_os = "macos")]
 #[test]
-fn only_a_keepalive_plist_restarts_the_job() {
-    let dir = tempfile::tempdir().unwrap();
-    let plist = |name: &str, body: &str| {
-        let p = dir.path().join(name);
-        std::fs::write(
-            &p,
-            format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>{body}</dict></plist>"),
-        )
-        .unwrap();
-        p
-    };
-    let keep = plist("t.plist", "<key>KeepAlive</key><true/>");
-    let cond = plist(
-        "c.plist",
-        "<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>",
-    );
-    let off = plist("f.plist", "<key>KeepAlive</key><false/>");
-    let none = plist("n.plist", "<key>Label</key><string>x</string>");
-    // launchd does not start these again after an exit 75.
-    let only_success = plist(
-        "s.plist",
-        "<key>KeepAlive</key><dict><key>SuccessfulExit</key><true/></dict>",
-    );
-    let crashed = plist(
-        "k.plist",
-        "<key>KeepAlive</key><dict><key>Crashed</key><true/></dict>",
-    );
-    let network = plist(
-        "w.plist",
-        "<key>KeepAlive</key><dict><key>NetworkState</key><true/></dict>",
-    );
-    let with_more = plist(
-        "m.plist",
-        "<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/><key>Crashed</key><true/></dict>",
-    );
-    assert!(plist_keeps_alive(&keep));
-    assert!(plist_keeps_alive(&cond));
-    assert!(plist_keeps_alive(&with_more));
-    for p in [&off, &none, &only_success, &crashed, &network] {
-        assert!(!plist_keeps_alive(p), "{}", p.display());
+fn launchd_policy_requires_complete_unambiguous_top_level_evidence() {
+    let record = |body: &str| format!("gui/501/io.freemkv.library = {{\n{body}}}\n");
+    let allows = |out: String| launchd_restarts(&Launchctl::Loaded(out));
+    let kept = "\tproperties = keepalive | runatload\n";
+    let cond = "\tsemaphores = {\n\t\tsuccessful exit => 0\n\t}\n";
+    assert!(allows(record(kept)));
+    assert!(allows(record(cond)));
+    assert!(allows(record(&format!("{cond}{kept}"))));
+    assert!(allows(record(
+        "\tsemaphores = {\n\t\tsuccessful exit => 0\n\t\tcrashed => 1\n\t}\n"
+    )));
+    assert!(allows(record(&format!(
+        "\tpath = /literal{{brace}}/name\n{kept}"
+    ))));
+    for body in [
+        "\tproperties = notkeepalive | runatload\n",
+        "\tproperties = text keepalive text\n",
+        "\tenvironment = {\n\t\tproperties = keepalive\n\t}\n",
+        "\tenvironment = {\n\t\tsemaphores = {\n\t\t\tsuccessful exit => 0\n\t\t}\n\t}\n",
+        "\tsuccessful exit => 0\n",
+        "\tsemaphores = {\n\t\tsuccessful exit => 1\n\t}\n",
+        "\tsemaphores = {\n\t\tsuccessful exit => 0\n\t\tsuccessful exit => 1\n\t}\n",
+        "\tsemaphores = {\n\t\tsuccessful exit => 0\n\t\tsuccessful exit => 0\n\t}\n",
+        "\tsemaphores = {\n\t\tnested = {\n\t\t\tsuccessful exit => 0\n\t\t}\n\t}\n",
+        "\tsemaphores = {\n\tsuccessful exit => 0\n\t}\n",
+    ] {
+        assert!(!allows(record(body)), "{body:?}");
     }
-    assert!(!plist_keeps_alive(&dir.path().join("missing.plist")));
-}
-
-// The loaded job decides when launchctl knows it: its keepalive property, else the plist
-// file at its path. A job launchctl does not list in the user's domain (a LaunchDaemon) is
-// refused.
-#[test]
-fn the_loaded_launchd_job_decides_over_the_installed_plist() {
-    let loaded = std::path::Path::new("/srv/svc/Library/LaunchAgents/loaded.plist");
-    let stale = std::path::Path::new("/srv/svc/Library/LaunchAgents/stale.plist");
-    let keeps_alive = |p: &std::path::Path| p == loaded;
-    let print = |path: &std::path::Path, props: &str| {
-        format!(
-            "gui/501/io.freemkv.library = {{\n\tpath = {}\n\ttype = LaunchAgent\n\tenvironment = {{\n\t\tpath = /nope\n\t}}\n\tproperties = {props}\n}}\n",
-            path.display()
-        )
-    };
-    let job = Launchctl::Loaded(print(loaded, "runatload | inferred program"));
-    assert!(
-        launchd_restarts(&job, stale, keeps_alive),
-        "the loaded job's plist, not the installed one"
-    );
-    let listed_kept = Launchctl::Loaded(print(stale, "keepalive | runatload"));
-    assert!(
-        launchd_restarts(&listed_kept, stale, keeps_alive),
-        "launchd lists the loaded job as kept alive"
-    );
-    let not_kept_anywhere = Launchctl::Loaded(print(stale, "runatload"));
-    assert!(!launchd_restarts(&not_kept_anywhere, loaded, keeps_alive));
-    assert!(
-        !launchd_restarts(&Launchctl::NotLoaded, loaded, keeps_alive),
-        "a LaunchDaemon"
-    );
-    assert!(launchd_restarts(
-        &Launchctl::Unavailable,
-        loaded,
-        keeps_alive
-    ));
-    assert!(!launchd_restarts(
-        &Launchctl::Unavailable,
-        stale,
-        keeps_alive
-    ));
-}
-
-// launchd lists no "keepalive" property for a conditional KeepAlive {SuccessfulExit =
-// false} (it shows a semaphores block): the loaded job's plist decides. Shape captured from
-// `launchctl print gui/501/<label>` of such an agent.
-#[test]
-fn a_conditional_keepalive_of_the_loaded_job_restarts_it() {
-    let plist = std::path::Path::new("/srv/svc/Library/LaunchAgents/io.freemkv.library.plist");
-    let print = format!(
-        "gui/501/io.freemkv.library = {{\n\tactive count = 1\n\tpath = {}\n\ttype = LaunchAgent\n\
-         \tstate = running\n\n\tenvironment = {{\n\t\tXPC_SERVICE_NAME => io.freemkv.library\n\t}}\n\n\
-         \tdomain = gui/501 [100002]\n\tminimum runtime = 10\n\texit timeout = 5\n\truns = 2\n\
-         \tsemaphores = {{\n\t\tsuccessful exit => 0\n\t}}\n\n\
-         \tproperties = runatload | managed LWCR | has LWCR\n}}\n",
-        plist.display()
-    );
-    let missing = std::path::Path::new("/srv/svc/not-installed.plist");
-    let job = Launchctl::Loaded(print);
-    assert!(launchd_restarts(&job, missing, |p| p == plist));
-    assert!(!launchd_restarts(&job, missing, |_| false));
+    for value in ["00", "01", "0 extra", "false", "unknown", ""] {
+        assert!(!allows(record(&format!(
+            "\tsemaphores = {{\n\t\tsuccessful exit => {value}\n\t}}\n"
+        ))));
+    }
+    // Even a valid affirmative field cannot rescue malformed/duplicate policy.
+    for body in [
+        format!("{kept}{kept}"),
+        format!("{kept}\tproperties = runatload\n"),
+        format!("{kept}\tproperties = \n"),
+        format!("{kept}\tproperties = keepalive |\n"),
+        format!("{kept}\tsemaphores = {{ trailing\n"),
+        format!("{kept}\tenvironment = {{ trailing\n"),
+        format!("{kept}\t}} trailing\n"),
+        format!("{kept}{cond}{cond}"),
+        format!("{kept}\tsemaphores = {{\n\t\tsuccessful exit => unknown\n\t}}\n"),
+        format!("{cond}\tsemaphores = {{\n\t\tsuccessful exit  => 0\n\t}}\n"),
+        format!("{kept}\tsemaphores = {{\n\t\tnested = {{ => 0\n\t}}\n"),
+        format!("{kept}\tenvironment = {{\n\t}}\n\t}}\n"),
+        format!("{kept}\tenvironment = {{\n\t\tVALUE => literal{{brace\n"),
+        format!("{kept}\tenvironment = {{\n\t\tVALUE => literal}}brace\n"),
+    ] {
+        assert!(!allows(record(&body)), "{body:?}");
+    }
+    for out in [
+        kept.to_owned(),
+        format!("gui/501/io.freemkv.library = {{\n{kept}"),
+        format!("gui/501/io.freemkv.library = {{\n{cond}"),
+        format!("{{\n{kept}}}\n"),
+        format!("gui/ = {{\n{kept}}}\n"),
+        format!("gui/501/ = {{\n{kept}}}\n"),
+        format!("gui/unknown/io.freemkv.library = {{\n{kept}}}\n"),
+        format!("gui/501/io.freemkv.library/extra = {{\n{kept}}}\n"),
+        format!("{{\n}}\n{kept}"),
+        format!("{}{}", record(kept), kept),
+        format!("{}{}", record(kept), record(kept)),
+        format!("garbage\n{}", record(kept)),
+    ] {
+        assert!(!allows(out.clone()), "{out:?}");
+    }
 }
 
 // A metadata refusal is a conflict (409); storage that may answer again is 503, other

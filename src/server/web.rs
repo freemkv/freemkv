@@ -2804,19 +2804,13 @@ fn relaunch_supported() -> bool {
     if !launchd_job(label.as_deref(), parent_pid()) || name.contains('/') || name.starts_with('.') {
         return false;
     }
-    let installed = std::env::var_os("HOME").map(|home| {
-        std::path::Path::new(&home)
-            .join("Library/LaunchAgents")
-            .join(format!("{name}.plist"))
-    });
-    installed
-        .is_some_and(|plist| launchd_restarts(&launchctl_print(name), &plist, plist_keeps_alive))
+    launchd_restarts(&launchctl_print(name))
 }
 
 /// What `launchctl print gui/<uid>/<label>` says about this job.
 #[cfg(any(target_os = "macos", test))]
 enum Launchctl {
-    /// launchctl could not be run: the installed plist alone decides.
+    /// No loaded policy could be queried: refused.
     Unavailable,
     /// Not a job in the user's GUI domain (a LaunchDaemon, say): refused.
     NotLoaded,
@@ -2842,57 +2836,126 @@ fn launchctl_print(label: &str) -> Launchctl {
 // Test seam: the route tests never ask the real launchd (this machine may run the job).
 #[cfg(all(target_os = "macos", test))]
 fn launchctl_print(_: &str) -> Launchctl {
-    Launchctl::Unavailable
-}
-
-// Whether launchd starts the job again after the exit-75 shutdown. A listed job: its
-// "keepalive" property (unconditional), else `keeps_alive` of the plist file at its `path`,
-// as that file reads now (a conditional KeepAlive is not listed). Else the installed `plist`.
-#[cfg(any(target_os = "macos", test))]
-fn launchd_restarts(
-    job: &Launchctl,
-    plist: &std::path::Path,
-    keeps_alive: impl Fn(&std::path::Path) -> bool,
-) -> bool {
-    match job {
-        Launchctl::Unavailable => keeps_alive(plist),
-        Launchctl::NotLoaded => false,
-        Launchctl::Loaded(out) => {
-            let field = |name: &str| {
-                out.lines()
-                    .find_map(|l| l.strip_prefix('\t')?.strip_prefix(name))
-                    .map(str::trim)
-            };
-            let kept = field("properties = ")
-                .is_some_and(|p| p.split('|').any(|f| f.trim() == "keepalive"));
-            kept || field("path = ").is_some_and(|p| keeps_alive(std::path::Path::new(p)))
-        }
+    match std::env::var("FREEMKV_TEST_LAUNCHCTL") {
+        Ok(out) if out == "not-loaded" => Launchctl::NotLoaded,
+        Ok(out) => Launchctl::Loaded(out),
+        Err(_) => Launchctl::Unavailable,
     }
 }
 
-// From `plutil -extract … raw` of KeepAlive and KeepAlive.SuccessfulExit: true, or conditions
-// that include SuccessfulExit = false (restart after a non-zero exit). Other conditions alone
-// do not restart a job that exited 75.
+// launchctl print is diagnostic, not a stable API. Accept only the measured loaded
+// policy syntax in a complete record; unknown or malformed policy fails closed.
 #[cfg(any(target_os = "macos", test))]
-fn keep_alive_restarts(keep_alive: Option<&str>, successful_exit: Option<&str>) -> bool {
-    keep_alive == Some("true") || successful_exit == Some("false")
-}
-
-#[cfg(target_os = "macos")]
-fn plist_keeps_alive(plist: &std::path::Path) -> bool {
-    let plutil = |args: &[&str]| {
-        std::process::Command::new("/usr/bin/plutil")
-            .args(args)
-            .arg(plist)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+fn launchd_restarts(job: &Launchctl) -> bool {
+    let Launchctl::Loaded(out) = job else {
+        return false;
     };
-    keep_alive_restarts(
-        plutil(&["-extract", "KeepAlive", "raw"]).as_deref(),
-        plutil(&["-extract", "KeepAlive.SuccessfulExit", "raw"]).as_deref(),
-    )
+    let mut lines = out.lines().filter(|line| !line.trim().is_empty());
+    let Some(header) = lines.next().and_then(|line| line.strip_suffix(" = {")) else {
+        return false;
+    };
+    let mut target = header.split('/');
+    if target.next() != Some("gui")
+        || !target
+            .next()
+            .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+        || !target.next().is_some_and(|label| {
+            !label.is_empty()
+                && !label.starts_with('.')
+                && !label
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '{' | '}' | '='))
+        })
+        || target.next().is_some()
+    {
+        return false;
+    }
+    let mut depth = 1;
+    let mut closed = false;
+    let mut properties = None;
+    let mut semaphores = false;
+    let mut in_semaphores = false;
+    let mut conditions = std::collections::HashSet::new();
+    let mut failed_exit = false;
+    for line in lines {
+        if closed {
+            return false;
+        }
+        let indent = line.bytes().take_while(|&c| c == b'\t').count();
+        let entry = &line[indent..];
+        if entry == "}" {
+            if indent + 1 != depth {
+                return false;
+            }
+            depth -= 1;
+            if depth == 1 {
+                in_semaphores = false;
+            }
+            closed = depth == 0;
+            continue;
+        }
+        if indent != depth
+            || entry.starts_with(char::is_whitespace)
+            || entry.starts_with(['{', '}'])
+            || entry
+                .split_once(" = ")
+                .is_some_and(|(_, value)| value.starts_with('{') && value != "{")
+        {
+            return false;
+        }
+        if in_semaphores {
+            // Only direct scalar conditions are recognized in this policy block.
+            let Some((key, value)) = entry.split_once(" => ") else {
+                return false;
+            };
+            if depth != 2
+                || key.is_empty()
+                || key != key.trim()
+                || key.contains(['{', '}', '=', '>', '\t'])
+                || !matches!(value, "0" | "1")
+                || !conditions.insert(key)
+            {
+                return false;
+            }
+            if key == "successful exit" {
+                failed_exit = value == "0";
+            }
+            continue;
+        }
+        if depth == 1 && entry.starts_with("properties") {
+            let Some(value) = entry.strip_prefix("properties = ") else {
+                return false;
+            };
+            if properties.is_some() {
+                return false;
+            }
+            let mut tokens = std::collections::HashSet::new();
+            for token in value.split('|').map(str::trim) {
+                if token.is_empty() || token.contains(['{', '}', '=']) || !tokens.insert(token) {
+                    return false;
+                }
+            }
+            properties = Some(tokens.contains("keepalive"));
+            continue;
+        }
+        if depth == 1 && entry.starts_with("semaphores") {
+            if semaphores || entry != "semaphores = {" {
+                return false;
+            }
+            semaphores = true;
+            in_semaphores = true;
+            depth += 1;
+            continue;
+        }
+        // Count only a complete block opener, never braces embedded in scalar values.
+        if entry
+            .strip_suffix(" = {")
+            .is_some_and(|key| !key.is_empty())
+        {
+            depth += 1;
+        }
+    }
+    closed && (properties == Some(true) || failed_exit)
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
