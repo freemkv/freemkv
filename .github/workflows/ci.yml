@@ -302,8 +302,7 @@ jobs:
       - name: Install GTK4 + libadwaita development headers
         timeout-minutes: 5
         run: |
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install --no-install-recommends -y \
+          bash .github/scripts/install-linux-deps.sh \
             libgtk-4-dev \
             libadwaita-1-dev \
             build-essential
@@ -523,8 +522,7 @@ jobs:
       - name: Install GTK4 + libadwaita development headers
         timeout-minutes: 5
         run: |
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install --no-install-recommends -y libgtk-4-dev libadwaita-1-dev build-essential
+          bash .github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable

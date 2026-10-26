@@ -257,8 +257,7 @@ jobs:
         timeout-minutes: 5
         if: runner.os == 'Linux' && matrix.features != ''
         run: |
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libgtk-4-dev libadwaita-1-dev build-essential
+          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -411,8 +410,7 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y ffmpeg
+            bash freemkv/.github/scripts/install-linux-deps.sh ffmpeg
           else
             brew install ffmpeg
           fi
@@ -468,8 +466,7 @@ jobs:
         timeout-minutes: 5
         if: matrix.os == 'linux'
         run: |
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus
+          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
