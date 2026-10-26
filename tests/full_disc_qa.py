@@ -89,7 +89,22 @@ def check_navigation(root, files):
     return counts
 
 
-def check_family(binary, family, source, key_args, output):
+def check_libbluray(executable, folder, log):
+    with log.open('w') as output:
+        result = subprocess.run([str(executable), str(folder)], stdout=output,
+                                stderr=subprocess.STDOUT)
+    answer = log.read_text(errors='replace')
+    if result.returncode or not re.search(r'BluRay detected\s*:\s*yes', answer):
+        raise RuntimeError(f'libbluray could not open the decrypted folder: {answer[-2000:]}')
+    if not re.search(r'AACS detected\s*:\s*no', answer):
+        raise RuntimeError(f'libbluray still sees the decrypted folder as AACS protected: {answer[-2000:]}')
+    titles = re.findall(r'(?:HDMV|BD-J) titles\s*:\s*(\d+)', answer)
+    if not titles or sum(map(int, titles)) == 0:
+        raise RuntimeError('libbluray found no titles in the decrypted folder')
+    return {'title_count': sum(map(int, titles)), 'aacs_detected': False}
+
+
+def check_family(binary, family, source, key_args, output, bd_info=None):
     if not source.is_file():
         raise RuntimeError(f'{family} fixture missing: {source}')
     # The suite already fetched and authenticated the source. Fail explicitly
@@ -120,6 +135,7 @@ def check_family(binary, family, source, key_args, output):
             raise RuntimeError(f'{family} decrypted ISO/folder differ in {len(difference)} files: {difference[:20]}')
         navigation = check_navigation(direct_folder, direct)
         check_navigation(iso_folder, from_iso)
+        external = check_libbluray(bd_info, direct_folder, root / 'bd_info.log') if bd_info else None
 
         title = smallest_title(binary, url('iso', source))
         title_hashes = {}
@@ -135,7 +151,7 @@ def check_family(binary, family, source, key_args, output):
             raise RuntimeError(f'{family} title {title} differs between source, decrypted ISO and folder')
         return {'fixture_bytes': source.stat().st_size, 'decrypted_iso_sha256': sha256(decrypted_iso),
                 'files': direct, 'file_count': len(direct), 'navigation_counts': navigation,
-                'title': title, 'title_hashes': title_hashes}
+                'title': title, 'title_hashes': title_hashes, 'libbluray': external}
 
 
 def main():
@@ -146,6 +162,7 @@ def main():
     parser.add_argument('--keydb', type=Path, required=True)
     parser.add_argument('--key-url', required=True)
     parser.add_argument('--key-auth', required=True)
+    parser.add_argument('--bd-info', type=Path)
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -155,7 +172,7 @@ def main():
     try:
         for name, source in (('bd', args.bd_iso), ('uhd', args.uhd_iso)):
             report['families'][name] = check_family(args.binary.resolve(), name, source.resolve(),
-                                                    key_args, args.out.resolve())
+                                                    key_args, args.out.resolve(), args.bd_info)
             print(f"PASS {name}: {report['families'][name]['file_count']} matching files, "
                   f"valid navigation, title {report['families'][name]['title']} matches source keylessly",
                   flush=True)

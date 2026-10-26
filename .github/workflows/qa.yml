@@ -737,7 +737,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.os }}" = "linux" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 python3-venv
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 python3-venv libbluray-bin
           else
             choco install ffmpeg python3 -y --no-progress
             export PATH="$PATH:/c/ProgramData/chocolatey/bin"
@@ -953,11 +953,14 @@ jobs:
           BIN="$PWD/freemkv/target/${{ matrix.target }}/release/freemkv"
           if [ "${{ matrix.os }}" = "windows" ]; then
             BIN="$(cygpath -m "$PWD")/freemkv/target/${{ matrix.target }}/release/freemkv.exe"
+            BD_INFO=()
+          else
+            BD_INFO=(--bd-info "$(command -v bd_info)")
           fi
           "$FMKV_PYTHON" freemkv/tests/full_disc_qa.py \
             --binary "$BIN" --bd-iso "$ISO_DIR/bd.iso" --uhd-iso "$ISO_DIR/uhd.iso" \
             --keydb "$KEYDB_PATH" --key-url "$FMKV_KEY_URL" --key-auth "$FMKV_KEY_AUTH" \
-            --out "release-comparison/${{ matrix.os }}/candidate"
+            --out "release-comparison/${{ matrix.os }}/candidate" "${BD_INFO[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
