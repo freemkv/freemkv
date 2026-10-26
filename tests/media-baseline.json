@@ -1,12 +1,25 @@
 {
-  "version": "1.8.4",
-  "revisions": {
-    "freemkv": "37043e37e3c97d602cffffdebb83d7bc30a6a231",
-    "libfreemkv": "2622b3fc5afe8eb4ebcd85f58eb0d498a3f6c743",
-    "freemkv-engine": "5585400af0a1ebbcb065c4fba834cae15186be9f",
-    "freemkv-keysources": "48f8906495530c27c3161253de51d21607a98856",
-    "freemkv-i18n": "2af22ec363f2d1d4ab70a9d95b86c784a795d341",
-    "freemkv-unlock": "5a09422c6a8aba667879e569bddaf1f0624ed3c3"
-  },
-  "expected_differences": {}
+  "schema": 1,
+  "history": [
+    {
+      "version": "1.8.4",
+      "revisions": {
+        "freemkv": "37043e37e3c97d602cffffdebb83d7bc30a6a231",
+        "libfreemkv": "2622b3fc5afe8eb4ebcd85f58eb0d498a3f6c743",
+        "freemkv-engine": "5585400af0a1ebbcb065c4fba834cae15186be9f",
+        "freemkv-keysources": "48f8906495530c27c3161253de51d21607a98856",
+        "freemkv-i18n": "2af22ec363f2d1d4ab70a9d95b86c784a795d341",
+        "freemkv-unlock": "5a09422c6a8aba667879e569bddaf1f0624ed3c3"
+      },
+      "manifests": {
+        "x86_64-unknown-linux-musl": {
+          "sha256": "92d5a310cf39c4976ff8347ee2d09051fc81cd2ae86ddfab1638f83b2d3a6a2c"
+        },
+        "x86_64-pc-windows-msvc": {
+          "sha256": "cbc4c35d91e401c418d9a90da9678b551adc3592243b43b6b8338d3f331c7bd1"
+        }
+      },
+      "expected_differences": {}
+    }
+  ]
 }

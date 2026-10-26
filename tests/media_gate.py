@@ -1681,7 +1681,7 @@ def verdict(env):
     if status == 'reuse':
         return True, lines + ['', f'full-disc not needed: evidence {env.get("EVIDENCE_URL", "")}']
     if status == 'run':
-        results = {k: env.get(k, '') for k in ('MATRIX', 'COMPARE', 'RECORD')}
+        results = {k: env.get(k, '') for k in ('MATRIX', 'COMPARE', 'RECORD', 'PUBLISH')}
         ok = all(v == 'success' for v in results.values())
         lines += ['', ', '.join(f'{k.lower()}={v or "not run"}' for k, v in results.items())]
         return ok, lines + ([f'evidence tag: {env.get("TAG", "")}'] if ok else ['the full-disc run is not green: qa is red'])

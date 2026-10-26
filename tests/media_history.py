@@ -91,20 +91,28 @@ def save(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
 
 
-def build_baseline(workspace, spec, target):
-    workspace.mkdir(parents=True, exist_ok=True)
-    app = workspace / 'freemkv'
-    subprocess.run(['git', 'init', '-q', str(app)], check=True)
-    subprocess.run(['git', '-C', str(app), 'fetch', '-q', '--depth=1',
-                    'https://github.com/freemkv/freemkv', spec['revisions']['freemkv']], check=True)
-    subprocess.run(['git', '-C', str(app), 'checkout', '-q', '--detach', 'FETCH_HEAD'], check=True)
-    gate.checkout(workspace, spec['revisions'])
-    gate.resolve(workspace)
-    env = dict(os.environ, CARGO_TARGET_DIR=str(workspace / 'target'))
-    subprocess.run(['cargo', 'build', '--locked', '--release', '--target', target, '--bin', 'freemkv'],
-                   cwd=app, env=env, check=True)
-    extension = '.exe' if 'windows' in target else ''
-    return workspace / 'target' / target / 'release' / f'freemkv{extension}'
+def historical_manifest(bucket, spec, target, identity, destination):
+    pin = spec['manifests'][target]
+    digest = pin['sha256']
+    if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+        raise ValueError(f"invalid historical SHA-256 for {spec['version']} {target}")
+    key = f"media-history/v1/{spec['version']}/{target}/{digest}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(['aws', 's3api', 'get-object', '--bucket', bucket, '--key', key,
+                    str(destination), '--region', 'us-west-2', '--query', 'ContentLength',
+                    '--output', 'text'], check=True)
+    if sha256(destination) != digest:
+        raise ValueError(f'historical SHA-256 mismatch: {key}')
+    report = json.loads(destination.read_text())
+    for field in ('schema', 'target', 'fixtures', 'harness', 'hash_method', 'rustc', 'ffmpeg'):
+        if report.get(field) != identity[field]:
+            raise ValueError(f'historical {field} differs for {spec["version"]} {target}; '
+                             'create a new pinned media history epoch before comparing')
+    if (report.get('version') != spec['version'] or
+            report.get('revisions') != spec['revisions'] or
+            report.get('suite_exit') != 0 or not report.get('artifacts')):
+        raise ValueError(f'invalid historical result: {key}')
+    return report
 
 
 def run_suite(binary, harness, destination, identity):
@@ -131,8 +139,11 @@ def run_suite(binary, harness, destination, identity):
 
 def run(args):
     spec = json.loads(args.baseline.read_text())
-    if not gate.valid_revisions(spec['revisions']):
-        raise ValueError('baseline must pin all six release revisions')
+    history = spec['history']
+    if not history or len({entry['version'] for entry in history}) != len(history):
+        raise ValueError('media history must contain unique released versions')
+    if any(not gate.valid_revisions(entry['revisions']) for entry in history):
+        raise ValueError('media history must pin all six release revisions')
     plan = json.loads((args.plan_directory / 'evidence.json').read_text())
     identity = {'schema': 1, 'run_id': os.environ.get('GITHUB_RUN_ID'),
                 'hash_method': 'framecrc-copyts-stream-and-chapter-metadata-v2',
@@ -141,29 +152,34 @@ def run(args):
                 'harness': plan['inputs']['policy']['harness'],
                 'rustc': subprocess.check_output(['rustc', '-Vv'], text=True),
                 'ffmpeg': subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0]}
-    baseline_bin = build_baseline(args.workspace.resolve(), spec, args.target)
-    baseline = run_suite(baseline_bin, args.harness, args.out / spec['version'],
-                         dict(identity, version=spec['version'], revisions=spec['revisions'],
-                              lock_sha256=sha256(args.workspace / 'freemkv/Cargo.lock')))
-    (args.out / spec['version'] / 'Cargo.lock').write_bytes(
-        (args.workspace / 'freemkv/Cargo.lock').read_bytes())
+    baselines = {entry['version']: historical_manifest(args.bucket, entry, args.target,
+                 identity, args.out / entry['version'] / 'manifest.json') for entry in history}
     version = subprocess.check_output([str(args.binary.resolve()), 'version'], text=True).strip()
+    def version_parts(value):
+        return tuple(int(part) for part in value.split('.'))
+    if any(version_parts(entry['version']) >= version_parts(version) for entry in history):
+        raise ValueError('media history must contain only earlier released versions')
     candidate = run_suite(args.binary, args.harness, args.out / 'candidate',
                           dict(identity, version=version, revisions=plan['revisions'],
                                lock_sha256=plan['lock_sha256']))
     (args.out / 'candidate' / 'Cargo.lock').write_bytes((args.plan_directory / 'Cargo.lock').read_bytes())
     if os.environ.get('FMKV_HASHES'):
         Path(os.environ['FMKV_HASHES']).write_bytes((args.out / 'candidate/raw-hashes.txt').read_bytes())
-    comparison = compare(baseline['artifacts'], candidate['artifacts'], spec['expected_differences'])
-    save(args.out / 'comparison.json', comparison)
-    print(f"Release comparison: {len(comparison['differences'])} changed outputs; "
-          f"{len(comparison['container_only'])} container-only changes; "
-          f"{len(comparison['unexpected'])} unexplained changes")
-    for name in comparison['unexpected']:
-        print(f'UNEXPECTED: {name}')
-    # A failed historical suite is saved and reported too; it cannot become a green baseline silently.
-    return int(bool(baseline['suite_exit'] or candidate['suite_exit'] or comparison['unexpected']
-                    or comparison['stale_exceptions']))
+    comparisons = {}
+    for entry in history:
+        old_version = entry['version']
+        comparison = compare(baselines[old_version]['artifacts'], candidate['artifacts'],
+                             entry['expected_differences'])
+        comparisons[old_version] = comparison
+        save(args.out / f'comparison-{old_version}.json', comparison)
+        print(f"{old_version} → {version}: {len(comparison['differences'])} changed outputs; "
+              f"{len(comparison['container_only'])} container-only changes; "
+              f"{len(comparison['unexpected'])} unexplained changes")
+        for name in comparison['unexpected']:
+            print(f'UNEXPECTED against {old_version}: {name}')
+    save(args.out / 'comparison.json', {'comparisons': comparisons})
+    return int(bool(candidate['suite_exit'] or any(c['unexpected'] or c['stale_exceptions']
+                                                  for c in comparisons.values())))
 
 
 def archive(directory, run_id, attempt, post=gate.gh_post):
@@ -182,19 +198,56 @@ def archive(directory, run_id, attempt, post=gate.gh_post):
     print(f'https://github.com/freemkv/freemkv/tree/{name}')
 
 
+def publish(directory, bucket):
+    """Store successful QA answers for the next release, without replacing prior runs."""
+    approved = []
+    for platform in ('linux', 'windows'):
+        root = directory / f'release-comparison-{platform}' / 'candidate'
+        path = root / 'manifest.json'
+        report = json.loads(path.read_text())
+        if report.get('suite_exit') != 0 or not report.get('artifacts'):
+            raise ValueError(f'{platform} has no successful candidate media answer')
+        full_disc = root / 'full-disc-qa.json'
+        if not full_disc.is_file() or 'error' in json.loads(full_disc.read_text()):
+            raise ValueError(f'{platform} has no successful full-disc report')
+        approved.append((path, report))
+    for path, report in approved:
+        digest = sha256(path)
+        key = (f"media-history/v1/candidates/{report['version']}/{report['run_id']}/"
+               f"{report['target']}/{digest}.json")
+        command = ['aws', 's3api', 'put-object', '--bucket', bucket, '--key', key,
+                   '--body', str(path), '--content-type', 'application/json',
+                   '--if-none-match', '*', '--region', 'us-west-2']
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode:
+            # An Actions retry can encounter its own immutable object. Verify it byte for byte.
+            with tempfile.TemporaryDirectory() as scratch:
+                existing = Path(scratch) / 'manifest.json'
+                subprocess.run(['aws', 's3api', 'get-object', '--bucket', bucket, '--key', key,
+                                str(existing), '--region', 'us-west-2'], check=True,
+                               stdout=subprocess.DEVNULL)
+                if sha256(existing) != digest:
+                    raise ValueError(f'published answer differs: {key}')
+        print(f's3://{bucket}/{key}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--archive', type=Path)
+    parser.add_argument('--publish', type=Path)
     parser.add_argument('--baseline', type=Path, default=Path(__file__).with_name('media-baseline.json'))
+    parser.add_argument('--bucket')
     parser.add_argument('--binary', type=Path)
     parser.add_argument('--harness', type=Path)
     parser.add_argument('--plan-directory', type=Path)
-    parser.add_argument('--workspace', type=Path, default=Path('historical-build'))
     parser.add_argument('--out', type=Path, default=Path('release-comparison'))
     parser.add_argument('--target')
     args = parser.parse_args()
     if args.archive:
         archive(args.archive, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'])
+        return 0
+    if args.publish:
+        publish(args.publish, args.bucket)
         return 0
     return run(args)
 

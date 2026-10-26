@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import media_history as history
 
@@ -102,9 +103,57 @@ class ComparisonTests(unittest.TestCase):
 
     def test_baseline_is_the_complete_released_184_set(self):
         spec = json.loads(Path(history.__file__).with_name('media-baseline.json').read_text())
-        self.assertEqual(spec['version'], '1.8.4')
-        self.assertTrue(history.gate.valid_revisions(spec['revisions']))
-        self.assertEqual(spec['expected_differences'], {})
+        self.assertEqual([entry['version'] for entry in spec['history']], ['1.8.4'])
+        entry = spec['history'][0]
+        self.assertTrue(history.gate.valid_revisions(entry['revisions']))
+        self.assertEqual(entry['expected_differences'], {})
+        self.assertEqual(set(entry['manifests']),
+                         {'x86_64-unknown-linux-musl', 'x86_64-pc-windows-msvc'})
+
+    def test_historical_manifest_requires_exact_pinned_bytes_and_compatible_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.json'
+            report = {'schema': 1, 'target': 'linux', 'version': '1.8.4',
+                      'revisions': {'freemkv': 'a'}, 'fixtures': {'bd.iso': 'pinned'},
+                      'harness': {'sha': 'b'}, 'hash_method': 'method', 'rustc': 'rustc',
+                      'ffmpeg': 'ffmpeg', 'suite_exit': 0, 'artifacts': {'x.clpi': {'sha256': 'c'}}}
+            history.save(source, report)
+            pin = history.sha256(source)
+            spec = {'version': '1.8.4', 'revisions': report['revisions'],
+                    'manifests': {report['target']: {'sha256': pin}}}
+            identity = {field: report[field] for field in
+                        ('schema', 'target', 'fixtures', 'harness', 'hash_method', 'rustc', 'ffmpeg')}
+            def fetch(command, **kwargs):
+                Path(command[command.index('--key') + 2]).write_bytes(source.read_bytes())
+            with patch.object(history.subprocess, 'run', fetch):
+                dest = Path(directory) / 'manifest.json'
+                self.assertEqual(history.historical_manifest('bucket', spec, report['target'],
+                                                             identity, dest)['artifacts'], report['artifacts'])
+                changed = dict(identity, ffmpeg='different ffmpeg')
+                with self.assertRaisesRegex(ValueError, 'historical ffmpeg differs'):
+                    history.historical_manifest('bucket', spec, report['target'], changed, dest)
+                spec['manifests'][report['target']]['sha256'] = '0' * 64
+                with self.assertRaisesRegex(ValueError, 'historical SHA-256 mismatch'):
+                    history.historical_manifest('bucket', spec, report['target'], identity, dest)
+
+    def test_publish_requires_both_successful_full_disc_reports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for platform in ('linux', 'windows'):
+                path = root / f'release-comparison-{platform}' / 'candidate'
+                history.save(path / 'manifest.json', {'version': '1.8.5', 'run_id': '123',
+                             'target': platform, 'suite_exit': 0, 'artifacts': {'x': {}}})
+                history.save(path / 'full-disc-qa.json', {'families': {'bd': {}, 'uhd': {}}})
+            with patch.object(history.subprocess, 'run') as put:
+                put.return_value.returncode = 0
+                history.publish(root, 'bucket')
+                self.assertEqual(put.call_count, 2)
+                self.assertTrue(all('--if-none-match' in call.args[0]
+                                    for call in put.call_args_list))
+                (root / 'release-comparison-windows/candidate/full-disc-qa.json').write_text(
+                    '{"error":"decryption failed"}')
+                with self.assertRaisesRegex(ValueError, 'no successful full-disc report'):
+                    history.publish(root, 'bucket')
 
     def test_failed_suite_keeps_its_historical_answers(self):
         with tempfile.TemporaryDirectory() as directory:

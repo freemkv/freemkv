@@ -178,6 +178,20 @@ matrix are green, so a typo cannot burn a two-hour rip. This is also why the
 EC2 matrix runs only on qa (push or dispatch), never on dev: a dev push trigger
 is how a busy afternoon becomes a surprise bill.
 
+**Release comparisons run the candidate once.** `tests/media-baseline.json`
+pins SHA-256 digests for the historical manifests in the same S3 bucket as the
+disc fixtures (`media-history/v1/<version>/<target>/<sha256>.json`). The EC2
+leg downloads those small manifests, verifies their bytes, fixture pins,
+harness, toolchain and hash method, then compares the candidate output against
+every listed released version. It never rebuilds or rerips 1.8.4. Each green
+QA run also writes immutable candidate manifests under
+`media-history/v1/candidates/<version>/<run>/<target>/<sha256>.json` for use as
+the next release's historical answer. When preparing 1.8.6, add the approved
+1.8.5 Linux and Windows manifest digests to `media-baseline.json` while retaining
+1.8.4, so both previous releases are checked. An incompatible toolchain or
+fixture set requires a new explicitly pinned history epoch; it cannot silently
+pass by comparing unlike inputs.
+
 ### What this gate does NOT cover
 
 **macOS, on full-size media.** EC2 Mac requires a Dedicated Host with a

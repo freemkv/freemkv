@@ -926,6 +926,7 @@ jobs:
           FMKV_HASHES="$PWD/cli-${{ matrix.os }}.txt" \
             "$FMKV_PYTHON" freemkv/tests/media_history.py \
               --binary "$BIN" --harness ci/scripts/cli-acceptance.sh \
+              --bucket "${{ secrets.FMKV_FIXTURES_BUCKET }}" \
               --plan-directory media-plan --target "${{ matrix.target }}" \
               --out "release-comparison/${{ matrix.os }}" 2>&1 | tee "suite-${{ matrix.os }}.log"
           rc=${PIPESTATUS[0]}
@@ -1083,6 +1084,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 tests/media_history.py --archive history
 
+  publish-media-history:
+    needs: [plan-media, cli-matrix, compare-cli-matrix, record-media-evidence]
+    if: >-
+      always() && needs.plan-media.outputs.run == 'true'
+      && needs.cli-matrix.result == 'success'
+      && needs.compare-cli-matrix.result == 'success'
+      && needs.record-media-evidence.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { pattern: 'release-comparison-*', path: history }
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
+          aws-region: us-west-2
+      - name: Publish immutable candidate manifests beside the ISO fixtures
+        env:
+          B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
+        run: python3 tests/media_history.py --publish history --bucket "$B"
+
   # Writes the evidence: an annotated tag media-evidence/<F>/<run_id> on an
   # orphan commit holding evidence.json and the built Cargo.lock.
   record-media-evidence:
@@ -1122,7 +1147,7 @@ jobs:
 
   # The one media answer (I-1): green only if evidence was reused or written by this run.
   media-verdict:
-    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence, gui-gate]
+    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence, publish-media-history, gui-gate]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1140,6 +1165,7 @@ jobs:
           MATRIX: ${{ needs.cli-matrix.result }}
           COMPARE: ${{ needs.compare-cli-matrix.result }}
           RECORD: ${{ needs.record-media-evidence.result }}
+          PUBLISH: ${{ needs.publish-media-history.result }}
           TAG: ${{ needs.record-media-evidence.outputs.tag }}
           GUI: ${{ needs.gui-gate.result }}
         run: python3 freemkv/tests/media_gate.py verdict
