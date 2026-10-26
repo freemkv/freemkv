@@ -80,6 +80,26 @@ class ComparisonTests(unittest.TestCase):
                             '-c', 'copy', '-metadata:s:a:0', 'language=fra', str(output)], check=True)
             self.assertNotEqual(history.content_hash(fixture), history.content_hash(output))
 
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg')
+    def test_chapter_names_and_boundaries_are_part_of_the_answer(self):
+        fixture = Path(__file__).with_name('media-fixtures') / 'cfr.mkv'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            answers = []
+            for i, (name, boundary) in enumerate([('Intro', 100), ('Changed', 100), ('Intro', 200)]):
+                metadata = root / f'{i}.txt'
+                metadata.write_text(';FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\n'
+                                    f'END={boundary}\ntitle={name}\n[CHAPTER]\nTIMEBASE=1/1000\n'
+                                    f'START={boundary}\nEND=300\ntitle=Main\n')
+                output = root / f'{i}.mkv'
+                subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', str(fixture),
+                                '-f', 'ffmetadata', '-i', str(metadata), '-map', '0',
+                                '-map_metadata', '0', '-map_chapters', '1', '-c', 'copy', str(output)],
+                               check=True)
+                answers.append(history.content_hash(output))
+            self.assertNotEqual(answers[0], answers[1], 'a changed chapter name must be detected')
+            self.assertNotEqual(answers[0], answers[2], 'a changed chapter boundary must be detected')
+
     def test_baseline_is_the_complete_released_184_set(self):
         spec = json.loads(Path(history.__file__).with_name('media-baseline.json').read_text())
         self.assertEqual(spec['version'], '1.8.4')

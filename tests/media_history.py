@@ -34,11 +34,12 @@ def content_hash(path):
         digest = hashlib.file_digest(output, 'sha256')
         metadata = subprocess.run(['ffprobe', '-v', 'error', '-show_entries',
                                    'stream=index,codec_name,codec_type,width,height,pix_fmt,sample_rate,'
-                                   'channels,channel_layout:stream_tags=language,title:stream_disposition',
+                                   'channels,channel_layout:stream_tags=language,title:stream_disposition:'
+                                   'chapter=time_base,start,end:chapter_tags=title,language',
                                    '-of', 'json', str(path)], capture_output=True)
         if metadata.returncode:
             raise ValueError(f'cannot hash stream metadata: {path.name}')
-        digest.update(b'\0streams\0')
+        digest.update(b'\0streams-and-chapters\0')
         digest.update(json.dumps(json.loads(metadata.stdout), sort_keys=True).encode())
         return digest.hexdigest()
 
@@ -134,7 +135,7 @@ def run(args):
         raise ValueError('baseline must pin all six release revisions')
     plan = json.loads((args.plan_directory / 'evidence.json').read_text())
     identity = {'schema': 1, 'run_id': os.environ.get('GITHUB_RUN_ID'),
-                'hash_method': 'framecrc-copyts-and-stream-metadata-v1',
+                'hash_method': 'framecrc-copyts-stream-and-chapter-metadata-v2',
                 'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'), 'target': args.target,
                 'fixtures': plan['inputs']['externals']['fixtures'],
                 'harness': plan['inputs']['policy']['harness'],
