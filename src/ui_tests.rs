@@ -3829,3 +3829,174 @@ fn home_drive_choice_obeys_explicit_source_and_unique_loaded_drive() {
         "a late discovery cannot replace an explicit open"
     );
 }
+
+fn source_numbering_app() -> App {
+    let mut app = App::new();
+    app.apply_scan("/media/a.mkv", Ok(probe_scan()), false);
+    app.settings.tv_season = "3".into();
+    app.settings.tv_first_episode = "8".into();
+    app
+}
+
+#[test]
+fn source_numbering_resets_on_every_successful_scan_adoption() {
+    // A path cannot identify media: the same file can be replaced or the same
+    // drive can contain another disc when Open is requested again.
+    for path in ["/media/b.mkv", "/media/a.mkv", "disc:///dev/test"] {
+        let mut app = source_numbering_app();
+        if path.starts_with("disc://") {
+            app.source = path.into();
+        }
+        let general = app.settings.clone();
+        let mut sc = probe_scan();
+        sc.volume_id = "NEW_DISC".into();
+        app.apply_scan(path, Ok(sc), false);
+        assert_eq!(app.source, path);
+        assert_eq!(app.disc_label, "NEW_DISC");
+        assert!(!app.tree.arena.is_empty());
+        assert!(
+            app.settings.tv_season.is_empty(),
+            "{path}: old season survived"
+        );
+        assert!(
+            app.settings.tv_first_episode.is_empty(),
+            "{path}: old episode survived"
+        );
+        let mut expected = general;
+        expected.tv_season.clear();
+        expected.tv_first_episode.clear();
+        assert!(
+            app.settings == expected,
+            "new scan changed general settings"
+        );
+    }
+}
+
+#[test]
+fn source_numbering_async_adoption_preserves_current_general_settings() {
+    let mut app = source_numbering_app();
+    let before = app.settings.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.opening = Some(rx);
+    // This edit lands after the worker's snapshot, before its result.
+    let mut edited = before.clone();
+    edited.dest_dir = "/edited/output".into();
+    edited.tmdb_api_key = "edited-credential".into();
+    edited.selection = "All titles".into();
+    edited.audio_langs = "de".into();
+    edited.sub_langs = "fr".into();
+    app.commit_settings(&before, edited);
+    let mut expected = app.settings.clone();
+    expected.tv_season.clear();
+    expected.tv_first_episode.clear();
+    assert_eq!(
+        app.settings.tv_season, "3",
+        "request initiation cleared numbering"
+    );
+    tx.send(OpenedSource {
+        path: "/media/b.mkv".into(),
+        scanned: Ok(probe_scan()),
+        preflight: None,
+    })
+    .unwrap();
+    app.tick();
+    assert_eq!(app.source, "/media/b.mkv");
+    assert!(
+        app.settings == expected,
+        "adoption lost edits or retained old numbering"
+    );
+}
+
+#[test]
+fn source_numbering_stale_form_cannot_restore_unchanged_overrides() {
+    for clear in [true, false] {
+        let mut app = source_numbering_app();
+        let mut form = opened_form(&mut app);
+        if clear {
+            app.clear_source();
+        } else {
+            app.apply_scan("/media/b.mkv", Ok(probe_scan()), false);
+        }
+        // Queue saves behind a controlled pending save: no filesystem or timing.
+        let (_save_tx, save_rx) = std::sync::mpsc::channel();
+        app.saving = Some((save_rx, false));
+        form.filename_template = "{title}_edited".into();
+        app.dispatch(Cmd::CommitSettings(Box::new(form)));
+        assert!(
+            app.settings.tv_season.is_empty(),
+            "stale form restored season"
+        );
+        assert!(
+            app.settings.tv_first_episode.is_empty(),
+            "stale form restored episode"
+        );
+        assert!(
+            app.settings_form().tv_season.is_empty(),
+            "shell baseline retained season"
+        );
+        assert!(
+            app.settings_form().tv_first_episode.is_empty(),
+            "shell baseline retained episode"
+        );
+        assert_eq!(app.settings.filename_template, "{title}_edited");
+        // Refilling the shell controls from that baseline must remain safe on
+        // its next unrelated commit, while an explicit numbering edit applies.
+        let mut form = app.settings_form().clone();
+        form.tv_season = "5".into();
+        app.dispatch(Cmd::CommitSettings(Box::new(form)));
+        assert_eq!(app.settings.tv_season, "5");
+        assert!(app.settings.tv_first_episode.is_empty());
+    }
+}
+
+#[test]
+fn source_numbering_repick_and_preflight_refresh_retain_overrides() {
+    let mut app = source_numbering_app();
+    let expected = app.settings.clone();
+    app.repick();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.recheck = Some((app.source.clone(), libfreemkv::Halt::new(), rx));
+    tx.send((None, Ok(Vec::new()))).unwrap();
+    app.poll_recheck();
+    assert!(app.settings == expected);
+}
+
+#[test]
+fn source_numbering_scan_error_clears_but_retained_sources_keep_overrides() {
+    let mut app = source_numbering_app();
+    app.apply_scan("/media/b.mkv", Err("unreadable".into()), false);
+    assert!(app.source.is_empty());
+    assert!(app.settings.tv_season.is_empty());
+    assert!(app.settings.tv_first_episode.is_empty());
+
+    let mut app = source_numbering_app();
+    let expected = app.settings.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.opening = Some(rx);
+    drop(tx);
+    app.tick();
+    assert_eq!(app.source, "/media/a.mkv");
+    assert!(
+        app.settings == expected,
+        "disconnected worker discarded numbering"
+    );
+
+    app.run = Some(Arc::default());
+    app.open("/media/b.mkv");
+    app.open_async("/media/b.mkv");
+    assert_eq!(app.source, "/media/a.mkv");
+    assert!(
+        app.settings == expected,
+        "rejected Open discarded numbering"
+    );
+    app.run = None;
+    let (_tx, rx) = std::sync::mpsc::channel();
+    app.ejecting = Some((app.source.clone(), rx));
+    app.open("/media/b.mkv");
+    app.open_async("/media/b.mkv");
+    assert_eq!(app.source, "/media/a.mkv");
+    assert!(
+        app.settings == expected,
+        "ejecting Open discarded numbering"
+    );
+}

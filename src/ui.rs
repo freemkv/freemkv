@@ -2929,6 +2929,8 @@ impl App {
         let prior = self.settings.clone();
         let merged = self.commit_settings(&before, edited);
         read.presentation_language = merged.presentation_language;
+        read.tv_season = merged.tv_season;
+        read.tv_first_episode = merged.tv_first_episode;
         self.settings_form = read;
         // A one-off folder pick survives an edit elsewhere in the form.
         if new_dest {
@@ -3587,7 +3589,9 @@ impl App {
 
     /// Apply a committed Settings form to `self.settings` (no save: `Cmd::CommitSettings`
     /// saves). The form may predate bar picks, so each remembered-stream field it did not
-    /// change (`edited` equal to `before`) keeps the App's current value. Changed subtitle
+    /// change (`edited` equal to `before`) keeps the App's current value. Unchanged
+    /// source numbering also keeps the current value, so a stale form cannot restore
+    /// overrides cleared by a new Open or Close. Changed subtitle
     /// languages end a bar "None"/"Forced only" mode, which no form control shows. Returns
     /// the merged settings.
     pub fn commit_settings(
@@ -3613,6 +3617,12 @@ impl App {
             } else {
                 cur.subtitle_mode.clone()
             };
+        }
+        if edited.tv_season == before.tv_season {
+            edited.tv_season = cur.tv_season.clone();
+        }
+        if edited.tv_first_episode == before.tv_first_episode {
+            edited.tv_first_episode = cur.tv_first_episode.clone();
         }
         if !valid_presentation_language(&edited.presentation_language) {
             let tag = std::mem::replace(
@@ -3707,6 +3717,10 @@ impl App {
         let disc = crate::engine::is_disc_source(path);
         match scanned {
             Ok(sc) => {
+                // A fresh scan adopts a new source even when its path is unchanged
+                // (for example, another disc in the same drive).
+                self.settings.tv_season.clear();
+                self.settings.tv_first_episode.clear();
                 if disc {
                     self.disc_present = Some(true);
                 }
