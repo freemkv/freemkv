@@ -108,8 +108,9 @@ def check_family(binary, family, source, key_args, output, bd_info=None):
     if not source.is_file():
         raise RuntimeError(f'{family} fixture missing: {source}')
     # The suite already fetched and authenticated the source. Fail explicitly
-    # if the runner lacks room for both user-visible outputs and their comparison.
-    required = source.stat().st_size * 3 + 2 * 1024**3
+    # Hold only the ISO and one extracted folder at a time. The runner already
+    # carries all four source fixtures and has no room for a third full copy.
+    required = source.stat().st_size * 2 + 6 * 1024**3
     free = shutil.disk_usage(output).free
     if free < required:
         raise RuntimeError(f'{family} full-disc gate needs {required} free bytes; runner has {free}')
@@ -124,17 +125,8 @@ def check_family(binary, family, source, key_args, output, bd_info=None):
         run(binary, url('iso', source), url('dir', direct_folder), root / 'direct-folder.log', *key_args)
         empty_keydb = root / 'empty-keydb.cfg'
         empty_keydb.write_text('')
-        run(binary, url('iso', decrypted_iso), url('dir', iso_folder), root / 'iso-folder.log',
-            '--keydb', str(empty_keydb))
-
         direct = manifest(direct_folder)
-        from_iso = manifest(iso_folder)
-        if direct != from_iso:
-            difference = [
-                name for name in sorted(direct.keys() | from_iso.keys()) if direct.get(name) != from_iso.get(name)]
-            raise RuntimeError(f'{family} decrypted ISO/folder differ in {len(difference)} files: {difference[:20]}')
         navigation = check_navigation(direct_folder, direct)
-        check_navigation(iso_folder, from_iso)
         external = check_libbluray(bd_info, direct_folder, root / 'bd_info.log') if bd_info else None
 
         title = smallest_title(binary, url('iso', source))
@@ -147,8 +139,19 @@ def check_family(binary, family, source, key_args, output, bd_info=None):
             run(binary, input_url, url('mkv', mkv), root / f'{label}.log', '-t', str(title), *options)
             title_hashes[label] = {'bytes': mkv.stat().st_size, 'sha256': sha256(mkv),
                                    'content_timing_sha256': content_hash(mkv)}
+            mkv.unlink()
         if len({value['content_timing_sha256'] for value in title_hashes.values()}) != 1:
             raise RuntimeError(f'{family} title {title} differs between source, decrypted ISO and folder')
+
+        shutil.rmtree(direct_folder)
+        run(binary, url('iso', decrypted_iso), url('dir', iso_folder), root / 'iso-folder.log',
+            '--keydb', str(empty_keydb))
+        from_iso = manifest(iso_folder)
+        if direct != from_iso:
+            difference = [
+                name for name in sorted(direct.keys() | from_iso.keys()) if direct.get(name) != from_iso.get(name)]
+            raise RuntimeError(f'{family} decrypted ISO/folder differ in {len(difference)} files: {difference[:20]}')
+        check_navigation(iso_folder, from_iso)
         return {'fixture_bytes': source.stat().st_size, 'decrypted_iso_sha256': sha256(decrypted_iso),
                 'files': direct, 'file_count': len(direct), 'navigation_counts': navigation,
                 'title': title, 'title_hashes': title_hashes, 'libbluray': external}
