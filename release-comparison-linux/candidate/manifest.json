@@ -1,0 +1,758 @@
+{
+  "artifacts": {
+    "a1_dvd.mkv": {
+      "bytes": 369807025,
+      "content_timing_sha256": "f78575694a537c4cbab99f0ec7091f8f42431070304c093ed489742377fe8c06",
+      "sha256": "7fe3c6f637e6fb6ba65cf1a4a849b7f7eab5d098ab67f0cc6aec21f6cf8796a6"
+    },
+    "a1_mpg.mkv": {
+      "bytes": 4873772,
+      "content_timing_sha256": "7dff6a10ccee6b7bbc10a6f7174decca6605e247b486468e03838800e8b10026",
+      "sha256": "f3338692e2cab20b6cefdb2c19f8b3055093c6d3c516b7c265c21829ab859614"
+    },
+    "a2_syn.m2ts": {
+      "bytes": 8973312,
+      "content_timing_sha256": "33f0891e4dbffe26d4a25b23a708cf6397c4314a180824e949d1a11d9a73fca9",
+      "sha256": "a5440d38c6de13781b255977ce19adf3de0777c2ebadadddc2147f7a69e6bf08"
+    },
+    "a3_adts.mkv": {
+      "bytes": 2278472,
+      "content_timing_sha256": "d2a9842bd8ec4b5f9f959833342391df7ab2b7572edffcf40b5e8c8f1f47a225",
+      "sha256": "0cea6411cfff7de95614a02e5bf84f82b65a413cfde6c216fe320abd1c3f9edb"
+    },
+    "a4_lpcm.mkv": {
+      "bytes": 8285349,
+      "content_timing_sha256": "78ede2cba2aadbfdb2730b262eca823bc0c219bac7d11b9b7f6aa2d7b535a11a",
+      "sha256": "1ed105b32b0ef99fc69a6b73eba3dc70382a7fc64e4975d8ee3fc68c2139e9bb"
+    },
+    "a6_damaged.mkv": {
+      "bytes": 316506515,
+      "content_timing_sha256": "5721b950e6528fa5354dba216c7401ace376652195512db151866f3e5d08ec6f",
+      "sha256": "32c30733ce39bbd50230f0623d3f048605cc993740d18269c46bdfd41908ef55"
+    },
+    "a8_adts_pipe.mkv": {
+      "bytes": 2278472,
+      "content_timing_sha256": "d2a9842bd8ec4b5f9f959833342391df7ab2b7572edffcf40b5e8c8f1f47a225",
+      "sha256": "029131bf93a3f63dd1037cfbcf4b72d331a6fc97ac22436c71dad20dc7499dd2"
+    },
+    "a8_lpcm_pipe.mkv": {
+      "bytes": 8285349,
+      "content_timing_sha256": "78ede2cba2aadbfdb2730b262eca823bc0c219bac7d11b9b7f6aa2d7b535a11a",
+      "sha256": "1ed105b32b0ef99fc69a6b73eba3dc70382a7fc64e4975d8ee3fc68c2139e9bb"
+    },
+    "bd.mkv": {
+      "bytes": 33165969817,
+      "content_timing_sha256": "efe0931c4fe11ff24314d2775ef84586a94e24a2e4ac1633398bf8bb3e507711",
+      "sha256": "a16ead3b350b512161f5b79f9dc890623c5b3b8ed54df447045af83402f19891"
+    },
+    "dir.m2ts": {
+      "bytes": 391218240,
+      "content_timing_sha256": "e0735a92d16981cda4890cc9e75846f9a738a16be8a2308c54440bb7789392ee",
+      "sha256": "e84fd390a3ce99e1f93a861c9204699e015956f8bc6e0bfdf5fb57abda788125"
+    },
+    "dir_redir/VIDEO_TS/VIDEO_TS.BUP": {
+      "bytes": 28672,
+      "sha256": "32efc88b483e1a57837fdbd9952bcb98e36d649f24fd6dd08822376ce81c0f4e"
+    },
+    "dir_redir/VIDEO_TS/VIDEO_TS.IFO": {
+      "bytes": 28672,
+      "sha256": "32efc88b483e1a57837fdbd9952bcb98e36d649f24fd6dd08822376ce81c0f4e"
+    },
+    "dir_redir/VIDEO_TS/VIDEO_TS.VOB": {
+      "bytes": 784384,
+      "content_timing_sha256": "71ef643957a6ace6b7784438b4a65884c8566abfac6c578db3c9ce8f7b889ae6",
+      "sha256": "e9d7f2449dcd7a7df82825fe7139055d3c8d635e7aeb968ad3f98ac7f125bde8"
+    },
+    "dir_redir/VIDEO_TS/VTS_01_0.BUP": {
+      "bytes": 18432,
+      "sha256": "ab0fb1a72a99ee96db5224dedd745a4c76030d87bd4bbbb696d0a97105132d4e"
+    },
+    "dir_redir/VIDEO_TS/VTS_01_0.IFO": {
+      "bytes": 18432,
+      "sha256": "ab0fb1a72a99ee96db5224dedd745a4c76030d87bd4bbbb696d0a97105132d4e"
+    },
+    "dir_redir/VIDEO_TS/VTS_01_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_01_1.VOB": {
+      "bytes": 186368,
+      "error": "cannot hash media content: VTS_01_1.VOB",
+      "sha256": "1375b33d865f41360c9ebff5a3c5f76f2d4ee38c6de26d4d234f3c6f58bac12a"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_0.BUP": {
+      "bytes": 90112,
+      "sha256": "7c99d967807475dfa214b31cfc2c52d0cc5447094e9da7bc7677473d1ecb4a8a"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_0.IFO": {
+      "bytes": 90112,
+      "sha256": "7c99d967807475dfa214b31cfc2c52d0cc5447094e9da7bc7677473d1ecb4a8a"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_0.VOB": {
+      "bytes": 7364608,
+      "error": "cannot hash media content: VTS_02_0.VOB",
+      "sha256": "275b32dce00465ef3cd8f320619f8c4204e903188c4bf01c4d1e0c99842559c1"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_1.VOB": {
+      "bytes": 1073321984,
+      "content_timing_sha256": "882164961e575d340d97f737784fc52c22bd62cdb359f1fccb4384a22b838cca",
+      "sha256": "402694b727bd1ac0de22debd05e442a7b99b78f47b469ec41b378ba09ee968bb"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_2.VOB": {
+      "bytes": 1073430528,
+      "content_timing_sha256": "a8dd726bf561d6214d9d3db1e14111a3fa1fa79a7b265d6722e2243bd4fcae28",
+      "sha256": "4a8913e4f9869ae122ae068f5979f3da74d491f266840df17d7713a168f38001"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_3.VOB": {
+      "bytes": 1073571840,
+      "content_timing_sha256": "28117e318959be2425155f51cdf34aed730e1ccd2341f4abd094838e5e880851",
+      "sha256": "bf599eb2ff33d8418d8760eca0d68e9a183fc91458ad1d091da81234918d8bce"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_4.VOB": {
+      "bytes": 1073653760,
+      "content_timing_sha256": "6998d1904ce44c1217df4eefaef9fa6cde3aa0dccde4298267f4276ec93df6cc",
+      "sha256": "93cb63ed1f3e3ebcaa6874f39058e93736276e67b714ef64095da917e0916d90"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_5.VOB": {
+      "bytes": 1073686528,
+      "content_timing_sha256": "d0782bf256b49c030d9158fa7477df5a871928bc5910afdf48158f6df5115101",
+      "sha256": "f5ec24de0aa0fb2fea60b56ebdd23bb585132a811cd88b4baa290bb2dbb0cdef"
+    },
+    "dir_redir/VIDEO_TS/VTS_02_6.VOB": {
+      "bytes": 895852544,
+      "error": "cannot hash media content: VTS_02_6.VOB",
+      "sha256": "1df011e52be4d8b408ae1999b78097f0e37dcc4962cc5e959a5761ebe8565608"
+    },
+    "dir_redir/VIDEO_TS/VTS_03_0.BUP": {
+      "bytes": 18432,
+      "sha256": "5a43bfb332e31e2affe3dd7b4f324f5172c02b096c5b1fa3f64522de39e489e5"
+    },
+    "dir_redir/VIDEO_TS/VTS_03_0.IFO": {
+      "bytes": 18432,
+      "sha256": "5a43bfb332e31e2affe3dd7b4f324f5172c02b096c5b1fa3f64522de39e489e5"
+    },
+    "dir_redir/VIDEO_TS/VTS_03_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_03_1.VOB": {
+      "bytes": 1423360,
+      "error": "cannot hash media content: VTS_03_1.VOB",
+      "sha256": "eb7eae9bbc92c50ec8369e43125860ed666f48f778a3f1fa26b2cf570687ef83"
+    },
+    "dir_redir/VIDEO_TS/VTS_04_0.BUP": {
+      "bytes": 16384,
+      "sha256": "e81eded399e39e0b579c7a320a6ebcdf619dc701f97bb441f803dbdf895d43fa"
+    },
+    "dir_redir/VIDEO_TS/VTS_04_0.IFO": {
+      "bytes": 16384,
+      "sha256": "e81eded399e39e0b579c7a320a6ebcdf619dc701f97bb441f803dbdf895d43fa"
+    },
+    "dir_redir/VIDEO_TS/VTS_04_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_04_1.VOB": {
+      "bytes": 1581056,
+      "error": "cannot hash media content: VTS_04_1.VOB",
+      "sha256": "c6dadba8328e70715b524711112e9ee56aeab877c4d6ca11acda9c5764bae82c"
+    },
+    "dir_redir/VIDEO_TS/VTS_05_0.BUP": {
+      "bytes": 18432,
+      "sha256": "b9565e21daf023d541d0995ee854ed0df320d34b77b0151b52a8e52d50f91d20"
+    },
+    "dir_redir/VIDEO_TS/VTS_05_0.IFO": {
+      "bytes": 18432,
+      "sha256": "b9565e21daf023d541d0995ee854ed0df320d34b77b0151b52a8e52d50f91d20"
+    },
+    "dir_redir/VIDEO_TS/VTS_05_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_05_1.VOB": {
+      "bytes": 290816,
+      "error": "cannot hash media content: VTS_05_1.VOB",
+      "sha256": "47cd0274a62e8d2e737b6d810a92c7a486182106acec691da4b987edb09fbff1"
+    },
+    "dir_redir/VIDEO_TS/VTS_06_0.BUP": {
+      "bytes": 16384,
+      "sha256": "7977ad5e694c9d537fbd0e05dafd40930baf1a8a9225bce02d3112ad0d20af8b"
+    },
+    "dir_redir/VIDEO_TS/VTS_06_0.IFO": {
+      "bytes": 16384,
+      "sha256": "7977ad5e694c9d537fbd0e05dafd40930baf1a8a9225bce02d3112ad0d20af8b"
+    },
+    "dir_redir/VIDEO_TS/VTS_06_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_06_1.VOB": {
+      "bytes": 32768,
+      "content_timing_sha256": "5ac9ced2771b5a538f6e36435b5af8b9564a7bc98dc5bd11fb759a5654acff93",
+      "sha256": "e1e57994a039020aeae9709880f3957d3d02798a247f79ffa2ac9cb98a6feea1"
+    },
+    "dir_redir/VIDEO_TS/VTS_07_0.BUP": {
+      "bytes": 18432,
+      "sha256": "953ca1fd7adf984215bcbc35b2bf68185e1cf250027a0c16afd7224a47ccaf08"
+    },
+    "dir_redir/VIDEO_TS/VTS_07_0.IFO": {
+      "bytes": 18432,
+      "sha256": "953ca1fd7adf984215bcbc35b2bf68185e1cf250027a0c16afd7224a47ccaf08"
+    },
+    "dir_redir/VIDEO_TS/VTS_07_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_07_1.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_08_0.BUP": {
+      "bytes": 18432,
+      "sha256": "1b14a9cdd410cebb4abfa2cebaa696c854a3953b159268796ca62eebd64e1846"
+    },
+    "dir_redir/VIDEO_TS/VTS_08_0.IFO": {
+      "bytes": 18432,
+      "sha256": "1b14a9cdd410cebb4abfa2cebaa696c854a3953b159268796ca62eebd64e1846"
+    },
+    "dir_redir/VIDEO_TS/VTS_08_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_08_1.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_09_0.BUP": {
+      "bytes": 18432,
+      "sha256": "506454686c4a49a23a670b75b2bb355bb44874b8b3b653dde2b892634ba7ba99"
+    },
+    "dir_redir/VIDEO_TS/VTS_09_0.IFO": {
+      "bytes": 18432,
+      "sha256": "506454686c4a49a23a670b75b2bb355bb44874b8b3b653dde2b892634ba7ba99"
+    },
+    "dir_redir/VIDEO_TS/VTS_09_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_09_1.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_10_0.BUP": {
+      "bytes": 18432,
+      "sha256": "86479109231a271b1809e1fcb37b261ebfc7d7158052368e45c259c23f8f77a2"
+    },
+    "dir_redir/VIDEO_TS/VTS_10_0.IFO": {
+      "bytes": 18432,
+      "sha256": "86479109231a271b1809e1fcb37b261ebfc7d7158052368e45c259c23f8f77a2"
+    },
+    "dir_redir/VIDEO_TS/VTS_10_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_10_1.VOB": {
+      "bytes": 18216960,
+      "error": "cannot hash media content: VTS_10_1.VOB",
+      "sha256": "e77261a01d0cf052f2554beced72058173e877c687826b2920e6f920f0d018c6"
+    },
+    "dir_redir/VIDEO_TS/VTS_11_0.BUP": {
+      "bytes": 30720,
+      "sha256": "45fc9db3d5ee01449a42137a03045d843ea5d34bf9fd4b4dd1d48a0153bde27c"
+    },
+    "dir_redir/VIDEO_TS/VTS_11_0.IFO": {
+      "bytes": 30720,
+      "sha256": "45fc9db3d5ee01449a42137a03045d843ea5d34bf9fd4b4dd1d48a0153bde27c"
+    },
+    "dir_redir/VIDEO_TS/VTS_11_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_11_1.VOB": {
+      "bytes": 383395840,
+      "error": "cannot hash media content: VTS_11_1.VOB",
+      "sha256": "18c5ef05d28723c5d368f6df3f5043f368c81ed22a76d7386374c52b05f49235"
+    },
+    "dir_redir/VIDEO_TS/VTS_12_0.BUP": {
+      "bytes": 16384,
+      "sha256": "a44a62ccc149e64136189cb562ccb36917c512b7cef260ed0aec327d05cc0588"
+    },
+    "dir_redir/VIDEO_TS/VTS_12_0.IFO": {
+      "bytes": 16384,
+      "sha256": "a44a62ccc149e64136189cb562ccb36917c512b7cef260ed0aec327d05cc0588"
+    },
+    "dir_redir/VIDEO_TS/VTS_12_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_12_1.VOB": {
+      "bytes": 960512,
+      "error": "cannot hash media content: VTS_12_1.VOB",
+      "sha256": "616d8243a57a9f7711ea54b2658a7d7a991b103823ab3ad65d58559df78d940c"
+    },
+    "dir_redir/VIDEO_TS/VTS_13_0.BUP": {
+      "bytes": 18432,
+      "sha256": "33dd271cdbb6fab843804e52fbe8aad3dabf48872c504cbaa85502fe38e54401"
+    },
+    "dir_redir/VIDEO_TS/VTS_13_0.IFO": {
+      "bytes": 18432,
+      "sha256": "33dd271cdbb6fab843804e52fbe8aad3dabf48872c504cbaa85502fe38e54401"
+    },
+    "dir_redir/VIDEO_TS/VTS_13_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "dir_redir/VIDEO_TS/VTS_13_1.VOB": {
+      "bytes": 63762432,
+      "error": "cannot hash media content: VTS_13_1.VOB",
+      "sha256": "36a53df35451631733aeee3106e9ff0c9e6a6f6909cf561ae0cfde314e67d88d"
+    },
+    "dir_t2.mkv": {
+      "bytes": 369807025,
+      "content_timing_sha256": "f78575694a537c4cbab99f0ec7091f8f42431070304c093ed489742377fe8c06",
+      "sha256": "7fe3c6f637e6fb6ba65cf1a4a849b7f7eab5d098ab67f0cc6aec21f6cf8796a6"
+    },
+    "dvd.mkv": {
+      "bytes": 6160640998,
+      "content_timing_sha256": "0324963de2ab3171cb4450a38ba700eddb4492b7392ced6714da6a074c2d269f",
+      "sha256": "e8c3f90a2b32646abb7b772a85a75c3b5d93c85e16ebefe5a4c47b273d7094d2"
+    },
+    "fmt.m2ts": {
+      "bytes": 391218240,
+      "content_timing_sha256": "e0735a92d16981cda4890cc9e75846f9a738a16be8a2308c54440bb7789392ee",
+      "sha256": "e84fd390a3ce99e1f93a861c9204699e015956f8bc6e0bfdf5fb57abda788125"
+    },
+    "fmt_dir/VIDEO_TS/VIDEO_TS.BUP": {
+      "bytes": 28672,
+      "sha256": "32efc88b483e1a57837fdbd9952bcb98e36d649f24fd6dd08822376ce81c0f4e"
+    },
+    "fmt_dir/VIDEO_TS/VIDEO_TS.IFO": {
+      "bytes": 28672,
+      "sha256": "32efc88b483e1a57837fdbd9952bcb98e36d649f24fd6dd08822376ce81c0f4e"
+    },
+    "fmt_dir/VIDEO_TS/VIDEO_TS.VOB": {
+      "bytes": 784384,
+      "content_timing_sha256": "71ef643957a6ace6b7784438b4a65884c8566abfac6c578db3c9ce8f7b889ae6",
+      "sha256": "e9d7f2449dcd7a7df82825fe7139055d3c8d635e7aeb968ad3f98ac7f125bde8"
+    },
+    "fmt_dir/VIDEO_TS/VTS_01_0.BUP": {
+      "bytes": 18432,
+      "sha256": "ab0fb1a72a99ee96db5224dedd745a4c76030d87bd4bbbb696d0a97105132d4e"
+    },
+    "fmt_dir/VIDEO_TS/VTS_01_0.IFO": {
+      "bytes": 18432,
+      "sha256": "ab0fb1a72a99ee96db5224dedd745a4c76030d87bd4bbbb696d0a97105132d4e"
+    },
+    "fmt_dir/VIDEO_TS/VTS_01_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_01_1.VOB": {
+      "bytes": 186368,
+      "error": "cannot hash media content: VTS_01_1.VOB",
+      "sha256": "1375b33d865f41360c9ebff5a3c5f76f2d4ee38c6de26d4d234f3c6f58bac12a"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_0.BUP": {
+      "bytes": 90112,
+      "sha256": "7c99d967807475dfa214b31cfc2c52d0cc5447094e9da7bc7677473d1ecb4a8a"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_0.IFO": {
+      "bytes": 90112,
+      "sha256": "7c99d967807475dfa214b31cfc2c52d0cc5447094e9da7bc7677473d1ecb4a8a"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_0.VOB": {
+      "bytes": 7364608,
+      "error": "cannot hash media content: VTS_02_0.VOB",
+      "sha256": "275b32dce00465ef3cd8f320619f8c4204e903188c4bf01c4d1e0c99842559c1"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_1.VOB": {
+      "bytes": 1073321984,
+      "content_timing_sha256": "882164961e575d340d97f737784fc52c22bd62cdb359f1fccb4384a22b838cca",
+      "sha256": "402694b727bd1ac0de22debd05e442a7b99b78f47b469ec41b378ba09ee968bb"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_2.VOB": {
+      "bytes": 1073430528,
+      "content_timing_sha256": "a8dd726bf561d6214d9d3db1e14111a3fa1fa79a7b265d6722e2243bd4fcae28",
+      "sha256": "4a8913e4f9869ae122ae068f5979f3da74d491f266840df17d7713a168f38001"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_3.VOB": {
+      "bytes": 1073571840,
+      "content_timing_sha256": "28117e318959be2425155f51cdf34aed730e1ccd2341f4abd094838e5e880851",
+      "sha256": "bf599eb2ff33d8418d8760eca0d68e9a183fc91458ad1d091da81234918d8bce"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_4.VOB": {
+      "bytes": 1073653760,
+      "content_timing_sha256": "6998d1904ce44c1217df4eefaef9fa6cde3aa0dccde4298267f4276ec93df6cc",
+      "sha256": "93cb63ed1f3e3ebcaa6874f39058e93736276e67b714ef64095da917e0916d90"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_5.VOB": {
+      "bytes": 1073686528,
+      "content_timing_sha256": "d0782bf256b49c030d9158fa7477df5a871928bc5910afdf48158f6df5115101",
+      "sha256": "f5ec24de0aa0fb2fea60b56ebdd23bb585132a811cd88b4baa290bb2dbb0cdef"
+    },
+    "fmt_dir/VIDEO_TS/VTS_02_6.VOB": {
+      "bytes": 895852544,
+      "error": "cannot hash media content: VTS_02_6.VOB",
+      "sha256": "1df011e52be4d8b408ae1999b78097f0e37dcc4962cc5e959a5761ebe8565608"
+    },
+    "fmt_dir/VIDEO_TS/VTS_03_0.BUP": {
+      "bytes": 18432,
+      "sha256": "5a43bfb332e31e2affe3dd7b4f324f5172c02b096c5b1fa3f64522de39e489e5"
+    },
+    "fmt_dir/VIDEO_TS/VTS_03_0.IFO": {
+      "bytes": 18432,
+      "sha256": "5a43bfb332e31e2affe3dd7b4f324f5172c02b096c5b1fa3f64522de39e489e5"
+    },
+    "fmt_dir/VIDEO_TS/VTS_03_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_03_1.VOB": {
+      "bytes": 1423360,
+      "error": "cannot hash media content: VTS_03_1.VOB",
+      "sha256": "eb7eae9bbc92c50ec8369e43125860ed666f48f778a3f1fa26b2cf570687ef83"
+    },
+    "fmt_dir/VIDEO_TS/VTS_04_0.BUP": {
+      "bytes": 16384,
+      "sha256": "e81eded399e39e0b579c7a320a6ebcdf619dc701f97bb441f803dbdf895d43fa"
+    },
+    "fmt_dir/VIDEO_TS/VTS_04_0.IFO": {
+      "bytes": 16384,
+      "sha256": "e81eded399e39e0b579c7a320a6ebcdf619dc701f97bb441f803dbdf895d43fa"
+    },
+    "fmt_dir/VIDEO_TS/VTS_04_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_04_1.VOB": {
+      "bytes": 1581056,
+      "error": "cannot hash media content: VTS_04_1.VOB",
+      "sha256": "c6dadba8328e70715b524711112e9ee56aeab877c4d6ca11acda9c5764bae82c"
+    },
+    "fmt_dir/VIDEO_TS/VTS_05_0.BUP": {
+      "bytes": 18432,
+      "sha256": "b9565e21daf023d541d0995ee854ed0df320d34b77b0151b52a8e52d50f91d20"
+    },
+    "fmt_dir/VIDEO_TS/VTS_05_0.IFO": {
+      "bytes": 18432,
+      "sha256": "b9565e21daf023d541d0995ee854ed0df320d34b77b0151b52a8e52d50f91d20"
+    },
+    "fmt_dir/VIDEO_TS/VTS_05_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_05_1.VOB": {
+      "bytes": 290816,
+      "error": "cannot hash media content: VTS_05_1.VOB",
+      "sha256": "47cd0274a62e8d2e737b6d810a92c7a486182106acec691da4b987edb09fbff1"
+    },
+    "fmt_dir/VIDEO_TS/VTS_06_0.BUP": {
+      "bytes": 16384,
+      "sha256": "7977ad5e694c9d537fbd0e05dafd40930baf1a8a9225bce02d3112ad0d20af8b"
+    },
+    "fmt_dir/VIDEO_TS/VTS_06_0.IFO": {
+      "bytes": 16384,
+      "sha256": "7977ad5e694c9d537fbd0e05dafd40930baf1a8a9225bce02d3112ad0d20af8b"
+    },
+    "fmt_dir/VIDEO_TS/VTS_06_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_06_1.VOB": {
+      "bytes": 32768,
+      "content_timing_sha256": "5ac9ced2771b5a538f6e36435b5af8b9564a7bc98dc5bd11fb759a5654acff93",
+      "sha256": "e1e57994a039020aeae9709880f3957d3d02798a247f79ffa2ac9cb98a6feea1"
+    },
+    "fmt_dir/VIDEO_TS/VTS_07_0.BUP": {
+      "bytes": 18432,
+      "sha256": "953ca1fd7adf984215bcbc35b2bf68185e1cf250027a0c16afd7224a47ccaf08"
+    },
+    "fmt_dir/VIDEO_TS/VTS_07_0.IFO": {
+      "bytes": 18432,
+      "sha256": "953ca1fd7adf984215bcbc35b2bf68185e1cf250027a0c16afd7224a47ccaf08"
+    },
+    "fmt_dir/VIDEO_TS/VTS_07_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_07_1.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_08_0.BUP": {
+      "bytes": 18432,
+      "sha256": "1b14a9cdd410cebb4abfa2cebaa696c854a3953b159268796ca62eebd64e1846"
+    },
+    "fmt_dir/VIDEO_TS/VTS_08_0.IFO": {
+      "bytes": 18432,
+      "sha256": "1b14a9cdd410cebb4abfa2cebaa696c854a3953b159268796ca62eebd64e1846"
+    },
+    "fmt_dir/VIDEO_TS/VTS_08_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_08_1.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_09_0.BUP": {
+      "bytes": 18432,
+      "sha256": "506454686c4a49a23a670b75b2bb355bb44874b8b3b653dde2b892634ba7ba99"
+    },
+    "fmt_dir/VIDEO_TS/VTS_09_0.IFO": {
+      "bytes": 18432,
+      "sha256": "506454686c4a49a23a670b75b2bb355bb44874b8b3b653dde2b892634ba7ba99"
+    },
+    "fmt_dir/VIDEO_TS/VTS_09_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_09_1.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_10_0.BUP": {
+      "bytes": 18432,
+      "sha256": "86479109231a271b1809e1fcb37b261ebfc7d7158052368e45c259c23f8f77a2"
+    },
+    "fmt_dir/VIDEO_TS/VTS_10_0.IFO": {
+      "bytes": 18432,
+      "sha256": "86479109231a271b1809e1fcb37b261ebfc7d7158052368e45c259c23f8f77a2"
+    },
+    "fmt_dir/VIDEO_TS/VTS_10_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_10_1.VOB": {
+      "bytes": 18216960,
+      "error": "cannot hash media content: VTS_10_1.VOB",
+      "sha256": "e77261a01d0cf052f2554beced72058173e877c687826b2920e6f920f0d018c6"
+    },
+    "fmt_dir/VIDEO_TS/VTS_11_0.BUP": {
+      "bytes": 30720,
+      "sha256": "45fc9db3d5ee01449a42137a03045d843ea5d34bf9fd4b4dd1d48a0153bde27c"
+    },
+    "fmt_dir/VIDEO_TS/VTS_11_0.IFO": {
+      "bytes": 30720,
+      "sha256": "45fc9db3d5ee01449a42137a03045d843ea5d34bf9fd4b4dd1d48a0153bde27c"
+    },
+    "fmt_dir/VIDEO_TS/VTS_11_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_11_1.VOB": {
+      "bytes": 383395840,
+      "error": "cannot hash media content: VTS_11_1.VOB",
+      "sha256": "18c5ef05d28723c5d368f6df3f5043f368c81ed22a76d7386374c52b05f49235"
+    },
+    "fmt_dir/VIDEO_TS/VTS_12_0.BUP": {
+      "bytes": 16384,
+      "sha256": "a44a62ccc149e64136189cb562ccb36917c512b7cef260ed0aec327d05cc0588"
+    },
+    "fmt_dir/VIDEO_TS/VTS_12_0.IFO": {
+      "bytes": 16384,
+      "sha256": "a44a62ccc149e64136189cb562ccb36917c512b7cef260ed0aec327d05cc0588"
+    },
+    "fmt_dir/VIDEO_TS/VTS_12_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_12_1.VOB": {
+      "bytes": 960512,
+      "error": "cannot hash media content: VTS_12_1.VOB",
+      "sha256": "616d8243a57a9f7711ea54b2658a7d7a991b103823ab3ad65d58559df78d940c"
+    },
+    "fmt_dir/VIDEO_TS/VTS_13_0.BUP": {
+      "bytes": 18432,
+      "sha256": "33dd271cdbb6fab843804e52fbe8aad3dabf48872c504cbaa85502fe38e54401"
+    },
+    "fmt_dir/VIDEO_TS/VTS_13_0.IFO": {
+      "bytes": 18432,
+      "sha256": "33dd271cdbb6fab843804e52fbe8aad3dabf48872c504cbaa85502fe38e54401"
+    },
+    "fmt_dir/VIDEO_TS/VTS_13_0.VOB": {
+      "bytes": 14336,
+      "content_timing_sha256": "e82cb5881ed4f2489598306d887caaa559ab5807ad5e582ad3252d805efbba6b",
+      "sha256": "fc7f39f811717a65e8f22f5093772786b689f1e4bafcc8fa7a808643cbc3e416"
+    },
+    "fmt_dir/VIDEO_TS/VTS_13_1.VOB": {
+      "bytes": 63762432,
+      "error": "cannot hash media content: VTS_13_1.VOB",
+      "sha256": "36a53df35451631733aeee3106e9ff0c9e6a6f6909cf561ae0cfde314e67d88d"
+    },
+    "hddvd.mkv": {
+      "bytes": 10891923572,
+      "content_timing_sha256": "ae9483e6c0471febd3d0246ed6789707d5786b6449e10079f5e721fadc7fffa0",
+      "sha256": "384591a08fb259bf06dcb3d1167fa71b28a9a44b5da08ecbfd59143658f17d0a"
+    },
+    "iso_t2.mkv": {
+      "bytes": 369807025,
+      "content_timing_sha256": "f78575694a537c4cbab99f0ec7091f8f42431070304c093ed489742377fe8c06",
+      "sha256": "7fe3c6f637e6fb6ba65cf1a4a849b7f7eab5d098ab67f0cc6aec21f6cf8796a6"
+    },
+    "rt_m2ts.m2ts": {
+      "bytes": 390562176,
+      "content_timing_sha256": "ebc5dc6ba5536a82dab92248cfa42f431d860235b09c6d336643647b271addef",
+      "sha256": "c614bbcf4bb224df3a0baf277a7c3a9e964b9ef1655f664ba9ad7f373667ff54"
+    },
+    "rt_stdio.mkv": {
+      "bytes": 369153350,
+      "content_timing_sha256": "c1ae05ad76b0a21d2b68897a7e88c213aebaae956d5a4d773888d5ccefac3def",
+      "sha256": "516c2d61aa67581493170389f8daec327d70f653f2ec8f599e5e35dcc1816bec"
+    },
+    "rtsrc.mkv": {
+      "bytes": 369153727,
+      "content_timing_sha256": "c1ae05ad76b0a21d2b68897a7e88c213aebaae956d5a4d773888d5ccefac3def",
+      "sha256": "24a7f2b22bcbde7a24cce7609c9a08045776b1407e9722b3f22548c7e4013491"
+    },
+    "sel_aeng.mkv": {
+      "bytes": 369807025,
+      "content_timing_sha256": "f78575694a537c4cbab99f0ec7091f8f42431070304c093ed489742377fe8c06",
+      "sha256": "7fe3c6f637e6fb6ba65cf1a4a849b7f7eab5d098ab67f0cc6aec21f6cf8796a6"
+    },
+    "sel_anone.mkv": {
+      "bytes": 358082239,
+      "content_timing_sha256": "256e05c17d17d79b63ec67a7e7fafb42e8d893e381c6bfc4a9f6ad2b6644c684",
+      "sha256": "0a42f905c8bb6ff4a225a0bbc919f278116186cd2e1d4584eff988891b291a05"
+    },
+    "sel_multi_t3.mkv": {
+      "bytes": 238405574,
+      "content_timing_sha256": "6e2fb323dc01685ceb6d8e6d39ede6874ce28dcc0c8f0dd151c28be5e07d1dec",
+      "sha256": "83d3a070edd0e6bd743547bf8dd92e7c9f8ad9730136f721b96300236f7a215e"
+    },
+    "sel_multi_t4.mkv": {
+      "bytes": 120687594,
+      "content_timing_sha256": "38ddb287fdf4cd7b85077ab81b12e380d5835b672430879452fe8eaf728debd3",
+      "sha256": "bcb36d0c32b55aa4126fb1b9273079dba739ed880848db9600a8b794c62bf0f6"
+    },
+    "sel_seng.mkv": {
+      "bytes": 369513836,
+      "content_timing_sha256": "4befd7735df1de5e268a008effe5a54502c5d0f76f7958c2d50dc1becd15c199",
+      "sha256": "4c2cdb48a6c46c7cf633dcb671649c4f3d0b1b04043e1fd32d304add7845ecab"
+    },
+    "sel_snone.mkv": {
+      "bytes": 369153727,
+      "content_timing_sha256": "c1ae05ad76b0a21d2b68897a7e88c213aebaae956d5a4d773888d5ccefac3def",
+      "sha256": "24a7f2b22bcbde7a24cce7609c9a08045776b1407e9722b3f22548c7e4013491"
+    },
+    "sel_sspa.mkv": {
+      "bytes": 369446916,
+      "content_timing_sha256": "56a2b22a22bc8ccf69b11bf5410c4b055befe5c4b775a7cb52f756d994e784d1",
+      "sha256": "c6b2e29065c618652301779f5b75e063688b4456c7ae76a566c5b5dfc117dd6b"
+    },
+    "uhd.mkv": {
+      "bytes": 52304616079,
+      "content_timing_sha256": "94a70383791ac2904dac6371a386a37166766eb3f577dd1d3b8440c58be965ce",
+      "sha256": "71eb39b515e8dbea3c75cd8659f1d0b869ce3c4ce254623bd7fb083feac13277"
+    }
+  },
+  "binary_sha256": "b6437c022c7f4180b8efd5f417eefbebe74824a6fd1271b795ed0684f4f6a892",
+  "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+  "fixtures": {
+    "bd-aacs-damage.patch.json": {
+      "etag": "\"2f30d62f96426fcbb8b715ac15297cea\"",
+      "size": 756,
+      "version_id": null
+    },
+    "bd.iso": {
+      "etag": "\"006f45b12b0824ba9843b2a61bb1bb47-4429\"",
+      "part_size": 8388608,
+      "parts": 4429,
+      "size": 37151703040,
+      "version_id": null
+    },
+    "dvd.iso": {
+      "etag": "\"654654f402c699e73b76fe4806dea131-804\"",
+      "part_size": 8388608,
+      "parts": 804,
+      "size": 6743590912,
+      "version_id": null
+    },
+    "hddvd.iso": {
+      "etag": "\"8a3e436d5adb4d144a4700a9269f2203-2029\"",
+      "part_size": 8388608,
+      "parts": 2029,
+      "size": 17018060800,
+      "version_id": null
+    },
+    "keydb.cfg": {
+      "etag": "\"d4c2dd850823548b51124d2dff0692c0-1\"",
+      "part_size": 24489617,
+      "parts": 1,
+      "size": 24489617,
+      "version_id": null
+    },
+    "synthetic-m2ts-h264-bframes-lpcm16-lpcm24.m2ts": {
+      "etag": "\"7a3c7076ebdb5529ef64cf55d3e6d54d\"",
+      "size": 8976384,
+      "version_id": null
+    },
+    "synthetic-mkv-h264-aac-mp2-mp3.mkv": {
+      "etag": "\"0b206a63c6d879a1b72da8bf23b9b77f\"",
+      "size": 2279020,
+      "version_id": null
+    },
+    "synthetic-mpg-mpeg2-interlaced-mp2-lpcm24.mpg": {
+      "etag": "\"9fb8ae1a488a3359af1ea03ff79dd7af\"",
+      "size": 4970496,
+      "version_id": null
+    },
+    "uhd.iso": {
+      "etag": "\"d2bb2b66d251e0bb83178e9a90b7a35f-6782\"",
+      "part_size": 8388608,
+      "parts": 6782,
+      "size": 56890556416,
+      "version_id": null
+    }
+  },
+  "harness": {
+    "repository": "freemkv/freemkv-ci",
+    "sha": "f2fcd7d0409596ee48a98fb27f6e0f97d88e0da9"
+  },
+  "hash_method": "framecrc-copyts-and-stream-metadata-v1",
+  "lock_sha256": "a765e6e2a4828c1f759c8a451fda773111a6290ad6f9e66ac0243a1de16054d0",
+  "revisions": {
+    "freemkv": "b4b5edf2cb2a02d337d7cc09a320e0ace4a50f4e",
+    "freemkv-engine": "e750bf32d7a83d90db823cedf11551a0a3ab966c",
+    "freemkv-i18n": "84b0d683c1e5424349768bbd4182477b0e1eea76",
+    "freemkv-keysources": "fdd57b3fecb0b6927d39a4ef4885f43f853ff59d",
+    "freemkv-unlock": "34f1c5697706e0694cd8e29eaea7b9232bb4ce91",
+    "libfreemkv": "cc0ee4597b6b389a19227bc283acc7bb37289e23"
+  },
+  "run_attempt": "1",
+  "run_id": "40250043143",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "schema": 1,
+  "suite_exit": 0,
+  "target": "x86_64-unknown-linux-musl",
+  "version": "1.8.5"
+}
