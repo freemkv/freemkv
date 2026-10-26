@@ -208,7 +208,10 @@ def publish(directory, bucket):
         if report.get('suite_exit') != 0 or not report.get('artifacts'):
             raise ValueError(f'{platform} has no successful candidate media answer')
         full_disc = root / 'full-disc-qa.json'
-        if not full_disc.is_file() or 'error' in json.loads(full_disc.read_text()):
+        if not full_disc.is_file():
+            raise ValueError(f'{platform} has no successful full-disc report')
+        full_report = json.loads(full_disc.read_text())
+        if 'error' in full_report or set(full_report.get('families', {})) != {'bd', 'uhd'}:
             raise ValueError(f'{platform} has no successful full-disc report')
         approved.append((path, report))
     for path, report in approved:
