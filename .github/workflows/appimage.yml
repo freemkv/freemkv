@@ -85,12 +85,12 @@ jobs:
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - name: Install GTK4 + libadwaita and AppImage tooling
+        timeout-minutes: 5
         env:
           ARCH: ${{ matrix.arch }}
           LINUXDEPLOY_SHA256: ${{ matrix.linuxdeploy }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          bash freemkv/.github/scripts/install-linux-deps.sh \
             libgtk-4-dev \
             libadwaita-1-dev \
             build-essential \
