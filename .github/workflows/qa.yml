@@ -966,7 +966,7 @@ jobs:
             echo "::error title=CLI acceptance failed on ${{ matrix.os }}::the suite exited $rc — the FAIL/SKIP lines naming each check are in this step's log above"
           fi
           if [ "$RECORD_BASELINE" = "true" ]; then
-            LF_SHA=$(python3 -c 'import json; print(json.load(open("freemkv/tests/media-baseline.json"))["history"][0]["revisions"]["libfreemkv"][:7])')
+            LF_SHA=$("$FMKV_PYTHON" -c 'import json; print(json.load(open("freemkv/tests/media-baseline.json"))["history"][0]["revisions"]["libfreemkv"][:7])')
           fi
           echo "libfreemkv=$LF_SHA" >> "cli-${{ matrix.os }}.txt"
           echo "── hashes recorded on ${{ matrix.os }} ──"

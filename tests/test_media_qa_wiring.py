@@ -208,6 +208,8 @@ class StructureTests(unittest.TestCase):
         suite = next(s for s in self.jobs['cli-matrix']['steps']
                      if s.get('name') == 'Run the full CLI acceptance suite')
         self.assertIn('--record-baseline', suite['run'])
+        self.assertIn('LF_SHA=$("$FMKV_PYTHON" -c', suite['run'])
+        self.assertNotIn('LF_SHA=$(python3 -c', suite['run'])
         full_disc = next(s for s in self.jobs['cli-matrix']['steps']
                          if s.get('name') == 'Verify decrypted Blu-ray and UHD ISO/folder outputs')
         self.assertEqual(full_disc['if'], 'inputs.record_baseline != true')
