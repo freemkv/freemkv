@@ -317,7 +317,10 @@ class LaunchWiringTests(unittest.TestCase):
         self.assertEqual(self.jobs['plan-media']['outputs']['legs'], '${{ steps.plan.outputs.legs }}')
 
     def test_everything_run_instances_gets_comes_from_the_spec(self):
-        self.assertIn('media_gate.py launch-spec --leg "$LEG"', self.step('Launch spec')['run'])
+        step = self.step('Launch spec')
+        self.assertIn('media_gate.py launch-spec --leg "$LEG"', step['run'])
+        self.assertIn('--reference-epoch', step['run'])
+        self.assertEqual(step['env']['RECORD_BASELINE'], '${{ inputs.record_baseline }}')
         run = (ROOT / '.github/scripts/launch-media-runner.sh').read_text()
         for want in ('--instance-market-options "$options"', '--block-device-mappings "$bdm"',
                      "jq -c '.markets[]'", '--instance-type "$t"'):
@@ -396,6 +399,16 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertEqual(spec['job'], 'cli-matrix (linux)')
         self.assertEqual(calls, [('ec2', 'describe-launch-template-versions', '--launch-template-name',
                                   'freemkv-runner-linux', '--versions', '7')], 'the PINNED version is read')
+
+    def test_dev_launch_requires_the_explicit_reference_epoch_mode(self):
+        with self.assertRaisesRegex(ValueError, 'launch on the qa branch only'):
+            self.spec(ref='refs/heads/dev')
+        spec, _ = self.spec(ref='refs/heads/dev', reference_epoch=True)
+        self.assertEqual(spec['labels'], f'freemkv-media,linux,run-{RUN_ID}')
+        with self.assertRaisesRegex(ValueError, 'reference epoch launch is dev-only'):
+            self.spec(ref='refs/heads/qa', reference_epoch=True)
+        with self.assertRaisesRegex(ValueError, 'reference epoch launch is dev-only'):
+            self.spec(ref='refs/tags/dev', reference_epoch=True)
 
     def test_long_release_comparison_uses_only_on_demand(self):
         spec, _ = self.spec()

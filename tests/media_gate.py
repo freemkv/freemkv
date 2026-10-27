@@ -1484,7 +1484,7 @@ def on_demand_launch(data, template, version, mappings):
     return {'input': out, 'tags': tags}
 
 
-def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1):
+def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1, reference_epoch=False):
     """Everything the launch step passes to run-instances for one leg, from the policy alone:
     - the functional template at its planned version (no separate perf templates exist);
     - perf differences as overrides: the perf instance type, no type fallback, the root volume;
@@ -1493,8 +1493,11 @@ def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1):
       version's own image, profile, security groups, volumes and metadata options;
     - a registration-token parameter per run, attempt and leg (the roles' existing
       /freemkv-ci/runner-reg/* scope); the instance deletes it after reading.
-    qa branch only: evidence is recorded only for qa-branch runs, so any other launch proves nothing."""
-    if ref != 'refs/heads/qa':
+    qa branch only by default. The explicit reference-epoch mode permits dev
+    solely to refresh released media references; it can never record candidate evidence."""
+    if reference_epoch and ref != 'refs/heads/dev':
+        raise ValueError(f'reference epoch launch is dev-only, not {ref!r}')
+    if ref != 'refs/heads/qa' and not (reference_epoch and ref == 'refs/heads/dev'):
         raise ValueError(f'the media legs launch on the qa branch only, not {ref!r} '
                          '(evidence is recorded for qa-branch runs only)')
     if leg not in legs(policy):
@@ -1744,6 +1747,8 @@ def main(argv=None):
     parser.add_argument('--bucket')
     parser.add_argument('--out', type=Path)
     parser.add_argument('--leg')
+    parser.add_argument('--reference-epoch', action='store_true',
+                        help='permit an explicit historical reference run on refs/heads/dev')
     parser.add_argument('--target')
     parser.add_argument('--c-toolchain', default='')
     parser.add_argument('--legs', type=Path)
@@ -1791,7 +1796,8 @@ def main(argv=None):
         if args.mode == 'launch-spec':
             spec = launch_spec(policy, args.leg, int(os.environ['GITHUB_RUN_ID']), os.environ['GITHUB_REF'],
                                json.loads(os.environ.get('TEMPLATES') or '{}'),
-                               attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT') or 1))
+                               attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT') or 1),
+                               reference_epoch=args.reference_epoch)
             print(json.dumps(spec, sort_keys=True))
             return 0
         if args.mode == 'record':

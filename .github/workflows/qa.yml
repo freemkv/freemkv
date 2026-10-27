@@ -576,9 +576,14 @@ jobs:
         id: spec
         env:
           TEMPLATES: ${{ needs.plan-media.outputs.launch_templates }}
+          RECORD_BASELINE: ${{ inputs.record_baseline }}
         run: |
           set -euo pipefail
-          spec=$(python3 freemkv/tests/media_gate.py launch-spec --leg "$LEG")
+          if [ "$RECORD_BASELINE" = "true" ]; then
+            spec=$(python3 freemkv/tests/media_gate.py launch-spec --leg "$LEG" --reference-epoch)
+          else
+            spec=$(python3 freemkv/tests/media_gate.py launch-spec --leg "$LEG")
+          fi
           echo "$spec" | jq .
           {
             echo "spec=$spec"
