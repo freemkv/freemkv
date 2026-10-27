@@ -16,6 +16,10 @@ on:
         description: Run the full-disc EC2 matrix even when green evidence exists.
         type: boolean
         default: false
+      record_baseline:
+        description: One-time 1.8.4 reference epoch on dev; produces no candidate verdict.
+        type: boolean
+        default: false
       skip_macos:
         description: Omit macOS hosted tests for an explicitly requested Linux/Windows QA run.
         type: boolean
@@ -72,6 +76,15 @@ jobs:
         with:
           path: freemkv
           persist-credentials: false
+      - name: Restrict reference epoch recording to dev
+        if: inputs.record_baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/dev ]; then
+            echo "::error title=Reference epoch is dev-only::record_baseline is permitted only on dev."
+            exit 1
+          fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: '3.12' }
       - name: Exact toolchain (freemkv rust-version)
@@ -159,7 +172,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REVISIONS: ${{ steps.pin.outputs.revisions }}
           SUPERSEDED: ${{ steps.pin.outputs.superseded }}
-          RUN_MEDIA: ${{ inputs.run_media }}
+          RUN_MEDIA: ${{ inputs.run_media || inputs.record_baseline }}
           SKIP_MEDIA: ${{ inputs.skip_media }}
           SKIP_REASON: ${{ inputs.skip_reason }}
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
@@ -897,6 +910,7 @@ jobs:
           B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
           FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
           FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
+          RECORD_BASELINE: ${{ inputs.record_baseline }}
         run: |
           set +e -uo pipefail
           if [ -z "${FMKV_KEY_URL:-}" ] || [ -z "${FMKV_KEY_AUTH:-}" ]; then
@@ -913,6 +927,10 @@ jobs:
             echo "::error title=CLI binary missing::expected a release build at $BIN"; exit 1; }
 
           chmod +x ci/scripts/cli-acceptance.sh || true
+          BASELINE_ARGS=()
+          if [ "$RECORD_BASELINE" = "true" ]; then
+            BASELINE_ARGS=(--record-baseline --workspace historical-build)
+          fi
           FMKV_MEDIA_CHECKS="$PWD/freemkv/tests/media_checks.py" \
           FMKV_BIN="$BIN" \
           FMKV_DVD_ISO="$ISO_DIR/dvd.iso" \
@@ -929,7 +947,8 @@ jobs:
               --binary "$BIN" --harness ci/scripts/cli-acceptance.sh \
               --bucket "$B" \
               --plan-directory media-plan --target "${{ matrix.target }}" \
-              --out "release-comparison/${{ matrix.os }}" 2>&1 | tee "suite-${{ matrix.os }}.log"
+              --out "release-comparison/${{ matrix.os }}" "${BASELINE_ARGS[@]}" \
+              2>&1 | tee "suite-${{ matrix.os }}.log"
           rc=${PIPESTATUS[0]}
 
           if [ "$rc" != 0 ]; then
@@ -941,11 +960,15 @@ jobs:
           if [ "$rc" != 0 ]; then
             echo "::error title=CLI acceptance failed on ${{ matrix.os }}::the suite exited $rc — the FAIL/SKIP lines naming each check are in this step's log above"
           fi
+          if [ "$RECORD_BASELINE" = "true" ]; then
+            LF_SHA=$(python3 -c 'import json; print(json.load(open("freemkv/tests/media-baseline.json"))["history"][0]["revisions"]["libfreemkv"][:7])')
+          fi
           echo "libfreemkv=$LF_SHA" >> "cli-${{ matrix.os }}.txt"
           echo "── hashes recorded on ${{ matrix.os }} ──"
           cat "cli-${{ matrix.os }}.txt"
           exit $rc
       - name: Verify decrypted Blu-ray and UHD ISO/folder outputs
+        if: inputs.record_baseline != true
         shell: bash
         env:
           FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
@@ -1091,7 +1114,7 @@ jobs:
       always() && needs.plan-media.outputs.run == 'true'
       && needs.cli-matrix.result == 'success'
       && needs.compare-cli-matrix.result == 'success'
-      && needs.record-media-evidence.result == 'success'
+      && (inputs.record_baseline == true || needs.record-media-evidence.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1100,14 +1123,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: 'release-comparison-*', path: history }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: inputs.record_baseline == true
+        with: { name: media-plan, path: history/media-plan }
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: us-west-2
-      - name: Publish immutable candidate manifests beside the ISO fixtures
+      - name: Publish immutable history manifests beside the ISO fixtures
         env:
           B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
-        run: python3 tests/media_history.py --publish history --bucket "$B"
+          RECORD_BASELINE: ${{ inputs.record_baseline }}
+          PLAN_DIR: history/media-plan
+        run: |
+          if [ "$RECORD_BASELINE" = "true" ]; then
+            python3 tests/media_history.py --publish-baseline history --bucket "$B" \
+              --plan-directory "$PLAN_DIR"
+          else
+            python3 tests/media_history.py --publish history --bucket "$B"
+          fi
 
   # Writes the evidence: an annotated tag media-evidence/<F>/<run_id> on an
   # orphan commit holding evidence.json and the built Cargo.lock.
@@ -1116,6 +1150,7 @@ jobs:
     if: >-
       always() && needs.plan-media.outputs.run == 'true' && needs.launch.result == 'success'
       && needs.cli-matrix.result == 'success' && needs.compare-cli-matrix.result == 'success'
+      && inputs.record_baseline != true
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -1149,7 +1184,7 @@ jobs:
   # The one media answer (I-1): green only if evidence was reused or written by this run.
   media-verdict:
     needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence, publish-media-history, gui-gate]
-    if: always()
+    if: always() && inputs.record_baseline != true
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1170,3 +1205,33 @@ jobs:
           TAG: ${{ needs.record-media-evidence.outputs.tag }}
           GUI: ${{ needs.gui-gate.result }}
         run: python3 freemkv/tests/media_gate.py verdict
+
+  baseline-epoch-verdict:
+    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, publish-media-history, gui-gate]
+    if: always() && inputs.record_baseline == true
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify reference-only epoch result
+        env:
+          PLAN: ${{ needs.plan-media.result }}
+          PLAN_RUN: ${{ needs.plan-media.outputs.run }}
+          LAUNCH: ${{ needs.launch.result }}
+          MATRIX: ${{ needs.cli-matrix.result }}
+          COMPARE: ${{ needs.compare-cli-matrix.result }}
+          PUBLISH: ${{ needs.publish-media-history.result }}
+          GUI: ${{ needs.gui-gate.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for result in PLAN LAUNCH MATRIX COMPARE PUBLISH GUI; do
+            value="${!result}"
+            if [ "$value" != success ]; then
+              echo "::error title=Reference epoch incomplete::$result concluded $value"
+              exit 1
+            fi
+          done
+          if [ "$PLAN_RUN" != true ]; then
+            echo "::error title=Reference epoch not run::plan-media did not launch fresh media legs"
+            exit 1
+          fi
+          echo "1.8.4 Linux and Windows reference manifests were recorded. No candidate media verdict or reusable candidate evidence was produced."

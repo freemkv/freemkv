@@ -175,15 +175,15 @@ scheduled sweeper.
 **Cost control is `needs:`, not decoration.** Nothing touches real media until
 lint, the unit suites, the cross-lint, the Windows build and the synthetic CLI
 matrix are green, so a typo cannot burn a two-hour rip. This is also why the
-EC2 matrix runs only on qa (push or dispatch), never on dev: a dev push trigger
-is how a busy afternoon becomes a surprise bill.
+EC2 matrix runs on qa (push or dispatch), never on dev pushes. A single explicit
+dev dispatch can record a new historical fixture epoch.
 
 **Release comparisons run the candidate once.** `tests/media-baseline.json`
 pins SHA-256 digests for the historical manifests in the same S3 bucket as the
 disc fixtures (`media-history/v1/<version>/<target>/<sha256>.json`). The EC2
 leg downloads those small manifests, verifies their bytes, fixture pins,
 harness, toolchain and hash method, then compares the candidate output against
-every listed released version. It never rebuilds or rerips 1.8.4. Each green
+every listed released version. Routine QA never rebuilds or rerips history. Each green
 QA run also writes immutable candidate manifests under
 `media-history/v1/candidates/<version>/<run>/<target>/<sha256>.json` for use as
 the next release's historical answer. When preparing 1.8.6, add the approved
@@ -191,6 +191,16 @@ the next release's historical answer. When preparing 1.8.6, add the approved
 1.8.4, so both previous releases are checked. An incompatible toolchain or
 fixture set requires a new explicitly pinned history epoch; it cannot silently
 pass by comparing unlike inputs.
+
+To create a deliberate 1.8.4 reference epoch after a fixture replacement, dispatch
+`qa.yml` from `dev` with `record_baseline=true` (this forces a fresh EC2 media run).
+The Linux and Windows legs rebuild the exact six pinned 1.8.4 revisions and save
+only their reference manifests. The workflow publishes those manifests immutably
+under the normal versioned history keys. This mode skips candidate media evidence
+and the release verdict; it cannot certify a candidate. After the manifests are
+published, update `media-baseline.json` with their two SHA-256 digests, land that
+pin update on dev, then promote normally. Routine QA leaves `record_baseline=false`
+and remains candidate-only.
 
 ### What this gate does NOT cover
 

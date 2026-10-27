@@ -193,7 +193,27 @@ class StructureTests(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertIn("needs.plan-media.outputs.run == 'true'", self.jobs[name]['if'])
                 self.assertNotIn('inputs.run_media', self.jobs[name]['if'])
-        self.assertEqual(self.jobs['media-verdict']['if'], 'always()')
+        self.assertEqual(self.jobs['media-verdict']['if'], 'always() && inputs.record_baseline != true')
+
+    def test_reference_epoch_is_explicit_dev_only_and_cannot_publish_candidate_evidence(self):
+        self.assertIn('record_baseline:', self.text)
+        self.assertIn('RUN_MEDIA: ${{ inputs.run_media || inputs.record_baseline }}', self.text)
+        record = self.jobs['record-media-evidence']
+        self.assertIn('inputs.record_baseline != true', record['if'])
+        verdict = self.jobs['media-verdict']
+        self.assertIn('inputs.record_baseline != true', verdict['if'])
+        epoch = self.jobs['baseline-epoch-verdict']
+        self.assertIn('inputs.record_baseline == true', epoch['if'])
+        self.assertIn('No candidate media verdict or reusable candidate evidence was produced.', self.text)
+        suite = next(s for s in self.jobs['cli-matrix']['steps']
+                     if s.get('name') == 'Run the full CLI acceptance suite')
+        self.assertIn('--record-baseline', suite['run'])
+        full_disc = next(s for s in self.jobs['cli-matrix']['steps']
+                         if s.get('name') == 'Verify decrypted Blu-ray and UHD ISO/folder outputs')
+        self.assertEqual(full_disc['if'], 'inputs.record_baseline != true')
+        publish = self.jobs['publish-media-history']
+        self.assertIn('inputs.record_baseline == true', publish['if'])
+        self.assertIn('--publish-baseline history', steps_text(publish))
 
     def test_only_tag_record_and_history_jobs_write_contents(self):
         writers = {n for n, j in self.jobs.items() if (j.get('permissions') or {}).get('contents') == 'write'}

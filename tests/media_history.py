@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -103,6 +104,50 @@ def download_manifest(bucket, key, destination):
     boto3.client('s3', region_name='us-west-2').download_file(bucket, key, str(destination))
 
 
+def build_baseline(workspace, spec, target):
+    """Build the exact released source set, for explicit history-epoch recording only."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    app = workspace / 'freemkv'
+    subprocess.run(['git', 'init', '-q', str(app)], check=True)
+    subprocess.run(['git', '-C', str(app), 'fetch', '-q', '--depth=1',
+                    'https://github.com/freemkv/freemkv', spec['revisions']['freemkv']], check=True)
+    subprocess.run(['git', '-C', str(app), 'checkout', '-q', '--detach', 'FETCH_HEAD'], check=True)
+    gate.checkout(workspace, spec['revisions'])
+    gate.resolve(workspace)
+    env = dict(os.environ, CARGO_TARGET_DIR=str(workspace / 'target'))
+    subprocess.run(['cargo', 'build', '--locked', '--release', '--target', target, '--bin', 'freemkv'],
+                   cwd=app, env=env, check=True)
+    extension = '.exe' if 'windows' in target else ''
+    return workspace / 'target' / target / 'release' / f'freemkv{extension}'
+
+
+def record_baseline(args, spec, plan, identity):
+    """Generate a reference only; this mode deliberately makes no candidate assertion."""
+    history = spec.get('history', [])
+    if len(history) != 1 or history[0].get('version') != '1.8.4':
+        raise ValueError('baseline epoch mode is restricted to the single pinned 1.8.4 history entry')
+    entry = history[0]
+    if not gate.valid_revisions(entry['revisions']):
+        raise ValueError('baseline epoch must pin all six released revisions')
+    fixtures = plan['inputs']['externals']['fixtures']
+    if fixtures.get('error'):
+        raise ValueError('baseline epoch requires a successfully fingerprinted fixture set')
+    binary = build_baseline(args.workspace.resolve(), entry, args.target)
+    version = subprocess.check_output([str(binary.resolve()), 'version'], text=True).strip()
+    if version != entry['version']:
+        raise ValueError('built historical binary version differs from the pinned release')
+    report = run_suite(binary, args.harness, args.out / entry['version'],
+                       dict(identity, version=entry['version'], revisions=entry['revisions'],
+                            lock_sha256=sha256(args.workspace / 'freemkv/Cargo.lock')))
+    (args.out / entry['version']).mkdir(parents=True, exist_ok=True)
+    (args.out / entry['version'] / 'Cargo.lock').write_bytes(
+        (args.workspace / 'freemkv/Cargo.lock').read_bytes())
+    if os.environ.get('FMKV_HASHES'):
+        Path(os.environ['FMKV_HASHES']).write_bytes(
+            (args.out / entry['version'] / 'raw-hashes.txt').read_bytes())
+    return int(bool(report['suite_exit']))
+
+
 def historical_manifest(bucket, spec, target, identity, destination):
     pin = spec['manifests'][target]
     digest = pin['sha256']
@@ -162,6 +207,8 @@ def run(args):
                 'harness': plan['inputs']['policy']['harness'],
                 'rustc': subprocess.check_output(['rustc', '-Vv'], text=True),
                 'ffmpeg': subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0]}
+    if args.record_baseline:
+        return record_baseline(args, spec, plan, identity)
     baselines = {entry['version']: historical_manifest(args.bucket, entry, args.target,
                  identity, args.out / entry['version'] / 'manifest.json') for entry in history}
     version = subprocess.check_output([str(args.binary.resolve()), 'version'], text=True).strip()
@@ -244,16 +291,85 @@ def publish(directory, bucket):
         print(f's3://{bucket}/{key}')
 
 
+def publish_baseline(directory, bucket, spec_path=Path(__file__).with_name('media-baseline.json'),
+                     run_id=None, run_attempt=None, plan_directory=None):
+    """Publish only successful, cross-platform pinned 1.8.4 reference manifests."""
+    history = json.loads(spec_path.read_text()).get('history', [])
+    if len(history) != 1 or history[0].get('version') != '1.8.4':
+        raise ValueError('baseline publication is restricted to the pinned 1.8.4 epoch')
+    entry = history[0]
+    if not gate.valid_revisions(entry['revisions']):
+        raise ValueError('baseline publication requires all six pinned 1.8.4 revisions')
+    expected_run_id = str(run_id or os.environ.get('GITHUB_RUN_ID') or '')
+    expected_attempt = str(run_attempt or os.environ.get('GITHUB_RUN_ATTEMPT') or '')
+    if not expected_run_id:
+        raise ValueError('baseline publication requires the current Actions run ID')
+    if not expected_attempt:
+        raise ValueError('baseline publication requires the current Actions run attempt')
+    if plan_directory is None:
+        raise ValueError('baseline publication requires the run media plan')
+    plan = json.loads((plan_directory / 'evidence.json').read_text())
+    expected_fixtures = plan['inputs']['externals']['fixtures']
+    expected_harness = plan['inputs']['policy']['harness']
+    if plan.get('run_id') != int(expected_run_id) or expected_fixtures.get('error') or 'uhd.iso' not in expected_fixtures:
+        raise ValueError('baseline publication requires this run\'s successfully fingerprinted UHD fixture')
+    approved, fixtures = [], None
+    identity_fields = ('schema', 'fixtures', 'harness', 'hash_method', 'rustc', 'ffmpeg')
+    for platform, target in (('linux', 'x86_64-unknown-linux-musl'),
+                             ('windows', 'x86_64-pc-windows-msvc')):
+        path = directory / f'release-comparison-{platform}' / '1.8.4' / 'manifest.json'
+        if not path.is_file():
+            raise ValueError(f'{target} has no reference manifest')
+        report = json.loads(path.read_text())
+        if (report.get('schema') != 1 or report.get('version') != entry['version'] or
+                report.get('target') != target or
+                report.get('revisions') != entry['revisions'] or report.get('suite_exit') != 0 or
+                not report.get('artifacts') or str(report.get('run_id')) != expected_run_id or
+                str(report.get('run_attempt')) != expected_attempt or
+                not re.fullmatch(r'[0-9a-f]{64}', report.get('lock_sha256', '')) or
+                not re.fullmatch(r'[0-9a-f]{64}', report.get('binary_sha256', '')) or
+                report.get('hash_method') != 'framecrc-copyts-stream-and-chapter-metadata-v2'):
+            raise ValueError(f'{target} reference manifest is not a successful pinned 1.8.4 answer')
+        if fixtures is None:
+            fixtures = report.get('fixtures')
+        elif report.get('fixtures') != fixtures:
+            raise ValueError('Linux and Windows reference manifests used different fixtures')
+        if report.get('fixtures') != expected_fixtures or report.get('harness') != expected_harness:
+            raise ValueError(f'{target} reference identity differs from this run media plan')
+        if any(not report.get(field) for field in identity_fields):
+            raise ValueError(f'{target} reference manifest has incomplete identity')
+        approved.append((path, report))
+    for path, report in approved:
+        digest = sha256(path)
+        key = f"media-history/v1/{report['version']}/{report['target']}/{digest}.json"
+        result = subprocess.run(['aws', 's3api', 'put-object', '--bucket', bucket, '--key', key,
+                                 '--body', str(path), '--content-type', 'application/json',
+                                 '--if-none-match', '*', '--region', 'us-west-2'],
+                                capture_output=True, text=True)
+        if result.returncode:
+            with tempfile.TemporaryDirectory() as scratch:
+                existing = Path(scratch) / 'manifest.json'
+                subprocess.run(['aws', 's3api', 'get-object', '--bucket', bucket, '--key', key,
+                                str(existing), '--region', 'us-west-2'], check=True,
+                               stdout=subprocess.DEVNULL)
+                if sha256(existing) != digest:
+                    raise ValueError(f'published baseline differs: {key}')
+        print(f's3://{bucket}/{key}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--archive', type=Path)
     parser.add_argument('--publish', type=Path)
+    parser.add_argument('--publish-baseline', type=Path)
+    parser.add_argument('--record-baseline', action='store_true')
     parser.add_argument('--baseline', type=Path, default=Path(__file__).with_name('media-baseline.json'))
     parser.add_argument('--bucket')
     parser.add_argument('--binary', type=Path)
     parser.add_argument('--harness', type=Path)
     parser.add_argument('--plan-directory', type=Path)
     parser.add_argument('--out', type=Path, default=Path('release-comparison'))
+    parser.add_argument('--workspace', type=Path, default=Path('historical-build'))
     parser.add_argument('--target')
     args = parser.parse_args()
     if args.archive:
@@ -261,6 +377,11 @@ def main():
         return 0
     if args.publish:
         publish(args.publish, args.bucket)
+        return 0
+    if args.publish_baseline:
+        publish_baseline(args.publish_baseline, args.bucket, args.baseline,
+                         os.environ.get('GITHUB_RUN_ID'), os.environ.get('GITHUB_RUN_ATTEMPT'),
+                         args.plan_directory)
         return 0
     return run(args)
 

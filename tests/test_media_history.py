@@ -170,6 +170,75 @@ class ComparisonTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'no successful full-disc report'):
                     history.publish(root, 'bucket')
 
+    def test_reference_epoch_builds_only_the_pinned_184_answer(self):
+        revisions = {name: str(index) * 40 for index, name in enumerate(
+            ('freemkv', 'libfreemkv', 'freemkv-engine', 'freemkv-keysources',
+             'freemkv-i18n', 'freemkv-unlock'), 1)}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / 'historical-build'
+            (workspace / 'freemkv').mkdir(parents=True)
+            (workspace / 'freemkv/Cargo.lock').write_text('pinned lock')
+            binary = root / 'freemkv-1.8.4'
+            harness = root / 'harness.sh'
+            harness.write_text('')
+            args = type('Args', (), {'workspace': workspace, 'target': 'x86_64-unknown-linux-musl',
+                                     'harness': harness, 'out': root / 'out'})()
+            spec = {'history': [{'version': '1.8.4', 'revisions': revisions}]}
+            plan = {'inputs': {'externals': {'fixtures': {'uhd.iso': {'sha256': 'new'}}}}}
+            with patch.object(history, 'build_baseline', return_value=binary) as build, \
+                    patch.object(history.subprocess, 'check_output', return_value='1.8.4\n'), \
+                    patch.object(history, 'run_suite', return_value={'suite_exit': 0}) as suite:
+                code = history.record_baseline(args, spec, plan, {'target': args.target})
+            self.assertEqual(code, 0)
+            build.assert_called_once_with(workspace.resolve(), spec['history'][0], args.target)
+            self.assertEqual(suite.call_args.args[2], args.out / '1.8.4')
+            self.assertEqual(suite.call_args.args[3]['revisions'], revisions)
+            with self.assertRaisesRegex(ValueError, 'restricted to the single pinned 1.8.4'):
+                history.record_baseline(args, {'history': spec['history'] + spec['history']},
+                                        plan, {'target': args.target})
+
+    def test_publish_baseline_requires_two_matching_immutable_reference_answers(self):
+        names = ('freemkv', 'libfreemkv', 'freemkv-engine', 'freemkv-keysources',
+                 'freemkv-i18n', 'freemkv-unlock')
+        revisions = {name: f'{index:040x}' for index, name in enumerate(names, 1)}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spec_path = root / 'baseline.json'
+            plan_directory = root / 'plan'
+            fixtures = {'uhd.iso': {'sha256': 'new'}}
+            harness = {'sha256': 'c' * 64}
+            history.save(plan_directory / 'evidence.json', {'run_id': 42,
+                                     'inputs': {'externals': {'fixtures': fixtures},
+                                     'policy': {'harness': harness}}})
+            spec = {'history': [{'version': '1.8.4', 'revisions': revisions}]}
+            history.save(spec_path, spec)
+            for platform, target in (('linux', 'x86_64-unknown-linux-musl'),
+                                     ('windows', 'x86_64-pc-windows-msvc')):
+                report = {'schema': 1, 'run_id': '42', 'run_attempt': '1',
+                          'version': '1.8.4', 'target': target,
+                          'revisions': revisions, 'suite_exit': 0, 'lock_sha256': 'a' * 64,
+                          'binary_sha256': 'b' * 64, 'fixtures': fixtures,
+                          'harness': harness, 'hash_method': 'framecrc-copyts-stream-and-chapter-metadata-v2',
+                          'rustc': 'rustc version', 'ffmpeg': 'ffmpeg version',
+                          'artifacts': {'title.mkv': {'sha256': 'd' * 64}}}
+                history.save(root / f'release-comparison-{platform}/1.8.4/manifest.json', report)
+            with patch.object(history.subprocess, 'run') as put:
+                put.return_value.returncode = 0
+                history.publish_baseline(root, 'bucket', spec_path, '42', '1', plan_directory)
+                self.assertEqual(put.call_count, 2)
+                keys = [call.args[0][call.args[0].index('--key') + 1] for call in put.call_args_list]
+                self.assertTrue(all(key.startswith('media-history/v1/1.8.4/') for key in keys))
+                self.assertTrue(all('--if-none-match' in call.args[0] for call in put.call_args_list))
+            windows = root / 'release-comparison-windows/1.8.4/manifest.json'
+            report = json.loads(windows.read_text())
+            report['fixtures']['uhd.iso']['sha256'] = 'old'
+            history.save(windows, report)
+            with patch.object(history.subprocess, 'run') as put:
+                with self.assertRaisesRegex(ValueError, 'different fixtures'):
+                    history.publish_baseline(root, 'bucket', spec_path, '42', '1', plan_directory)
+                put.assert_not_called()
+
     def test_failed_suite_keeps_its_historical_answers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
