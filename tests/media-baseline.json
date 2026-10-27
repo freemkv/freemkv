@@ -13,10 +13,10 @@
       },
       "manifests": {
         "x86_64-unknown-linux-musl": {
-          "sha256": "92d5a310cf39c4976ff8347ee2d09051fc81cd2ae86ddfab1638f83b2d3a6a2c"
+          "sha256": "7a7f46887cddc6746fe9477dd65d051936022305f6c5713b85cfa2f80b8bca59"
         },
         "x86_64-pc-windows-msvc": {
-          "sha256": "cbc4c35d91e401c418d9a90da9678b551adc3592243b43b6b8338d3f331c7bd1"
+          "sha256": "bc227f10c416dff991cf54b70ae8f1cba6f4e2ca211962fc1068769e08b8010a"
         }
       },
       "expected_differences": {}
