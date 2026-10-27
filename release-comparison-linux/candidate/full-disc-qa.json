@@ -1,0 +1,991 @@
+{
+  "error": "iso:///home/ubuntu/actions-runner/_work/freemkv/freemkv/isos/uhd.iso -> dir:///home/ubuntu/actions-runner/_work/freemkv/freemkv/release-comparison/linux/candidate/freemkv-uhd-disc-rpi3fv9i/direct-folder exited 1:\nfreemkv 1.8.5\n\nkey: keydb > found unit keys > RESOLVED\nExtracting decrypted file tree to /home/ubuntu/actions-runner/_work/freemkv/freemkv/release-comparison/linux/candidate/freemkv-uhd-disc-rpi3fv9i/direct-folder\n\n  BDMV/STREAM/00061.m2ts: 0.48 MB lost\nExtracted 365 files but 0.48 MB were unreadable/undecryptable. Recover with disc->iso --multipass, then iso->dir.",
+  "families": {
+    "bd": {
+      "decrypted_iso_sha256": "f97a4be6cc66a440b5cf39f85292abb0c4b2d24ee98d10013ffbe25085e2d495",
+      "file_count": 239,
+      "files": {
+        "AACS/CPSUnit00001.cci": {
+          "bytes": 2048,
+          "sha256": "3dd9273da2627420028089897a341b1fa9249b59167e487b19e97edd26f5924f"
+        },
+        "AACS/Content000.cer": {
+          "bytes": 160,
+          "sha256": "653deb2af4d77dbdf5dee17f0d9cc5b1a0b465e79b6e1e12694f9569205f9da5"
+        },
+        "AACS/Content001.cer": {
+          "bytes": 424,
+          "sha256": "c2517996ed3625291f74bdaa406ff67ca17ee542ad3cbabaf91eb62ef5f63171"
+        },
+        "AACS/ContentHash000.tbl": {
+          "bytes": 756136,
+          "sha256": "8226e3f01ac058a2d12d7b8f5c4e1d960d5c821fcb35a1a4e3aef3a9f97bbdae"
+        },
+        "AACS/ContentHash001.tbl": {
+          "bytes": 755188,
+          "sha256": "0fa160c27cf9b656e62495b4167b23e7bdbfc26e2bfeebac7e7ebea5903541ff"
+        },
+        "AACS/ContentRevocation.lst": {
+          "bytes": 1048576,
+          "sha256": "62146b684683e4f08d4d4d5ccce6aa298e83627d3c9ae899609e7551c2ea4e2d"
+        },
+        "AACS/DUPLICATE/CPSUnit00001.cci": {
+          "bytes": 2048,
+          "sha256": "3dd9273da2627420028089897a341b1fa9249b59167e487b19e97edd26f5924f"
+        },
+        "AACS/DUPLICATE/Content000.cer": {
+          "bytes": 160,
+          "sha256": "653deb2af4d77dbdf5dee17f0d9cc5b1a0b465e79b6e1e12694f9569205f9da5"
+        },
+        "AACS/DUPLICATE/Content001.cer": {
+          "bytes": 424,
+          "sha256": "c2517996ed3625291f74bdaa406ff67ca17ee542ad3cbabaf91eb62ef5f63171"
+        },
+        "AACS/DUPLICATE/ContentHash000.tbl": {
+          "bytes": 756136,
+          "sha256": "8226e3f01ac058a2d12d7b8f5c4e1d960d5c821fcb35a1a4e3aef3a9f97bbdae"
+        },
+        "AACS/DUPLICATE/ContentHash001.tbl": {
+          "bytes": 755188,
+          "sha256": "0fa160c27cf9b656e62495b4167b23e7bdbfc26e2bfeebac7e7ebea5903541ff"
+        },
+        "AACS/DUPLICATE/ContentRevocation.lst": {
+          "bytes": 1048576,
+          "sha256": "62146b684683e4f08d4d4d5ccce6aa298e83627d3c9ae899609e7551c2ea4e2d"
+        },
+        "AACS/DUPLICATE/MKB_RO.inf": {
+          "bytes": 1048576,
+          "sha256": "9c0808977a242d27c09f2b24e801f70ec82c020ba4e77e13f862f8dbc32329da"
+        },
+        "AACS/DUPLICATE/MKB_RW.inf": {
+          "bytes": 1048576,
+          "sha256": "18c554038095ed25573ef922cef4f46011888456bf0a111c0e3453a53a342d02"
+        },
+        "AACS/DUPLICATE/Unit_Key_RO.inf": {
+          "bytes": 65536,
+          "sha256": "5f4aa0e4afe42b56356b800061f43f58844177491a2b9fed9aa49122c4030afe"
+        },
+        "AACS/DUPLICATE/mcmf.xml": {
+          "bytes": 7254,
+          "sha256": "0ed666c4c697a662b649196dde74280ec8542d6f96fe760519c3f6afeb7801c2"
+        },
+        "AACS/MKB_RO.inf": {
+          "bytes": 1048576,
+          "sha256": "9c0808977a242d27c09f2b24e801f70ec82c020ba4e77e13f862f8dbc32329da"
+        },
+        "AACS/MKB_RW.inf": {
+          "bytes": 1048576,
+          "sha256": "18c554038095ed25573ef922cef4f46011888456bf0a111c0e3453a53a342d02"
+        },
+        "AACS/Unit_Key_RO.bak": {
+          "bytes": 65536,
+          "sha256": "5f4aa0e4afe42b56356b800061f43f58844177491a2b9fed9aa49122c4030afe"
+        },
+        "AACS/mcmf.xml": {
+          "bytes": 7254,
+          "sha256": "0ed666c4c697a662b649196dde74280ec8542d6f96fe760519c3f6afeb7801c2"
+        },
+        "BDMV/BACKUP/CLIPINF/00002.clpi": {
+          "bytes": 396,
+          "sha256": "18318d6e0bd5474a1f63f413ce4e21fb613f80182cc114013a07582f9379f39a"
+        },
+        "BDMV/BACKUP/CLIPINF/00003.clpi": {
+          "bytes": 432,
+          "sha256": "d3366de1ac1a491c3d37a8f4c6278a3e8bd3bd92914b4be0e73ce1cef6c118cf"
+        },
+        "BDMV/BACKUP/CLIPINF/00004.clpi": {
+          "bytes": 416,
+          "sha256": "85da7252314ed9a1561f8cb5c5613a2e43c99d5a825124328ba380e6e41acf66"
+        },
+        "BDMV/BACKUP/CLIPINF/00005.clpi": {
+          "bytes": 392,
+          "sha256": "ddd4968249ef01cfdeeca23b1461d371df19b3e727e83b23fd8860951eb0aad9"
+        },
+        "BDMV/BACKUP/CLIPINF/00006.clpi": {
+          "bytes": 324,
+          "sha256": "02181cdfee11b8b79fa540b66be904a607e6f32a9a336fd70281b352fae01606"
+        },
+        "BDMV/BACKUP/CLIPINF/00007.clpi": {
+          "bytes": 292,
+          "sha256": "f4b2b2c5c8be8b614538434580f0a2ac12741018ab369dc6a48aca9bf1e0cea3"
+        },
+        "BDMV/BACKUP/CLIPINF/00008.clpi": {
+          "bytes": 364,
+          "sha256": "9a7ea805b62804e03ef3b454ad036968bb7c08488ac4863d263e2e0190beb328"
+        },
+        "BDMV/BACKUP/CLIPINF/00009.clpi": {
+          "bytes": 364,
+          "sha256": "5069f8f5762a32ee95aec030ccaeeb6d52702fd0925ff73b0c52baa8d3e68f63"
+        },
+        "BDMV/BACKUP/CLIPINF/00010.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/BACKUP/CLIPINF/00011.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/BACKUP/CLIPINF/00013.clpi": {
+          "bytes": 428,
+          "sha256": "fa298bb6cb2ba8d7c7627997699498878b10c5748a589925f1331051ea8b1f87"
+        },
+        "BDMV/BACKUP/CLIPINF/00014.clpi": {
+          "bytes": 324,
+          "sha256": "02181cdfee11b8b79fa540b66be904a607e6f32a9a336fd70281b352fae01606"
+        },
+        "BDMV/BACKUP/CLIPINF/00015.clpi": {
+          "bytes": 544,
+          "sha256": "63d344b2e61df95216bc37bd58367baf43d21d4d106efb0a9a718cd230204726"
+        },
+        "BDMV/BACKUP/CLIPINF/00016.clpi": {
+          "bytes": 736,
+          "sha256": "89a1ab98454b153abda02634fc2c4b472a79fc9d51e687181edcd17c78ef1992"
+        },
+        "BDMV/BACKUP/CLIPINF/00017.clpi": {
+          "bytes": 600,
+          "sha256": "50e67a3a94b6c00471c92ace2891796f50868313b19f4ba6ad1d8441102c4d24"
+        },
+        "BDMV/BACKUP/CLIPINF/00018.clpi": {
+          "bytes": 2820,
+          "sha256": "2aad906ae18053435754f699f38b5fcfa22efcac773960242253a146b8f17228"
+        },
+        "BDMV/BACKUP/CLIPINF/00032.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/BACKUP/CLIPINF/00033.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/BACKUP/CLIPINF/00034.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/BACKUP/CLIPINF/00039.clpi": {
+          "bytes": 324,
+          "sha256": "02181cdfee11b8b79fa540b66be904a607e6f32a9a336fd70281b352fae01606"
+        },
+        "BDMV/BACKUP/CLIPINF/00040.clpi": {
+          "bytes": 324,
+          "sha256": "02181cdfee11b8b79fa540b66be904a607e6f32a9a336fd70281b352fae01606"
+        },
+        "BDMV/BACKUP/CLIPINF/00041.clpi": {
+          "bytes": 352,
+          "sha256": "8c089df5d64b2dbd6ffc7e58f03908b51bc13b848f042e471293edf57b2001a1"
+        },
+        "BDMV/BACKUP/CLIPINF/00042.clpi": {
+          "bytes": 54396,
+          "sha256": "bb268b941de3b47dec9ed56c9c494c4f2dd7ceb85dbd7f731ac68068731c7386"
+        },
+        "BDMV/BACKUP/CLIPINF/00050.clpi": {
+          "bytes": 388,
+          "sha256": "4b49f6e46b52a1af7a0b3a3f4f032e1164df5ab118055f368fa1056070e33bee"
+        },
+        "BDMV/BACKUP/CLIPINF/00051.clpi": {
+          "bytes": 388,
+          "sha256": "dfccc30f719ea939323745aba40428ac3d1ccb1848050901600bcb4fcce0566c"
+        },
+        "BDMV/BACKUP/CLIPINF/00052.clpi": {
+          "bytes": 292,
+          "sha256": "4e6868d1b5f4548d6f477f4e72025fb2e88d0675e0fde72b9307ee418f706e59"
+        },
+        "BDMV/BACKUP/CLIPINF/00053.clpi": {
+          "bytes": 292,
+          "sha256": "f48550644b5927f41cbba30c0f86e387874e4a1ba0401f3c34ed81b2139c35c8"
+        },
+        "BDMV/BACKUP/CLIPINF/00054.clpi": {
+          "bytes": 432,
+          "sha256": "d2ef66e0dac1ef2f8cf3b29ffa8288fe33b3f8ee4d351a8493676775d6e4158e"
+        },
+        "BDMV/BACKUP/CLIPINF/00055.clpi": {
+          "bytes": 432,
+          "sha256": "fb4d6e1d2a9978836d1dcad82d59dd736b1683764605941e9f691f17f7b55831"
+        },
+        "BDMV/BACKUP/CLIPINF/00056.clpi": {
+          "bytes": 580,
+          "sha256": "f415baf46759c3a6fa4f83dfb4b2b69f673013de15b57261d8b0109fe02d5b31"
+        },
+        "BDMV/BACKUP/CLIPINF/00057.clpi": {
+          "bytes": 764,
+          "sha256": "9dd01d888c4e8980f1ef96e7f860f3d0adfdc9d0894f2aa2a0b5d9284aaaa365"
+        },
+        "BDMV/BACKUP/CLIPINF/00058.clpi": {
+          "bytes": 628,
+          "sha256": "3183e49ee4b8f8a1dcc40c8d842b0a693277eafdc83f82fe4248a6ded759aa92"
+        },
+        "BDMV/BACKUP/CLIPINF/00059.clpi": {
+          "bytes": 2792,
+          "sha256": "6ad039acd294917f8cfd82693f710277eb3509c426097901163a9c51915f61a8"
+        },
+        "BDMV/BACKUP/CLIPINF/00062.clpi": {
+          "bytes": 292,
+          "sha256": "81fe13c0378b98e82097be02ba424903d5b4fea19e4e8f69e64b8152b0f69584"
+        },
+        "BDMV/BACKUP/CLIPINF/00063.clpi": {
+          "bytes": 980,
+          "sha256": "47d899feed1139c909c6c81c83a4846c86ca565453018b9c9ab1d3caf93970f3"
+        },
+        "BDMV/BACKUP/CLIPINF/00064.clpi": {
+          "bytes": 1832,
+          "sha256": "eb6ee00b75d798312f0da74c04588497f42e9a2fc7251cecf3acdf4e5a02b7ab"
+        },
+        "BDMV/BACKUP/CLIPINF/00066.clpi": {
+          "bytes": 640,
+          "sha256": "225b1bd772246910d145ef60146cc144d2faa98173985d00d10ebeadfdde9b9f"
+        },
+        "BDMV/BACKUP/CLIPINF/00067.clpi": {
+          "bytes": 1460,
+          "sha256": "d62dd936395212e4fb4d1aadf6fc0a990f298383ae344e796ccbf106111384f8"
+        },
+        "BDMV/BACKUP/CLIPINF/00068.clpi": {
+          "bytes": 292,
+          "sha256": "fb97d8d1a4f5875e2e119b9c920d83436f6672047d07720646ab63862cd6a84d"
+        },
+        "BDMV/BACKUP/CLIPINF/00069.clpi": {
+          "bytes": 1848,
+          "sha256": "1e6f02e7bc517f0829ab74215aee8e15ca2500eea08a63dd04d3bfc0197d082b"
+        },
+        "BDMV/BACKUP/CLIPINF/00070.clpi": {
+          "bytes": 1476,
+          "sha256": "6a2f7c7b726219389fb1aa70c2ae5f043bbae2bcee59c24dbb5bba8c06c76ffa"
+        },
+        "BDMV/BACKUP/CLIPINF/00071.clpi": {
+          "bytes": 292,
+          "sha256": "fb97d8d1a4f5875e2e119b9c920d83436f6672047d07720646ab63862cd6a84d"
+        },
+        "BDMV/BACKUP/CLIPINF/00072.clpi": {
+          "bytes": 292,
+          "sha256": "81fe13c0378b98e82097be02ba424903d5b4fea19e4e8f69e64b8152b0f69584"
+        },
+        "BDMV/BACKUP/CLIPINF/00073.clpi": {
+          "bytes": 49664,
+          "sha256": "9e1c68aa49d9f7932569001b0baecf4a799026aff43ac43c582a0d9276c25c15"
+        },
+        "BDMV/BACKUP/CLIPINF/00074.clpi": {
+          "bytes": 472,
+          "sha256": "ffa95e7eb8f5dd93a6b4969c3e1776f0223dfa12924505f0a1d1f886639ed572"
+        },
+        "BDMV/BACKUP/CLIPINF/00075.clpi": {
+          "bytes": 436,
+          "sha256": "3434c45405801be26795a63181e93899892101201bc32172da3bcb5c53daf8d7"
+        },
+        "BDMV/BACKUP/CLIPINF/00076.clpi": {
+          "bytes": 980,
+          "sha256": "2ca88d260594c6ca6d56cf24dc0de5f31a0485a949cd8106b897f890bbad28bd"
+        },
+        "BDMV/BACKUP/CLIPINF/00077.clpi": {
+          "bytes": 640,
+          "sha256": "37fd48865b0f4a1cfadc95e76406b885087e0433ab47fd1fe5cbef0592aed536"
+        },
+        "BDMV/BACKUP/MovieObject.bdmv": {
+          "bytes": 114606,
+          "sha256": "547af20d82a59b0db6a44670517ebc81d3c4fee6ca68be2dca3cab34daedaf3b"
+        },
+        "BDMV/BACKUP/PLAYLIST/00002.mpls": {
+          "bytes": 210,
+          "sha256": "378909b54af0b77d3ed3323419a474aaa37378ced12c6a81d09caa72295e2299"
+        },
+        "BDMV/BACKUP/PLAYLIST/00003.mpls": {
+          "bytes": 210,
+          "sha256": "e723587fc7ea9e90440e9f8a8682ec60987eedbad31591e701cf82c0e88b40cf"
+        },
+        "BDMV/BACKUP/PLAYLIST/00010.mpls": {
+          "bytes": 210,
+          "sha256": "33f39aa8985fd0d8976c524b03f5cb93c70d594e1af0284cb83a26fc467e13e4"
+        },
+        "BDMV/BACKUP/PLAYLIST/00011.mpls": {
+          "bytes": 168,
+          "sha256": "8e4613a21e96a0bcd8375043ebd454c8a15777222e6d3e4eae08e1db9def3ae2"
+        },
+        "BDMV/BACKUP/PLAYLIST/00012.mpls": {
+          "bytes": 168,
+          "sha256": "ee39042bed4079c64a9d5d2fc20170048787595585f678c81b2755a3961793f8"
+        },
+        "BDMV/BACKUP/PLAYLIST/00013.mpls": {
+          "bytes": 184,
+          "sha256": "ff186a4a5631725f610cc574d647cda9706d0b47b1388c910a2ec77c68a3a2e1"
+        },
+        "BDMV/BACKUP/PLAYLIST/00014.mpls": {
+          "bytes": 168,
+          "sha256": "f1913f20c205e031b26d22d2e7d423009324c646b114357d639ad8ccd161c17c"
+        },
+        "BDMV/BACKUP/PLAYLIST/00015.mpls": {
+          "bytes": 276,
+          "sha256": "20ed7481f5df87fced4b9b8f3251b27cbeb7535c8ec550af8731e853caf31377"
+        },
+        "BDMV/BACKUP/PLAYLIST/00016.mpls": {
+          "bytes": 168,
+          "sha256": "b2ec04f1c2adf829675de624803b96f7279e3590242eb553cb56b735526772d7"
+        },
+        "BDMV/BACKUP/PLAYLIST/00017.mpls": {
+          "bytes": 394,
+          "sha256": "07abe748ab54092c9dd1f4d24562b2bff220b43ce3533d209cdf196d16d98939"
+        },
+        "BDMV/BACKUP/PLAYLIST/00020.mpls": {
+          "bytes": 168,
+          "sha256": "ac33551fee814e848573c894d7a424a959a1fc463ef32ad412d34d7af8d2aacf"
+        },
+        "BDMV/BACKUP/PLAYLIST/00021.mpls": {
+          "bytes": 170,
+          "sha256": "e4cdc803fc3f834f5619cb3cef4ae10c636a6c14c4f01524898816ca8a2239e3"
+        },
+        "BDMV/BACKUP/PLAYLIST/00022.mpls": {
+          "bytes": 170,
+          "sha256": "78b10c49224d494e1c3da0d9b34d236ff347591afa1dc0243ce073b4e395081c"
+        },
+        "BDMV/BACKUP/PLAYLIST/00023.mpls": {
+          "bytes": 170,
+          "sha256": "9dc3be66c47354d4b7efb27cc98791ede17f3cf53592612617af973536d74b99"
+        },
+        "BDMV/BACKUP/PLAYLIST/00024.mpls": {
+          "bytes": 170,
+          "sha256": "ce9db02bf36ac56c681920da583bf69d1f9ab2f6f0330cc0a09fb40eacfb59ea"
+        },
+        "BDMV/BACKUP/PLAYLIST/00025.mpls": {
+          "bytes": 170,
+          "sha256": "323c2d011ed46da56cb3f39b92ee49a81f76cd4a2e393ee699157b29e8768d80"
+        },
+        "BDMV/BACKUP/PLAYLIST/00050.mpls": {
+          "bytes": 276,
+          "sha256": "1e5b809d624397a85bd169f1d4726e77d71efefaf6723ce58f1d1613432d3761"
+        },
+        "BDMV/BACKUP/PLAYLIST/00051.mpls": {
+          "bytes": 154,
+          "sha256": "b1b8604384e924b0f1e0bb4017326ac1fffbc0145217b1f2fcc8f78edf5d1f4b"
+        },
+        "BDMV/BACKUP/PLAYLIST/00052.mpls": {
+          "bytes": 276,
+          "sha256": "952b738cd6b2388cbbb6dc3408f9e62bd0999a8507aa9a6f68ca596f7db0fd0d"
+        },
+        "BDMV/BACKUP/PLAYLIST/00053.mpls": {
+          "bytes": 332,
+          "sha256": "e13afc2f36b5c58533f732d73aa322b4ce7977c6fc4e2ef65ade529ecb6fce80"
+        },
+        "BDMV/BACKUP/PLAYLIST/00054.mpls": {
+          "bytes": 304,
+          "sha256": "2a8fbf1aa571ffad9023e667770c25ecfe7bb8a9fbcf6f49515a149d9339e4e7"
+        },
+        "BDMV/BACKUP/PLAYLIST/00055.mpls": {
+          "bytes": 738,
+          "sha256": "c15de4587a9bafa12dcd1f26c51b9e176e5540e39aab2ecc4bc24429c2019c85"
+        },
+        "BDMV/BACKUP/PLAYLIST/00098.mpls": {
+          "bytes": 796,
+          "sha256": "44ece8825e2a1fb164773b21dfa7819783b98c931d8c99a623824533be339f43"
+        },
+        "BDMV/BACKUP/PLAYLIST/00119.mpls": {
+          "bytes": 1900,
+          "sha256": "728dcb4551ceb2174d98e473820609e29c0304590459ad52425671d3ae3d5426"
+        },
+        "BDMV/BACKUP/PLAYLIST/00123.mpls": {
+          "bytes": 1900,
+          "sha256": "a1e6abb0b167a3d9f224f8823fbdbbbe9f4084779b793475b09023d6fe7cff36"
+        },
+        "BDMV/BACKUP/PLAYLIST/00431.mpls": {
+          "bytes": 262,
+          "sha256": "150d299072369a2e85a8e98c6710672394c6af4ecdfb3e9eac9c3a2c34378c72"
+        },
+        "BDMV/BACKUP/PLAYLIST/00432.mpls": {
+          "bytes": 262,
+          "sha256": "256d9e70be7c89acb5860201f7c6b3e54b9c5b3af49eaf8ef39c4342b4433af9"
+        },
+        "BDMV/BACKUP/index.bdmv": {
+          "bytes": 252,
+          "sha256": "5df883e54bc3512ab41986c49c2f2e6882a0d9c05bdc70d69d42819053143612"
+        },
+        "BDMV/CLIPINF/00002.clpi": {
+          "bytes": 396,
+          "sha256": "18318d6e0bd5474a1f63f413ce4e21fb613f80182cc114013a07582f9379f39a"
+        },
+        "BDMV/CLIPINF/00003.clpi": {
+          "bytes": 432,
+          "sha256": "d3366de1ac1a491c3d37a8f4c6278a3e8bd3bd92914b4be0e73ce1cef6c118cf"
+        },
+        "BDMV/CLIPINF/00004.clpi": {
+          "bytes": 416,
+          "sha256": "85da7252314ed9a1561f8cb5c5613a2e43c99d5a825124328ba380e6e41acf66"
+        },
+        "BDMV/CLIPINF/00005.clpi": {
+          "bytes": 392,
+          "sha256": "ddd4968249ef01cfdeeca23b1461d371df19b3e727e83b23fd8860951eb0aad9"
+        },
+        "BDMV/CLIPINF/00006.clpi": {
+          "bytes": 324,
+          "sha256": "02181cdfee11b8b79fa540b66be904a607e6f32a9a336fd70281b352fae01606"
+        },
+        "BDMV/CLIPINF/00007.clpi": {
+          "bytes": 292,
+          "sha256": "f4b2b2c5c8be8b614538434580f0a2ac12741018ab369dc6a48aca9bf1e0cea3"
+        },
+        "BDMV/CLIPINF/00008.clpi": {
+          "bytes": 364,
+          "sha256": "9a7ea805b62804e03ef3b454ad036968bb7c08488ac4863d263e2e0190beb328"
+        },
+        "BDMV/CLIPINF/00009.clpi": {
+          "bytes": 364,
+          "sha256": "5069f8f5762a32ee95aec030ccaeeb6d52702fd0925ff73b0c52baa8d3e68f63"
+        },
+        "BDMV/CLIPINF/00010.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/CLIPINF/00011.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/CLIPINF/00013.clpi": {
+          "bytes": 428,
+          "sha256": "fa298bb6cb2ba8d7c7627997699498878b10c5748a589925f1331051ea8b1f87"
+        },
+        "BDMV/CLIPINF/00014.clpi": {
+          "bytes": 324,
+          "sha256": "02181cdfee11b8b79fa540b66be904a607e6f32a9a336fd70281b352fae01606"
+        },
+        "BDMV/CLIPINF/00015.clpi": {
+          "bytes": 544,
+          "sha256": "63d344b2e61df95216bc37bd58367baf43d21d4d106efb0a9a718cd230204726"
+        },
+        "BDMV/CLIPINF/00016.clpi": {
+          "bytes": 736,
+          "sha256": "89a1ab98454b153abda02634fc2c4b472a79fc9d51e687181edcd17c78ef1992"
+        },
+        "BDMV/CLIPINF/00017.clpi": {
+          "bytes": 600,
+          "sha256": "50e67a3a94b6c00471c92ace2891796f50868313b19f4ba6ad1d8441102c4d24"
+        },
+        "BDMV/CLIPINF/00018.clpi": {
+          "bytes": 2820,
+          "sha256": "2aad906ae18053435754f699f38b5fcfa22efcac773960242253a146b8f17228"
+        },
+        "BDMV/CLIPINF/00032.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/CLIPINF/00033.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/CLIPINF/00034.clpi": {
+          "bytes": 348,
+          "sha256": "d2660cb35d8124f65219a79f9c130a0a30c0e1fdde378c6bd83e289401ad7649"
+        },
+        "BDMV/CLIPINF/00039.clpi": {
+          "bytes": 324,
+          "sha256": "02181cdfee11b8b79fa540b66be904a607e6f32a9a336fd70281b352fae01606"
+        },
+        "BDMV/CLIPINF/00040.clpi": {
+          "bytes": 324,
+          "sha256": "02181cdfee11b8b79fa540b66be904a607e6f32a9a336fd70281b352fae01606"
+        },
+        "BDMV/CLIPINF/00041.clpi": {
+          "bytes": 352,
+          "sha256": "8c089df5d64b2dbd6ffc7e58f03908b51bc13b848f042e471293edf57b2001a1"
+        },
+        "BDMV/CLIPINF/00042.clpi": {
+          "bytes": 54396,
+          "sha256": "bb268b941de3b47dec9ed56c9c494c4f2dd7ceb85dbd7f731ac68068731c7386"
+        },
+        "BDMV/CLIPINF/00050.clpi": {
+          "bytes": 388,
+          "sha256": "4b49f6e46b52a1af7a0b3a3f4f032e1164df5ab118055f368fa1056070e33bee"
+        },
+        "BDMV/CLIPINF/00051.clpi": {
+          "bytes": 388,
+          "sha256": "dfccc30f719ea939323745aba40428ac3d1ccb1848050901600bcb4fcce0566c"
+        },
+        "BDMV/CLIPINF/00052.clpi": {
+          "bytes": 292,
+          "sha256": "4e6868d1b5f4548d6f477f4e72025fb2e88d0675e0fde72b9307ee418f706e59"
+        },
+        "BDMV/CLIPINF/00053.clpi": {
+          "bytes": 292,
+          "sha256": "f48550644b5927f41cbba30c0f86e387874e4a1ba0401f3c34ed81b2139c35c8"
+        },
+        "BDMV/CLIPINF/00054.clpi": {
+          "bytes": 432,
+          "sha256": "d2ef66e0dac1ef2f8cf3b29ffa8288fe33b3f8ee4d351a8493676775d6e4158e"
+        },
+        "BDMV/CLIPINF/00055.clpi": {
+          "bytes": 432,
+          "sha256": "fb4d6e1d2a9978836d1dcad82d59dd736b1683764605941e9f691f17f7b55831"
+        },
+        "BDMV/CLIPINF/00056.clpi": {
+          "bytes": 580,
+          "sha256": "f415baf46759c3a6fa4f83dfb4b2b69f673013de15b57261d8b0109fe02d5b31"
+        },
+        "BDMV/CLIPINF/00057.clpi": {
+          "bytes": 764,
+          "sha256": "9dd01d888c4e8980f1ef96e7f860f3d0adfdc9d0894f2aa2a0b5d9284aaaa365"
+        },
+        "BDMV/CLIPINF/00058.clpi": {
+          "bytes": 628,
+          "sha256": "3183e49ee4b8f8a1dcc40c8d842b0a693277eafdc83f82fe4248a6ded759aa92"
+        },
+        "BDMV/CLIPINF/00059.clpi": {
+          "bytes": 2792,
+          "sha256": "6ad039acd294917f8cfd82693f710277eb3509c426097901163a9c51915f61a8"
+        },
+        "BDMV/CLIPINF/00062.clpi": {
+          "bytes": 292,
+          "sha256": "81fe13c0378b98e82097be02ba424903d5b4fea19e4e8f69e64b8152b0f69584"
+        },
+        "BDMV/CLIPINF/00063.clpi": {
+          "bytes": 980,
+          "sha256": "47d899feed1139c909c6c81c83a4846c86ca565453018b9c9ab1d3caf93970f3"
+        },
+        "BDMV/CLIPINF/00064.clpi": {
+          "bytes": 1832,
+          "sha256": "eb6ee00b75d798312f0da74c04588497f42e9a2fc7251cecf3acdf4e5a02b7ab"
+        },
+        "BDMV/CLIPINF/00066.clpi": {
+          "bytes": 640,
+          "sha256": "225b1bd772246910d145ef60146cc144d2faa98173985d00d10ebeadfdde9b9f"
+        },
+        "BDMV/CLIPINF/00067.clpi": {
+          "bytes": 1460,
+          "sha256": "d62dd936395212e4fb4d1aadf6fc0a990f298383ae344e796ccbf106111384f8"
+        },
+        "BDMV/CLIPINF/00068.clpi": {
+          "bytes": 292,
+          "sha256": "fb97d8d1a4f5875e2e119b9c920d83436f6672047d07720646ab63862cd6a84d"
+        },
+        "BDMV/CLIPINF/00069.clpi": {
+          "bytes": 1848,
+          "sha256": "1e6f02e7bc517f0829ab74215aee8e15ca2500eea08a63dd04d3bfc0197d082b"
+        },
+        "BDMV/CLIPINF/00070.clpi": {
+          "bytes": 1476,
+          "sha256": "6a2f7c7b726219389fb1aa70c2ae5f043bbae2bcee59c24dbb5bba8c06c76ffa"
+        },
+        "BDMV/CLIPINF/00071.clpi": {
+          "bytes": 292,
+          "sha256": "fb97d8d1a4f5875e2e119b9c920d83436f6672047d07720646ab63862cd6a84d"
+        },
+        "BDMV/CLIPINF/00072.clpi": {
+          "bytes": 292,
+          "sha256": "81fe13c0378b98e82097be02ba424903d5b4fea19e4e8f69e64b8152b0f69584"
+        },
+        "BDMV/CLIPINF/00073.clpi": {
+          "bytes": 49664,
+          "sha256": "9e1c68aa49d9f7932569001b0baecf4a799026aff43ac43c582a0d9276c25c15"
+        },
+        "BDMV/CLIPINF/00074.clpi": {
+          "bytes": 472,
+          "sha256": "ffa95e7eb8f5dd93a6b4969c3e1776f0223dfa12924505f0a1d1f886639ed572"
+        },
+        "BDMV/CLIPINF/00075.clpi": {
+          "bytes": 436,
+          "sha256": "3434c45405801be26795a63181e93899892101201bc32172da3bcb5c53daf8d7"
+        },
+        "BDMV/CLIPINF/00076.clpi": {
+          "bytes": 980,
+          "sha256": "2ca88d260594c6ca6d56cf24dc0de5f31a0485a949cd8106b897f890bbad28bd"
+        },
+        "BDMV/CLIPINF/00077.clpi": {
+          "bytes": 640,
+          "sha256": "37fd48865b0f4a1cfadc95e76406b885087e0433ab47fd1fe5cbef0592aed536"
+        },
+        "BDMV/META/DL/300roae_metadata416.jpg": {
+          "bytes": 263586,
+          "sha256": "1a1962f8f082f62f2baa1f5a35577b60f24492c89d97a5a88bee337cefab936f"
+        },
+        "BDMV/META/DL/300roae_metadata640.jpg": {
+          "bytes": 357077,
+          "sha256": "0a1e0f6b54488bfcb976fea8b76a4407a4f1a2eb15876517f72bfb1e54619b87"
+        },
+        "BDMV/META/DL/bdmt_eng.xml": {
+          "bytes": 503,
+          "sha256": "3fcb78c93f4cdb2ba368900053d4e31688563ec04d940495f188d2b071387ad8"
+        },
+        "BDMV/META/DL/bdmt_fra.xml": {
+          "bytes": 488,
+          "sha256": "64b686cc844ec3b02d95f756505623713c1214384a8a95077c8d57f3770e86bf"
+        },
+        "BDMV/MovieObject.bdmv": {
+          "bytes": 114606,
+          "sha256": "547af20d82a59b0db6a44670517ebc81d3c4fee6ca68be2dca3cab34daedaf3b"
+        },
+        "BDMV/PLAYLIST/00002.mpls": {
+          "bytes": 210,
+          "sha256": "378909b54af0b77d3ed3323419a474aaa37378ced12c6a81d09caa72295e2299"
+        },
+        "BDMV/PLAYLIST/00003.mpls": {
+          "bytes": 210,
+          "sha256": "e723587fc7ea9e90440e9f8a8682ec60987eedbad31591e701cf82c0e88b40cf"
+        },
+        "BDMV/PLAYLIST/00010.mpls": {
+          "bytes": 210,
+          "sha256": "33f39aa8985fd0d8976c524b03f5cb93c70d594e1af0284cb83a26fc467e13e4"
+        },
+        "BDMV/PLAYLIST/00011.mpls": {
+          "bytes": 168,
+          "sha256": "8e4613a21e96a0bcd8375043ebd454c8a15777222e6d3e4eae08e1db9def3ae2"
+        },
+        "BDMV/PLAYLIST/00012.mpls": {
+          "bytes": 168,
+          "sha256": "ee39042bed4079c64a9d5d2fc20170048787595585f678c81b2755a3961793f8"
+        },
+        "BDMV/PLAYLIST/00013.mpls": {
+          "bytes": 184,
+          "sha256": "ff186a4a5631725f610cc574d647cda9706d0b47b1388c910a2ec77c68a3a2e1"
+        },
+        "BDMV/PLAYLIST/00014.mpls": {
+          "bytes": 168,
+          "sha256": "f1913f20c205e031b26d22d2e7d423009324c646b114357d639ad8ccd161c17c"
+        },
+        "BDMV/PLAYLIST/00015.mpls": {
+          "bytes": 276,
+          "sha256": "20ed7481f5df87fced4b9b8f3251b27cbeb7535c8ec550af8731e853caf31377"
+        },
+        "BDMV/PLAYLIST/00016.mpls": {
+          "bytes": 168,
+          "sha256": "b2ec04f1c2adf829675de624803b96f7279e3590242eb553cb56b735526772d7"
+        },
+        "BDMV/PLAYLIST/00017.mpls": {
+          "bytes": 394,
+          "sha256": "07abe748ab54092c9dd1f4d24562b2bff220b43ce3533d209cdf196d16d98939"
+        },
+        "BDMV/PLAYLIST/00020.mpls": {
+          "bytes": 168,
+          "sha256": "ac33551fee814e848573c894d7a424a959a1fc463ef32ad412d34d7af8d2aacf"
+        },
+        "BDMV/PLAYLIST/00021.mpls": {
+          "bytes": 170,
+          "sha256": "e4cdc803fc3f834f5619cb3cef4ae10c636a6c14c4f01524898816ca8a2239e3"
+        },
+        "BDMV/PLAYLIST/00022.mpls": {
+          "bytes": 170,
+          "sha256": "78b10c49224d494e1c3da0d9b34d236ff347591afa1dc0243ce073b4e395081c"
+        },
+        "BDMV/PLAYLIST/00023.mpls": {
+          "bytes": 170,
+          "sha256": "9dc3be66c47354d4b7efb27cc98791ede17f3cf53592612617af973536d74b99"
+        },
+        "BDMV/PLAYLIST/00024.mpls": {
+          "bytes": 170,
+          "sha256": "ce9db02bf36ac56c681920da583bf69d1f9ab2f6f0330cc0a09fb40eacfb59ea"
+        },
+        "BDMV/PLAYLIST/00025.mpls": {
+          "bytes": 170,
+          "sha256": "323c2d011ed46da56cb3f39b92ee49a81f76cd4a2e393ee699157b29e8768d80"
+        },
+        "BDMV/PLAYLIST/00050.mpls": {
+          "bytes": 276,
+          "sha256": "1e5b809d624397a85bd169f1d4726e77d71efefaf6723ce58f1d1613432d3761"
+        },
+        "BDMV/PLAYLIST/00051.mpls": {
+          "bytes": 154,
+          "sha256": "b1b8604384e924b0f1e0bb4017326ac1fffbc0145217b1f2fcc8f78edf5d1f4b"
+        },
+        "BDMV/PLAYLIST/00052.mpls": {
+          "bytes": 276,
+          "sha256": "952b738cd6b2388cbbb6dc3408f9e62bd0999a8507aa9a6f68ca596f7db0fd0d"
+        },
+        "BDMV/PLAYLIST/00053.mpls": {
+          "bytes": 332,
+          "sha256": "e13afc2f36b5c58533f732d73aa322b4ce7977c6fc4e2ef65ade529ecb6fce80"
+        },
+        "BDMV/PLAYLIST/00054.mpls": {
+          "bytes": 304,
+          "sha256": "2a8fbf1aa571ffad9023e667770c25ecfe7bb8a9fbcf6f49515a149d9339e4e7"
+        },
+        "BDMV/PLAYLIST/00055.mpls": {
+          "bytes": 738,
+          "sha256": "c15de4587a9bafa12dcd1f26c51b9e176e5540e39aab2ecc4bc24429c2019c85"
+        },
+        "BDMV/PLAYLIST/00098.mpls": {
+          "bytes": 796,
+          "sha256": "44ece8825e2a1fb164773b21dfa7819783b98c931d8c99a623824533be339f43"
+        },
+        "BDMV/PLAYLIST/00119.mpls": {
+          "bytes": 1900,
+          "sha256": "728dcb4551ceb2174d98e473820609e29c0304590459ad52425671d3ae3d5426"
+        },
+        "BDMV/PLAYLIST/00123.mpls": {
+          "bytes": 1900,
+          "sha256": "a1e6abb0b167a3d9f224f8823fbdbbbe9f4084779b793475b09023d6fe7cff36"
+        },
+        "BDMV/PLAYLIST/00431.mpls": {
+          "bytes": 262,
+          "sha256": "150d299072369a2e85a8e98c6710672394c6af4ecdfb3e9eac9c3a2c34378c72"
+        },
+        "BDMV/PLAYLIST/00432.mpls": {
+          "bytes": 262,
+          "sha256": "256d9e70be7c89acb5860201f7c6b3e54b9c5b3af49eaf8ef39c4342b4433af9"
+        },
+        "BDMV/STREAM/00002.m2ts": {
+          "bytes": 3594240,
+          "sha256": "2d290559f19e6f4792db1ec09a6dbb8b62b2340eeffb1aaf62b138d11fc18c75"
+        },
+        "BDMV/STREAM/00003.m2ts": {
+          "bytes": 9879552,
+          "sha256": "4d734e7d1f0be56e917122aa9ac62f5d7107b000c856b1a550170f70e04b4222"
+        },
+        "BDMV/STREAM/00004.m2ts": {
+          "bytes": 14383104,
+          "sha256": "5aac51b1e39cb825dce5d99b11c2a7586ea67783ca7a303a37ed2eced315b803"
+        },
+        "BDMV/STREAM/00005.m2ts": {
+          "bytes": 976896,
+          "sha256": "676c7401ac2bc01b15ff0005e25362ee8aec9481c89a72a10202d0672dc73def"
+        },
+        "BDMV/STREAM/00006.m2ts": {
+          "bytes": 12288,
+          "sha256": "4e82502fa4ceb07c798acee8af60ea41b790b2e824f02cc7c19b5d088ec6b968"
+        },
+        "BDMV/STREAM/00007.m2ts": {
+          "bytes": 8355840,
+          "sha256": "36a7585f2356fc732cb802333b4afb371165d5587a378a66bc9c6f81738bdd38"
+        },
+        "BDMV/STREAM/00008.m2ts": {
+          "bytes": 706560,
+          "sha256": "cf15483ef4ed42b547b2d41ac8e7640a8e9301ffe7b325d0d1b74b4c93aab625"
+        },
+        "BDMV/STREAM/00009.m2ts": {
+          "bytes": 1167360,
+          "sha256": "c5b5bc0b0716f70574ce6d325b05d656ca9cdd98781078ee31feaec48529f4e5"
+        },
+        "BDMV/STREAM/00010.m2ts": {
+          "bytes": 18432,
+          "sha256": "0a56aab7d75f1b0f08250fbf53434a93b8b967f7148349b1e4cf675c5fbe2c6e"
+        },
+        "BDMV/STREAM/00011.m2ts": {
+          "bytes": 18432,
+          "sha256": "0a56aab7d75f1b0f08250fbf53434a93b8b967f7148349b1e4cf675c5fbe2c6e"
+        },
+        "BDMV/STREAM/00013.m2ts": {
+          "bytes": 3766272,
+          "sha256": "66928bd62018241f3e680cf9c0d3b321b35ed470586a8ab71de8ebfe9dff3103"
+        },
+        "BDMV/STREAM/00014.m2ts": {
+          "bytes": 12288,
+          "sha256": "4e82502fa4ceb07c798acee8af60ea41b790b2e824f02cc7c19b5d088ec6b968"
+        },
+        "BDMV/STREAM/00015.m2ts": {
+          "bytes": 49741824,
+          "sha256": "8ccc7f18fd27c4bf7951c6891a21410e7d4e9d8767dca6d2aa425f69444aa5da"
+        },
+        "BDMV/STREAM/00016.m2ts": {
+          "bytes": 98832384,
+          "sha256": "d63d2d6f34f18c06f454b2ed7d664c470edde0d49ae83cfd1f8765b62b36879a"
+        },
+        "BDMV/STREAM/00017.m2ts": {
+          "bytes": 64456704,
+          "sha256": "7810fe4d52c9a6242dfbec1c3a1c7868f8db099dbae1a81b5c195bd779f68a35"
+        },
+        "BDMV/STREAM/00018.m2ts": {
+          "bytes": 327567360,
+          "sha256": "5a12ad6455c175cb62ffe8d3c0ef346c9f9af382c6508307619b0cb0fbe2c262"
+        },
+        "BDMV/STREAM/00032.m2ts": {
+          "bytes": 18432,
+          "sha256": "0a56aab7d75f1b0f08250fbf53434a93b8b967f7148349b1e4cf675c5fbe2c6e"
+        },
+        "BDMV/STREAM/00033.m2ts": {
+          "bytes": 18432,
+          "sha256": "0a56aab7d75f1b0f08250fbf53434a93b8b967f7148349b1e4cf675c5fbe2c6e"
+        },
+        "BDMV/STREAM/00034.m2ts": {
+          "bytes": 18432,
+          "sha256": "0a56aab7d75f1b0f08250fbf53434a93b8b967f7148349b1e4cf675c5fbe2c6e"
+        },
+        "BDMV/STREAM/00039.m2ts": {
+          "bytes": 12288,
+          "sha256": "4e82502fa4ceb07c798acee8af60ea41b790b2e824f02cc7c19b5d088ec6b968"
+        },
+        "BDMV/STREAM/00040.m2ts": {
+          "bytes": 12288,
+          "sha256": "4e82502fa4ceb07c798acee8af60ea41b790b2e824f02cc7c19b5d088ec6b968"
+        },
+        "BDMV/STREAM/00041.m2ts": {
+          "bytes": 3047424,
+          "sha256": "69f91bce2d5772a949221f05dc25a74b38e1e4a9434ec602928e46c4c779f823"
+        },
+        "BDMV/STREAM/00042.m2ts": {
+          "bytes": 25846806528,
+          "sha256": "7b54a971dcc1f16d1c387e57f70223c33c402ad455abd284f10a2e3121485b11"
+        },
+        "BDMV/STREAM/00050.m2ts": {
+          "bytes": 4773888,
+          "sha256": "35c5f09d1f180fd9eb97281048d2a61f6c976385b85c7bb886e6bed6eb392f27"
+        },
+        "BDMV/STREAM/00051.m2ts": {
+          "bytes": 3072000,
+          "sha256": "eec5b8508236aca2c7724f8f43b95d507bc7d8f092206caa63ee32878eb74f06"
+        },
+        "BDMV/STREAM/00052.m2ts": {
+          "bytes": 817152,
+          "sha256": "b44a8004f9c5c91d523a383d1203408fb5c26b7c74ae9e4790c7d1e7adc3bd7b"
+        },
+        "BDMV/STREAM/00053.m2ts": {
+          "bytes": 878592,
+          "sha256": "0c641f194354d7015dcdb6f152eaee27a664a0868c5ba27734e2858a851afb1f"
+        },
+        "BDMV/STREAM/00054.m2ts": {
+          "bytes": 1529856,
+          "sha256": "d642aea32e458e0c8ee2cb771c0241f5de542888180220ac7eb8b32f2c6feff8"
+        },
+        "BDMV/STREAM/00055.m2ts": {
+          "bytes": 1357824,
+          "sha256": "9df2771e356b32fdba33b62d93f7a63a908d47a3084ed29c1ea4946c778d438b"
+        },
+        "BDMV/STREAM/00056.m2ts": {
+          "bytes": 6045696,
+          "sha256": "abf697fa1073e5bd4e213a27b1b7a87ec9124d772316f7f7f7ae042663ba5065"
+        },
+        "BDMV/STREAM/00057.m2ts": {
+          "bytes": 18051072,
+          "sha256": "5ed6410186b477c983e03916ea5231bf4a3b1c38b055990fc2e3faa3c07820b1"
+        },
+        "BDMV/STREAM/00058.m2ts": {
+          "bytes": 10358784,
+          "sha256": "9ddf59b04447520c18c15764f2e24a522dc20b2ab0ade1cfc958f7c951a95f68"
+        },
+        "BDMV/STREAM/00059.m2ts": {
+          "bytes": 94820352,
+          "sha256": "b00fb632ed7aabd8831aaa8fae6302e6fe41b441d89833b7fbc668b140ab7c9b"
+        },
+        "BDMV/STREAM/00062.m2ts": {
+          "bytes": 6266880,
+          "sha256": "256baef294a017bea3880815bb7d47bed7fc359d73b206321f0247391d8358a8"
+        },
+        "BDMV/STREAM/00063.m2ts": {
+          "bytes": 101609472,
+          "sha256": "649605569f2b2c017289dbb25e007da9aeb009521bb1158c85e0d479be6c663d"
+        },
+        "BDMV/STREAM/00064.m2ts": {
+          "bytes": 289013760,
+          "sha256": "c8d6964252f9d02371d51c72d5d2d3ec111518b50b2869077ff9b769ea97bbbf"
+        },
+        "BDMV/STREAM/00066.m2ts": {
+          "bytes": 9105408,
+          "sha256": "1c5c207b2e0658105dbe822825c9a0015a3b5f165a867196fcbb2a8e4f920d07"
+        },
+        "BDMV/STREAM/00067.m2ts": {
+          "bytes": 53336064,
+          "sha256": "4d6ca209ba535632955f2be454514ef1e92194e4eea7582624a8d15e9dddbfdc"
+        },
+        "BDMV/STREAM/00068.m2ts": {
+          "bytes": 6266880,
+          "sha256": "95086e9bfa4cd8e02cd7af80ef99bf01d18321d0a4646e457e112b28cbd3354d"
+        },
+        "BDMV/STREAM/00069.m2ts": {
+          "bytes": 315254784,
+          "sha256": "c6c0ee2fd4bd9da0847224dc287307b381b3fd4a61e49f1e8b9776add37db29d"
+        },
+        "BDMV/STREAM/00070.m2ts": {
+          "bytes": 65421312,
+          "sha256": "fd711aa21ccda471196cbbf2d125dc60663a7c52c4b414095aa37778cf8194d5"
+        },
+        "BDMV/STREAM/00071.m2ts": {
+          "bytes": 6266880,
+          "sha256": "aac9f79403e7e8ca4a81ad141c2e282d79c66f2ab3855b42b548a019e98b4680"
+        },
+        "BDMV/STREAM/00072.m2ts": {
+          "bytes": 6266880,
+          "sha256": "1123ca40ab401272126db274a2c3f1c693c9e4247f6193f02350418e81575ce2"
+        },
+        "BDMV/STREAM/00073.m2ts": {
+          "bytes": 9586102272,
+          "sha256": "2be67c7fd64f35e476ec0eea22a87f27b42c9fcf6cf34670c8389b4421ee013a"
+        },
+        "BDMV/STREAM/00074.m2ts": {
+          "bytes": 2414592,
+          "sha256": "d24327839dd243d70b238953b36f8dd34c9fe36505be4c90789d596206b471c0"
+        },
+        "BDMV/STREAM/00075.m2ts": {
+          "bytes": 1026048,
+          "sha256": "c19b2d14ae5482d2eda84832aba82fb6b049866f78c20ba1b3e620bc0b03331d"
+        },
+        "BDMV/STREAM/00076.m2ts": {
+          "bytes": 101695488,
+          "sha256": "4f1c4db96f470249324360007242ac0fb1c7b0bf2d72d2d1ff99521a9b1586ed"
+        },
+        "BDMV/STREAM/00077.m2ts": {
+          "bytes": 9068544,
+          "sha256": "fead62807a5d20e28f6e8fd44b9a981513816d9aec0906c908202443ecad04b6"
+        },
+        "BDMV/STREAM/SSIF/00005.ssif": {
+          "bytes": 2002944,
+          "sha256": "2c3aa6475bb6aae1f6366cdea05c69084376d9052bd9f2adaf9f0a1c208abb08"
+        },
+        "BDMV/STREAM/SSIF/00013.ssif": {
+          "bytes": 6180864,
+          "sha256": "a87bb0832bd80ca3fc5cd2f3ccd161e8dba0d8c910a868440ab89e8ac32e3748"
+        },
+        "BDMV/STREAM/SSIF/00015.ssif": {
+          "bytes": 55787520,
+          "sha256": "9d9a180fe2eb8efb7df3010e746aff1e4186921fcdad0a1fe9dbf32b5c67f70b"
+        },
+        "BDMV/STREAM/SSIF/00016.ssif": {
+          "bytes": 116883456,
+          "sha256": "e94dda40cff61811acae4b5e5a3e366a4e49dcd8674db6c2b946d036505e4cdc"
+        },
+        "BDMV/STREAM/SSIF/00017.ssif": {
+          "bytes": 74815488,
+          "sha256": "d6e99f8030d51ce776719e926331a77fa88988894307c40556299d3c430b5cd8"
+        },
+        "BDMV/STREAM/SSIF/00018.ssif": {
+          "bytes": 422387712,
+          "sha256": "1cb9301441efc71928368fe6af59bc4d555482ca59bf5d377f0ceeee0a80e1f9"
+        },
+        "BDMV/STREAM/SSIF/00042.ssif": {
+          "bytes": 35432908800,
+          "sha256": "699b6a4fae0b3a740f2a0dcb117ff38411c0867482832d3c87ac9e0e7fb3c8fc"
+        },
+        "BDMV/STREAM/SSIF/00050.ssif": {
+          "bytes": 6303744,
+          "sha256": "eeb055b86a2d3365659288052ccc340b8f6cb51783c5ecc4bc4ae3c3e93d54ce"
+        },
+        "BDMV/STREAM/SSIF/00051.ssif": {
+          "bytes": 4429824,
+          "sha256": "89567886a11e30da3c9c33fc42fc6932b8b6f8e5620cf28a27dbb7f77938eea0"
+        },
+        "BDMV/STREAM/SSIF/00063.ssif": {
+          "bytes": 110714880,
+          "sha256": "ffbfe008ae1a55bccd6c60fc5672157aa0bff15054f6350b07a950df2dee96d9"
+        },
+        "BDMV/STREAM/SSIF/00064.ssif": {
+          "bytes": 342349824,
+          "sha256": "cbd2983b340d2f7b656786afeec472404964e4b0c0dc6bf2f09d354be5ce61b3"
+        },
+        "BDMV/STREAM/SSIF/00069.ssif": {
+          "bytes": 380676096,
+          "sha256": "d7df5768efacc2cde4f0346c3856ca1984abe291bc3216ef8bd6e0faf669da51"
+        },
+        "BDMV/STREAM/SSIF/00076.ssif": {
+          "bytes": 110764032,
+          "sha256": "06740884916bcf46c621f6bedb720a80ab9d819f9eef05f7fbc69e6d90e17941"
+        },
+        "BDMV/index.bdmv": {
+          "bytes": 252,
+          "sha256": "5df883e54bc3512ab41986c49c2f2e6882a0d9c05bdc70d69d42819053143612"
+        }
+      },
+      "fixture_bytes": 37151703040,
+      "folder_title_status": "3d-ssif-unsupported-E9061",
+      "libbluray": {
+        "aacs_detected": false,
+        "title_count": 12
+      },
+      "navigation_counts": {
+        "BDMV/CLIPINF/": 48,
+        "BDMV/PLAYLIST/": 27
+      },
+      "title": 4,
+      "title_hashes": {
+        "decrypted_iso": {
+          "bytes": 316518291,
+          "content_timing_sha256": "6f5fe6d0bc4155f6c6da87b7f3a764ecc5d41b11906659a422ad6716fc28d209",
+          "sha256": "5434d339dd4ad44c591e1c8c343fa4b5a74fae644495cf1951d736988a64a978"
+        },
+        "source": {
+          "bytes": 316518291,
+          "content_timing_sha256": "6f5fe6d0bc4155f6c6da87b7f3a764ecc5d41b11906659a422ad6716fc28d209",
+          "sha256": "5434d339dd4ad44c591e1c8c343fa4b5a74fae644495cf1951d736988a64a978"
+        }
+      }
+    }
+  },
+  "schema": 1
+}
