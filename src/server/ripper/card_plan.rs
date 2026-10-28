@@ -400,14 +400,17 @@ impl Task {
             }
             Lane::Replan => {
                 let correction = self.correction.as_ref().expect("admitted correction");
-                let planned = cache.work.plan(&self.inputs, correction);
-                if let Err(error) = &planned {
-                    tracing::warn!(
-                        revision = correction.revision,
-                        %error,
-                        "card replan failed; keeping the previous episodes"
-                    );
-                }
+                let episodes = cache
+                    .work
+                    .plan(&self.inputs, correction)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            revision = correction.revision,
+                            %error,
+                            "card replan failed; the card lists no episodes"
+                        );
+                        Vec::new()
+                    });
                 let mut plans = cache.plans.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(p) = plans.entries.iter_mut().find(|p| {
                     Arc::ptr_eq(&p.incarnation, &self.permit.incarnation)
@@ -415,8 +418,7 @@ impl Task {
                         && p.replanning
                             .as_ref()
                             .is_some_and(|m| Arc::ptr_eq(m, &self.permit.owner))
-                }) && let Ok(episodes) = planned
-                {
+                }) {
                     p.episodes = episodes;
                     p.rows = Arc::new(());
                     p.measured = None;

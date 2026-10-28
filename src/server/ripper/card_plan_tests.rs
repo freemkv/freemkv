@@ -282,8 +282,26 @@ fn burst_polls_and_eviction_preserve_process_measurement_cap() {
     assert_eq!(counts(&cache), (0, 0));
 }
 
+#[derive(Clone, Default)]
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for LogBuf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+    fn make_writer(&'a self) -> LogBuf {
+        self.clone()
+    }
+}
+
 #[test]
-fn a_failed_replan_keeps_the_previous_episodes() {
+fn a_failed_replan_clears_the_episodes_and_logs_the_cause() {
     let mut fake = FakeWork::new();
     fake.planner = Box::new(|inputs, correction| {
         if correction.revision == 1 {
@@ -295,18 +313,23 @@ fn a_failed_replan_keeps_the_previous_episodes() {
     let cache = Cache::new(work.clone());
     publish_test(&cache, "job");
     work.finish();
-    let numbers = |c: &Arc<Cache>| -> Vec<u16> {
-        c.episodes("job")
-            .unwrap()
-            .iter()
-            .map(|e| e.episode)
-            .collect()
-    };
-    assert_eq!(numbers(&cache), [4, 5, 6]);
-    correct(&cache, "job", 1, 9);
-    work.finish();
-    assert_eq!(numbers(&cache), [4, 5, 6]);
-    assert_eq!(counts(&cache), (0, 0));
+    assert_eq!(cache.episodes("job").unwrap().len(), 3);
+    let log = LogBuf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        correct(&cache, "job", 1, 9);
+        work.finish();
+    });
+    assert!(cache.episodes("job").is_none_or(|e| e.is_empty()));
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        text.contains("WARN") && text.contains("card replan failed"),
+        "{text}"
+    );
+    assert!(text.contains(&PlanError::NoTitles.to_string()), "{text}");
     correct(&cache, "job", 2, 9);
     work.finish();
     assert_eq!(first(&cache, "job"), 9, "a later correction still replans");
