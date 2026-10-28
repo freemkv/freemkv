@@ -5302,10 +5302,13 @@ pub fn eject_drive(device_path: &str) -> bool {
 
 /// The operator's Eject. A disc that left the drive ends its insertion and any Stop's
 /// hold on it, so the next disc in starts on_insert even if no poll saw the drive empty.
-pub fn operator_eject(device_path: &str) {
-    if eject_drive(device_path) {
+/// Whether the drive took the eject.
+pub fn operator_eject(device_path: &str) -> bool {
+    let took = eject_drive(device_path);
+    if took {
         state::note_medium_changed(&device_key(device_path));
     }
+    took
 }
 
 // `sanitize_filename` / `format_duration` live in `util`.

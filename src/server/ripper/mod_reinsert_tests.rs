@@ -154,7 +154,7 @@ fn an_eject_after_stop_lets_the_next_insert_start() {
     assert_eq!(p.started, 1, "a stopped disc stays stopped");
 
     let path = hold_fake_drive(&p.dev);
-    operator_eject(&path);
+    let _ = operator_eject(&path);
     // Re-inserted before any poll saw the drive empty.
     p.present();
     assert_eq!(p.started, 2, "Eject ends the Stop's hold on the disc");
@@ -166,7 +166,7 @@ fn an_eject_after_stop_then_one_empty_poll_lets_the_next_insert_start() {
     p.present();
     p.stop();
     let path = hold_fake_drive(&p.dev);
-    operator_eject(&path);
+    let _ = operator_eject(&path);
     p.tick(Ok(DiscPresence::Absent));
     p.present();
     assert_eq!(p.started, 2);

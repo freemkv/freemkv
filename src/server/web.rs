@@ -3652,16 +3652,35 @@ fn handle_eject(request: tiny_http::Request, device: &str) {
         );
     }
     let device_path = device_path(device);
-    ripper::operator_eject(&device_path);
+    let (status, body) = eject_outcome(device, ripper::operator_eject(&device_path));
+    json_response(request, status, &body);
+}
+
+// Record the Eject and answer for it. The claim is released either way; a drive that did
+// not take the eject still holds its disc, and the answer names the cause with its code.
+fn eject_outcome(device: &str, took: bool) -> (u16, String) {
     ripper::update_state(
         device,
         ripper::RipState {
             device: device.to_string(),
             status: "idle".to_string(),
+            disc_present: !took,
             ..Default::default()
         },
     );
-    json_response(request, 200, r#"{"ok":true}"#);
+    if took {
+        return (200, r#"{"ok":true}"#.to_string());
+    }
+    let code = libfreemkv::error::E_DEVICE_LOCKED;
+    let message = freemkv_i18n::error_message(u32::from(code));
+    let error = format!(
+        "E{code} {}",
+        message.strip_prefix("Error: ").unwrap_or(&message)
+    );
+    (
+        409,
+        serde_json::json!({ "ok": false, "error": error }).to_string(),
+    )
 }
 
 fn prepare_stop(device: &str) -> Option<u64> {
