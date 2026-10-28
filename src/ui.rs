@@ -1886,10 +1886,10 @@ pub fn starts_collapsed(r: &Row) -> bool {
 
 /// Which row a freshly-rebuilt tree should leave sitting at the top.
 ///
-/// Not simply "row 0": under the default "Main film only" the single ticked title can be
-/// anywhere in the disc's order, and that title is the point of the screen. So it is the first
-/// TICKED row, which under "All titles" is row 0 anyway. Nothing ticked (an empty disc, or a
-/// preset that selected nothing) falls back to the first row.
+/// Not simply "row 0": under the default "Main film / episodes" the ticked titles can be
+/// anywhere in the disc's order, and the first of them is the point of the screen.
+/// So it is the first TICKED row, which under "All titles" is row 0 anyway.
+/// Nothing ticked (an empty disc, or a preset that selected nothing) falls back to the first row.
 pub fn first_visible_row(rows: &[Row]) -> Option<usize> {
     rows.iter()
         .position(|r| matches!(r.check, Some(Check::On) | Some(Check::Mixed)))

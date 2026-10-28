@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Launch shows the ready screen with your optical drives instead of opening a disc straight away; Settings ▸ At startup can open a loaded disc or a preferred drive at launch as before. (app only: a desktop window setting)
+- Launch shows the ready screen with your optical drives instead of opening a disc straight away; Settings ▸ At startup can open the loaded disc (only when exactly one drive holds a disc; with several loaded, the ready screen stays) or a preferred drive at launch. (app only: a desktop window setting)
 - The default selection for new settings is "Main film / episodes"; a saved "Main film only" is kept. (app only: the desktop selection default)
 - A queued or failed 1.8.4/1.8.5 remux job without a recorded source stamp goes to Review after the upgrade; **Remux** it again. Already-staged outputs still deliver. (server only: the Library's remux queue)
 - Reboot trusts only the loaded launchd policy; if it cannot be read, Reboot is refused. (server only: the Library's macOS service)

@@ -103,9 +103,12 @@ installer; log out and back in after its jobs finish to apply an update.
 
 **Reboot library** (System page) relies on this service: the server exits and
 launchd's `KeepAlive` starts it again. The installer sets `KeepAlive` to true on
-a new install; an edited plist must keep it true, or use conditions that include
-`SuccessfulExit` false. A server started by hand, or a job launchd would not
-start again, refuses the reboot; stop and start it yourself instead.
+a new install. Reboot trusts only the job launchd has loaded (`launchctl print`),
+not the plist file: the loaded job must have `KeepAlive` true, or a condition
+that restarts it after a successful exit. A plist edited but not yet loaded
+(`launchctl bootout` and `bootstrap` it) does not count. Otherwise, and for a
+server started by hand, the reboot is refused with a 409; stop and start it
+yourself instead.
 
 The installer also sets `ExitTimeOut` to 130 s, longer than the server's own
 116 s stop limit, so launchd does not kill a stop that is still draining. After
