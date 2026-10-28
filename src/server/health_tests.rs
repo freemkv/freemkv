@@ -1357,6 +1357,9 @@ fn a_write_test_answers_before_its_sweep() {
     eventually("swept after the answer", || !stale.exists());
 }
 
+// Bound on a test waiting for a production path to reach its gate.
+const GATE_WAIT: Duration = Duration::from_secs(10);
+
 // A detached preflight may answer after recovery; its completion rank cannot make its
 // old-mount evidence current again.
 #[test]
@@ -1370,7 +1373,8 @@ fn remount_rejects_detached_preflight_answers() {
         let pending = preflight_begin(
             "output",
             path,
-            Wait::Until(Instant::now()),
+            // Queue behind the last round's probe, which leaves the list just after answering.
+            Wait::Until(Instant::now() + Duration::from_secs(5)),
             HANG_AFTER,
             move |_| {
                 entered.send(()).unwrap();
@@ -1383,7 +1387,9 @@ fn remount_rejects_detached_preflight_answers() {
             },
         );
         let mount = pending.as_ref().unwrap().mount;
-        running.recv().unwrap();
+        running
+            .recv_timeout(GATE_WAIT)
+            .expect("the preflight probe never started");
         assert!(preflight_finish("output", path, Duration::ZERO, HANG_AFTER, pending).is_err());
         STALE_REPORTS
             .lock()
@@ -1459,7 +1465,9 @@ fn remount_publication_and_renewal_have_one_commit_boundary() {
         release: gate,
     });
     let publish = std::thread::spawn(move || publish(vec![old], false));
-    inside.recv().unwrap();
+    inside
+        .recv_timeout(GATE_WAIT)
+        .expect("the publication never reached its commit");
     let reports_locked = matches!(
         STALE_REPORTS.try_lock(),
         Err(std::sync::TryLockError::WouldBlock)
@@ -1621,7 +1629,9 @@ fn remount_rejects_actual_check_answer_in_both_publication_routes() {
             })
         })
     };
-    inside.recv().unwrap();
+    inside
+        .recv_timeout(GATE_WAIT)
+        .expect("the check never started");
     STALE_REPORTS
         .lock()
         .unwrap()
@@ -1672,7 +1682,9 @@ fn remount_queued_probe_captures_its_origin_after_the_queue() {
             |generation| generation,
         )
     });
-    queued.recv().unwrap();
+    queued
+        .recv_timeout(GATE_WAIT)
+        .expect("the probe never queued behind the stuck one");
     STALE_REPORTS
         .lock()
         .unwrap()
