@@ -1028,12 +1028,10 @@ jobs:
             local name; name=$(basename "$dir")
             local cfg="$dir/.cargo/config.toml"
             local cfg_disabled="$dir/.cargo/config.toml.disabled"
-            local lock="$dir/Cargo.lock"
 
             if $DRY_RUN; then
               printf '  [dry-run] mv %s %s\n' "$cfg" "$cfg_disabled"
-              printf '  [dry-run] rm -f %s\n' "$lock"
-              printf '  [dry-run] (cd %s && cargo +%s generate-lockfile)\n' "$dir" "$TOOLCHAIN"
+              printf '  [dry-run] cargo +%s metadata --manifest-path %s/Cargo.toml (re-resolve the re-pinned siblings only)\n' "$TOOLCHAIN" "$dir"
               printf '  [dry-run] mv %s %s\n' "$cfg_disabled" "$cfg"
               return 0
             fi
@@ -1056,10 +1054,9 @@ jobs:
               DISABLED_CONFIGS+=("$cfg_disabled")
             fi
 
-            rm -f "$lock"
-
-            # cargo generate-lockfile honors the manifest path; no need to cd.
-            cargo "+$TOOLCHAIN" generate-lockfile --manifest-path "$dir/Cargo.toml"
+            # Keep the lock qa tested: resolving re-locks only the re-pinned sibling tags.
+            # A full regen upgraded every third-party crate past qa (1.8.6: ureq 3.5 broke the build).
+            cargo "+$TOOLCHAIN" metadata --format-version 1 --manifest-path "$dir/Cargo.toml" >/dev/null
 
             local restored
             for restored in "$cfg_disabled" "$root_cfg_disabled"; do
@@ -1072,7 +1069,7 @@ jobs:
               done
               DISABLED_CONFIGS=("${new[@]+"${new[@]}"}")
             done
-            ok "$name: regenerated Cargo.lock against the git tags (toolchain $TOOLCHAIN)"
+            ok "$name: re-locked the sibling tags in Cargo.lock, other pins kept (toolchain $TOOLCHAIN)"
           }
 
           # verify_lockfile_invariants <crate-dir> <dep-name> <expected-version>
@@ -1136,8 +1133,7 @@ jobs:
             local fix="To fix:
               re-pin the [patch.crates-io] $dep tag in $dir/Cargo.toml to v$expected, then:
               mv $dir/.cargo/config.toml $dir/.cargo/config.toml.disabled 2>/dev/null || true
-              rm -f $dir/Cargo.lock
-              cargo +$TOOLCHAIN generate-lockfile --manifest-path $dir/Cargo.toml
+              cargo +$TOOLCHAIN metadata --format-version 1 --manifest-path $dir/Cargo.toml >/dev/null
               mv $dir/.cargo/config.toml.disabled $dir/.cargo/config.toml 2>/dev/null || true"
 
             [ -n "$got_version" ] || die "$name: Cargo.lock has no [[package]] entry for $dep. $fix"
