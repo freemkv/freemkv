@@ -47,13 +47,13 @@ pub fn names_note(
     };
     let mut note = crate::strings::get_or(
         "rip.aacs_key_file_kept",
-        "The copy keeps AACS/Unit_Key_RO.inf, so some players (such as VLC) may treat it as encrypted. Its content is decrypted.",
+        "The copy keeps AACS/Unit_Key_RO.inf, so some players (such as VLC) may treat the copy as encrypted. The copy's content is decrypted.",
     );
     if iso && *cause == NamesKept::Damaged {
         note.push(' ');
         note.push_str(&crate::strings::get_or(
             "rip.aacs_key_file_kept_retry",
-            "A resumed run that reads the damaged area renames it to Unit_Key_RO.bak.",
+            "A resumed run that reads the damaged area renames the file to Unit_Key_RO.bak.",
         ));
     }
     Some(note)

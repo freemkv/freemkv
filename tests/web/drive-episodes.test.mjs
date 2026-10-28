@@ -67,14 +67,19 @@ test('an episode row shows its own at-risk time', async () => {
 
 async function bannersHtml() {
   const source = await readFile(new URL('../../src/server/web/assets/ripper.js', import.meta.url), 'utf8');
-  const context = vm.createContext({ esc: s => String(s ?? '').replace(/</g, '&lt;'), escLinks: s => s, lossAborted: () => false });
+  const ui = await readFile(new URL('../../src/server/web/assets/ui.js', import.meta.url), 'utf8');
+  const context = vm.createContext({ escLinks: s => s, lossAborted: () => false });
+  // The real `esc` from ui.js.
+  const at = ui.indexOf('export function esc(');
+  vm.runInContext(ui.slice(at + 'export '.length, ui.indexOf('\n', at)), context);
   vm.runInContext(source.slice(source.indexOf('function bannersHtml('), source.indexOf('function actionsFor(')), context);
   return context.bannersHtml;
 }
 
 test('a finished rip shows its notice, escaped', async () => {
-  const html = (await bannersHtml())({ status: 'done', notice: 'Keeps <Unit_Key_RO.inf>' });
+  const html = (await bannersHtml())({ status: 'done', notice: 'Keeps <img src=x onerror="a()"> & more' });
   assert.match(html, /class="banner warn"/);
-  assert.match(html, /Keeps &lt;Unit_Key_RO.inf>/);
+  assert.match(html, /Keeps &lt;img src=x onerror=&quot;a\(\)&quot;&gt; &amp; more/);
+  assert.ok(!html.includes('<img'), html);
   assert.equal((await bannersHtml())({ status: 'done', notice: '' }), '');
 });

@@ -4588,18 +4588,30 @@ fn a_finished_interrupted_reset_that_removed_the_job_is_no_hold() {
 fn a_kept_key_file_becomes_the_rips_notice() {
     use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
     crate::strings::set_locale("en");
+    let device = "names_notice_test_device";
     let kept = DecryptedNames::Kept {
         cause: NamesKept::Damaged,
     };
-    let notice = iso_names_notice(Some(&kept));
+    let notice = iso_names_notice(device, Some(&kept));
     assert!(notice.contains("Unit_Key_RO.inf"), "{notice}");
     assert!(
         notice.contains("Unit_Key_RO.bak"),
         "an ISO names the retry: {notice}"
     );
+    // The card resets on eject; the device log keeps it.
+    let logged = crate::server::log::get_device_log(device, 10);
+    assert_eq!(
+        logged.iter().filter(|l| l.ends_with(&notice)).count(),
+        1,
+        "{logged:?}"
+    );
     let renamed = DecryptedNames::Renamed {
         mirror_sectors_restored: 2,
     };
-    assert_eq!(iso_names_notice(Some(&renamed)), "");
-    assert_eq!(iso_names_notice(None), "");
+    assert_eq!(iso_names_notice(device, Some(&renamed)), "");
+    assert_eq!(iso_names_notice(device, None), "");
+    assert_eq!(
+        crate::server::log::get_device_log(device, 10).len(),
+        logged.len()
+    );
 }

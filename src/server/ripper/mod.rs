@@ -4202,6 +4202,7 @@ fn rip_disc_inner(
                         )
                     },
                 );
+                let notice = iso_names_notice(device, names.as_ref());
                 update_state_with(device, |s| {
                     s.status = "error".to_string();
                     // Surface the Accept-damage off-ramp: the complete ISO is on
@@ -4215,7 +4216,6 @@ fn rip_disc_inner(
                             fmt_threshold(effective_abort)
                         );
                     }
-                    let notice = iso_names_notice(names.as_ref());
                     if !notice.is_empty() {
                         s.last_error = format!("{} {notice}", s.last_error);
                     }
@@ -4320,10 +4320,11 @@ fn rip_disc_inner(
                 device,
                 &format!("ISO output complete — disc image staged as {iso_filename}"),
             );
+            let notice = iso_names_notice(device, names.as_ref());
             update_state_with(device, |s| {
                 s.status = "done".to_string();
                 s.output_file = iso_filename.clone();
-                s.notice = iso_names_notice(names.as_ref());
+                s.notice = notice;
             });
             // Rip stage done (ISO delivery — no mux stage follows; the ISO is
             // the deliverable and the mover fires move_complete later). Fire
@@ -5597,8 +5598,16 @@ fn handoff_done_row(device: &str, card: RipState) -> RipState {
 }
 
 // A kept `Unit_Key_RO.inf` in the finished ISO, as the dashboard shows it; "" otherwise.
-fn iso_names_notice(names: Option<&libfreemkv::whole_disc::DecryptedNames>) -> String {
-    crate::disc_copy_verdict::names_note(names, true).unwrap_or_default()
+// Logged too: the card resets to idle when the disc leaves.
+fn iso_names_notice(
+    device: &str,
+    names: Option<&libfreemkv::whole_disc::DecryptedNames>,
+) -> String {
+    let notice = crate::disc_copy_verdict::names_note(names, true).unwrap_or_default();
+    if !notice.is_empty() {
+        crate::server::log::device_log(device, &notice);
+    }
+    notice
 }
 
 // Record a rip's loss abort as `.aborted-loss`; a write that did not land is surfaced in the
