@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.8.6] — UNRELEASED
+
+### Changed
+
+- Launch shows the ready screen with your optical drives instead of opening a disc straight away; Settings ▸ At startup can open a loaded disc or a preferred drive at launch as before. (app only: a desktop window setting)
+- The default selection for new settings is "Main film / episodes"; a saved "Main film only" is kept. (app only: the desktop selection default)
+- A queued or failed 1.8.4/1.8.5 remux job without a recorded source stamp goes to Review after the upgrade; **Remux** it again. Already-staged outputs still deliver. (server only: the Library's remux queue)
+- Reboot trusts only the loaded launchd policy; if it cannot be read, Reboot is refused. (server only: the Library's macOS service)
+
+### Added
+
+- Optional private TMDB key and disc-ordered TV episode names. If an episode name is already taken in the output folder, that disc keeps the filename template instead of replacing the file. (app only: the server already names episodes from its own TMDB key)
+- An evidence-based film or episodes preset, and batch progress shown only for planned title jobs. (app only: desktop selection and progress)
+
+### Fixed
+
+- Decrypted folder backups keep navigation, menu and protection files, and use the same reader, decryption and recovery as ISO backups; a disc with damaged UDF metadata still backs up with its original names. (CLI, app, server)
+- Resumed jobs keep their captured output format, saved whole-disc ISO jobs resume without episode selection, and landing evidence is kept until the output link is durable. (server only: Library resume and delivery)
+- MediaTek (LD) drives that answer UNIT ATTENTION while restarting after a firmware upload are read again instead of re-uploaded. (CLI, app, server)
+
 ## [1.8.5] — 2026-10-19
 
 ### Fixed
