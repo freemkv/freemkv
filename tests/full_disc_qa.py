@@ -6,8 +6,10 @@ separate from this candidate's full-disc contract.
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -57,14 +59,18 @@ def smallest_title(binary, source):
     return min(rows)[1]
 
 
+# hashlib releases the GIL, so files hash in parallel; largest first keeps the pool busy.
+HASH_WORKERS = min(8, os.cpu_count() or 1)
+
+
 def manifest(root):
-    answer = {}
-    for path in sorted(root.rglob('*')):
-        if path.is_file():
-            answer[path.relative_to(root).as_posix()] = {
-                'bytes': path.stat().st_size, 'sha256': sha256(path),
-            }
-    return answer
+    print(f'HASH {root}', flush=True)
+    files = sorted(path for path in root.rglob('*') if path.is_file())
+    jobs = sorted(files, key=lambda path: path.stat().st_size, reverse=True)
+    with ThreadPoolExecutor(HASH_WORKERS) as pool:
+        digests = dict(zip(jobs, pool.map(sha256, jobs)))
+    return {path.relative_to(root).as_posix(): {'bytes': path.stat().st_size, 'sha256': digests[path]}
+            for path in files}
 
 
 def assert_disc_tree(files):
@@ -141,10 +147,16 @@ def check_family(binary, family, source, key_args, output, bd_info=None):
         decrypted_iso = root / 'decrypted.iso'
         direct_folder = root / 'direct-folder'
         iso_folder = root / 'iso-folder'
-        run(binary, url('iso', source), url('iso', decrypted_iso), root / 'decrypted-iso.log', *key_args)
+        # Both copies coexist anyway, so they run concurrently at the same peak disk use.
+        with ThreadPoolExecutor(2) as pool:
+            copies = [pool.submit(run, binary, url('iso', source), url('iso', decrypted_iso),
+                                  root / 'decrypted-iso.log', *key_args),
+                      pool.submit(run, binary, url('iso', source), url('dir', direct_folder),
+                                  root / 'direct-folder.log', *key_args)]
+            for copy in copies:
+                copy.result()
         if decrypted_iso.stat().st_size != source.stat().st_size:
             raise RuntimeError(f'{family} decrypted ISO has a different size from its source')
-        run(binary, url('iso', source), url('dir', direct_folder), root / 'direct-folder.log', *key_args)
         empty_keydb = root / 'empty-keydb.cfg'
         empty_keydb.write_text('')
         direct = manifest(direct_folder)
@@ -171,15 +183,19 @@ def check_family(binary, family, source, key_args, output, bd_info=None):
             raise RuntimeError(f'{family} title {title} differs between source, decrypted ISO and folder')
 
         shutil.rmtree(direct_folder)
-        run(binary, url('iso', decrypted_iso), url('dir', iso_folder), root / 'iso-folder.log',
-            '--keydb', str(empty_keydb))
+        # The extract reads the ISO anyway; hashing it alongside shares that read.
+        with ThreadPoolExecutor(1) as pool:
+            iso_digest = pool.submit(sha256, decrypted_iso)
+            run(binary, url('iso', decrypted_iso), url('dir', iso_folder), root / 'iso-folder.log',
+                '--keydb', str(empty_keydb))
+            decrypted_iso_sha256 = iso_digest.result()
         from_iso = manifest(iso_folder)
         if direct != from_iso:
             difference = [
                 name for name in sorted(direct.keys() | from_iso.keys()) if direct.get(name) != from_iso.get(name)]
             raise RuntimeError(f'{family} decrypted ISO/folder differ in {len(difference)} files: {difference[:20]}')
         check_navigation(iso_folder, from_iso)
-        return {'fixture_bytes': source.stat().st_size, 'decrypted_iso_sha256': sha256(decrypted_iso),
+        return {'fixture_bytes': source.stat().st_size, 'decrypted_iso_sha256': decrypted_iso_sha256,
                 'files': direct, 'file_count': len(direct), 'navigation_counts': navigation,
                 'title': title, 'title_hashes': title_hashes, 'folder_title_status':
                 '3d-ssif-unsupported-E9061' if ssif else 'matched', 'libbluray': external}
