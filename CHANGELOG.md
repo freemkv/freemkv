@@ -16,6 +16,10 @@
 
 ### Fixed
 
+- A delivered disc is not ripped again after a long run of failed drive probes once the drive answers again. (server only: the Library's drive poller)
+- Eject reports why the drive refused, with its own code, instead of answering as if it had ejected. (server only: the Library's Eject)
+- A correction whose new plan fails logs the cause. (server only: the Library's card plan)
+- Windows: the ready-screen buttons follow a language change, and "Use at startup" is disabled for the drive already chosen, as on macOS and Linux. (app only: a Windows window)
 - Decrypted folder backups keep navigation, menu and protection files, and use the same reader, decryption and recovery as ISO backups; a disc with damaged UDF metadata still backs up with its original names. (CLI, app, server)
 - Resumed jobs keep their captured output format, saved whole-disc ISO jobs resume without episode selection, and landing evidence is kept until the output link is durable. (server only: Library resume and delivery)
 - MediaTek (LD) drives that answer UNIT ATTENTION while restarting after a firmware upload are read again instead of re-uploaded. (CLI, app, server)
