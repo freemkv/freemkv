@@ -104,7 +104,8 @@ fn at_risk_time_is_the_damage_inside_the_title_at_its_rate() {
 // an indefinitely blocked syscall without sleeping or touching a network share.
 type WorkTask = Box<dyn FnOnce() + Send>;
 type DamageLoader = Box<dyn Fn(&Path) -> Option<Vec<(u64, u64)>> + Send + Sync>;
-type RowPlanner = Box<dyn Fn(&Inputs, &Correction) -> Vec<CardEpisode> + Send + Sync>;
+type RowPlanner =
+    Box<dyn Fn(&Inputs, &Correction) -> Result<Vec<CardEpisode>, PlanError> + Send + Sync>;
 struct FakeWork {
     tasks: Mutex<std::collections::VecDeque<WorkTask>>,
     loader: DamageLoader,
@@ -145,7 +146,11 @@ impl CardWork for FakeWork {
     fn damage(&self, path: &Path) -> Option<Vec<(u64, u64)>> {
         (self.loader)(path)
     }
-    fn plan(&self, inputs: &Inputs, correction: &Correction) -> Vec<CardEpisode> {
+    fn plan(
+        &self,
+        inputs: &Inputs,
+        correction: &Correction,
+    ) -> Result<Vec<CardEpisode>, PlanError> {
         (self.planner)(inputs, correction)
     }
     fn spawn(&self, task: WorkTask) -> std::io::Result<()> {
@@ -278,16 +283,46 @@ fn burst_polls_and_eviction_preserve_process_measurement_cap() {
 }
 
 #[test]
+fn a_failed_replan_keeps_the_previous_episodes() {
+    let mut fake = FakeWork::new();
+    fake.planner = Box::new(|inputs, correction| {
+        if correction.revision == 1 {
+            return Err(PlanError::NoTitles);
+        }
+        CardIo.plan(inputs, correction)
+    });
+    let work = Arc::new(fake);
+    let cache = Cache::new(work.clone());
+    publish_test(&cache, "job");
+    work.finish();
+    let numbers = |c: &Arc<Cache>| -> Vec<u16> {
+        c.episodes("job")
+            .unwrap()
+            .iter()
+            .map(|e| e.episode)
+            .collect()
+    };
+    assert_eq!(numbers(&cache), [4, 5, 6]);
+    correct(&cache, "job", 1, 9);
+    work.finish();
+    assert_eq!(numbers(&cache), [4, 5, 6]);
+    assert_eq!(counts(&cache), (0, 0));
+    correct(&cache, "job", 2, 9);
+    work.finish();
+    assert_eq!(first(&cache, "job"), 9, "a later correction still replans");
+}
+
+#[test]
 fn old_measurement_cannot_change_a_new_row_generation_or_incarnation() {
     let mut fake = FakeWork::new();
     fake.planner = Box::new(|inputs, correction| {
-        let mut rows = CardIo.plan(inputs, correction);
+        let mut rows = CardIo.plan(inputs, correction)?;
         // A changed selection order associates each number with a new title.
         rows.rotate_left(1);
         for (index, row) in rows.iter_mut().enumerate() {
             row.episode = correction.start.unwrap() + index as u16;
         }
-        rows
+        Ok(rows)
     });
     let work = Arc::new(fake);
     let cache = Cache::new(work.clone());

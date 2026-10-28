@@ -4,7 +4,7 @@
 //! carries the playback time its not-yet-good sectors cover, read from the job's mapfile.
 
 use crate::server::config::Config;
-use crate::server::planner::MediaKind;
+use crate::server::planner::{MediaKind, PlanError};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -73,7 +73,8 @@ struct Plans {
 // production uses the existing mapfile interpretation and planner unchanged.
 trait CardWork: Send + Sync {
     fn damage(&self, path: &Path) -> Option<Vec<(u64, u64)>>;
-    fn plan(&self, inputs: &Inputs, correction: &Correction) -> Vec<CardEpisode>;
+    fn plan(&self, inputs: &Inputs, correction: &Correction)
+    -> Result<Vec<CardEpisode>, PlanError>;
     fn spawn(&self, task: Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
 }
 
@@ -85,7 +86,11 @@ impl CardWork for CardIo {
         Some(map.ranges_with(&[S::NonTrimmed, S::NonScraped, S::Unreadable]))
     }
 
-    fn plan(&self, inputs: &Inputs, correction: &Correction) -> Vec<CardEpisode> {
+    fn plan(
+        &self,
+        inputs: &Inputs,
+        correction: &Correction,
+    ) -> Result<Vec<CardEpisode>, PlanError> {
         let label = super::planning_label(&inputs.label, Some(correction.kind));
         super::plan_mux_outputs(
             &inputs.titles,
@@ -97,7 +102,6 @@ impl CardWork for CardIo {
             correction.start,
         )
         .map(|outputs| card_episodes(&inputs.titles, label, &outputs))
-        .unwrap_or_default()
     }
 
     fn spawn(&self, task: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
@@ -396,7 +400,14 @@ impl Task {
             }
             Lane::Replan => {
                 let correction = self.correction.as_ref().expect("admitted correction");
-                let episodes = cache.work.plan(&self.inputs, correction);
+                let planned = cache.work.plan(&self.inputs, correction);
+                if let Err(error) = &planned {
+                    tracing::warn!(
+                        revision = correction.revision,
+                        %error,
+                        "card replan failed; keeping the previous episodes"
+                    );
+                }
                 let mut plans = cache.plans.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(p) = plans.entries.iter_mut().find(|p| {
                     Arc::ptr_eq(&p.incarnation, &self.permit.incarnation)
@@ -405,10 +416,12 @@ impl Task {
                             .as_ref()
                             .is_some_and(|m| Arc::ptr_eq(m, &self.permit.owner))
                 }) {
-                    p.episodes = episodes;
-                    p.rows = Arc::new(());
-                    p.measured = None;
-                    p.measure_pending = !p.episodes.is_empty();
+                    if let Ok(episodes) = planned {
+                        p.episodes = episodes;
+                        p.rows = Arc::new(());
+                        p.measured = None;
+                        p.measure_pending = !p.episodes.is_empty();
+                    }
                 }
             }
         }
