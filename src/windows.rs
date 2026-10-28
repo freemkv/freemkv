@@ -4148,15 +4148,17 @@ impl Shell {
             .hwnd()
             .SetWindowText(&g("gui.btn.open_disc"));
         let _ = self.btn_open.hwnd().SetWindowText(&g("gui.btn.open_file"));
-        let get = crate::strings::get_or;
         let _ = self
             .home_open
             .hwnd()
-            .SetWindowText(&get("gui.home.open", "Open"));
+            .SetWindowText(&crate::strings::get_or("gui.home.open", "Open"));
         let _ = self
             .home_prefer
             .hwnd()
-            .SetWindowText(&get("gui.home.use_startup", "Use at startup"));
+            .SetWindowText(&crate::strings::get_or(
+                "gui.home.use_startup",
+                "Use at startup",
+            ));
         let _ = self.lbl_out.hwnd().SetWindowText(&g("gui.group.output"));
         for (l, text) in self.lbl_pick.iter().zip(crate::ui::pick_labels()) {
             let _ = l.hwnd().SetWindowText(&format!("{text}:"));
