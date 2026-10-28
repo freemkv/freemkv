@@ -33,6 +33,25 @@ class ThreeDFolderTests(unittest.TestCase):
                     qa.check_3d_folder_limit(root / 'freemkv', root / 'folder', target,
                                              root / 'run.log', 1, root / 'empty-keydb.cfg')
 
+            def success_without_output(command, **kwargs):
+                kwargs['stdout'].write('Error: E9061 unsupported SSIF\n')
+                return types.SimpleNamespace(returncode=0)
+
+            with patch.object(qa.subprocess, 'run', success_without_output):
+                with self.assertRaisesRegex(RuntimeError, 'did not refuse'):
+                    qa.check_3d_folder_limit(root / 'freemkv', root / 'folder', target,
+                                             root / 'run.log', 1, root / 'empty-keydb.cfg')
+
+            def refusal_with_output(command, **kwargs):
+                kwargs['stdout'].write('Error: E9061 unsupported SSIF\n')
+                target.write_bytes(b'mkv')
+                return types.SimpleNamespace(returncode=1)
+
+            with patch.object(qa.subprocess, 'run', refusal_with_output):
+                with self.assertRaisesRegex(RuntimeError, 'did not refuse'):
+                    qa.check_3d_folder_limit(root / 'freemkv', root / 'folder', target,
+                                             root / 'run.log', 1, root / 'empty-keydb.cfg')
+
 
 class RedactTests(unittest.TestCase):
     def test_key_values_and_url_hosts_are_hidden(self):

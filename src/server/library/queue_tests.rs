@@ -51,7 +51,8 @@ fn blocked_durable_write_preserves_reads_and_mutations(failure: Option<bool>) {
         std::thread::spawn(move || reading.send(q.snapshot()).unwrap())
     };
     let visible = read.recv_timeout(Duration::from_secs(2));
-    let premature_mutation = committed.try_recv();
+    // The mutation parks on the durable writer's gate; give a regression time to slip past it.
+    let premature_mutation = committed.recv_timeout(Duration::from_millis(300));
     release.send(()).unwrap();
     let result = durable.join().unwrap();
     ordinary.join().unwrap();
@@ -60,7 +61,10 @@ fn blocked_durable_write_preserves_reads_and_mutations(failure: Option<bool>) {
         visible.expect("snapshot blocked behind durable writer"),
         original
     );
-    assert!(matches!(premature_mutation, Err(mpsc::TryRecvError::Empty)));
+    assert!(matches!(
+        premature_mutation,
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
     assert_eq!(result.is_err(), failure.is_some());
     assert!(q.snapshot().paused, "ordinary mutation was lost");
     assert_eq!(q.snapshot().debug_log, failure != Some(false));

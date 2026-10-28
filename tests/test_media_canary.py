@@ -340,7 +340,7 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(mc.post_decode('https://k/d', 'tok', {'a': 1}, opener), {'UK': '00'})
         req, timeout = seen[0]
         self.assertEqual((req.get_method(), req.get_header('Authorization'), timeout),
-                         ('POST', 'Bearer tok', mc.TIMEOUT))
+                         ('POST', 'Bearer tok', 30))
         self.assertEqual(json.loads(req.data), {'a': 1})
         with self.assertRaises(mc.CanaryError):
             mc.post_decode('http://k/d', 'tok', {}, opener)
@@ -533,6 +533,20 @@ class RedirectTests(unittest.TestCase):
                             lambda key, pin: lambda offset, length: b'')
         self.assertFalse(result['ok'])
         self.assertEqual(result['probes'][0]['failure_kind'], 'transport')
+
+    def test_other_canary_errors_are_not_transport(self):
+        policy = {'canary': {'probes': [{'fixture': 'uhd.iso'}]}}
+        pins = {'uhd.iso': {'etag': 'pinned'}}
+        for error in (mc.CanaryError('the key service is unreachable (URLError)'),
+                      mc.Transient('the key service answered HTTP 503'),
+                      mc.CanaryError('the key service refused the token (HTTP 401)')):
+            with unittest.mock.patch.object(mc, 'Udf', lambda read: object()), \
+                 unittest.mock.patch.object(mc, 'probe', side_effect=error):
+                result = mc.run(policy, pins, 'https://example.com/decode', 'token',
+                                lambda key, pin: lambda offset, length: b'')
+            self.assertEqual(result['probes'][0]['failure_kind'], 'key-or-service', str(error))
+        result = mc.run(policy, {}, 'https://example.com/decode', 'token', None)
+        self.assertEqual(result['probes'][0]['failure_kind'], 'key-or-service')
 
     def test_the_default_opener_has_no_following_redirect_handler(self):
         """Python 3.12 docs, build_opener: "Instances of the following classes will be in front of
