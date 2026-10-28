@@ -700,6 +700,23 @@ impl Shell {
             .map(|index| index as usize)
     }
 
+    // "Use at startup" is off for the drive that already is the startup drive.
+    fn sync_home_prefer(&self) {
+        let on = {
+            let app = self.app.borrow();
+            self.selected_home_drive()
+                .and_then(|i| app.home_drives.get(i))
+                .is_none_or(|d| {
+                    crate::ui::can_prefer_home_drive(
+                        &app.settings.startup_mode,
+                        &app.settings.preferred_drive,
+                        &d.label,
+                    )
+                })
+        };
+        self.home_prefer.hwnd().EnableWindow(on);
+    }
+
     fn open_selected_home_drive(&self) {
         let source = self
             .selected_home_drive()
@@ -1824,6 +1841,7 @@ impl Shell {
             }
             *self.home_sig.borrow_mut() = Some(home);
         }
+        self.sync_home_prefer();
 
         // Format list depends on source kind, so it's re-derived every render,
         // not just at build time — a real macOS bug had "Whole disc → ISO image"
@@ -2663,6 +2681,11 @@ impl Shell {
         let me = self.clone();
         self.home_list.on().lbn_dbl_clk(move || {
             me.open_selected_home_drive();
+            Ok(())
+        });
+        let me = self.clone();
+        self.home_list.on().lbn_sel_change(move || {
+            me.sync_home_prefer();
             Ok(())
         });
         let me = self.clone();
@@ -4125,6 +4148,15 @@ impl Shell {
             .hwnd()
             .SetWindowText(&g("gui.btn.open_disc"));
         let _ = self.btn_open.hwnd().SetWindowText(&g("gui.btn.open_file"));
+        let get = crate::strings::get_or;
+        let _ = self
+            .home_open
+            .hwnd()
+            .SetWindowText(&get("gui.home.open", "Open"));
+        let _ = self
+            .home_prefer
+            .hwnd()
+            .SetWindowText(&get("gui.home.use_startup", "Use at startup"));
         let _ = self.lbl_out.hwnd().SetWindowText(&g("gui.group.output"));
         for (l, text) in self.lbl_pick.iter().zip(crate::ui::pick_labels()) {
             let _ = l.hwnd().SetWindowText(&format!("{text}:"));

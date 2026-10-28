@@ -2338,6 +2338,11 @@ pub struct App {
     reported_bad: u64,
 }
 
+/// Whether "Use at startup" is on offer for a drive: not when it already is the startup drive.
+pub fn can_prefer_home_drive(startup_mode: &str, preferred_drive: &str, label: &str) -> bool {
+    !(startup_mode == "Open preferred drive" && preferred_drive == label)
+}
+
 /// One ready-screen optical drive; `None` means presence could not be determined.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HomeDrive {

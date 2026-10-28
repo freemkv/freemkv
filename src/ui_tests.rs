@@ -4177,3 +4177,12 @@ fn source_numbering_scan_error_clears_but_retained_sources_keep_overrides() {
         "ejecting Open discarded numbering"
     );
 }
+
+#[test]
+fn use_at_startup_is_off_only_for_the_current_startup_drive() {
+    let on = |mode, pref, label| can_prefer_home_drive(mode, pref, label);
+    assert!(!on("Open preferred drive", "BD-RE", "BD-RE"));
+    assert!(on("Open preferred drive", "BD-RE", "DVD"));
+    assert!(on("Show drives", "BD-RE", "BD-RE"));
+    assert!(on("Open any loaded disc", "BD-RE", "BD-RE"));
+}
