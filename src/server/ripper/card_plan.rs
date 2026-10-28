@@ -415,13 +415,12 @@ impl Task {
                         && p.replanning
                             .as_ref()
                             .is_some_and(|m| Arc::ptr_eq(m, &self.permit.owner))
-                }) {
-                    if let Ok(episodes) = planned {
-                        p.episodes = episodes;
-                        p.rows = Arc::new(());
-                        p.measured = None;
-                        p.measure_pending = !p.episodes.is_empty();
-                    }
+                }) && let Ok(episodes) = planned
+                {
+                    p.episodes = episodes;
+                    p.rows = Arc::new(());
+                    p.measured = None;
+                    p.measure_pending = !p.episodes.is_empty();
                 }
             }
         }
