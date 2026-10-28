@@ -4086,16 +4086,7 @@ fn tv_naming_plan(
         .season
         .or_else(|| tmdb::season_from_label(label))
         .unwrap_or(1);
-    let disc_number = tmdb::disc_from_label(label).unwrap_or(1).max(1);
-    let first = tv.first_episode.or_else(|| {
-        usize::from(disc_number - 1)
-            .checked_mul(tv.roster.len())
-            .and_then(|n| n.checked_add(1))
-            .and_then(|n| u16::try_from(n).ok())
-    });
-    let Some(first) = first.filter(|first| {
-        *first > 0 && usize::from(*first) + tv.roster.len() - 1 <= usize::from(u16::MAX)
-    }) else {
+    let Some(first) = tv_first_episode(tv, label) else {
         fe::Sink::log(
             sink,
             fe::Level::Warn,
@@ -4104,7 +4095,54 @@ fn tv_naming_plan(
         return std::collections::HashMap::new();
     };
     let episodes = client.season_episodes(found.tmdb_id, season);
-    tv_names_from_roster(&tv.roster, &found.title, season, first, &episodes)
+    let names = tv_names_from_roster(&tv.roster, &found.title, season, first, &episodes);
+    let OutKind::File(ext) = out_kind(&req.format) else {
+        return std::collections::HashMap::new();
+    };
+    let names = tv_names_if_free(names, &req.dest_dir, ext);
+    if names.is_empty() {
+        fe::Sink::log(
+            sink,
+            fe::Level::Warn,
+            "An episode file with that name already exists; using the filename template",
+        );
+    }
+    names
+}
+
+// This disc's first episode: the override, else even-split disc order.
+fn tv_first_episode(tv: &TvNamingRequest, label: &str) -> Option<u16> {
+    let disc_number = freemkv_engine::metadata::tmdb::disc_from_label(label)
+        .unwrap_or(1)
+        .max(1);
+    let first = tv.first_episode.or_else(|| {
+        usize::from(disc_number - 1)
+            .checked_mul(tv.roster.len())
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| u16::try_from(n).ok())
+    });
+    first.filter(|first| {
+        *first > 0 && usize::from(*first) + tv.roster.len() - 1 <= usize::from(u16::MAX)
+    })
+}
+
+// Disc-order numbering is a guess: if any target is taken (an uneven split or an
+// unnumbered disc landing on an earlier disc's episodes), drop it all for the
+// label-keyed template rather than truncate that file.
+fn tv_names_if_free(
+    names: std::collections::HashMap<usize, String>,
+    dest_dir: &str,
+    ext: &str,
+) -> std::collections::HashMap<usize, String> {
+    let taken = names.values().any(|base| {
+        let path = std::path::Path::new(dest_dir).join(format!("{base}.{ext}"));
+        !matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    });
+    if taken {
+        std::collections::HashMap::new()
+    } else {
+        names
+    }
 }
 
 fn tv_names_from_roster(

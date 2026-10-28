@@ -1,11 +1,11 @@
 use super::{
-    DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, UiSink, damage_note,
-    demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, image_title_run,
-    is_disc_source, is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
-    recovery_produced_no_data, recovery_raw, run_disc_scanning, run_stream,
+    DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, TvNamingRequest, UiSink,
+    damage_note, demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme,
+    image_title_run, is_disc_source, is_stream_source, iso_recovery_result, mux_opts, out_kind,
+    recovery_plan, recovery_produced_no_data, recovery_raw, run_disc_scanning, run_stream,
     should_delete_staging_iso, source_scheme, staging_not_kept_note, stream_selection_for,
-    title_dest, title_options, title_plan, tv_names_from_roster, verify_selection_identity,
-    verify_title_identity, whole_image_gate,
+    title_dest, title_options, title_plan, tv_first_episode, tv_names_from_roster,
+    tv_names_if_free, verify_selection_identity, verify_title_identity, whole_image_gate,
 };
 use std::sync::Arc;
 
@@ -1043,6 +1043,78 @@ fn tv_names_follow_authored_roster_even_when_only_one_episode_is_ripped() {
         &Default::default(),
     );
     assert_eq!(unchanged, "/out/KUNG_FU_t3.mkv");
+}
+
+fn tv(roster: Vec<usize>) -> TvNamingRequest {
+    TvNamingRequest {
+        api_key: "k".into(),
+        roster,
+        season: Some(1),
+        first_episode: None,
+    }
+}
+
+// Disc `label`'s episode targets in `dir` after the existing-file guard.
+fn guarded_tv_paths(dir: &std::path::Path, label: &str, roster: &[usize]) -> Vec<String> {
+    let first = tv_first_episode(&tv(roster.to_vec()), label).expect("first episode");
+    let names = tv_names_from_roster(roster, "Show", 1, first, &[]);
+    let mut r = req();
+    r.dest_dir = dir.to_string_lossy().into_owned();
+    let names = tv_names_if_free(names, &r.dest_dir, "mkv");
+    roster
+        .iter()
+        .map(|&idx| title_dest(&r, OutKind::File("mkv"), label, idx, true, &names).1)
+        .collect()
+}
+
+fn write_all(paths: &[String], tag: &str) {
+    for p in paths {
+        std::fs::write(p, tag).unwrap();
+    }
+}
+
+fn assert_untouched(paths: &[String], tag: &str, later: &[String]) {
+    for p in paths {
+        assert_eq!(
+            std::fs::read_to_string(p).unwrap(),
+            tag,
+            "{p} was clobbered"
+        );
+        assert!(!later.contains(p), "a later disc targets {p}");
+    }
+}
+
+/// 10 episodes on 4/4/2 discs: disc 3 guesses E05, disc 2's first file.
+#[test]
+fn an_uneven_split_disc_never_targets_an_earlier_discs_episode_file() {
+    let dir = std::env::temp_dir().join(format!("fmkv-tv-uneven-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let disc1 = guarded_tv_paths(&dir, "SHOW_S1_DISC1", &[0, 1, 2, 3]);
+    write_all(&disc1, "d1");
+    let disc2 = guarded_tv_paths(&dir, "SHOW_S1_DISC2", &[0, 1, 2, 3]);
+    assert!(disc2[0].ends_with("Show_S01E05.mkv"), "{disc2:?}");
+    write_all(&disc2, "d2");
+    let disc3 = guarded_tv_paths(&dir, "SHOW_S1_DISC3", &[0, 1]);
+    assert_untouched(&disc1, "d1", &disc3);
+    assert_untouched(&disc2, "d2", &disc3);
+    assert!(disc3[0].ends_with("SHOW_S1_DISC3_t1.mkv"), "{disc3:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// No disc number falls back to disc 1, so a second disc guesses E01 again.
+#[test]
+fn an_unnumbered_disc_never_targets_an_earlier_discs_episode_file() {
+    let dir = std::env::temp_dir().join(format!("fmkv-tv-unnumbered-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = guarded_tv_paths(&dir, "SHOW_S1", &[0, 1]);
+    assert!(first[0].ends_with("Show_S01E01.mkv"), "{first:?}");
+    write_all(&first, "a");
+    let second = guarded_tv_paths(&dir, "SHOW_S1_EXTRA", &[0, 1]);
+    assert_untouched(&first, "a", &second);
+    assert!(second[0].ends_with("SHOW_S1_EXTRA_t1.mkv"), "{second:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A `disc://` source must route to the live-drive path and nothing else
