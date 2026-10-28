@@ -4022,10 +4022,12 @@ fn rip_disc_inner(
         };
         let recovered = freemkv_engine::run_with(&plan, with, &pass_sink);
         let (attempt, gave_up, halted_in_recovery) = (host.attempt, host.gave_up, host.halted);
-        let result = match recovered {
+        let (result, names) = match recovered {
             Ok(freemkv_engine::Report::Image {
-                recovery: Some(r), ..
-            }) => r,
+                recovery: Some(r),
+                names,
+                ..
+            }) => (r, names),
             Ok(_) => {
                 tracing::error!(device = %device, "recovery returned no pass verdict");
                 let msg = "Internal error: recovery returned no pass verdict";
@@ -4213,6 +4215,10 @@ fn rip_disc_inner(
                             fmt_threshold(effective_abort)
                         );
                     }
+                    let notice = iso_names_notice(names.as_ref());
+                    if !notice.is_empty() {
+                        s.last_error = format!("{} {notice}", s.last_error);
+                    }
                 });
                 // Record the abort as RESUMABLE `.aborted-loss`, not `.failed`:
                 // deterministic media damage a plain re-rip won't fix.
@@ -4317,6 +4323,7 @@ fn rip_disc_inner(
             update_state_with(device, |s| {
                 s.status = "done".to_string();
                 s.output_file = iso_filename.clone();
+                s.notice = iso_names_notice(names.as_ref());
             });
             // Rip stage done (ISO delivery — no mux stage follows; the ISO is
             // the deliverable and the mover fires move_complete later). Fire
@@ -5587,6 +5594,11 @@ fn handoff_done_row(device: &str, card: RipState) -> RipState {
         largest_gap_ms: d.largest_gap_ms,
         ..card
     }
+}
+
+// A kept `Unit_Key_RO.inf` in the finished ISO, as the dashboard shows it; "" otherwise.
+fn iso_names_notice(names: Option<&libfreemkv::whole_disc::DecryptedNames>) -> String {
+    crate::disc_copy_verdict::names_note(names, true).unwrap_or_default()
 }
 
 // Record a rip's loss abort as `.aborted-loss`; a write that did not land is surfaced in the

@@ -58,6 +58,7 @@ fn test_state_json_serialization_round_trip() {
         largest_gap_ms: 12.5,
         loss_aborted: true,
         last_error: "read error".to_string(),
+        notice: "keeps Unit_Key_RO.inf".to_string(),
         output_file: "TEST DISC.mkv".to_string(),
         tmdb_title: "Test Disc".to_string(),
         tmdb_year: 2024,
@@ -126,6 +127,7 @@ fn test_state_json_serialization_round_trip() {
     assert_eq!(v["largest_gap_ms"], 12.5);
     assert_eq!(v["loss_aborted"], true);
     assert_eq!(v["last_error"], "read error");
+    assert_eq!(v["notice"], "keeps Unit_Key_RO.inf");
     assert_eq!(v["tmdb_poster"], "https://image.tmdb.org/p/abc.jpg");
     assert_eq!(v["tmdb_overview"], "An overview.");
     assert_eq!(v["tmdb_media_type"], "movie");

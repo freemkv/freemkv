@@ -2293,8 +2293,12 @@ pub(crate) fn whole_disc(
     };
     match r {
         Ok(freemkv_engine::Report::Image {
-            copy, disc, path, ..
-        }) => render_copy(&copy, disc.as_deref(), &path, start, out),
+            copy,
+            disc,
+            path,
+            names,
+            ..
+        }) => render_copy(&copy, disc.as_deref(), &path, names.as_ref(), start, out),
         Ok(freemkv_engine::Report::Tree { extract }) => match render_extract(&extract, out) {
             true => 0,
             false => 1,
@@ -2337,6 +2341,7 @@ fn render_copy(
     r: &freemkv_engine::CopyResult,
     disc: Option<&libfreemkv::Disc>,
     iso_path: &std::path::Path,
+    names: Option<&libfreemkv::whole_disc::DecryptedNames>,
     start: std::time::Instant,
     out: &Output,
 ) -> i32 {
@@ -2404,6 +2409,9 @@ fn render_copy(
                     &crate::disc_copy_verdict::retry_with_multipass_hint(),
                 );
             }
+            if let Some(note) = crate::disc_copy_verdict::names_note(names, true) {
+                out.raw(Always, &note);
+            }
             out.raw(
                 Normal,
                 &strings::fmt(
@@ -2448,6 +2456,9 @@ fn render_extract(res: &libfreemkv::ExtractResult, out: &Output) -> bool {
     if res.halted {
         out.raw(Normal, &strings::get("rip.interrupted"));
         return extract_succeeded(res.halted, res.complete);
+    }
+    if let Some(note) = crate::disc_copy_verdict::names_note(res.names.as_ref(), false) {
+        out.raw(Always, &note);
     }
     if res.complete {
         let good_mb = res.bytes_good as f64 / 1_048_576.0;

@@ -262,6 +262,7 @@ fn extract_result(halted: bool, files: usize, bytes_unreadable: u64) -> libfreem
         bytes_unreadable,
         complete: !halted && bytes_unreadable == 0,
         halted,
+        ..Default::default()
     }
 }
 
@@ -289,6 +290,7 @@ fn a_completed_image_decrypt_reports_written() {
     let msg = summarize_image_decrypt(
         &copy_result(false, 2 * 1_073_741_824, 0),
         std::path::Path::new("/out/Disc.iso"),
+        None,
     );
     assert_eq!(msg, "Decrypted image written: /out/Disc.iso (2.00 GiB)");
 }
@@ -301,6 +303,7 @@ fn an_image_decrypt_halted_by_cancel_says_so_not_written() {
     let msg = summarize_image_decrypt(
         &copy_result(true, 1_073_741_824, 0),
         std::path::Path::new("/out/Disc.iso"),
+        None,
     );
     assert!(
         msg.starts_with("Cancelled"),
@@ -320,6 +323,7 @@ fn a_lossy_image_decrypt_reports_the_unreadable_bytes() {
     let msg = summarize_image_decrypt(
         &copy_result(false, 1_073_741_824, 2 * 1_048_576),
         std::path::Path::new("/out/Disc.iso"),
+        None,
     );
     assert!(msg.starts_with("Decrypted image written"), "{msg}");
     assert!(
@@ -336,6 +340,7 @@ fn an_image_decrypt_with_bytes_still_pending_is_not_a_clean_write() {
     let msg = summarize_image_decrypt(
         &copy_result_pending(false, 1_073_741_824, 0, 4 * 1_048_576),
         std::path::Path::new("/out/Disc.iso"),
+        None,
     );
     assert!(
         msg.contains("4.0 MiB not read"),
@@ -353,6 +358,7 @@ fn an_image_decrypt_reports_lost_and_unread_bytes_together() {
     let msg = summarize_image_decrypt(
         &copy_result_pending(false, 1_073_741_824, 2 * 1_048_576, 4 * 1_048_576),
         std::path::Path::new("/out/Disc.iso"),
+        None,
     );
     assert!(msg.contains("2.0 MiB unreadable"), "{msg}");
     assert!(msg.contains("4.0 MiB not read"), "{msg}");
@@ -400,4 +406,63 @@ fn a_halted_extraction_still_beats_unreadable_wording() {
     let res = extract_result(true, 1, 1_048_576);
     let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
     assert!(msg.starts_with("Cancelled"), "{msg}");
+}
+
+// The finish summary of every whole-disc path names a kept `Unit_Key_RO.inf` on its own line.
+#[test]
+fn a_kept_key_file_is_named_in_every_whole_disc_summary() {
+    use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
+    crate::strings::set_locale("en");
+    let kept = DecryptedNames::Kept {
+        cause: NamesKept::Damaged,
+    };
+    let renamed = DecryptedNames::Renamed {
+        mirror_sectors_restored: 0,
+    };
+    let iso = std::path::Path::new("/out/Disc.iso");
+    let clean = copy_result(false, 1_073_741_824, 0);
+    let msg = summarize_image_decrypt(&clean, iso, Some(&kept));
+    assert!(
+        msg.starts_with("Decrypted image written: /out/Disc.iso (1.00 GiB)\n"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("Unit_Key_RO.inf") && msg.contains("Unit_Key_RO.bak"),
+        "{msg}"
+    );
+    assert_eq!(
+        summarize_image_decrypt(&clean, iso, Some(&renamed)),
+        "Decrypted image written: /out/Disc.iso (1.00 GiB)"
+    );
+
+    let recovery = fe::MultipassResult {
+        unreadable_bytes: 0,
+        pending_bytes: 0,
+        good_bytes: 50_000_000_000,
+        main_lost_ms: 0.0,
+        lost_bytes: 0,
+        severity: fe::DamageSeverity::Clean,
+        passes: 1,
+        aborted_for_loss: false,
+        halted: false,
+        wedged: false,
+        complete: true,
+    };
+    let msg = super::iso_recovery_result(&recovery, "/x.iso", Some(&kept)).expect("a copy");
+    assert!(msg.starts_with("ISO image written to /x.iso\n"), "{msg}");
+    assert!(msg.contains("Unit_Key_RO.inf"), "{msg}");
+
+    let mut res = extract_result(false, 3, 0);
+    res.names = Some(DecryptedNames::Kept {
+        cause: NamesKept::Collision,
+    });
+    let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
+    assert!(
+        msg.starts_with("Decrypted file tree written to /out/Disc — 3 file(s)\n"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("Unit_Key_RO.inf") && !msg.contains(".bak"),
+        "{msg}"
+    );
 }

@@ -177,6 +177,7 @@ function bannersHtml(s) {
   if (s.last_error && (s.errors > 0 || s.status === 'error' || lossAborted(s))) {
     h += '<div class="banner bad">⚠ <span>' + escLinks(s.last_error) + '</span></div>';
   }
+  if (s.notice) h += '<div class="banner warn">ⓘ <span>' + esc(s.notice) + '</span></div>';
   if (s.status === 'ripping' && s.current_batch > 0 && s.preferred_batch > 0 && s.current_batch < s.preferred_batch) {
     h += '<div class="banner info">↺ Reading a damaged area slowly (' + s.current_batch + ' / ' + s.preferred_batch + ' sectors at a time)</div>';
   }

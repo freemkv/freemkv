@@ -6,10 +6,10 @@ use super::{
     bad_sector_statuses, disk_space_preflight_message, disk_space_required_bytes,
     end_of_recovery_promotion, fmts_gate_decision, fmts_gate_plan, format_lib_error,
     format_pass_error, header_phase_disposition, incomplete_mux_status, is_fmts_key_missing_error,
-    is_safe_staging_segment, list_staging_basenames, patch_made_progress, patch_pass_decision,
-    plan_passes, pre_pass_converged, prune_intermediate_iso, register_halt, resumable_dir_blocked,
-    resumable_for_job, resume_remaining_iso_bytes, scope_bad_bytes, scope_converged,
-    skip_diskcheck_value, staging_disc_owned_by_worker, staging_free_bytes,
+    is_safe_staging_segment, iso_names_notice, list_staging_basenames, patch_made_progress,
+    patch_pass_decision, plan_passes, pre_pass_converged, prune_intermediate_iso, register_halt,
+    resumable_dir_blocked, resumable_for_job, resume_remaining_iso_bytes, scope_bad_bytes,
+    scope_converged, skip_diskcheck_value, staging_disc_owned_by_worker, staging_free_bytes,
 };
 use crate::server::ripper::session::device_halt;
 use crate::server::ripper::staging;
@@ -4581,4 +4581,25 @@ fn a_finished_interrupted_reset_that_removed_the_job_is_no_hold() {
     assert_eq!(super::disc_staging_hold(&cfg, device, false), None);
     assert!(!dir.exists());
     forget_device(device);
+}
+
+// A finished ISO that keeps `Unit_Key_RO.inf` tells the dashboard; a renamed one is silent.
+#[test]
+fn a_kept_key_file_becomes_the_rips_notice() {
+    use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
+    crate::strings::set_locale("en");
+    let kept = DecryptedNames::Kept {
+        cause: NamesKept::Damaged,
+    };
+    let notice = iso_names_notice(Some(&kept));
+    assert!(notice.contains("Unit_Key_RO.inf"), "{notice}");
+    assert!(
+        notice.contains("Unit_Key_RO.bak"),
+        "an ISO names the retry: {notice}"
+    );
+    let renamed = DecryptedNames::Renamed {
+        mirror_sectors_restored: 2,
+    };
+    assert_eq!(iso_names_notice(Some(&renamed)), "");
+    assert_eq!(iso_names_notice(None), "");
 }

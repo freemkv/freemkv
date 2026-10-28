@@ -15,3 +15,36 @@ fn the_retry_hint_is_not_empty() {
     crate::strings::set_locale("en");
     assert!(retry_with_multipass_hint().contains("--multipass"));
 }
+
+#[test]
+fn a_kept_key_file_is_named_and_a_renamed_one_is_silent() {
+    use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
+    crate::strings::set_locale("en");
+    let kept = |cause| DecryptedNames::Kept { cause };
+    let renamed = DecryptedNames::Renamed {
+        mirror_sectors_restored: 1,
+    };
+    assert_eq!(names_note(None, true), None);
+    assert_eq!(names_note(Some(&renamed), true), None);
+    assert_eq!(names_note(Some(&renamed), false), None);
+    for iso in [true, false] {
+        for cause in [
+            NamesKept::Damaged,
+            NamesKept::Collision,
+            NamesKept::Unexpected,
+        ] {
+            let note = names_note(Some(&kept(cause)), iso).expect("a kept name is reported");
+            assert!(
+                note.contains("Unit_Key_RO.inf") && note.contains("VLC"),
+                "{note}"
+            );
+            // Only a damaged ISO can be renamed by a later run.
+            let retry = iso && cause == NamesKept::Damaged;
+            assert_eq!(
+                note.contains("Unit_Key_RO.bak"),
+                retry,
+                "{cause:?} iso={iso}: {note}"
+            );
+        }
+    }
+}

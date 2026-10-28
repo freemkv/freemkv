@@ -32,6 +32,33 @@ pub fn retry_with_multipass_hint() -> String {
     )
 }
 
+/// A decrypted copy that keeps `AACS/Unit_Key_RO.inf` says so: some players then treat it
+/// as encrypted. `None` once it was renamed (or there was nothing to rename). Only an ISO
+/// whose directory was unreadable can be renamed by a later run, so only it says so.
+///
+/// `get_or` with literal keys: new keys, and the key-drift check reads them as written.
+pub fn names_note(
+    names: Option<&libfreemkv::whole_disc::DecryptedNames>,
+    iso: bool,
+) -> Option<String> {
+    use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
+    let DecryptedNames::Kept { cause } = names? else {
+        return None;
+    };
+    let mut note = crate::strings::get_or(
+        "rip.aacs_key_file_kept",
+        "The copy keeps AACS/Unit_Key_RO.inf, so some players (such as VLC) may treat it as encrypted. Its content is decrypted.",
+    );
+    if iso && *cause == NamesKept::Damaged {
+        note.push(' ');
+        note.push_str(&crate::strings::get_or(
+            "rip.aacs_key_file_kept_retry",
+            "A resumed run that reads the damaged area renames it to Unit_Key_RO.bak.",
+        ));
+    }
+    Some(note)
+}
+
 #[cfg(test)]
 #[path = "disc_copy_verdict_tests.rs"]
 mod tests;

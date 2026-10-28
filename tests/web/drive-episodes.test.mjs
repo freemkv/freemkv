@@ -64,3 +64,17 @@ test('an episode row shows its own at-risk time', async () => {
   assert.match(html, /A<\/span><span class="warn"[^>]*>~12s at risk/);
   assert.doesNotMatch(html, /B<\/span><span class="warn"/);
 });
+
+async function bannersHtml() {
+  const source = await readFile(new URL('../../src/server/web/assets/ripper.js', import.meta.url), 'utf8');
+  const context = vm.createContext({ esc: s => String(s ?? '').replace(/</g, '&lt;'), escLinks: s => s, lossAborted: () => false });
+  vm.runInContext(source.slice(source.indexOf('function bannersHtml('), source.indexOf('function actionsFor(')), context);
+  return context.bannersHtml;
+}
+
+test('a finished rip shows its notice, escaped', async () => {
+  const html = (await bannersHtml())({ status: 'done', notice: 'Keeps <Unit_Key_RO.inf>' });
+  assert.match(html, /class="banner warn"/);
+  assert.match(html, /Keeps &lt;Unit_Key_RO.inf>/);
+  assert.equal((await bannersHtml())({ status: 'done', notice: '' }), '');
+});

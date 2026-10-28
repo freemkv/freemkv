@@ -2,6 +2,7 @@
 //! rips comes through here — no engine types leak into the AppKit shell.
 
 use freemkv_engine as fe;
+use libfreemkv::whole_disc::DecryptedNames;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -2065,7 +2066,15 @@ pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String
 /// either (see [`fe::CopyResult`]'s doc). `complete` means "nothing pending
 /// AND nothing lost AND not interrupted"; both shortfalls are named in the
 /// message when it is false. The partial image is kept in every case.
-pub fn summarize_image_decrypt(result: &fe::CopyResult, dest: &std::path::Path) -> String {
+pub fn summarize_image_decrypt(
+    result: &fe::CopyResult,
+    dest: &std::path::Path,
+    names: Option<&DecryptedNames>,
+) -> String {
+    with_names_note(image_decrypt_line(result, dest), names, true)
+}
+
+fn image_decrypt_line(result: &fe::CopyResult, dest: &std::path::Path) -> String {
     let gib = result.bytes_good as f64 / 1_073_741_824.0;
     let mib = |b: u64| b as f64 / 1_048_576.0;
     if result.halted {
@@ -2114,6 +2123,19 @@ pub fn summarize_image_decrypt(result: &fe::CopyResult, dest: &std::path::Path) 
 /// Cancel mid-extraction cannot read as a complete write. Pure so the
 /// mapping is unit-testable without a real disc/extraction.
 pub fn summarize_extract(res: &libfreemkv::ExtractResult, dest: &std::path::Path) -> String {
+    with_names_note(extract_line(res, dest), res.names.as_ref(), false)
+}
+
+// A kept `Unit_Key_RO.inf` goes on its own line under the summary (shared renderer).
+fn with_names_note(mut summary: String, names: Option<&DecryptedNames>, iso: bool) -> String {
+    if let Some(note) = crate::disc_copy_verdict::names_note(names, iso) {
+        summary.push('\n');
+        summary.push_str(&note);
+    }
+    summary
+}
+
+fn extract_line(res: &libfreemkv::ExtractResult, dest: &std::path::Path) -> String {
     let n = res.files.len();
     if res.halted {
         format!(
@@ -3111,21 +3133,21 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                 ..fe::RunWith::default()
             };
             let copied = match fe::run_with(&plan, with, sink) {
-                Ok(fe::Report::Image { copy, .. }) => Ok(copy),
+                Ok(fe::Report::Image { copy, names, .. }) => Ok((copy, names)),
                 Ok(_) => Err(libfreemkv::Error::StreamUrlInvalid {
                     url: plan.dest.clone(),
                 }),
                 Err(e) => Err(e),
             };
-            let halted = matches!(&copied, Ok(r) if r.halted);
+            let halted = matches!(&copied, Ok((r, _)) if r.halted);
             let res = copied
                 .map_err(|e| failed_with("image decrypt failed", &e))
-                .and_then(|result| {
+                .and_then(|(result, names)| {
                     if recovery_produced_no_data(result.bytes_good) {
                         let _ = std::fs::remove_file(&dest);
                         return Err("No readable data — no image was written.".into());
                     }
-                    Ok(summarize_image_decrypt(&result, &dest))
+                    Ok(summarize_image_decrypt(&result, &dest, names.as_ref()))
                 });
             release_iso_lock(lock, &res, halted, &dest, state);
             return res;
@@ -3471,7 +3493,11 @@ fn disc_raw_copy(kind: OutKind, raw: bool) -> bool {
 // Matches the CLI's `copy_verdict`: NOTHING readable is the only failure, and that (unusable)
 // ISO is kept, not deleted. Any copy short of some sectors still succeeds and always names the
 // loss and points at another run (shared `disc_copy_verdict` renderer, can't drift from the CLI).
-fn iso_recovery_result(result: &fe::MultipassResult, iso_path: &str) -> Result<String, String> {
+fn iso_recovery_result(
+    result: &fe::MultipassResult,
+    iso_path: &str,
+    names: Option<&DecryptedNames>,
+) -> Result<String, String> {
     if recovery_produced_no_data(result.good_bytes) {
         // Names where it was kept, like every other terminal message here does.
         return Err(format!(
@@ -3484,7 +3510,11 @@ fn iso_recovery_result(result: &fe::MultipassResult, iso_path: &str) -> Result<S
         note.push('\n');
         note.push_str(&crate::disc_copy_verdict::retry_with_multipass_hint());
     }
-    Ok(format!("ISO image written to {iso_path}{note}"))
+    Ok(with_names_note(
+        format!("ISO image written to {iso_path}{note}"),
+        names,
+        true,
+    ))
 }
 
 // Rip from a live optical drive (disc://). Scans once (no key call), resolves the rip's keys
@@ -3691,10 +3721,12 @@ fn run_disc_scanning(
                 locked: true,
                 ..fe::RunWith::default()
             };
-            let result = match fe::run_with(&plan, with, sink) {
+            let (result, names) = match fe::run_with(&plan, with, sink) {
                 Ok(fe::Report::Image {
-                    recovery: Some(r), ..
-                }) => Ok(r),
+                    recovery: Some(r),
+                    names,
+                    ..
+                }) => Ok((r, names)),
                 Ok(_) => Err(libfreemkv::Error::StreamUrlInvalid {
                     url: plan.dest.clone(),
                 }),
@@ -3720,7 +3752,7 @@ fn run_disc_scanning(
             }
 
             if want_iso {
-                return iso_recovery_result(&result, &iso_path);
+                return iso_recovery_result(&result, &iso_path, names.as_ref());
             }
 
             // Title output: mux the selected titles from the recovered (encrypted, see

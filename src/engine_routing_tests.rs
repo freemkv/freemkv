@@ -51,7 +51,7 @@ fn the_private_disc_seams_still_go_through_their_guards() {
     //    the shipped defaults fail before reading a sector.
     let recover = slice(
         "        let mut job = recovery_job(&req.source, &iso_path, &indices);",
-        "            let result = match fe::run_with(&plan, with, sink) {",
+        "            let (result, names) = match fe::run_with(&plan, with, sink) {",
     );
     assert!(
         recover.contains("recovery_raw(req.multipass, want_iso, req.raw)"),
@@ -1605,15 +1605,15 @@ fn the_gui_raw_disc_to_iso_scan_requests_raw_copy() {
 // is kept, not deleted. A holed image always succeeds and always points at another run.
 #[test]
 fn an_iso_copy_takes_the_cli_copy_verdict() {
-    assert!(iso_recovery_result(&clean_result(), "/x.iso").is_ok());
+    assert!(iso_recovery_result(&clean_result(), "/x.iso", None).is_ok());
     let no_data = fe::MultipassResult {
         good_bytes: 0,
         unreadable_bytes: 1_048_576,
         complete: false,
         ..clean_result()
     };
-    let err =
-        iso_recovery_result(&no_data, "/x.iso").expect_err("no data at all is the only failure");
+    let err = iso_recovery_result(&no_data, "/x.iso", None)
+        .expect_err("no data at all is the only failure");
     assert!(
         err.contains("/x.iso"),
         "the no-data error must say where the (unusable but kept) ISO is: {err}"
@@ -1627,7 +1627,7 @@ fn an_iso_copy_takes_the_cli_copy_verdict() {
         complete: false,
         ..clean_result()
     };
-    let msg = iso_recovery_result(&holed, "/x.iso").expect("a holed copy still succeeds");
+    let msg = iso_recovery_result(&holed, "/x.iso", None).expect("a holed copy still succeeds");
     assert!(
         msg.contains("1.0")
             && msg.contains(crate::disc_copy_verdict::retry_with_multipass_hint().as_str()),

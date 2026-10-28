@@ -258,6 +258,7 @@ fn a_lossy_copy_reports_its_loss_and_exits_with_its_own_code() {
             &lossy,
             None,
             std::path::Path::new("/nonexistent/x.iso"),
+            None,
             std::time::Instant::now(),
             &quiet,
         )
@@ -285,6 +286,62 @@ fn a_lossy_copy_reports_its_loss_and_exits_with_its_own_code() {
     assert!(
         arm.contains("retry_with_multipass_hint()"),
         "a lossy sweep must always point at another run"
+    );
+}
+
+// A copy that keeps `Unit_Key_RO.inf` says so, even under -q, before "Complete"; the exit
+// code is the verdict's alone.
+#[test]
+fn a_kept_key_file_is_reported_before_complete() {
+    use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
+    crate::strings::set_locale("en");
+    let kept = DecryptedNames::Kept {
+        cause: NamesKept::Damaged,
+    };
+    let render = |out: &Output, names| {
+        crate::output::capture(|| {
+            super::render_copy(
+                &copy_result(false, 1 << 20, 0),
+                None,
+                std::path::Path::new("/nonexistent/x.iso"),
+                names,
+                std::time::Instant::now(),
+                out,
+            )
+        })
+    };
+    let (code, printed) = render(&loud(), Some(&kept));
+    assert_eq!(code, 0, "{printed}");
+    let note = printed
+        .find("Unit_Key_RO.inf")
+        .expect("the note is printed");
+    assert!(printed.contains("Unit_Key_RO.bak"), "{printed}");
+    let complete = printed.find("Complete").expect("Complete is printed");
+    assert!(note < complete, "{printed}");
+    let (_, printed) = render(&quiet(), Some(&kept));
+    assert!(printed.contains("Unit_Key_RO.inf"), "{printed:?}");
+    let renamed = DecryptedNames::Renamed {
+        mirror_sectors_restored: 0,
+    };
+    let (code, printed) = render(&loud(), Some(&renamed));
+    assert_eq!(code, 0);
+    assert!(!printed.contains("Unit_Key_RO"), "{printed}");
+
+    // A folder: same note, no ISO-only retry sentence, before the summary.
+    let res = libfreemkv::ExtractResult {
+        complete: true,
+        names: Some(kept),
+        ..Default::default()
+    };
+    let (ok, printed) = crate::output::capture(|| super::render_extract(&res, &loud()));
+    assert!(ok, "{printed}");
+    let note = printed
+        .find("Unit_Key_RO.inf")
+        .expect("the note is printed");
+    assert!(!printed.contains("Unit_Key_RO.bak"), "{printed}");
+    assert!(
+        note < printed.find("Extracted").expect("summary"),
+        "{printed}"
     );
 }
 

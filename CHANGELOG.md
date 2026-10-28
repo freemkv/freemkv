@@ -23,6 +23,8 @@
 - Decrypted folder backups keep navigation, menu and protection files, and use the same reader, decryption and recovery as ISO backups; a disc with damaged UDF metadata still backs up with its original names. (CLI, app, server)
 - Resumed jobs keep their captured output format, saved whole-disc ISO jobs resume without episode selection, and landing evidence is kept until the output link is durable. (server only: Library resume and delivery)
 - MediaTek (LD) drives that answer UNIT ATTENTION while restarting after a firmware upload are read again instead of re-uploaded. (CLI, app, server)
+- Decrypted ISO copies rename AACS/Unit_Key_RO.inf after the copy finishes, so a multi-pass or resumed copy never mixes renamed and original directory sectors; an unreadable metadata mirror copy is rebuilt from the main copy. (CLI, app, server)
+- When the rename cannot be done, the result says the copy keeps Unit_Key_RO.inf and that VLC may treat it as encrypted. (CLI, app, server)
 
 ## [1.8.5] — 2026-10-19
 

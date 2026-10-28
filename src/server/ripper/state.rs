@@ -152,6 +152,8 @@ pub struct RipState {
     /// the operator can deliver the rip as-is instead of re-ripping.
     pub loss_aborted: bool,
     pub last_error: String,
+    /// What a finished rip still tells the operator (a kept `Unit_Key_RO.inf`); "" for none.
+    pub notice: String,
     pub output_file: String,
     pub tmdb_title: String,
     pub tmdb_year: u16,
@@ -316,6 +318,7 @@ impl Default for RipState {
             largest_gap_ms: 0.0,
             loss_aborted: false,
             last_error: String::new(),
+            notice: String::new(),
             output_file: String::new(),
             tmdb_title: String::new(),
             tmdb_year: 0,
