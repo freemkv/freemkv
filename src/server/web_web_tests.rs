@@ -4931,19 +4931,28 @@ fn card_decoration_releases_state_before_entry_and_stop_can_claim_and_cancel() {
 }
 
 #[test]
-fn a_refused_eject_answers_with_its_cause_and_keeps_the_disc_shown() {
+fn a_failed_eject_answers_409_with_the_errors_own_code_and_keeps_the_disc_shown() {
     let dev = format!("eject-refused-{}", std::process::id());
-    let (status, body) = eject_outcome(&dev, false);
+    let unplugged = libfreemkv::Error::DeviceNotFound {
+        path: "/dev/sg9".into(),
+    };
+    let (status, body) = eject_outcome(&dev, Err(unplugged));
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(status, 409);
     assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().starts_with("E1005 "), "{body}");
+    assert!(v["error"].as_str().unwrap().starts_with("E1000 "), "{body}");
     let row = ripper::STATE.lock().unwrap().get(&dev).cloned().unwrap();
     assert_eq!(row.status, "idle");
     assert!(row.disc_present, "the disc is still in the drive");
 
+    let lost = libfreemkv::Error::DeviceNotReady {
+        path: "/dev/sg9".into(),
+    };
+    let (_, body) = eject_outcome(&dev, Err(lost));
+    assert!(body.contains("E1002 "), "{body}");
+
     let dev = format!("eject-taken-{}", std::process::id());
-    let (status, body) = eject_outcome(&dev, true);
+    let (status, body) = eject_outcome(&dev, Ok(()));
     assert_eq!((status, body.as_str()), (200, r#"{"ok":true}"#));
     assert!(
         !ripper::STATE

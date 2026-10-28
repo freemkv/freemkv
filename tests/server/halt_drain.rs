@@ -116,7 +116,7 @@ fn test_eject_halts_and_drains_the_rip_thread_before_dropping_the_session() {
 
     // No session is held and the path is no drive, so the eject itself is skipped; the
     // halt-and-drain that precedes it is what this pins.
-    ripper::eject_drive(&format!("/dev/{device}"));
+    let _ = ripper::eject_drive(&format!("/dev/{device}"));
 
     assert!(halt.is_cancelled(), "eject did not halt the rip thread");
     assert!(

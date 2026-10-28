@@ -84,7 +84,7 @@ fn eject_addresses_a_backslash_path_by_its_device_key() {
     let key = format!("FaCdRom{}", std::process::id());
     let halt = libfreemkv::Halt::new();
     register_halt(&key, halt.clone());
-    eject_drive(&format!(r"\\.\{key}"));
+    let _ = eject_drive(&format!(r"\\.\{key}"));
     assert!(halt.is_cancelled(), "the device's rip was stopped");
     assert!(device_halt(&key).is_none(), "and its halt unregistered");
 }

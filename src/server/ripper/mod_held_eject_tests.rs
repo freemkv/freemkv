@@ -28,9 +28,22 @@ fn eject_drive_uses_the_held_session_handle() {
     };
     store_session(&dev, session);
     register_halt(&dev, halt.clone());
-    eject_drive(&format!("/nonexistent/{dev}"));
+    let _ = eject_drive(&format!("/nonexistent/{dev}"));
     assert!(halt.is_cancelled());
     assert_eq!(fake.count(is_eject), 1, "{:02x?}", fake.cdbs());
     assert_eq!(fake.live_handles(), 0, "the held handle is closed");
     assert!(take_session(&dev).is_none());
+}
+
+#[test]
+fn a_not_ready_reopen_after_a_failed_first_eject_counts_as_ejected() {
+    use super::eject_verdict;
+    let not_ready = || libfreemkv::Error::DeviceNotReady { path: "x".into() };
+    assert!(eject_verdict(true, Err(not_ready())).is_ok());
+    // Without a failed first eject, not ready is just a failure.
+    assert!(eject_verdict(false, Err(not_ready())).is_err());
+    // Other errors stay errors.
+    let gone = libfreemkv::Error::DeviceNotFound { path: "x".into() };
+    assert_eq!(eject_verdict(true, Err(gone)).unwrap_err().code(), 1000);
+    assert!(eject_verdict(true, Ok(())).is_ok());
 }

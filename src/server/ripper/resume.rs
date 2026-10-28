@@ -1917,7 +1917,7 @@ fn resume_remux_within<S>(
         // already ejected, and the drive may hold a different disc.
         if super::should_auto_eject(cfg_read.auto_eject, device) {
             let device_path = format!("/dev/{}", device);
-            super::eject_drive(&device_path);
+            let _ = super::eject_drive(&device_path);
         }
         return;
     }
@@ -2466,7 +2466,7 @@ fn resume_remux_within<S>(
     // (`should_auto_eject` skips the synthetic `_mux` device).
     if super::should_auto_eject(cfg_read.auto_eject, device) {
         let device_path = format!("/dev/{}", device);
-        super::eject_drive(&device_path);
+        let _ = super::eject_drive(&device_path);
     }
 }
 

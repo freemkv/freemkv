@@ -4337,7 +4337,7 @@ fn rip_disc_inner(
                     h.cancel();
                 }
                 drop(session);
-                eject_drive(device_path);
+                let _ = eject_drive(device_path);
             } else {
                 drop(session);
                 unregister_halt(device);
@@ -4482,7 +4482,7 @@ fn rip_disc_inner(
                     h.cancel();
                 }
                 drop(session);
-                eject_drive(device_path);
+                let _ = eject_drive(device_path);
             } else {
                 drop(session);
                 unregister_halt(device);
@@ -5241,7 +5241,7 @@ fn rip_disc_inner(
     // every remaining log line must be emitted first or it lands in the NEXT
     // rip's ring. Routed through `should_auto_eject`, where the eject-once rule lives.
     if should_auto_eject(cfg_read.auto_eject, device) {
-        eject_drive(device_path);
+        let _ = eject_drive(device_path);
     }
 }
 
@@ -5251,8 +5251,8 @@ pub(crate) fn should_auto_eject(auto_eject: bool, device: &str) -> bool {
     auto_eject && !device.starts_with('_')
 }
 
-/// Eject the disc in `device_path`; whether the drive took the eject.
-pub fn eject_drive(device_path: &str) -> bool {
+/// Eject the disc in `device_path`; the error says why the drive did not take it.
+pub fn eject_drive(device_path: &str) -> Result<(), libfreemkv::Error> {
     let dev = device_key(device_path);
     let dev = dev.as_str();
     // Halt and drain any in-flight rip on this device BEFORE dropping
@@ -5272,43 +5272,59 @@ pub fn eject_drive(device_path: &str) -> bool {
     // Pre-0.25.2 both branches here used `let _ =` and any failure was
     // invisible: the user-facing symptom was "auto_eject is set but the
     // disc stayed put, no log line, no idea why". Surface both.
+    let mut first_failed = false;
     if let Some(d) = held {
         match libfreemkv::DiscSession::from_drive(d).finish(libfreemkv::Finish::Eject) {
-            Ok(()) => return true,
+            Ok(()) => return Ok(()),
             Err(e) => {
+                first_failed = true;
                 tracing::warn!(device = %dev, error = %e, "eject on the held handle failed; reopening")
             }
         }
     }
-    match freemkv_engine::drive::open(std::path::Path::new(device_path)) {
-        Ok(drive) => {
-            let session = libfreemkv::DiscSession::from_drive(drive);
-            match session.finish(libfreemkv::Finish::Eject) {
-                Ok(()) => true,
-                Err(e) => {
-                    crate::server::log::device_log(dev, &format!("eject failed: {e}"));
-                    tracing::warn!(device = %dev, error = %e, "eject command failed");
-                    false
-                }
-            }
-        }
+    let second = match freemkv_engine::drive::open(std::path::Path::new(device_path)) {
+        Ok(drive) => libfreemkv::DiscSession::from_drive(drive).finish(libfreemkv::Finish::Eject),
         Err(e) => {
             crate::server::log::device_log(dev, &format!("eject skipped — drive open failed: {e}"));
             tracing::warn!(device = %dev, error = %e, "eject skipped — drive open failed");
-            false
+            return Err(e);
         }
+    };
+    let verdict = eject_verdict(first_failed, second);
+    if let Err(e) = &verdict {
+        crate::server::log::device_log(dev, &format!("eject failed: {e}"));
+        tracing::warn!(device = %dev, error = %e, "eject command failed");
     }
+    verdict
+}
+
+// After a failed first eject, a re-open that finds the drive not ready or without a
+// medium most likely means the tray already opened: that is an eject.
+fn eject_verdict(
+    first_failed: bool,
+    second: Result<(), libfreemkv::Error>,
+) -> Result<(), libfreemkv::Error> {
+    match second {
+        Err(e) if first_failed && no_medium(&e) => {
+            tracing::info!(error = %e, "eject: drive not ready after a failed first eject; treating the tray as open");
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn no_medium(e: &libfreemkv::Error) -> bool {
+    matches!(e, libfreemkv::Error::DeviceNotReady { .. })
+        || e.scsi_sense().is_some_and(|s| s.is_not_ready())
 }
 
 /// The operator's Eject. A disc that left the drive ends its insertion and any Stop's
 /// hold on it, so the next disc in starts on_insert even if no poll saw the drive empty.
-/// Whether the drive took the eject.
-pub fn operator_eject(device_path: &str) -> bool {
-    let took = eject_drive(device_path);
-    if took {
-        state::note_medium_changed(&device_key(device_path));
-    }
-    took
+/// An error says why the drive did not take the eject.
+pub fn operator_eject(device_path: &str) -> Result<(), libfreemkv::Error> {
+    eject_drive(device_path)?;
+    state::note_medium_changed(&device_key(device_path));
+    Ok(())
 }
 
 // `sanitize_filename` / `format_duration` live in `util`.
@@ -6731,7 +6747,7 @@ fn format_lib_error(phase: &str, e: &libfreemkv::Error) -> String {
 
 // The shared catalog's line for `e`, code first (`E6022 This image …`), with the error's own
 // data as `{detail}`. Every published code has an entry, so no failure reads as "unexpected".
-fn catalog_message(e: &libfreemkv::Error) -> String {
+pub(crate) fn catalog_message(e: &libfreemkv::Error) -> String {
     let code = e.code();
     let shown = e.to_string();
     let detail = shown
