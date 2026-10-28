@@ -17,6 +17,13 @@ import tempfile
 from media_history import content_hash
 
 
+def redact(text, *secrets):
+    """Hide the key values and any URL before text reaches the published report."""
+    for secret in sorted(filter(None, secrets), key=len, reverse=True):
+        text = text.replace(secret, '<redacted>')
+    return re.sub(r'https?://[^\s\'"<>)]+', '<redacted>', text)
+
+
 def sha256(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -202,7 +209,7 @@ def main():
                   f"folder status {report['families'][name]['folder_title_status']}",
                   flush=True)
     except Exception as error:
-        report['error'] = str(error)
+        report['error'] = redact(str(error), args.key_url, args.key_auth)
         raise
     finally:
         (args.out / 'full-disc-qa.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
