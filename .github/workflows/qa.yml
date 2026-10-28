@@ -21,7 +21,7 @@ on:
         type: boolean
         default: false
       skip_macos:
-        description: Omit macOS hosted tests for an explicitly requested Linux/Windows QA run.
+        description: Omit macOS hosted tests (ignored on qa, which always runs macOS).
         type: boolean
         default: false
       skip_media:
@@ -133,31 +133,36 @@ jobs:
           FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, socket, urllib.error, urllib.parse, urllib.request
+          import json, os, socket, ssl, urllib.error, urllib.request
           if not os.path.isfile('canary.json'):
               print('no canary report to diagnose')
               raise SystemExit(0)
           if json.load(open('canary.json')).get('ok'):
               raise SystemExit(0)
+          # Type only: no host, address, port, path or token detail in public logs.
           url = os.environ['FMKV_KEY_URL']
           auth = os.environ['FMKV_KEY_AUTH'].strip()
-          host = urllib.parse.urlsplit(url).hostname
-          print('key-service host:', host)
-          print('token fingerprint:', hashlib.sha256(auth.encode()).hexdigest()[:12])
-          print('HTTPS proxy configured:', bool(os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy')))
           try:
-              print('DNS addresses:', sorted({item[4][0] for item in socket.getaddrinfo(host, 443)}))
               request = urllib.request.Request(url, data=b'{}', method='POST', headers={
                   'Content-Type': 'application/json', 'Authorization': 'Bearer ' + auth})
               with urllib.request.urlopen(request, timeout=8) as response:
-                  print('short HTTPS probe status:', response.status)
+                  print('key-service probe: HTTP', response.status)
           except urllib.error.HTTPError as error:
-              print('short HTTPS probe status:', error.code)
+              print('key-service probe: HTTP', error.code)
               error.close()
           except Exception as error:
-              reason = getattr(error, 'reason', None)
-              print('short HTTPS probe error:', type(error).__name__, type(reason).__name__,
-                    getattr(reason, 'errno', None))
+              reason = getattr(error, 'reason', error)
+              if isinstance(reason, socket.gaierror):
+                  kind = 'dns failure'
+              elif isinstance(reason, ConnectionRefusedError):
+                  kind = 'connect refused'
+              elif isinstance(reason, (socket.timeout, TimeoutError)):
+                  kind = 'timeout'
+              elif isinstance(reason, ssl.SSLError):
+                  kind = 'tls failure'
+              else:
+                  kind = 'other (' + type(reason).__name__ + ')'
+              print('key-service probe error:', kind)
           PY
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         continue-on-error: true
@@ -240,7 +245,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.skip_macos && '["ubuntu-24.04"]' || '["ubuntu-24.04","macos-latest"]') }}
+        os: ${{ fromJSON(inputs.skip_macos && github.ref != 'refs/heads/qa' && '["ubuntu-24.04"]' || '["ubuntu-24.04","macos-latest"]') }}
         # CLI build, then the app build.
         features: ['', '--features gui']
     runs-on: ${{ matrix.os }}
@@ -399,7 +404,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.skip_macos && '["ubuntu-24.04"]' || '["ubuntu-24.04","macos-latest"]') }}
+        os: ${{ fromJSON(inputs.skip_macos && github.ref != 'refs/heads/qa' && '["ubuntu-24.04"]' || '["ubuntu-24.04","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

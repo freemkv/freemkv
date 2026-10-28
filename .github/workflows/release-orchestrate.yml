@@ -540,6 +540,22 @@ jobs:
               if $PRERELEASE; then refuse_qa_candidate_tag "$r"; fi
             done
 
+            # An already-released version must not be re-run over a newer qa candidate: every
+            # release_* step would skip as a resume, then main would jump to qa HEAD.
+            if ! $PRERELEASE; then
+              local fmkv_tag; fmkv_tag=$(remote_tag_commit "$CANONICAL_ROOT/freemkv")
+              if [ -n "$fmkv_tag" ]; then
+                local rtag
+                for r in "${repos[@]}"; do
+                  rtag=$(remote_tag_commit "$r")
+                  [ -n "$rtag" ] || continue
+                  at_release_point "$r" HEAD "$rtag" \
+                    || die "$(basename "$r"): v$VERSION is already released; release the qa candidate as a new version"
+                done
+                ok "v$VERSION is tagged and every repo is still at its release point (resume)"
+              fi
+            fi
+
             # Release notes must exist (cheap, file-only; NOT code verification).
             # A prerelease (rc) reuses the base version's notes — there is no
             # `[X.Y.Z-rcN]` heading or consumer-notes file — so skip this gate.
@@ -570,6 +586,21 @@ jobs:
                 ok "consumer notes present: .github/release-notes/$VERSION.md"
               fi
             fi
+          }
+
+          # remote_tag_commit <dir>: the commit v$VERSION points to on origin ('' if no tag).
+          remote_tag_commit() {
+            local dir="$1" refs
+            refs=$(git -C "$dir" ls-remote origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}") \
+              || die "$(basename "$dir"): cannot list tags on origin"
+            awk -v t="refs/tags/v$VERSION" '{c[$2]=$1} END {print (c[t "^{}"] != "" ? c[t "^{}"] : c[t])}' <<<"$refs"
+          }
+
+          # at_release_point <dir> <rev> <tag-commit>: rev is the tagged commit, or the single
+          # post-tag dependency-restore commit directly on it. Anything further is new work.
+          at_release_point() {
+            local rev; rev=$(git -C "$1" rev-parse "$2")
+            [ "$rev" = "$3" ] || [ "$(git -C "$1" rev-parse "$rev^" 2>/dev/null)" = "$3" ]
           }
 
           # qa.yml stamps LIGHTWEIGHT vX.Y.Z-rcN candidate tags; this cascade's tags are
@@ -1989,7 +2020,7 @@ jobs:
 
           # Preserve post-tag development dependency restores while aligning all branches.
           advance_main_to_release() {
-            local dir="$1" name target branch
+            local dir="$1" name target branch tagged
             name=$(basename "$dir")
             if $DRY_RUN; then
               printf '  [dry-run] %s: fast-forward main, qa and dev to the completed release branch\n' "$name"
@@ -2000,8 +2031,10 @@ jobs:
             target=$(git -C "$dir" rev-parse HEAD)
             [ "$(git -C "$dir" rev-parse origin/qa)" = "$target" ] \
               || die "$name: qa changed after this release snapshot; refusing to publish concurrent work"
-            git -C "$dir" merge-base --is-ancestor "v$VERSION" "$target" \
-              || die "$name: qa does not contain v$VERSION"
+            tagged=$(remote_tag_commit "$dir")
+            [ -n "$tagged" ] || die "$name: v$VERSION is not on origin"
+            at_release_point "$dir" "$target" "$tagged" \
+              || die "$name: refusing to move main to $target; v$VERSION points to $tagged"
             for branch in main qa dev; do
               git -C "$dir" merge-base --is-ancestor "origin/$branch" "$target" \
                 || die "$name: $branch advanced outside this release; reconcile without rewriting history"

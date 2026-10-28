@@ -185,10 +185,11 @@ class ReleaseBranchTests(unittest.TestCase):
             git('commit', '--allow-empty', '-m', 'release')
             git('tag', 'v1.7.7')
             git('commit', '--allow-empty', '-m', 'restore development dependency')
-            git('push', 'origin', 'qa')
+            git('push', 'origin', 'qa', 'v1.7.7')
             target = git('rev-parse', 'HEAD')
             function = embedded('          advance_main_to_release() {\n', '\n          preflight\n')
-            script = ('die() { echo "$*" >&2; exit 1; }; ok() { :; }; DRY_RUN=false; VERSION=1.7.7\n'
+            helpers = embedded("          # remote_tag_commit <dir>: the commit v$VERSION points to on origin ('' if no tag).\n", '\n          # qa.yml stamps')
+            script = ('die() { echo "$*" >&2; exit 1; }; ok() { :; }; DRY_RUN=false; VERSION=1.7.7\n' + helpers + '\n'
                       + 'advance_main_to_release() {\n' + function + '\nadvance_main_to_release "$1"\n')
 
             def align():
