@@ -222,3 +222,25 @@ fn a_probe_glitch_never_re_rips_a_finished_disc() {
     p.present();
     assert_eq!(p.started, 2, "a swapped disc is new");
 }
+
+// The poller's wedge warning overwrites the `done` row; the finished insertion must
+// still survive further failed probes, and a medium change must still end it.
+#[test]
+fn a_wedge_row_does_not_unfinish_a_delivered_disc() {
+    let mut p = Poller::new("wedge");
+    p.present();
+    p.rip_finishes();
+    assert!(publish_poll_row(
+        &p.dev,
+        RipState {
+            device: p.dev.clone(),
+            status: "error".into(),
+            disc_present: true,
+            last_error: "Drive communication failed repeatedly (E4000). Retrying automatically."
+                .into(),
+            ..Default::default()
+        },
+    ));
+    assert!(same_insertion(&p.dev, &no_answer(), true));
+    assert!(!same_insertion(&p.dev, &medium_changed(), true));
+}

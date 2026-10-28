@@ -1146,6 +1146,7 @@ fn same_insertion(
         });
     if changed {
         state::release_stopped_disc(device);
+        state::clear_finished_insertion(device);
     }
     let failed = probe.is_err() && !state::rip_finished(device);
     had_disc && !changed && !failed
@@ -1509,6 +1510,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                         continue;
                     }
                     PollAction::Absent { removed } => {
+                        state::clear_finished_insertion(&device);
                         if removed {
                             tracing::info!(device = %device, "disc removed");
                             drop_session(&device);

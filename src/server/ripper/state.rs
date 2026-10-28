@@ -386,19 +386,46 @@ static MEDIUM_CHANGED: once_cell::sync::Lazy<Mutex<std::collections::HashSet<Str
 /// no poll caught the drive empty in between.
 pub(super) fn note_medium_changed(device: &str) {
     release_stopped_disc(device);
+    clear_finished_insertion(device);
     MEDIUM_CHANGED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(device.into());
 }
 
-/// The last rip on `device` finished and delivered (status `done`).
+// Devices whose current insertion's rip finished; outlives the row's `done` status.
+static FINISHED_INSERTIONS: once_cell::sync::Lazy<Mutex<std::collections::HashSet<String>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
+
+fn latch_finished(device: &str, row: &RipState) {
+    if row.status == "done" {
+        FINISHED_INSERTIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(device.into());
+    }
+}
+
+/// The insertion in `device` is over (changed, ejected, absent, or re-claimed).
+pub(super) fn clear_finished_insertion(device: &str) {
+    FINISHED_INSERTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(device);
+}
+
+/// The last rip on `device` finished and delivered (status `done`, or latched once so,
+/// so a poller warning overwriting the row does not unfinish it).
 pub(super) fn rip_finished(device: &str) -> bool {
-    STATE
+    let done = STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(device)
-        .is_some_and(|row| row.status == "done")
+        .is_some_and(|row| row.status == "done");
+    done || FINISHED_INSERTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(device)
 }
 
 pub(super) fn take_medium_changed(device: &str) -> bool {
@@ -470,6 +497,7 @@ pub(super) fn is_in_cooldown(device: &str) -> bool {
 /// accumulate stale entries. Recovers poisoned locks before cleanup.
 pub(super) fn forget_device_state(device: &str) {
     release_stopped_disc(device);
+    clear_finished_insertion(device);
     take_medium_changed(device);
     super::forget_staging_hold(device);
     STOP_COOLDOWNS
@@ -568,6 +596,7 @@ pub fn update_state(device: &str, mut state: RipState) {
         // else: idle / done / error / failed → leave at 0 (clears
         // the elapsed-counter in the UI)
     }
+    latch_finished(device, &state);
     s.insert(device.to_string(), state);
 }
 
@@ -593,6 +622,7 @@ pub fn update_state_with<F: FnOnce(&mut RipState)>(device: &str, f: F) {
         ..Default::default()
     });
     f(entry);
+    latch_finished(device, entry);
     // Re-derive damage_severity after the mutation, matching `update_state`:
     // closures that bump errors/total_lost_ms (patch-pass, watchdog) would
     // otherwise leave a stale severity badge, since this path skips that.
@@ -643,6 +673,7 @@ pub fn try_claim_active_checked(device: &str, known: bool) -> Option<u64> {
     });
     entry.status = "scanning".to_string();
     entry.disc_present = true;
+    clear_finished_insertion(device);
     // Bump claim_gen so a stale detached worker can detect the device was
     // re-claimed and decline to reset it to idle. Saturating so it never wraps.
     entry.claim_gen = entry.claim_gen.saturating_add(1);
