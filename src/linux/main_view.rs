@@ -424,9 +424,11 @@ impl MainView {
                     "gui.home.use_startup",
                     "Use at startup",
                 ));
-                prefer.set_sensitive(
-                    !(v.startup_mode == "Open preferred drive" && v.preferred_drive == drive.label),
-                );
+                prefer.set_sensitive(crate::ui::can_prefer_home_drive(
+                    &v.startup_mode,
+                    &v.preferred_drive,
+                    &drive.label,
+                ));
                 let shell = self.shell.clone();
                 prefer.connect_clicked(move |_| {
                     if let Some(shell) = shell.upgrade() {

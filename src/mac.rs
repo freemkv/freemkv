@@ -1625,10 +1625,11 @@ impl Controller {
                         sel!(onHomePreferred:),
                     );
                     prefer.setTag(index as isize);
-                    prefer.setEnabled(
-                        !(v.startup_mode == "Open preferred drive"
-                            && v.preferred_drive == drive.label),
-                    );
+                    prefer.setEnabled(crate::ui::can_prefer_home_drive(
+                        &v.startup_mode,
+                        &v.preferred_drive,
+                        &drive.label,
+                    ));
                     rows.addSubview(&prefer);
                 }
             }
