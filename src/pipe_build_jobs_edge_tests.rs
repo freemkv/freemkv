@@ -7,7 +7,7 @@ fn an_empty_scanned_title_list_still_builds_a_job() {
     let out = Output::new(false, true);
     let dest = "mkv:///tmp/fmkv-empty-scan.mkv";
     let parsed = parse_url(dest);
-    let jobs = build_jobs(&Some(vec![]), false, &[], false, dest, &parsed, &out)
+    let jobs = build_jobs(&Some(vec![]), false, &[], false, dest, &parsed, &out, false, &None)
         .expect("an empty title list must not fail job building");
     assert_eq!(
         jobs.len(),
@@ -30,7 +30,7 @@ fn one_title_into_a_directory_is_still_named_per_title() {
         libfreemkv::DiscTitle::empty(),
         libfreemkv::DiscTitle::empty(),
     ]);
-    let jobs = build_jobs(&titles, false, &[1], true, &dest, &parsed, &out)
+    let jobs = build_jobs(&titles, false, &[1], true, &dest, &parsed, &out, false, &None)
         .expect("a directory dest accepts a single title");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].0, Some(0), "-t 1 is the first title, 0-based");
@@ -47,7 +47,7 @@ fn one_title_into_a_directory_is_still_named_per_title() {
     // The same title against a single FILE dest goes straight to that file.
     let file = "mkv:///tmp/fmkv-one.mkv";
     let pf = parse_url(file);
-    let jobs = build_jobs(&titles, false, &[1], false, file, &pf, &out)
+    let jobs = build_jobs(&titles, false, &[1], false, file, &pf, &out, false, &None)
         .expect("a file dest accepts a single title");
     assert_eq!(jobs, vec![(Some(0), file.to_string())]);
 
@@ -61,7 +61,7 @@ fn one_disc_title_into_a_directory_is_named_per_title() {
     let dir = super::tests::temp_path("disc-one-into-dir");
     let dest = format!("mkv://{}/", dir.display());
     let parsed = parse_url(&dest);
-    let jobs = build_jobs(&None, true, &[2], true, &dest, &parsed, &out)
+    let jobs = build_jobs(&None, true, &[2], true, &dest, &parsed, &out, false, &None)
         .expect("a directory dest accepts a single title");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].0, Some(1), "-t 2 is the second title, 0-based");
@@ -78,7 +78,7 @@ fn several_image_titles_fan_out_beside_a_single_file_name() {
     let dest = format!("mkv://{}", file.display());
     let parsed = parse_url(&dest);
     let titles = Some(vec![libfreemkv::DiscTitle::empty(); 4]);
-    let jobs = build_jobs(&titles, false, &[3, 4], false, &dest, &parsed, &out);
+    let jobs = build_jobs(&titles, false, &[3, 4], false, &dest, &parsed, &out, false, &None);
     let made_dir = file.is_dir();
     let _ = std::fs::remove_dir_all(file.parent().unwrap());
     let jobs = jobs.expect("several titles onto a file name must fan out, not refuse");
@@ -115,7 +115,7 @@ fn an_expanded_disc_selection_fans_out_beside_a_single_file_name() {
     let dest = "mkv:///tmp/fmkv-t-all.mkv";
     let parsed = parse_url(dest);
     let nums = disc_title_nums(true, &[], 12);
-    let jobs = build_jobs(&None, true, &nums, false, dest, &parsed, &out)
+    let jobs = build_jobs(&None, true, &nums, false, dest, &parsed, &out, false, &None)
         .expect("twelve titles fan out, not refuse");
     let beside = |n: u32| {
         let file = std::path::Path::new("/tmp").join(format!("fmkv-t-all_t{n}.mkv"));

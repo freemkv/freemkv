@@ -102,6 +102,7 @@ All URLs use the `scheme://path` format. No bare paths — always include the sc
 freemkv disc:// mkv://Movie.mkv                     # Main feature (the default since 1.6.0)
 freemkv disc:// mkv://Movie.mkv -t 1                # Title 1 explicitly
 freemkv disc:// mkv://out.mkv -t 1 -t 3             # Titles 1 and 3: out_t1.mkv and out_t3.mkv beside out.mkv
+freemkv disc:// mkv://out/ -t all --source-names    # All titles into out/, named after their playlists (00024.mkv, …)
 freemkv disc:// mkv://out/ -t all                   # Every title
 freemkv disc:// iso://Disc.iso                      # Full disc to ISO (decrypted)
 freemkv disc:// iso://Disc.iso --raw                # Full disc to ISO (encrypted)
@@ -261,6 +262,9 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 ```
 -t, --title N       Select title (1-based, repeatable). Default: the main
                     title only; use `-t all` for every title.
+    --source-names  When several titles produce several files, name each after
+                    the title's own source (00024.mpls → 00024.mkv) instead of
+                    <name>_t<N>.<ext>.
     --keydb PATH    KEYDB.cfg path (optional; only required for UHD / AACS 2.0+ discs)
     --log-level N   Log verbosity: 1 = warnings/errors only (default), 2 = info,
                     3 = debug, 4 = trace. At level ≥2 also widens human stdout detail.
