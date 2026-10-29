@@ -268,11 +268,8 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
             None
         };
 
-        // Sanitize SCSI INQUIRY strings: vendor/product/revision come from the
-        // drive/bridge firmware (untrusted — a spoofed enclosure could return
-        // terminal escapes), so strip control bytes like every other external field.
-        // The drive is named as everywhere else: the OS name (`E:`, `/dev/sr0`), then
-        // `VENDOR MODEL (rev FW)`; the raw device path follows only when it differs.
+        // Named as everywhere else (OS name, then `VENDOR MODEL (rev FW)`). INQUIRY strings
+        // are untrusted firmware bytes, so control characters are stripped.
         let path = drive.device_path().to_string();
         let name = libfreemkv::drive_info(&path)
             .map(|d| sanitize(d.name()))

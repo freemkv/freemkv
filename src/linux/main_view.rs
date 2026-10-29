@@ -402,7 +402,7 @@ impl MainView {
                     Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
                     None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
                 };
-                let label = gtk::Label::new(Some(&format!("{} — {status}", &drive.display)));
+                let label = gtk::Label::new(Some(&format!("{} — {status}", drive.display)));
                 label.set_xalign(0.0);
                 label.set_hexpand(true);
                 row.append(&label);
