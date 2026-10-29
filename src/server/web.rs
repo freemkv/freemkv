@@ -1483,10 +1483,7 @@ impl<In> IdleReCapTransport<In> {
         } else {
             idle
         };
-        ureq::unversioned::transport::NextTimeout {
-            after,
-            reason: timeout.reason,
-        }
+        ureq::unversioned::transport::NextTimeout { after, ..timeout }
     }
 }
 

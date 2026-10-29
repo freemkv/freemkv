@@ -372,6 +372,7 @@ impl<In> IdleReCapTransport<In> {
         ureq::unversioned::transport::NextTimeout {
             after,
             reason: ureq::Timeout::RecvBody,
+            ..timeout
         }
     }
 }

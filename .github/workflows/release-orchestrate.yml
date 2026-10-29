@@ -1021,6 +1021,16 @@ jobs:
 
           # ─────────────────── canonical Cargo.lock regen + verify ─────────────────
 
+          # registry_pins <lock>: every crates.io "name version" pin, sorted.
+          registry_pins() {
+            awk '
+              /^\[\[package\]\]/ { n=""; v=""; next }
+              /^name = /    { n=$3 }
+              /^version = / { v=$3 }
+              /^source = "registry+/ { gsub(/"/,"",n); gsub(/"/,"",v); print n" "v }
+            ' "$1" | sort
+          }
+
           # regenerate_lockfile <crate-dir>
           # Implements the canonical recipe verbatim.
           regenerate_lockfile() {
@@ -1056,7 +1066,14 @@ jobs:
 
             # Keep the lock qa tested: resolving re-locks only the re-pinned sibling tags.
             # A full regen upgraded every third-party crate past qa (1.8.6: ureq 3.5 broke the build).
+            local registry_before registry_after
+            registry_before=$(registry_pins "$dir/Cargo.lock")
             cargo "+$TOOLCHAIN" metadata --format-version 1 --manifest-path "$dir/Cargo.toml" >/dev/null
+            registry_after=$(registry_pins "$dir/Cargo.lock")
+            # A crates.io pin that moved ships code qa never built: stop before this tag.
+            local drift
+            drift=$(comm -13 <(printf '%s\n' "$registry_before") <(printf '%s\n' "$registry_after"))
+            [ -z "$drift" ] || die "$name: re-locking moved crates.io pins qa did not test: $(echo "$drift" | paste -sd, -). Update them on dev (cargo update -p <crate>), get qa green, then release."
 
             local restored
             for restored in "$cfg_disabled" "$root_cfg_disabled"; do

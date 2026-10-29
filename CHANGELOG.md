@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Builds with ureq 3.5, whose `NextTimeout` gained per-read and per-write fields; the lockfile now tests 3.5. (CLI, app, server)
 - A delivered disc is not ripped again after a long run of failed drive probes once the drive answers again. (server only: the Library's drive poller)
 - Eject reports why the drive refused, with its own code, instead of answering as if it had ejected. (server only: the Library's Eject)
 - A correction whose new plan fails logs the cause. (server only: the Library's card plan)
