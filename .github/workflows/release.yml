@@ -9,11 +9,12 @@ on:
       # which would have this workflow build and PUBLISH a GitHub release for
       # every candidate, including the red ones.
       - '!v*-rc*'
-    # Rehearsal: every push to qa builds every leg below that no other qa
-    # workflow already builds (the macOS app, all seven CLI binaries) and
-    # publishes nothing. release-orchestrate gates on this run, so a target
-    # that cannot build stops the release before any tag is public.
-    branches: [qa]
+    # Rehearsal: every push to dev and qa builds every leg below that no other
+    # workflow on that branch already builds (the macOS app, all seven CLI
+    # binaries) and publishes, signs and tags nothing. dev shows a break first;
+    # release-orchestrate gates on the qa run, so a target that cannot build
+    # stops the release before any tag is public.
+    branches: [dev, qa]
   # Backfill: build ONLY the targets added after a release (the legs marked
   # `backfill`, plus the multi-arch server image) from that tag's source, with
   # this workflow's packaging, and add them to its existing GitHub release. The
@@ -38,7 +39,7 @@ on:
 permissions:
   contents: read
 
-# A newer qa push supersedes a rehearsal; a tag build is never cancelled.
+# A newer push supersedes a rehearsal; a tag build is never cancelled.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: ${{ (github.event_name == 'push' && github.ref_type == 'branch') }}
@@ -63,8 +64,8 @@ jobs:
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::'$TAG' is not a release tag"; exit 1; }
           gh release view "$TAG" --json tagName,isDraft --jq '"\(.tagName) draft=\(.isDraft)"'
-      # The version every leg checks its binary against: the tag, or for a qa
-      # rehearsal the version qa would be released as.
+      # The version every leg checks its binary against: the tag, or for a
+      # rehearsal the version the branch would be released as.
       - name: Release version
         id: tag
         env:
@@ -141,7 +142,7 @@ jobs:
     # NOTE: deliberately does NOT `needs: test` — see the test job above.
     needs: verify
     # Already shipped for every macOS arch; a backfill never rebuilds it.
-    # A qa push rehearses it (built, bundled and verified, not uploaded).
+    # A dev or qa push rehearses it (built, bundled and verified, not uploaded).
     if: github.event_name == 'push'
     # Uploads assets to the GitHub release.
     permissions:
@@ -161,20 +162,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # qa rehearsal: build against the sibling crates' qa branches, as deb.yml
-      # does (the tag's pinned git deps exist only after the release tags them).
-      - name: Pin sibling sources (qa rehearsal)
+      # Rehearsal: build against the sibling crates' same branch (dev or qa), as
+      # deb.yml does (the tag's pinned git deps exist only after the release tags them).
+      - name: Pin sibling sources (rehearsal)
         if: (github.event_name == 'push' && github.ref_type == 'branch')
         shell: bash
         run: |
           set -euo pipefail
           for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
-            git clone --depth 1 --branch qa "https://github.com/freemkv/$repo.git" "siblings/$repo"
+            git clone --depth 1 --branch "$GITHUB_REF_NAME" "https://github.com/freemkv/$repo.git" "siblings/$repo"
           done
           # Windows runners have `python`, not always `python3`.
           py=$(command -v python3 || command -v python)
           "$py" - <<'PY'
-          import importlib.util, pathlib, tomllib
+          import importlib.util, os, pathlib, tomllib
           spec = importlib.util.spec_from_file_location('flatpak_prepare', 'packaging/flatpak/prepare.py')
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
@@ -182,7 +183,7 @@ jobs:
           for repo in module.REPOS[1:]:
               actual = tomllib.loads(pathlib.Path('siblings', repo, 'Cargo.toml').read_text())['package']['version']
               if actual != version:
-                  raise SystemExit(f'{repo} qa is {actual}, freemkv qa is {version}')
+                  raise SystemExit(f'{repo} {os.environ["GITHUB_REF_NAME"]} is {actual}, freemkv is {version}')
           config = pathlib.Path('.cargo/config.toml')
           config.parent.mkdir(exist_ok=True)
           config.write_text(module.patches().replace('"../', '"siblings/'))
@@ -329,7 +330,7 @@ jobs:
   build-windows:
     # Same rationale as `build`: does NOT `needs: test` (parallel tripwire).
     needs: verify
-    # windows-app.yml runs on every qa push itself.
+    # windows-app.yml runs on every dev and qa push itself.
     if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch') }}
     permissions:
       contents: write
@@ -391,20 +392,20 @@ jobs:
           # The tag checkout lacks this workflow's commit; fetch it to overlay from.
           git fetch --no-tags --depth=1 origin "$SHA"
           git checkout "$SHA" -- .github/scripts/
-      # qa rehearsal: build against the sibling crates' qa branches, as deb.yml
-      # does (the tag's pinned git deps exist only after the release tags them).
-      - name: Pin sibling sources (qa rehearsal)
+      # Rehearsal: build against the sibling crates' same branch (dev or qa), as
+      # deb.yml does (the tag's pinned git deps exist only after the release tags them).
+      - name: Pin sibling sources (rehearsal)
         if: (github.event_name == 'push' && github.ref_type == 'branch')
         shell: bash
         run: |
           set -euo pipefail
           for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
-            git clone --depth 1 --branch qa "https://github.com/freemkv/$repo.git" "siblings/$repo"
+            git clone --depth 1 --branch "$GITHUB_REF_NAME" "https://github.com/freemkv/$repo.git" "siblings/$repo"
           done
           # Windows runners have `python`, not always `python3`.
           py=$(command -v python3 || command -v python)
           "$py" - <<'PY'
-          import importlib.util, pathlib, tomllib
+          import importlib.util, os, pathlib, tomllib
           spec = importlib.util.spec_from_file_location('flatpak_prepare', 'packaging/flatpak/prepare.py')
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
@@ -412,7 +413,7 @@ jobs:
           for repo in module.REPOS[1:]:
               actual = tomllib.loads(pathlib.Path('siblings', repo, 'Cargo.toml').read_text())['package']['version']
               if actual != version:
-                  raise SystemExit(f'{repo} qa is {actual}, freemkv qa is {version}')
+                  raise SystemExit(f'{repo} {os.environ["GITHUB_REF_NAME"]} is {actual}, freemkv is {version}')
           config = pathlib.Path('.cargo/config.toml')
           config.parent.mkdir(exist_ok=True)
           config.write_text(module.patches().replace('"../', '"siblings/'))
@@ -590,7 +591,7 @@ jobs:
   # ── Linux desktop app (AppImage, bundles GTK4 + libadwaita) ─────────────
   linux-appimage:
     needs: verify
-    # appimage.yml runs on every qa push itself.
+    # appimage.yml runs on every dev and qa push itself.
     if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch') }}
     permissions:
       contents: write
