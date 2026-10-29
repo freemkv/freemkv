@@ -3,10 +3,10 @@ name: CI
 on:
   push:
     # dev -> qa -> main. `dev` is where work lands and is meant to be pushed
-    # to often: these are the FAST checks, so a mistake surfaces in minutes.
-    # `qa` is the release candidate — it runs these too, plus the expensive
-    # suite in qa.yml. `main` only ever moves at release time, to a tagged
-    # commit that was already green on qa.
+    # to often: every check but full-disc media runs here, so a mistake
+    # surfaces on dev. `qa` is the release candidate — it runs these too, plus
+    # the media sign-off in qa.yml. `main` only ever moves at release time, to
+    # a tagged commit that was already green on qa.
     branches: [main, dev, qa]
   pull_request:
 
@@ -60,13 +60,11 @@ permissions:
 # `no-server-deps-outside-server` proves neither the CLI nor the app build
 # links a server crate.
 #
-# RELEASE-CANDIDATE-ONLY JOBS. dev is the FAST lane, so the macOS, Windows and
-# Intel jobs below (and cli-linux's release builds) run on qa and main rather
-# than on every push to dev. Nothing stops being checked before a release:
-# qa.yml independently covers macOS and Windows, and the jobs unique to this
-# file run here on qa and main. `if` SKIPS a job rather than queueing it; a
-# never-scheduled job would leave the run pending and the required checks
-# incomplete forever.
+# EVERYTHING BUT MEDIA RUNS HERE, on every push to dev. qa.yml is only the
+# full-disc media sign-off, so a break must surface on dev: the macOS, Windows
+# and Intel jobs, the release-profile tests, the Windows build, CLI
+# integration, the GUI gate and freemkv-i18n's key drift all run on dev, and
+# again on qa (release-orchestrate gates on this workflow at the qa sha).
 jobs:
   web-tests:
     runs-on: ubuntu-24.04
@@ -89,7 +87,7 @@ jobs:
         with: { python-version: '3.12' }
       - run: pip install --quiet pyyaml
       - run: python3 -m unittest discover -s tests -p 'test_media*.py' -v
-      # The GUI gate's driver and disc fixture (qa's gui-gate job).
+      # The GUI gate's driver and disc fixture (the gui-gate job).
       - run: python3 -m unittest discover -s tests -p 'test_gui*.py' -v
 
   changelog:
@@ -115,8 +113,6 @@ jobs:
   # ── macOS: the whole crate, GUI shell included ─────────────────────────────
   # --all-targets so the tests and the AppKit shell are linted too.
   lint-macos:
-    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
-    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -144,8 +140,6 @@ jobs:
   # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
   # this runs the platform-neutral suite without needing media on the runner.
   test-macos:
-    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
-    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -174,8 +168,6 @@ jobs:
   # `platform.rs` in particular has a `#[cfg(windows)]` `GetDiskFreeSpaceExW`
   # arm that no other job compiles, so nothing else can catch a regression.
   lint-windows:
-    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
-    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -204,8 +196,6 @@ jobs:
   # themselves when FMKV_TEST_ISO is unset). If a test needs editing to pass
   # on Windows, the Windows port has broken something — that is the signal.
   test-windows:
-    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
-    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -232,8 +222,6 @@ jobs:
   # release-only failures are real (LTO, codegen-units, opt-level). Cheap
   # insurance that the artifact the release workflow zips actually links.
   release-build-windows:
-    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
-    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -261,8 +249,6 @@ jobs:
   # runners are arm64, so a break would have surfaced at tag time, in the
   # release workflow, after the version bump and the tag push.
   build-macos-intel:
-    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
-    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -329,10 +315,8 @@ jobs:
       - run: cargo test --tests --features server
         working-directory: freemkv
       - run: cargo build --release --bin freemkv
-        if: github.ref_name == 'qa' || github.ref_name == 'main'
         working-directory: freemkv
       - run: cargo build --release --features gui --bin freemkv
-        if: github.ref_name == 'qa' || github.ref_name == 'main'
         working-directory: freemkv
 
   # The CLI build must link no UI crate on any target. `--target all` resolves
@@ -499,6 +483,227 @@ jobs:
             rc=1
           }
           exit $rc
+
+  # ── Moved from qa.yml: the checks release.yml relies on, on dev first ────
+  # Built on the exact toolchain release.yml ships with, after the same
+  # clean-environment check, against the sibling tips (not qa's pinned lock).
+  release-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+        # CLI build, then the app build.
+        features: ['', '--features gui']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          self: freemkv
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - name: Install GTK4 + libadwaita development headers (Linux app)
+        timeout-minutes: 5
+        if: runner.os == 'Linux' && matrix.features != ''
+        run: |
+          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv
+          key: ${{ matrix.features == '' && 'release-cli' || 'release-app' }}
+      - name: Clean build environment and C toolchain
+        shell: bash
+        run: |
+          bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
+      - run: cargo test --release --tests ${{ matrix.features }}
+        working-directory: freemkv
+
+  # The release-profile test builds on Windows, and the EC2 Windows leg's
+  # bootstrap parsed before qa can launch it. The installer is built and
+  # round-tripped by windows-app.yml on the same push.
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+      - name: Validate Windows bootstrap syntax
+        shell: powershell
+        run: |
+          $source = Get-Content freemkv/.github/runner-templates/user-data-windows.ps1 -Raw
+          $source = $source -replace '(?s)^<powershell>\s*', '' -replace '(?s)</powershell>\s*$', ''
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { $errors | Format-List; throw 'Invalid Windows bootstrap syntax' }
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          self: freemkv
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv
+          key: release-tests
+      - name: Clean build environment and C toolchain
+        shell: bash
+        run: |
+          bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
+      - run: cargo build --release --tests
+        working-directory: freemkv
+      - run: cargo build --release --tests --features gui
+        working-directory: freemkv
+
+  cli-integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          self: freemkv
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv
+          key: release-cli
+      - name: Install ffmpeg and python
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            bash freemkv/.github/scripts/install-linux-deps.sh ffmpeg
+          else
+            brew install ffmpeg
+          fi
+      # The CLI build: cli-parity expects a bare `freemkv` to print usage.
+      - run: cargo build --release --bin freemkv
+        working-directory: freemkv
+      - run: tests/cli-parity.sh check
+        working-directory: freemkv
+      - run: tests/cli-integration.sh
+        working-directory: freemkv
+
+  # The desktop app checks itself (tests/gui_gate.py) over a synthetic Blu-ray folder, in
+  # English, German and Arabic at 100% and 150%: the title tree's Length and Size columns
+  # render whole, as do the Settings destination path and every dropdown's choice, with no
+  # crash on the way. A debug build, the only one with the FMKV_* hooks.
+  gui-gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+            bin: freemkv
+          - os: windows
+            runner: windows-latest
+            bin: freemkv-gui
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v2
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          self: freemkv
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - name: Install GTK4, libadwaita and a virtual display (Linux)
+        timeout-minutes: 5
+        if: matrix.os == 'linux'
+        run: |
+          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv
+          key: gui-gate
+      - name: Build the app with its gate hooks
+        shell: bash
+        working-directory: freemkv
+        run: cargo build --features gui --bin "${{ matrix.bin }}"
+      - name: GUI gate
+        shell: bash
+        working-directory: freemkv
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          if [ "${{ matrix.os }}" = linux ]; then
+            dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1200x24' \
+              "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}" "$RUNNER_TEMP/gui-gate"
+          else
+            "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}.exe" "$RUNNER_TEMP/gui-gate"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: "gui-gate-${{ matrix.os }}"
+          path: |
+            ${{ runner.temp }}/gui-gate/*/*.png
+            ${{ runner.temp }}/gui-gate/*/gate.txt
+          overwrite: true
+          if-no-files-found: warn
+
+  # freemkv-i18n's drift guard over THIS checkout's src/: every key freemkv looks up
+  # with a compiled-in English fallback must ship in en.json with the same text.
+  # freemkv-i18n's own CI runs it too, but only on i18n pushes.
+  freemkv-key-drift:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          sparse-checkout: src
+      # The same-named branch, so paired changes test together; else dev.
+      - name: Check out freemkv-i18n and freemkv-engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          want="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          for r in freemkv-i18n freemkv-engine; do
+            ref=dev
+            if git ls-remote --exit-code --heads "https://github.com/freemkv/$r.git" "refs/heads/$want" >/dev/null 2>&1; then
+              ref="$want"
+            fi
+            echo "$r ref: $ref"
+            git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$r.git" "$r"
+          done
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv-i18n
+      - run: cargo test --test freemkv_keys
+        working-directory: freemkv-i18n
+        env:
+          FREEMKV_SRC: ${{ github.workspace }}/freemkv/src
+          FREEMKV_ENGINE_SRC: ${{ github.workspace }}/freemkv-engine/src
 
   # ── Coverage: informational Codecov upload ─────────────────────────────────
   # Additive, NON-REQUIRED. Mirrors the Linux CLI job's sibling-checkout layout

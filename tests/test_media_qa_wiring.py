@@ -18,6 +18,7 @@ from test_media_gate import Evidence, RUN_ID, SIB_SHA, lock_text  # noqa: E402
 
 ROOT = Path(__file__).parents[1]
 QA = ROOT / '.github/workflows/qa.yml'
+CI = ROOT / '.github/workflows/ci.yml'
 POLICY = mg.load_policy()
 
 
@@ -164,29 +165,44 @@ class StructureTests(unittest.TestCase):
 
     def test_no_branch_resolved_siblings(self):
         self.assertNotIn('checkout-siblings', self.text)
-        for name in ('release-tests', 'windows-build', 'cli-integration', 'cli-matrix'):
-            with self.subTest(job=name):
-                text = steps_text(self.jobs[name])
-                self.assertIn('media_gate.py checkout', text)
-                self.assertIn('media_gate.py restore', text)
-                self.assertIn('plan-media', self.jobs[name]['needs'])
+        text = steps_text(self.jobs['cli-matrix'])
+        self.assertIn('media_gate.py checkout', text)
+        self.assertIn('media_gate.py restore', text)
+        self.assertIn('plan-media', self.jobs['cli-matrix']['needs'])
 
-    def test_the_gui_gate_runs_on_every_candidate_and_holds_the_verdict(self):
-        gate = self.jobs['gui-gate']
-        self.assertNotIn('if', gate, 'the GUI gate must not wait for a media run')
-        self.assertEqual(gate['needs'], ['plan-media'])
+    def test_qa_is_only_the_media_sign_off(self):
+        self.assertEqual(set(self.jobs), {
+            'plan-media', 'rc-tag', 'rc-image', 'launch', 'cli-matrix', 'compare-cli-matrix',
+            'archive-release-comparison', 'publish-media-history', 'record-media-evidence',
+            'media-verdict', 'baseline-epoch-verdict'})
+        self.assertEqual(self.jobs['launch']['needs'], ['plan-media'], 'EC2 starts right after the plan')
+        sign_off = self.qa[True]['workflow_dispatch']['inputs']['sign_off']
+        self.assertEqual((sign_off['type'], sign_off['default']), ('boolean', False))
+        plan = next(s for s in self.jobs['plan-media']['steps'] if s.get('id') == 'plan')
+        self.assertEqual(plan['env']['SKIP_MEDIA'],
+                         '${{ inputs.skip_media || !(inputs.sign_off || inputs.run_media || inputs.record_baseline) }}')
+        self.assertIn('-f sign_off=true', plan['env']['SKIP_REASON'])
+
+    def test_the_cheap_qa_checks_run_in_ci_on_dev(self):
+        ci = load(CI)
+        self.assertIn('dev', ci[True]['push']['branches'])
+        jobs = ci['jobs']
+        for name in ('release-tests', 'windows-build', 'cli-integration', 'gui-gate', 'freemkv-key-drift'):
+            with self.subTest(job=name):
+                self.assertIn(name, jobs)
+                self.assertNotIn('if', jobs[name], 'runs on every push, dev included')
+        gate = jobs['gui-gate']
         oses = [i['os'] for i in gate['strategy']['matrix']['include']]
         self.assertEqual(oses, ['linux', 'windows'])
         text = steps_text(gate)
         self.assertIn('tests/gui_gate.py', text)
         self.assertIn('xvfb-run', text)
-        self.assertIn('media_gate.py checkout', text)
-        verdict = self.jobs['media-verdict']
-        self.assertIn('gui-gate', verdict['needs'])
-        step = next(s for s in verdict['steps'] if s.get('name') == 'Media verdict')
-        self.assertEqual(step['env']['GUI'], '${{ needs.gui-gate.result }}')
-        for upload in (s for s in gate['steps'] if 'upload-artifact' in s.get('uses', '')):
-            self.assertTrue(upload['with'].get('overwrite'))
+        self.assertIn('cargo test --release --tests', steps_text(jobs['release-tests']))
+        self.assertIn('user-data-windows.ps1', steps_text(jobs['windows-build']))
+        self.assertIn('tests/cli-integration.sh', steps_text(jobs['cli-integration']))
+        drift = steps_text(jobs['freemkv-key-drift'])
+        self.assertIn('cargo test --test freemkv_keys', drift)
+        self.assertIn('FREEMKV_SRC', drift)
 
     def test_media_jobs_gate_on_the_plan(self):
         for name in ('launch', 'cli-matrix', 'compare-cli-matrix', 'record-media-evidence'):
@@ -1052,7 +1068,7 @@ class VerdictTests(unittest.TestCase):
                          dict(env, GITHUB_REF='refs/heads/dev')))
 
     def test_i1(self):
-        ok = {'PLAN_RESULT': 'success', 'GUI': 'success'}
+        ok = {'PLAN_RESULT': 'success'}
         cases = [
             (dict(ok, STATUS='reuse', EVIDENCE_URL='u'), True),
             (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success', PUBLISH='success'), True),
@@ -1066,10 +1082,6 @@ class VerdictTests(unittest.TestCase):
             ({'PLAN_RESULT': 'failure', 'STATUS': 'canary-failed'}, False),
             ({'PLAN_RESULT': 'failure', 'STATUS': 'reuse'}, False),
             ({'PLAN_RESULT': 'success', 'STATUS': ''}, False),
-            (dict(ok, STATUS='reuse', EVIDENCE_URL='u', GUI='failure'), False),
-            (dict(ok, STATUS='reuse', EVIDENCE_URL='u', GUI='skipped'), False),
-            (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success', GUI='cancelled'), False),
-            ({'PLAN_RESULT': 'success', 'STATUS': 'reuse', 'EVIDENCE_URL': 'u'}, False),
         ]
         for env, green in cases:
             with self.subTest(env=env):
@@ -1088,7 +1100,7 @@ class VerdictTests(unittest.TestCase):
         self.assertNotIn('::stop-commands::', body)
 
     def test_reuse_says_why(self):
-        green, lines = mg.verdict({'PLAN_RESULT': 'success', 'GUI': 'success', 'STATUS': 'reuse',
+        green, lines = mg.verdict({'PLAN_RESULT': 'success', 'STATUS': 'reuse',
                                    'EVIDENCE_URL': 'https://x/1',
                                    'REASON': 'full-disc not needed: …'})
         self.assertTrue(green)

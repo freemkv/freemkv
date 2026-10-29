@@ -2,14 +2,17 @@
 
 `dev` → **`qa`** → `main`. Every public freemkv repo follows this.
 
-`dev` is for committing often. `ci.yml` runs the fast checks on every push —
-fmt, clippy, unit tests, leak-guard — so a mistake surfaces in minutes while it
-is still cheap to fix. Push to `dev` freely; that is what it is for.
+`dev` is for committing often. `ci.yml` runs every check but full-disc media on
+every push — fmt, clippy, unit and release-profile tests on three platforms, CLI
+integration, the GUI gate, key drift — and the package and release rehearsals
+run beside it, so a mistake surfaces on dev while it is still cheap to fix.
 
-`qa` is the release candidate. Pushing to it runs `ci.yml` **and** `qa.yml`,
-which is everything expensive that can run without physical media. A green `qa`
-is the claim "this is production worth", and `qa` is therefore always a pointer
-to the last thing that passed everything.
+`qa` is the release candidate. Pushing to it runs all of that again **and**
+`qa.yml`, which is only the full-disc media sign-off: it reuses green evidence
+for the rip-affecting inputs, or stays pending (red) until the one sign-off per
+release, `gh workflow run qa.yml --ref qa -f sign_off=true`, runs the EC2
+matrix. A green `qa` is the claim "this is production worth", and `qa` is
+therefore always a pointer to the last thing that passed everything.
 
 `main` only ever receives a `qa` that is green. `release.sh` advances it to the
 new tag as its final step.
@@ -39,9 +42,9 @@ question. Current state of each:
 | `scan-secrets.sh` (private, via `scan-public.sh`) | no private info in any public repo | `promote.yml` + `release-orchestrate.yml` gates, daily `leak-scan.yml` |
 | `precommit.sh` — fmt, clippy | style + lint on the CI toolchain | `ci.yml`, every push |
 | `precommit.sh` — `cargo test` | the unit suite | `ci.yml`, every push |
-| `precommit.sh` — `test --release` | release-profile behaviour | `qa.yml`, push to `qa` |
+| `precommit.sh` — `test --release` | release-profile behaviour | `ci.yml`, every push |
 | `precommit.sh` — Linux cross-clippy | cfg-gated code lints on its own target | `qa.yml`, push to `qa` |
-| `tests/cli-integration.sh` | the whole CLI file surface, ffprobe-verified | `qa.yml`, push to `qa` |
+| `tests/cli-integration.sh` | the whole CLI file surface, ffprobe-verified | `ci.yml`, every push |
 | `prerelease.sh` phase 1 (static) | secret scan across public repos | `leak-guard.yml` |
 | `prerelease.sh` phase 2 (gate) | per-crate fmt/clippy/test | `ci.yml` + `qa.yml` |
 | `prerelease.sh` phase 3 (contract) | CLI contract + exit codes | **still manual** |
@@ -61,12 +64,12 @@ disc images in S3, described under "the real-media gate" below.
 | check | where | trigger |
 |---|---|---|
 | fmt / clippy / unit tests / leak-guard | GitHub Actions (`ci.yml`) | every push to dev, qa, main + PRs |
-| **release-profile tests, 3 platforms** | GitHub Actions (`qa.yml`) | push to `qa` |
+| **release-profile tests, 3 platforms** | GitHub Actions (`ci.yml`) | every push |
 | **Linux cross-target clippy** | GitHub Actions (`qa.yml`) | push to `qa` |
-| **CLI integration, end to end** | GitHub Actions (`qa.yml`, `freemkv`) | push to `qa` |
+| **CLI integration, end to end** | GitHub Actions (`ci.yml`, `freemkv`) | every push |
 | **cross-platform output parity** | GitHub Actions (`parity.yml`) | push to `qa` + manual |
-| **real-media acceptance, full-size** | ephemeral EC2 (linux + windows) | push to `qa` — see below |
-| **GUI automation** | self-hosted or EC2 | `qa` |
+| **real-media acceptance, full-size** | ephemeral EC2 (linux + windows) | `qa` sign-off dispatch — see below |
+| **GUI gate** | GitHub Actions (`ci.yml`, linux + windows) | every push |
 | mutation runs (~12k mutants, ~1 h) | EC2, sharded | pre-release only |
 
 Mutation testing is deliberately NOT per-push: an hour and real money per run
@@ -172,11 +175,12 @@ job's `if: always()` Tear down step at the end of qa.yml terminates every
 instance tagged `launched-by=<run id>` (success, failure or cancel). There is no
 scheduled sweeper.
 
-**Cost control is `needs:`, not decoration.** Nothing touches real media until
-lint, the unit suites, the cross-lint, the Windows build and the synthetic CLI
-matrix are green, so a typo cannot burn a two-hour rip. This is also why the
-EC2 matrix runs on qa (push or dispatch), never on dev pushes. A single explicit
-dev dispatch can record a new historical fixture epoch.
+**Cost control is the sign-off.** Nothing touches real media until a person
+dispatches it, and promote only moves qa to dev shas whose `ci.yml` (lint, unit
+and release-profile suites, the Windows build, CLI integration, the GUI gate)
+is green, so a typo cannot burn a two-hour rip. The EC2 matrix starts right
+after `plan-media`, on the qa sign-off dispatch, never on a push or on dev. A
+single explicit dev dispatch can record a new historical fixture epoch.
 
 **Release comparisons run the candidate once.** `tests/media-baseline.json`
 pins SHA-256 digests for the historical manifests in the same S3 bucket as the
@@ -204,9 +208,6 @@ and remains candidate-only.
 
 ### What this gate does NOT cover
 
-For an explicitly requested Linux/Windows validation, dispatch `qa.yml` with
-`skip_macos: true`. The default remains full hosted coverage. The run's inputs
-record this choice; Linux/Windows tests and the real-media gates still run.
 CI and QA use Ubuntu 24.04 explicitly and install dependencies through the main
 Ubuntu HTTPS archive instead of the slow Azure mirror. Installation has a five-minute
 deadline and bounded network retries.

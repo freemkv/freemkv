@@ -3,25 +3,28 @@ run-name: qa ${{ inputs.dispatch_id || github.sha }}
 
 # The release candidate gate. plan-media pins the candidate (the six rip-crate
 # shas and one resolved lock, L_qa) for every job, and decides whether the
-# full-disc EC2 matrix must run: it runs when the rip-affecting inputs have no
-# green evidence (tests/media_gate.py, policy tests/media-gate-policy.json),
-# and is reused otherwise. media-verdict is the one media answer.
+# full-disc EC2 matrix must run: green evidence for the rip-affecting inputs
+# (tests/media_gate.py, policy tests/media-gate-policy.json) is reused. Without
+# it, a push leaves the media pending (qa red) and EC2 runs only on the final
+# sign-off, once per release: gh workflow run qa.yml --ref qa -f sign_off=true.
+# media-verdict is the one media answer. Everything else (release-profile tests,
+# the Windows build, CLI integration, the GUI gate) runs in ci.yml on dev first.
 
 on:
   push:
     branches: [qa]
   workflow_dispatch:
     inputs:
+      sign_off:
+        description: Final media sign-off. Reuses green evidence, else runs the full-disc EC2 matrix once.
+        type: boolean
+        default: false
       run_media:
         description: Run the full-disc EC2 matrix even when green evidence exists.
         type: boolean
         default: false
       record_baseline:
         description: One-time 1.8.4 reference epoch on dev; produces no candidate verdict.
-        type: boolean
-        default: false
-      skip_macos:
-        description: Omit macOS hosted tests (ignored on qa, which always runs macOS).
         type: boolean
         default: false
       skip_media:
@@ -178,8 +181,9 @@ jobs:
           REVISIONS: ${{ steps.pin.outputs.revisions }}
           SUPERSEDED: ${{ steps.pin.outputs.superseded }}
           RUN_MEDIA: ${{ inputs.run_media || inputs.record_baseline }}
-          SKIP_MEDIA: ${{ inputs.skip_media }}
-          SKIP_REASON: ${{ inputs.skip_reason }}
+          # EC2 runs only when asked for: every other run reuses evidence or stays pending.
+          SKIP_MEDIA: ${{ inputs.skip_media || !(inputs.sign_off || inputs.run_media || inputs.record_baseline) }}
+          SKIP_REASON: ${{ inputs.skip_reason || 'final sign-off pending, run gh workflow run qa.yml --ref qa -f sign_off=true' }}
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: python3 freemkv/tests/media_gate.py plan --workspace . --externals externals.json --canary canary.json --plan-directory media-plan
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -240,289 +244,6 @@ jobs:
       tag: ${{ needs.rc-tag.outputs.tag }}
       sibling: qa
 
-  release-tests:
-    needs: [plan-media]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(inputs.skip_macos && github.ref != 'refs/heads/qa' && '["ubuntu-24.04"]' || '["ubuntu-24.04","macos-latest"]') }}
-        # CLI build, then the app build.
-        features: ['', '--features gui']
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: freemkv
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with: { python-version: '3.12' }
-      - name: Exact toolchain (freemkv rust-version)
-        shell: bash
-        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with: { name: media-plan, path: media-plan }
-      # The six rip-crate shas and the one lock (L_qa) plan-media pinned; every
-      # build below is --locked against it.
-      - name: Build from the planned candidate
-        shell: bash
-        env:
-          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
-        run: |
-          set -euo pipefail
-          py=$(command -v python3 || command -v python)
-          "$py" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
-          "$py" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
-      - name: Install GTK4 + libadwaita development headers (Linux app)
-        timeout-minutes: 5
-        if: runner.os == 'Linux' && matrix.features != ''
-        run: |
-          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: freemkv
-          key: ${{ matrix.features == '' && 'cli' || 'app' }}
-      # The check release.yml runs before shipping, exercised on every qa run first.
-      - name: Clean build environment and C toolchain
-        shell: bash
-        run: |
-          bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
-      - run: cargo test --locked --release --tests ${{ matrix.features }}
-        working-directory: freemkv
-
-  windows-build:
-    needs: [plan-media]
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: freemkv
-      - name: Validate Windows bootstrap syntax
-        shell: powershell
-        run: |
-          $source = Get-Content freemkv/.github/runner-templates/user-data-windows.ps1 -Raw
-          $source = $source -replace '(?s)^<powershell>\s*', '' -replace '(?s)</powershell>\s*$', ''
-          $tokens = $null; $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors.Count) { $errors | Format-List; throw 'Invalid Windows bootstrap syntax' }
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with: { python-version: '3.12' }
-      - name: Exact toolchain (freemkv rust-version)
-        shell: bash
-        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with: { name: media-plan, path: media-plan }
-      # The six rip-crate shas and the one lock (L_qa) plan-media pinned; every
-      # build below is --locked against it.
-      - name: Build from the planned candidate
-        shell: bash
-        env:
-          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
-        run: |
-          set -euo pipefail
-          py=$(command -v python3 || command -v python)
-          "$py" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
-          "$py" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: freemkv
-      # The check release.yml runs before shipping, exercised on every qa run first.
-      - name: Clean build environment and C toolchain
-        shell: bash
-        run: |
-          bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
-      - run: cargo build --locked --release --tests
-        working-directory: freemkv
-      - run: cargo build --locked --release --tests --features gui
-        working-directory: freemkv
-      # The release installer, compiled and round-tripped here so a broken
-      # freemkv.iss fails qa instead of the tag build (steps mirror release.yml).
-      - run: cargo build --locked --release --features gui
-        working-directory: freemkv
-      - name: Build the installer
-        shell: pwsh
-        working-directory: freemkv
-        run: |
-          New-Item -ItemType Directory -Force stage | Out-Null
-          Copy-Item target/release/freemkv-gui.exe stage/freemkv.exe
-          Copy-Item target/release/freemkv.exe stage/freemkv.com
-          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup --version 6.4.3 -y --no-progress
-            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          }
-          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          & $iscc "/DAppVersion=$ver" "/DBinDir=$((Resolve-Path stage).Path)" "/O$PWD" packaging/windows/freemkv.iss
-          if ($LASTEXITCODE -ne 0) { throw "iscc exited $LASTEXITCODE" }
-          if (-not (Test-Path freemkv-x86_64-windows-setup.exe)) { throw "freemkv-x86_64-windows-setup.exe was not built" }
-      - name: Round-trip the installer
-        shell: pwsh
-        working-directory: freemkv
-        run: |
-          $dir = "$env:LOCALAPPDATA\Programs\freemkv"
-          $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\freemkv.lnk"
-          $aumid = 'org.freemkv.FreeMKV'
-          $aumidKey = "HKCU:\Software\Classes\AppUserModelId\$aumid"
-          $userPath = { [Environment]::GetEnvironmentVariable('Path', 'User') }
-          $keep = @("$env:RUNNER_TEMP\keep-a", "$env:RUNNER_TEMP\keep-b")
-          [Environment]::SetEnvironmentVariable('Path', ((@((& $userPath) -split ';') + $keep) | Where-Object { $_ }) -join ';', 'User')
-          $before = (& $userPath) -split ';'
-          Start-Process -Wait ./freemkv-x86_64-windows-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
-          foreach ($f in 'freemkv.exe','freemkv.com','unins000.exe') {
-            if (-not (Test-Path "$dir\$f")) { throw "installer did not create $dir\$f" }
-          }
-          if ((& $userPath) -split ';' -notcontains $dir) { throw "installer did not add $dir to the user PATH" }
-          if (-not (Test-Path $lnk)) { throw "installer did not create $lnk" }
-          # The shell property read is best-effort; the registry key checks below are the hard gate.
-          $got = $null
-          try {
-            $item = (New-Object -ComObject Shell.Application).NameSpace((Split-Path $lnk)).ParseName((Split-Path $lnk -Leaf))
-            $got = $item.ExtendedProperty('System.AppUserModel.ID')
-          } catch { }
-          if (-not $got) { Write-Output "::warning::could not read the AppUserModelID of $lnk; not verified" }
-          elseif ($got -ne $aumid) { throw "Start-menu shortcut AppUserModelID is '$got', want $aumid" }
-          if (-not (Test-Path $aumidKey)) { throw "installer did not register $aumidKey" }
-          & "$dir\freemkv.com" --version
-          if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
-          # The bare name must resolve to the console .com (PATHEXT), not the windowed .exe.
-          $env:Path = (& $userPath) + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
-          $bare = (Get-Command freemkv -CommandType Application | Select-Object -First 1).Source
-          if ($bare -ne "$dir\freemkv.com") { throw "bare 'freemkv' resolves to $bare, want $dir\freemkv.com" }
-          Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
-          # The uninstaller relaunches itself from %TEMP%, so -Wait can return early.
-          $done = { -not (Test-Path "$dir\freemkv.exe") -and ((& $userPath) -split ';' -notcontains $dir) }
-          for ($i = 0; $i -lt 60 -and -not (& $done); $i++) { Start-Sleep 1 }
-          if (Test-Path "$dir\freemkv.exe") { throw "uninstaller left $dir\freemkv.exe" }
-          if ((& $userPath) -split ';' -contains $dir) { throw "uninstaller left $dir on the user PATH" }
-          if (Test-Path $lnk) { throw "uninstaller left $lnk" }
-          if (Test-Path $aumidKey) { throw "uninstaller left $aumidKey" }
-          $after = (& $userPath) -split ';'
-          if (Compare-Object $before $after -SyncWindow 0) { throw "uninstall changed other user PATH entries: '$($before -join ';')' -> '$($after -join ';')'" }
-
-
-  cli-integration:
-    needs: [plan-media]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(inputs.skip_macos && github.ref != 'refs/heads/qa' && '["ubuntu-24.04"]' || '["ubuntu-24.04","macos-latest"]') }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: freemkv
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with: { python-version: '3.12' }
-      - name: Exact toolchain (freemkv rust-version)
-        shell: bash
-        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with: { name: media-plan, path: media-plan }
-      # The six rip-crate shas and the one lock (L_qa) plan-media pinned; every
-      # build below is --locked against it.
-      - name: Build from the planned candidate
-        shell: bash
-        env:
-          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
-        run: |
-          set -euo pipefail
-          py=$(command -v python3 || command -v python)
-          "$py" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
-          "$py" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: freemkv
-      - name: Install ffmpeg and python
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            bash freemkv/.github/scripts/install-linux-deps.sh ffmpeg
-          else
-            brew install ffmpeg
-          fi
-      # The CLI build: cli-parity expects a bare `freemkv` to print usage.
-      - run: cargo build --locked --release --bin freemkv
-        working-directory: freemkv
-      - run: tests/cli-parity.sh check
-        working-directory: freemkv
-      - run: tests/cli-integration.sh
-        working-directory: freemkv
-
-  # The desktop app checks itself (tests/gui_gate.py) over a synthetic Blu-ray folder, in
-  # English, German and Arabic at 100% and 150%: the title tree's Length and Size columns
-  # render whole, as do the Settings destination path and every dropdown's choice, with no
-  # crash on the way. A debug build, the only one with the FMKV_* hooks. Hosted runners:
-  # the fixture is generated, and the EC2 legs launch only when the rip inputs change.
-  gui-gate:
-    needs: [plan-media]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-24.04
-            bin: freemkv
-          - os: windows
-            runner: windows-latest
-            bin: freemkv-gui
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: freemkv
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with: { python-version: '3.12' }
-      - name: Exact toolchain (freemkv rust-version)
-        shell: bash
-        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with: { name: media-plan, path: media-plan }
-      - name: Build from the planned candidate
-        shell: bash
-        env:
-          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
-        run: |
-          set -euo pipefail
-          py=$(command -v python3 || command -v python)
-          "$py" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
-          "$py" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
-      - name: Install GTK4, libadwaita and a virtual display (Linux)
-        timeout-minutes: 5
-        if: matrix.os == 'linux'
-        run: |
-          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: freemkv
-          key: gui-gate
-      - name: Build the app with its gate hooks
-        shell: bash
-        working-directory: freemkv
-        run: cargo build --locked --features gui --bin "${{ matrix.bin }}"
-      - name: GUI gate
-        shell: bash
-        working-directory: freemkv
-        run: |
-          set -euo pipefail
-          py=$(command -v python3 || command -v python)
-          if [ "${{ matrix.os }}" = linux ]; then
-            dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1200x24' \
-              "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}" "$RUNNER_TEMP/gui-gate"
-          else
-            "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}.exe" "$RUNNER_TEMP/gui-gate"
-          fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: "gui-gate-${{ matrix.os }}"
-          path: |
-            ${{ runner.temp }}/gui-gate/*/*.png
-            ${{ runner.temp }}/gui-gate/*/gate.txt
-          overwrite: true
-          if-no-files-found: warn
-
   # One job per EC2 leg: launch a runner only this run can use (the run-<id>
   # label), then watch the leg and end with its conclusion, so "Re-run failed
   # jobs" re-runs both and gets a fresh instance. Teardown always runs, so a
@@ -530,7 +251,7 @@ jobs:
   # from `media_gate.py launch-spec` (the policy): the functional template at its
   # planned version, the perf legs' differences as overrides, and the Spot cap.
   launch:
-    needs: [plan-media, release-tests, windows-build, cli-integration]
+    needs: [plan-media]
     if: needs.plan-media.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -725,7 +446,7 @@ jobs:
   cli-matrix:
     # Not `needs: launch`: a failed leg fails its launch job too, so "Re-run failed
     # jobs" re-runs the pair and gets a fresh instance for this run's label.
-    needs: [plan-media, release-tests, windows-build, cli-integration]
+    needs: [plan-media]
     if: needs.plan-media.outputs.run == 'true'
     strategy:
       fail-fast: false
@@ -1193,7 +914,7 @@ jobs:
 
   # The one media answer (I-1): green only if evidence was reused or written by this run.
   media-verdict:
-    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence, publish-media-history, gui-gate]
+    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence, publish-media-history]
     if: always() && inputs.record_baseline != true
     runs-on: ubuntu-24.04
     steps:
@@ -1213,11 +934,10 @@ jobs:
           RECORD: ${{ needs.record-media-evidence.result }}
           PUBLISH: ${{ needs.publish-media-history.result }}
           TAG: ${{ needs.record-media-evidence.outputs.tag }}
-          GUI: ${{ needs.gui-gate.result }}
         run: python3 freemkv/tests/media_gate.py verdict
 
   baseline-epoch-verdict:
-    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, publish-media-history, gui-gate]
+    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, publish-media-history]
     if: always() && inputs.record_baseline == true
     runs-on: ubuntu-24.04
     steps:
@@ -1229,11 +949,10 @@ jobs:
           MATRIX: ${{ needs.cli-matrix.result }}
           COMPARE: ${{ needs.compare-cli-matrix.result }}
           PUBLISH: ${{ needs.publish-media-history.result }}
-          GUI: ${{ needs.gui-gate.result }}
         shell: bash
         run: |
           set -euo pipefail
-          for result in PLAN LAUNCH MATRIX COMPARE PUBLISH GUI; do
+          for result in PLAN LAUNCH MATRIX COMPARE PUBLISH; do
             value="${!result}"
             if [ "$value" != success ]; then
               echo "::error title=Reference epoch incomplete::$result concluded $value"

@@ -188,6 +188,8 @@ jobs:
         run: |
           $dir = "$env:LOCALAPPDATA\Programs\freemkv"
           $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\freemkv.lnk"
+          $aumid = 'org.freemkv.FreeMKV'
+          $aumidKey = "HKCU:\Software\Classes\AppUserModelId\$aumid"
           $userPath = { [Environment]::GetEnvironmentVariable('Path', 'User') }
           $keep = @("$env:RUNNER_TEMP\keep-a", "$env:RUNNER_TEMP\keep-b")
           [Environment]::SetEnvironmentVariable('Path', ((@((& $userPath) -split ';') + $keep) | Where-Object { $_ }) -join ';', 'User')
@@ -198,6 +200,15 @@ jobs:
           }
           if (-not (Test-Path $lnk)) { throw "installer did not create $lnk" }
           if ((& $userPath) -split ';' -notcontains $dir) { throw "installer did not add $dir to the user PATH" }
+          # The shell property read is best-effort; the registry key checks are the hard gate.
+          $got = $null
+          try {
+            $item = (New-Object -ComObject Shell.Application).NameSpace((Split-Path $lnk)).ParseName((Split-Path $lnk -Leaf))
+            $got = $item.ExtendedProperty('System.AppUserModel.ID')
+          } catch { }
+          if (-not $got) { Write-Output "::warning::could not read the AppUserModelID of $lnk; not verified" }
+          elseif ($got -ne $aumid) { throw "Start-menu shortcut AppUserModelID is '$got', want $aumid" }
+          if (-not (Test-Path $aumidKey)) { throw "installer did not register $aumidKey" }
           & "$dir\freemkv.com" --version
           if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
           # The bare name must resolve to the console .com (PATHEXT), not the windowed .exe.
@@ -213,6 +224,7 @@ jobs:
           if (Test-Path "$dir\freemkv.exe") { throw "uninstaller left $dir\freemkv.exe" }
           if ((& $userPath) -split ';' -contains $dir) { throw "uninstaller left $dir on the user PATH" }
           if (Test-Path $lnk) { throw "uninstaller left $lnk" }
+          if (Test-Path $aumidKey) { throw "uninstaller left $aumidKey" }
           $after = (& $userPath) -split ';'
           if (Compare-Object $before $after -SyncWindow 0) { throw "uninstall changed other user PATH entries: '$($before -join ';')' -> '$($after -join ';')'" }
 
