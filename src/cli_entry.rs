@@ -817,6 +817,13 @@ fn usage() {
     println!();
     println!("{}", crate::strings::get("usage.flags_header"));
     println!("{}", crate::strings::get("usage.flag.title"));
+    println!(
+        "{}",
+        crate::strings::get_or(
+            "usage.flag.source_names",
+            "      --source-names  Name per-title outputs after the title's source (00024.mpls → 00024.mkv)",
+        )
+    );
     println!("{}", crate::strings::get("usage.flag.audio"));
     println!(
         "{}",

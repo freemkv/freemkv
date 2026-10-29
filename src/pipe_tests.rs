@@ -272,6 +272,8 @@ fn shipped_help_examples_parse_and_build_runnable_jobs() {
             &dest_owned,
             &parsed_dest,
             &out,
+            false,
+            &None,
         );
         assert!(
             jobs.is_some(),
@@ -336,7 +338,7 @@ fn an_expanded_disc_selection_builds_one_job_per_title() {
     let dest = &format!("{}/", dir.display());
     let parsed = libfreemkv::parse_url(dest);
     let nums = disc_title_nums(true, &[], 4);
-    let jobs = build_jobs(&None, true, &nums, true, dest, &parsed, &out)
+    let jobs = build_jobs(&None, true, &nums, true, dest, &parsed, &out, false, &None)
         .expect("a directory dest accepts a multi-title disc rip");
     assert_eq!(jobs.len(), 4, "expected one job per title, got {jobs:?}");
     // 1-based flags map onto 0-based indices, in order.
@@ -353,7 +355,7 @@ fn t_all_on_a_one_title_disc_is_a_single_job() {
     let dest = &temp_path("t-all-one.mkv").display().to_string();
     let parsed = libfreemkv::parse_url(dest);
     let nums = disc_title_nums(true, &[], 1);
-    let jobs = build_jobs(&None, true, &nums, false, dest, &parsed, &out)
+    let jobs = build_jobs(&None, true, &nums, false, dest, &parsed, &out, false, &None)
         .expect("a single title may go to a single file");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].0, Some(0));
@@ -1026,6 +1028,8 @@ fn disc_multiple_titles_build_one_job_each() {
         &dest,
         &parsed_dest,
         &out,
+        false,
+        &None,
     )
     .expect("dir creation should succeed in temp");
 
@@ -1041,6 +1045,155 @@ fn disc_multiple_titles_build_one_job_each() {
     let _ = std::fs::remove_dir_all(&dest_dir);
 }
 
+// ── --source-names: per-title outputs named after the title's source ────
+
+#[test]
+fn source_names_flag_is_parsed() {
+    assert!(parse_flags(&v(&["--source-names"])).unwrap().source_names);
+    assert!(!parse_flags(&v(&[])).unwrap().source_names);
+}
+
+#[test]
+fn source_names_name_outputs_after_the_playlist() {
+    let mut t1 = libfreemkv::DiscTitle::empty();
+    t1.playlist = "00024.mpls".into();
+    let mut t2 = libfreemkv::DiscTitle::empty();
+    t2.playlist = "00025.mpls".into();
+    let titles = Some(vec![t1, t2]);
+    let playlists = Some(vec!["00024.mpls".to_string(), "00025.mpls".to_string()]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("source-names-dir");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+
+    let jobs = build_jobs(
+        &titles,
+        false,
+        &[],
+        true,
+        &dest,
+        &parsed_dest,
+        &out,
+        true,
+        &playlists,
+    )
+    .expect("dir creation should succeed in temp");
+
+    assert_eq!(jobs.len(), 2);
+    assert!(
+        jobs[0].1.ends_with("00024.mkv"),
+        "named after the title's source, got {}",
+        jobs[0].1
+    );
+    assert!(jobs[1].1.ends_with("00025.mkv"), "got {}", jobs[1].1);
+
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+// Several titles onto a single-file name: with --source-names each file takes the
+// title's source name beside it, not `<stem>_t<N>`.
+#[test]
+fn source_names_fan_out_beside_a_file_dest() {
+    let mut t1 = libfreemkv::DiscTitle::empty();
+    t1.playlist = "00024.mpls".into();
+    let mut t2 = libfreemkv::DiscTitle::empty();
+    t2.playlist = "00025.mpls".into();
+    let titles = Some(vec![t1, t2]);
+    let playlists = Some(vec!["00024.mpls".to_string(), "00025.mpls".to_string()]);
+    let out = Output::new(false, true);
+    let file = temp_path("source-names-file").join("movie.mkv");
+    let dest = format!("mkv://{}", file.display());
+    let parsed_dest = parse_url(&dest);
+
+    let jobs = build_jobs(
+        &titles, false, &[], false, &dest, &parsed_dest, &out, true, &playlists,
+    )
+    .expect("several titles onto a file name fan out");
+
+    assert_eq!(jobs.len(), 2);
+    let parent = file.parent().unwrap();
+    assert!(parent.join("00024.mkv").display().to_string() == jobs[0].1.trim_start_matches("mkv://"));
+    assert!(parent.join("00025.mkv").display().to_string() == jobs[1].1.trim_start_matches("mkv://"));
+    let _ = std::fs::remove_dir_all(parent);
+}
+
+// Two titles from the SAME playlist (a duplicate source name) keep the default
+// `<name>_t<N>` naming, so no job overwrites another's output.
+#[test]
+fn source_names_duplicate_playlist_falls_back_to_title_numbering() {
+    let titles = Some(vec![
+        libfreemkv::DiscTitle::empty(),
+        libfreemkv::DiscTitle::empty(),
+    ]);
+    let playlists = Some(vec!["00024.mpls".to_string(), "00024.mpls".to_string()]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("source-names-dup");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+
+    let jobs = build_jobs(
+        &titles, false, &[], true, &dest, &parsed_dest, &out, true, &playlists,
+    )
+    .expect("dir creation should succeed in temp");
+
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs[0].1.ends_with("00024.mkv"), "got {}", jobs[0].1);
+    assert!(
+        jobs[1].1.ends_with("_t2.mkv"),
+        "the duplicate keeps _t<N> naming, got {}",
+        jobs[1].1
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+// A title with no source name keeps the default `<name>_t<N>` naming.
+#[test]
+fn source_names_empty_playlist_falls_back_to_title_numbering() {
+    let titles = Some(vec![
+        libfreemkv::DiscTitle::empty(),
+        libfreemkv::DiscTitle::empty(),
+    ]);
+    let playlists = Some(vec![String::new(), "00025.mpls".to_string()]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("source-names-empty");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+
+    let jobs = build_jobs(
+        &titles, false, &[], true, &dest, &parsed_dest, &out, true, &playlists,
+    )
+    .expect("dir creation should succeed in temp");
+
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs[0].1.contains("_t1."), "got {}", jobs[0].1);
+    assert!(jobs[1].1.ends_with("00025.mkv"), "got {}", jobs[1].1);
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+// Without --source-names the naming is unchanged.
+#[test]
+fn without_source_names_the_t_numbering_stays() {
+    let titles = Some(vec![
+        libfreemkv::DiscTitle::empty(),
+        libfreemkv::DiscTitle::empty(),
+    ]);
+    let playlists = Some(vec!["00024.mpls".to_string(), "00025.mpls".to_string()]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("no-source-names");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+
+    let jobs = build_jobs(
+        &titles, false, &[], true, &dest, &parsed_dest, &out, false, &playlists,
+    )
+    .expect("dir creation should succeed in temp");
+
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs[0].1.contains("_t1."), "got {}", jobs[0].1);
+    assert!(jobs[1].1.contains("_t2."), "got {}", jobs[1].1);
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
 // Several titles of an unscanned disc onto a single-file name: one file per title beside
 // it, as for an image or folder (`-t 1 -t 2 mkv://d/movie.mkv` -> `d/movie_t1.mkv`, `_t2`).
 #[test]
@@ -1050,7 +1203,7 @@ fn disc_multiple_titles_to_file_dest_fan_out_beside_it() {
     let _ = std::fs::remove_dir_all(&file);
     let dest = format!("mkv://{}", file.display());
     let parsed_dest = libfreemkv::parse_url(&dest);
-    let jobs = build_jobs(&None, true, &[1, 2], false, &dest, &parsed_dest, &out)
+    let jobs = build_jobs(&None, true, &[1, 2], false, &dest, &parsed_dest, &out, false, &None)
         .expect("several disc titles onto a file name fan out, not refuse");
     let made_dir = file.is_dir();
     let _ = std::fs::remove_dir_all(file.parent().unwrap());
@@ -1096,6 +1249,8 @@ fn disc_single_title_is_single_file_job() {
         "mkv://out.mkv",
         &parsed_dest,
         &out,
+        false,
+        &None,
     )
     .unwrap();
     assert_eq!(jobs.len(), 1);
@@ -1926,7 +2081,7 @@ fn null_dest_multi_title_routes_all_to_sink() {
     ]);
     let out = Output::new(false, true);
     let parsed = parse_url("null://");
-    let jobs = build_jobs(&titles, false, &[], false, "null://", &parsed, &out)
+    let jobs = build_jobs(&titles, false, &[], false, "null://", &parsed, &out, false, &None)
         .expect("null:// multi-title must build jobs, not fail");
     assert_eq!(jobs.len(), 3, "one job per title");
     for (idx, url) in &jobs {
@@ -1948,7 +2103,7 @@ fn stdio_dest_multi_title_routes_all_to_sink() {
     ]);
     let out = Output::new(false, true);
     let parsed = parse_url("stdio://");
-    let jobs = build_jobs(&titles, false, &[], false, "stdio://", &parsed, &out)
+    let jobs = build_jobs(&titles, false, &[], false, "stdio://", &parsed, &out, false, &None)
         .expect("stdio:// multi-title must build jobs");
     assert_eq!(jobs.len(), 2);
     for (_idx, url) in &jobs {
@@ -1964,7 +2119,7 @@ fn demux_dest_multi_title_urls_carry_scheme() {
     ]);
     let out = Output::new(false, true);
     let parsed = parse_url("demux://out/");
-    let jobs = build_jobs(&titles, false, &[], false, "demux://out/", &parsed, &out)
+    let jobs = build_jobs(&titles, false, &[], false, "demux://out/", &parsed, &out, false, &None)
         .expect("demux:// multi-title must build jobs");
     assert_eq!(jobs.len(), 2, "one job per title");
     // t01 / t02 subdirs, each a valid Demux URL (scheme present).
@@ -1989,7 +2144,7 @@ fn kind_filter_dest_multi_title_urls_carry_own_scheme() {
         let out = Output::new(false, true);
         let dest = format!("{scheme}://out/");
         let parsed = parse_url(&dest);
-        let jobs = build_jobs(&titles, false, &[], false, &dest, &parsed, &out)
+        let jobs = build_jobs(&titles, false, &[], false, &dest, &parsed, &out, false, &None)
             .unwrap_or_else(|| panic!("{scheme}:// multi-title must build jobs"));
         assert_eq!(jobs.len(), 2, "{scheme}: one job per title");
         assert_eq!(jobs[0].1, format!("{scheme}://out/t01/"), "{scheme} t01");
@@ -2022,7 +2177,7 @@ fn file_dest_multi_title_still_named_per_title() {
     let dir = temp_path("mkvout");
     let dest = format!("{}/", dir.display());
     let parsed = parse_url(&format!("mkv://{}/", dir.display()));
-    let jobs = build_jobs(&titles, false, &[], true, &dest, &parsed, &out);
+    let jobs = build_jobs(&titles, false, &[], true, &dest, &parsed, &out, false, &None);
     let _ = std::fs::remove_dir_all(&dir);
     let jobs = jobs.expect("dir dest builds per-title jobs");
     assert_eq!(jobs.len(), 2);
