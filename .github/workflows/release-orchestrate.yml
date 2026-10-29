@@ -100,7 +100,14 @@ jobs:
             [ "$(echo "$gating" | jq '[.[]|select(.status!="completed")]|length')" = "0" ] \
               || { echo "::error::$r: qa still running for ${sha:0:7}"; fail=1; continue; }
             bad=$(echo "$gating" | jq -r '[.[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]|unique|join(", ")')
-            [ -z "$bad" ] || { echo "::error::$r: qa ${sha:0:7} not green ($bad)"; fail=1; continue; }
+            if [ -n "$bad" ]; then
+              echo "::error::$r: qa ${sha:0:7} not green ($bad)"
+              # A qa push only reuses media evidence; without it the media is pending until the sign-off.
+              if [ "$r" = freemkv ] && [[ ", $bad, " == *", qa, "* ]]; then
+                echo "::error::freemkv: if qa.yml's media verdict is waived (final sign-off pending), run the sign-off: gh workflow run qa.yml --repo freemkv/freemkv --ref qa -f sign_off=true"
+              fi
+              fail=1; continue
+            fi
             # A build workflow that never ran is as bad as one that failed: every
             # target freemkv ships must have built green on this exact qa sha.
             if [ "$r" = freemkv ]; then

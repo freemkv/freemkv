@@ -259,7 +259,16 @@ jobs:
             [[ "$own" < "$upstream" ]] || upstream=$own
           done
           [ "$stale" = 0 ] || exit 1
-          echo "promoted. qa CI is running — the heaviest leg (full-size media) runs last, behind everything else."
+          # The full-disc EC2 matrix runs only on the sign-off, never on a push; dispatched by hand, once.
+          echo "promoted. qa CI is running; qa.yml reuses green media evidence, else waits for the sign-off."
+          echo "When the rest of qa is green, sign off (runs the full-disc EC2 matrix only if no green evidence exists):"
+          echo "  gh workflow run qa.yml --repo freemkv/freemkv --ref qa -f sign_off=true"
+          {
+            echo "### Media sign-off"
+            echo '```'
+            echo "gh workflow run qa.yml --repo freemkv/freemkv --ref qa -f sign_off=true"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Dry run
         if: ${{ inputs.dry_run }}
