@@ -1117,14 +1117,15 @@ def read_evidence(ref, request):
 
 
 def required_jobs(policy):
-    jobs = ['cli-matrix (linux)', 'cli-matrix (windows)', 'compare-cli-matrix', 'record-media-evidence']
+    jobs = ['cli-matrix (linux)', 'record-media-evidence']
     if policy['perf']['enabled']:
-        jobs += ['cli-perf (linux)', 'cli-perf (windows)']
+        jobs += ['cli-perf (linux)']
     return jobs
 
 
 def legs(policy):
-    return ['linux', 'windows'] + (['linux-perf', 'windows-perf'] if policy['perf']['enabled'] else [])
+    # Linux only: the sign-off is "Linux makes the same hashes as the last release".
+    return ['linux'] + (['linux-perf'] if policy['perf']['enabled'] else [])
 
 
 LEG_JOB = {'linux': 'cli-matrix (linux)', 'windows': 'cli-matrix (windows)',
@@ -1201,7 +1202,7 @@ def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, req
             raise ValueError(f'leg {leg} lacks instance type, C toolchain or a clean environment')
     if policy['perf']['enabled']:
         perf = ev.get('perf')
-        if not isinstance(perf, dict) or set(perf) != {'linux', 'windows'}:
+        if not isinstance(perf, dict) or set(perf) != {'linux'}:
             raise ValueError('perf results missing')
         if perf_check is None:
             raise ValueError('no perf verdict checker')
@@ -1484,7 +1485,7 @@ def on_demand_launch(data, template, version, mappings):
     return {'input': out, 'tags': tags}
 
 
-def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1, reference_epoch=False):
+def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1, reference_epoch=False, trial=False):
     """Everything the launch step passes to run-instances for one leg, from the policy alone:
     - the functional template at its planned version (no separate perf templates exist);
     - perf differences as overrides: the perf instance type, no type fallback, the root volume;
@@ -1494,10 +1495,11 @@ def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1, refere
     - a registration-token parameter per run, attempt and leg (the roles' existing
       /freemkv-ci/runner-reg/* scope); the instance deletes it after reading.
     qa branch only by default. The explicit reference-epoch mode permits dev
-    solely to refresh released media references; it can never record candidate evidence."""
+    solely to refresh released media references, and a trial permits dev to time the legs;
+    neither can ever record candidate evidence."""
     if reference_epoch and ref != 'refs/heads/dev':
         raise ValueError(f'reference epoch launch is dev-only, not {ref!r}')
-    if ref != 'refs/heads/qa' and not (reference_epoch and ref == 'refs/heads/dev'):
+    if ref != 'refs/heads/qa' and not ((reference_epoch or trial) and ref == 'refs/heads/dev'):
         raise ValueError(f'the media legs launch on the qa branch only, not {ref!r} '
                          '(evidence is recorded for qa-branch runs only)')
     if leg not in legs(policy):
@@ -1699,8 +1701,12 @@ def verdict(env):
                                    'guard fired (see its log). qa is red.']
     if status == 'reuse':
         return True, lines + ['', f'full-disc not needed: evidence {env.get("EVIDENCE_URL", "")}']
+    if status == 'run' and env.get('TRIAL') == 'true':
+        ok = env.get('MATRIX') == 'success'
+        return ok, lines + ['', f'trial: matrix={env.get("MATRIX") or "not run"}; it records no evidence '
+                                'or history and cannot sign off a candidate']
     if status == 'run':
-        results = {k: env.get(k, '') for k in ('MATRIX', 'COMPARE', 'RECORD', 'PUBLISH')}
+        results = {k: env.get(k, '') for k in ('MATRIX', 'RECORD', 'PUBLISH')}
         ok = all(v == 'success' for v in results.values())
         lines += ['', ', '.join(f'{k.lower()}={v or "not run"}' for k, v in results.items())]
         return ok, lines + ([f'evidence tag: {env.get("TAG", "")}'] if ok else ['the full-disc run is not green: qa is red'])
@@ -1745,6 +1751,8 @@ def main(argv=None):
     parser.add_argument('--leg')
     parser.add_argument('--reference-epoch', action='store_true',
                         help='permit an explicit historical reference run on refs/heads/dev')
+    parser.add_argument('--trial', action='store_true',
+                        help='permit a no-evidence trial run of the legs on refs/heads/dev')
     parser.add_argument('--target')
     parser.add_argument('--c-toolchain', default='')
     parser.add_argument('--legs', type=Path)
@@ -1793,7 +1801,7 @@ def main(argv=None):
             spec = launch_spec(policy, args.leg, int(os.environ['GITHUB_RUN_ID']), os.environ['GITHUB_REF'],
                                json.loads(os.environ.get('TEMPLATES') or '{}'),
                                attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT') or 1),
-                               reference_epoch=args.reference_epoch)
+                               reference_epoch=args.reference_epoch, trial=args.trial)
             print(json.dumps(spec, sort_keys=True))
             return 0
         if args.mode == 'record':

@@ -553,8 +553,8 @@ class FingerprintTests(unittest.TestCase):
         for path, value in ((('fixtures', 'uhd.iso', 'etag'), '"other"'),
                             (('fixtures', 'bd.iso', 'version_id'), 'v2'),
                             (('launch_templates', 'freemkv-runner-linux', 'version'), 4),
-                            (('launch_templates', 'freemkv-runner-windows', 'image_id'), 'ami-2'),
-                            (('launch_templates', 'freemkv-runner-windows', 'instance_type'), 'c6i.4xlarge')):
+                            (('launch_templates', 'freemkv-runner-linux', 'image_id'), 'ami-2'),
+                            (('launch_templates', 'freemkv-runner-linux', 'instance_type'), 'c6i.4xlarge')):
             ext = copy.deepcopy(EXTERNALS)
             ext[path[0]][path[1]][path[2]] = value
             with self.subTest(external=path):
@@ -760,20 +760,19 @@ class DecideTests(unittest.TestCase):
             'fork': lambda e: e.run.update(head_repository={'full_name': 'evil/freemkv'}),
             'head sha': lambda e: e.run.update(head_sha='f' * 40),
             'run id mismatch': lambda e: e.ev.update(run_id=RUN_ID + 1),
-            'job failed': lambda e: e.job('compare-cli-matrix').update(conclusion='failure'),
+            'job failed': lambda e: e.job('cli-matrix (linux)').update(conclusion='failure'),
             'record failed': lambda e: e.job('record-media-evidence').update(conclusion='cancelled'),
-            'windows leg failed': lambda e: e.job('cli-matrix (windows)').update(conclusion='failure'),
             'rogue runner': lambda e: [e.job('cli-matrix (linux)').update(runner_name='freemkv-media-1'),
                                        e.ev['legs']['linux'].update(runner_name='freemkv-media-1')],
             'no run label': lambda e: e.job('cli-matrix (linux)').update(labels=['self-hosted', 'freemkv-media']),
-            'launched-by unconfirmed': lambda e: e.ev['legs']['windows'].update(launched_by=None),
+            'launched-by unconfirmed': lambda e: e.ev['legs']['linux'].update(launched_by=None),
             'rustc != TC': lambda e: e.ev['legs']['linux'].update(rustc_release='1.98.2'),
             'gnu target': lambda e: e.ev['legs']['linux'].update(target='x86_64-unknown-linux-gnu'),
             'no instance type': lambda e: e.ev['legs']['linux'].update(instance_type=''),
-            'no C toolchain': lambda e: e.ev['legs']['windows'].pop('c_toolchain'),
-            'instance is not the runner': lambda e: e.ev['legs']['windows'].update(instance_id='i-0fedcba9876543210'),
-            'dirty env': lambda e: e.ev['legs']['windows'].update(env_clean=False),
-            'leg missing': lambda e: e.ev['legs'].pop('windows'),
+            'no C toolchain': lambda e: e.ev['legs']['linux'].pop('c_toolchain'),
+            'instance is not the runner': lambda e: e.ev['legs']['linux'].update(instance_id='i-0fedcba9876543210'),
+            'dirty env': lambda e: e.ev['legs']['linux'].update(env_clean=False),
+            'leg missing': lambda e: e.ev['legs'].pop('linux'),
             'oversized': lambda e: e.ev.update(pad='x' * (mg.MAX_EVIDENCE + 1)),
         }
         for name, apply in cases.items():
@@ -787,11 +786,11 @@ class DecideTests(unittest.TestCase):
         e.ev.pop('perf', None)
         self.assertIsNone(e.found(lambda r, p: True), 'evidence without perf')
         e = Evidence(self, perf_policy)
-        e.ev['perf'] = {'linux': {'verdict': 'PASS'}, 'windows': {'verdict': 'PASS'}}
+        e.ev['perf'] = {'linux': {'verdict': 'PASS'}}
         self.assertIsNone(e.found(lambda r, p: False), 'perf verdict does not recompute')
         self.assertIsNotNone(e.found(lambda r, p: True))
         e = Evidence(self, perf_policy)
-        e.ev['perf'] = {'linux': {}, 'windows': {}}
+        e.ev['perf'] = {'linux': {}}
         e.ev['legs']['linux-perf']['runner_name'] = 'ephemeral-linux-i-0123456789abcdef0'
         e.job('cli-perf (linux)')['runner_name'] = 'ephemeral-linux-i-0123456789abcdef0'
         self.assertIsNone(e.found(lambda r, p: True), 'perf leg on a functional runner')
@@ -1211,7 +1210,7 @@ class PlanTests(unittest.TestCase):
         self.assertIn('fresh EC2 key proof', out['reason'])
 
     def test_plan_names_the_legs_to_launch(self):
-        self.assertEqual(json.loads(self.plan()['legs']), ['linux', 'windows'])
+        self.assertEqual(json.loads(self.plan()['legs']), ['linux'])
 
     def test_env_driven_decisions(self):
         self.assertEqual(self.plan()['status'], 'run')

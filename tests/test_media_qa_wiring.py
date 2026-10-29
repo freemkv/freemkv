@@ -172,15 +172,33 @@ class StructureTests(unittest.TestCase):
 
     def test_qa_is_only_the_media_sign_off(self):
         self.assertEqual(set(self.jobs), {
-            'plan-media', 'rc-tag', 'rc-image', 'launch', 'cli-matrix', 'compare-cli-matrix',
+            'plan-media', 'rc-tag', 'rc-image', 'launch', 'cli-matrix',
             'archive-release-comparison', 'publish-media-history', 'record-media-evidence',
             'media-verdict', 'baseline-epoch-verdict'})
         self.assertEqual(self.jobs['launch']['needs'], ['plan-media'], 'EC2 starts right after the plan')
         sign_off = self.qa[True]['workflow_dispatch']['inputs']['sign_off']
         self.assertEqual((sign_off['type'], sign_off['default']), ('boolean', False))
         plan = next(s for s in self.jobs['plan-media']['steps'] if s.get('id') == 'plan')
-        self.assertEqual(plan['env']['SKIP_MEDIA'],
-                         '${{ inputs.skip_media || !(inputs.sign_off || inputs.run_media || inputs.record_baseline) }}')
+        self.assertEqual(plan['env']['SKIP_MEDIA'], '${{ inputs.skip_media || !(inputs.sign_off || inputs.run_media '
+                                                    '|| inputs.record_baseline || inputs.trial) }}')
+        self.assertEqual(self.jobs['cli-matrix']['strategy']['matrix']['os'], ['linux'])
+        names = [st.get('name') for st in self.jobs['cli-matrix']['steps']]
+        self.assertNotIn('Verify decrypted Blu-ray and UHD ISO/folder outputs', names)
+        self.assertNotIn('full_disc_qa.py', self.text)
+
+    def test_a_trial_writes_nothing(self):
+        self.assertIn('inputs.trial', self.text)
+        plan = next(s for s in self.jobs['plan-media']['steps'] if s.get('id') == 'plan')
+        self.assertIn('inputs.trial', plan['env']['RUN_MEDIA'])
+        for name in ('archive-release-comparison', 'publish-media-history', 'record-media-evidence'):
+            with self.subTest(job=name):
+                self.assertIn('inputs.trial != true', self.jobs[name]['if'])
+        for name in ('archive-release-comparison', 'record-media-evidence'):
+            with self.subTest(job=name):
+                self.assertIn("github.ref == 'refs/heads/qa'", self.jobs[name]['if'])
+        step = next(s for s in self.jobs['media-verdict']['steps'] if s.get('name') == 'Media verdict')
+        self.assertEqual(step['env']['TRIAL'], '${{ inputs.trial }}')
+        self.assertIn('--trial', steps_text(self.jobs['launch']))
         self.assertIn('-f sign_off=true', plan['env']['SKIP_REASON'])
 
     def test_the_cheap_qa_checks_run_in_ci_on_dev(self):
@@ -205,7 +223,7 @@ class StructureTests(unittest.TestCase):
         self.assertIn('FREEMKV_SRC', drift)
 
     def test_media_jobs_gate_on_the_plan(self):
-        for name in ('launch', 'cli-matrix', 'compare-cli-matrix', 'record-media-evidence'):
+        for name in ('launch', 'cli-matrix', 'record-media-evidence'):
             with self.subTest(job=name):
                 self.assertIn("needs.plan-media.outputs.run == 'true'", self.jobs[name]['if'])
                 self.assertNotIn('inputs.run_media', self.jobs[name]['if'])
@@ -213,7 +231,7 @@ class StructureTests(unittest.TestCase):
 
     def test_reference_epoch_is_explicit_dev_only_and_cannot_publish_candidate_evidence(self):
         self.assertIn('record_baseline:', self.text)
-        self.assertIn('RUN_MEDIA: ${{ inputs.run_media || inputs.record_baseline }}', self.text)
+        self.assertIn('RUN_MEDIA: ${{ inputs.run_media || inputs.record_baseline || inputs.trial }}', self.text)
         record = self.jobs['record-media-evidence']
         self.assertIn('inputs.record_baseline != true', record['if'])
         verdict = self.jobs['media-verdict']
@@ -226,9 +244,6 @@ class StructureTests(unittest.TestCase):
         self.assertIn('--record-baseline', suite['run'])
         self.assertIn('LF_SHA=$("$FMKV_PYTHON" -c', suite['run'])
         self.assertNotIn('LF_SHA=$(python3 -c', suite['run'])
-        full_disc = next(s for s in self.jobs['cli-matrix']['steps']
-                         if s.get('name') == 'Verify decrypted Blu-ray and UHD ISO/folder outputs')
-        self.assertEqual(full_disc['if'], 'inputs.record_baseline != true')
         publish = self.jobs['publish-media-history']
         self.assertIn('inputs.record_baseline == true', publish['if'])
         self.assertIn('--publish-baseline history', steps_text(publish))
@@ -399,7 +414,7 @@ class LaunchSpecTests(unittest.TestCase):
                               aws=self.fake_aws(calls, data), **kw), calls
 
     def test_only_the_functional_templates_are_pinned(self):
-        self.assertEqual(mg.launch_templates(POLICY), ['freemkv-runner-linux', 'freemkv-runner-windows'])
+        self.assertEqual(mg.launch_templates(POLICY), ['freemkv-runner-linux'])
         self.assertEqual(mg.launch_templates(self.perf_policy()), mg.launch_templates(POLICY))
 
     def test_linux_spot_through_the_template_with_the_policy_cap(self):
@@ -473,13 +488,13 @@ class LaunchSpecTests(unittest.TestCase):
                          POLICY['perf']['root_volume_gib'])
         self.assertEqual(LINUX_TEMPLATE['BlockDeviceMappings'][0]['Ebs']['VolumeSize'], 300, 'template data untouched')
 
-    def test_windows_uses_its_template_market_and_type(self):
-        spec, calls = self.spec('windows')
-        self.assertEqual(spec['markets'], [{'name': 'template', 'options': None, 'template': True}])
-        self.assertEqual(spec['types'], [])
-        self.assertIsNone(spec['on_demand'])
-        self.assertEqual(calls, [], 'no template read is needed')
-        self.assertTrue(spec['user_data'].endswith('user-data-windows.ps1'))
+    def test_linux_only_on_instance_store_types(self):
+        with self.assertRaisesRegex(ValueError, 'not launched under this policy'):
+            self.spec('windows')
+        self.assertEqual(mg.legs(POLICY), ['linux'])
+        # The user-data mounts the instance-store NVMe as the work dir: every type needs one.
+        for t in POLICY['launch']['linux']['types']:
+            self.assertRegex(t, r'^[a-z][0-9]+[a-z]*d\.[0-9]*xlarge$')
 
     def test_spot_only_when_the_policy_says_so(self):
         import copy
@@ -493,11 +508,8 @@ class LaunchSpecTests(unittest.TestCase):
 
     def test_perf_legs_override_the_functional_template(self):
         policy = self.perf_policy()
-        self.assertEqual(mg.legs(policy), ['linux', 'windows', 'linux-perf', 'windows-perf'])
-        windows = dict(LINUX_TEMPLATE, TagSpecifications=[])
-        windows.pop('InstanceMarketOptions')
-        for leg, template, version, data in (('linux-perf', 'freemkv-runner-linux', '7', LINUX_TEMPLATE),
-                                             ('windows-perf', 'freemkv-runner-windows', '5', windows)):
+        self.assertEqual(mg.legs(policy), ['linux', 'linux-perf'])
+        for leg, template, version, data in (('linux-perf', 'freemkv-runner-linux', '7', LINUX_TEMPLATE),):
             with self.subTest(leg=leg):
                 spec, calls = self.spec(leg, policy, data=data)
                 self.assertEqual((spec['template'], spec['version']), (template, version))
@@ -522,7 +534,7 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID + 1, self.QA, self.TEMPLATES,
                                               aws=self.fake_aws([]))['param'])
         self.assertNotEqual(a, self.spec(attempt=2)[0]['param'])
-        self.assertNotEqual(a, self.spec('windows')[0]['param'])
+        self.assertNotEqual(a, self.spec('linux-perf', self.perf_policy())[0]['param'])
         # Both roles grant exactly arn:...:parameter/freemkv-ci/runner-reg/* (checked 2026-09-27).
         self.assertRegex(a, r'^/freemkv-ci/runner-reg/[0-9]+-[0-9]+-[a-z-]+$')
 
@@ -532,6 +544,13 @@ class LaunchSpecTests(unittest.TestCase):
             with self.subTest(ref=ref):
                 with self.assertRaises(ValueError):
                     self.spec(ref=ref)
+
+    def test_a_trial_launches_on_dev_but_never_elsewhere(self):
+        self.assertEqual(self.spec(ref='refs/heads/dev', trial=True)[0]['leg'], 'linux')
+        for ref in ('refs/heads/main', 'refs/tags/qa', 'refs/heads/ci/x'):
+            with self.subTest(ref=ref):
+                with self.assertRaises(ValueError):
+                    self.spec(ref=ref, trial=True)
 
     def test_an_unpinned_template_is_refused(self):
         """Fail closed: '$Default' would be read at launch time, not the version F fingerprinted."""
@@ -823,7 +842,7 @@ class ExternalsTests(unittest.TestCase):
     def test_template_pins_are_the_default_version_and_perf_only_when_enabled(self):
         calls = []
         pins = mg.read_externals('launch_templates', POLICY, run=self.fake_aws(calls))
-        self.assertEqual(set(pins), {'freemkv-runner-linux', 'freemkv-runner-windows'})
+        self.assertEqual(set(pins), {'freemkv-runner-linux'})
         self.assertEqual(pins['freemkv-runner-linux']['version'], 3)
         self.assertTrue(all('$Default' in c for c in calls))
 
@@ -920,12 +939,12 @@ class LegAndRecordTests(unittest.TestCase):
         for change in ('delete', 'os', 'run'):
             with self.subTest(change=change):
                 e, plan, legs, env, aws, post, posts, tags = self.setup_record()
-                path = legs / 'launch-windows-1.json'
+                path = legs / 'launch-linux-1.json'
                 att = json.loads(path.read_text())
                 if change == 'delete':
                     path.unlink()
                 elif change == 'os':
-                    att.update(os='linux', runner_labels=f'freemkv-media,linux,run-{RUN_ID}')
+                    att.update(os='windows', runner_labels=f'freemkv-media,windows,run-{RUN_ID}')
                     path.write_text(json.dumps(att))
                 else:
                     att['launched_by'] = RUN_ID + 1
@@ -936,7 +955,7 @@ class LegAndRecordTests(unittest.TestCase):
 
     def test_record_refuses_ec2_labels_for_another_os(self):
         e, plan, legs, env, aws, post, posts, tags = self.setup_record()
-        tags['labels'] = f'freemkv-media,linux,run-{RUN_ID}'
+        tags['labels'] = f'freemkv-media,windows,run-{RUN_ID}'
         with self.assertRaises(ValueError):
             mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
 
@@ -1041,9 +1060,9 @@ class LegAndRecordTests(unittest.TestCase):
 
     def test_record_refuses_a_runner_mismatch_or_another_candidate(self):
         e, plan, legs, env, aws, post, posts, _ = self.setup_record()
-        rec = json.loads((legs / 'leg-windows.json').read_text())
-        rec['runner_name'] = 'ephemeral-windows-i-0fedcba9876543210'
-        (legs / 'leg-windows.json').write_text(json.dumps(rec))
+        rec = json.loads((legs / 'leg-linux.json').read_text())
+        rec['runner_name'] = 'ephemeral-linux-i-0fedcba9876543210'
+        (legs / 'leg-linux.json').write_text(json.dumps(rec))
         with self.assertRaises(ValueError):
             mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
         e, plan, legs, env, aws, post, posts, _ = self.setup_record()
@@ -1071,17 +1090,20 @@ class VerdictTests(unittest.TestCase):
         ok = {'PLAN_RESULT': 'success'}
         cases = [
             (dict(ok, STATUS='reuse', EVIDENCE_URL='u'), True),
-            (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success', PUBLISH='success'), True),
-            (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='success', PUBLISH='failure'), False),
-            (dict(ok, STATUS='run', MATRIX='failure', COMPARE='success', RECORD='skipped'), False),
-            (dict(ok, STATUS='run', MATRIX='success', COMPARE='success', RECORD='failure'), False),
-            (dict(ok, STATUS='run', MATRIX='cancelled', COMPARE='cancelled', RECORD='skipped'), False),
+            (dict(ok, STATUS='run', MATRIX='success', RECORD='success', PUBLISH='success'), True),
+            (dict(ok, STATUS='run', MATRIX='success', RECORD='success', PUBLISH='failure'), False),
+            (dict(ok, STATUS='run', MATRIX='failure', RECORD='skipped'), False),
+            (dict(ok, STATUS='run', MATRIX='success', RECORD='failure'), False),
+            (dict(ok, STATUS='run', MATRIX='cancelled', RECORD='skipped'), False),
             (dict(ok, STATUS='waived'), False),
             (dict(ok, STATUS='superseded'), False),
             (dict(ok, STATUS='canary-failed'), False),
             ({'PLAN_RESULT': 'failure', 'STATUS': 'canary-failed'}, False),
             ({'PLAN_RESULT': 'failure', 'STATUS': 'reuse'}, False),
             ({'PLAN_RESULT': 'success', 'STATUS': ''}, False),
+            (dict(ok, STATUS='run', MATRIX='success', RECORD='skipped', PUBLISH='skipped', TRIAL='true'), True),
+            (dict(ok, STATUS='run', MATRIX='failure', TRIAL='true'), False),
+            (dict(ok, STATUS='run', MATRIX='success', RECORD='skipped', PUBLISH='skipped', TRIAL='false'), False),
         ]
         for env, green in cases:
             with self.subTest(env=env):

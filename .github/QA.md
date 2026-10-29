@@ -68,7 +68,7 @@ disc images in S3, described under "the real-media gate" below.
 | **Linux cross-target clippy** | GitHub Actions (`qa.yml`) | push to `qa` |
 | **CLI integration, end to end** | GitHub Actions (`ci.yml`, `freemkv`) | every push |
 | **cross-platform output parity** | GitHub Actions (`parity.yml`) | push to `qa` + manual |
-| **real-media acceptance, full-size** | ephemeral EC2 (linux + windows) | `qa` sign-off dispatch — see below |
+| **real-media acceptance, full-size** | ephemeral EC2 (linux) | `qa` sign-off dispatch — see below |
 | **GUI gate** | GitHub Actions (`ci.yml`, linux + windows) | every push |
 | mutation runs (~12k mutants, ~1 h) | EC2, sharded | pre-release only |
 
@@ -130,22 +130,26 @@ uses.
 
 `disc://` and real `iso://` need media no hosted runner has: hosted runners
 ship ~14 GB of disk against a 34 GB Blu-ray and a 53 GB UHD. So `qa.yml` runs
-the acceptance suite on **ephemeral EC2 runners**, one Linux and one Windows,
-against full-size disc images held in S3.
-
-Three jobs, in order:
+the acceptance suite on **one ephemeral Linux EC2 runner** against full-size
+disc images held in S3. The question it answers is "does Linux make the same
+hashes as the last release": Windows is covered by the hosted `ci.yml` and
+`windows-app.yml` jobs, not by a second EC2 leg.
 
 | job | what it does |
 |---|---|
-| `launch-runners` | mints a single-use registration token per OS and starts one EC2 instance from a launch template |
-| `cli-matrix` | builds the CLI, fetches four fixtures, runs `cli-acceptance.sh`, emits a hash ledger |
-| `compare-cli-matrix` | fails unless Linux and Windows produced byte-identical output |
+| `launch` | mints a single-use registration token and starts one EC2 instance |
+| `cli-matrix (linux)` | builds the CLI, fetches the fixtures, runs `cli-acceptance.sh`, hashes every output and compares it with the pinned release manifests |
+
+**Instance store.** The policy's Linux types all carry local NVMe
+(`c6id`/`m6id`), and `user-data-linux.sh` mounts it as the runner's work dir,
+so the fixtures, the build and the suite's outputs never touch the EBS root.
+That volume (gp3, 500 MB/s) capped the fetch and every full-disc rip. A type
+without instance store falls back to the root volume.
 
 **Fixtures — one per family**, in the bucket named by the `FMKV_FIXTURES_BUCKET` secret:
 `dvd.iso` (CSS), `bd.iso` (AACS v1), `uhd.iso` (AACS 2.0), `hddvd.iso`
-(MPEG-PS/VC-1). ~121 GiB, held for the whole run rather than fetched per rip,
-because the format, selection and `dir://` groups revisit them — the launch
-templates carry 600 GB for that reason.
+(MPEG-PS/VC-1). ~110 GiB, held for the whole run rather than fetched per rip,
+because the format, selection and `dir://` groups revisit them.
 
 **Keys — BOTH sources, because neither covers everything.**
 `FMKV_KEY_URL` / `FMKV_KEY_AUTH` (repo secrets) point at the online key
@@ -179,30 +183,35 @@ scheduled sweeper.
 dispatches it, and promote only moves qa to dev shas whose `ci.yml` (lint, unit
 and release-profile suites, the Windows build, CLI integration, the GUI gate)
 is green, so a typo cannot burn a two-hour rip. The EC2 matrix starts right
-after `plan-media`, on the qa sign-off dispatch, never on a push or on dev. A
-single explicit dev dispatch can record a new historical fixture epoch.
+after `plan-media`, on the qa sign-off dispatch, never on a push. A single
+explicit dev dispatch can record a new historical fixture epoch, and
+`trial=true` (qa or dev) times the leg without recording evidence, history or
+tags: `gh workflow run qa.yml --ref dev -f trial=true`.
 
 **Release comparisons run the candidate once.** `tests/media-baseline.json`
 pins SHA-256 digests for the historical manifests in the same S3 bucket as the
 disc fixtures (`media-history/v1/<version>/<target>/<sha256>.json`). The EC2
 leg downloads those small manifests, verifies their bytes, fixture pins,
 harness, toolchain and hash method, then compares the candidate output against
-every listed released version. Routine QA never rebuilds or rerips history. Each green
+every listed released version: media files on their stream content and timing
+(ffmpeg `framecrc` plus stream and chapter metadata), other files byte for byte,
+and any difference must be listed with both hashes and a reason. Routine QA
+never rebuilds or rerips history. Each green
 QA run also writes immutable candidate manifests under
 `media-history/v1/candidates/<version>/<run>/<target>/<sha256>.json` for use as
 the next release's historical answer. When preparing 1.8.6, add the approved
-1.8.5 Linux and Windows manifest digests to `media-baseline.json` while retaining
+1.8.5 Linux manifest digest to `media-baseline.json` while retaining
 1.8.4, so both previous releases are checked. An incompatible toolchain or
 fixture set requires a new explicitly pinned history epoch; it cannot silently
 pass by comparing unlike inputs.
 
 To create a deliberate 1.8.4 reference epoch after a fixture replacement, dispatch
 `qa.yml` from `dev` with `record_baseline=true` (this forces a fresh EC2 media run).
-The Linux and Windows legs rebuild the exact six pinned 1.8.4 revisions and save
-only their reference manifests. The workflow publishes those manifests immutably
+The Linux leg rebuilds the exact six pinned 1.8.4 revisions and saves only its
+reference manifest. The workflow publishes those manifests immutably
 under the normal versioned history keys. This mode skips candidate media evidence
 and the release verdict; it cannot certify a candidate. After the manifests are
-published, update `media-baseline.json` with their two SHA-256 digests, land that
+published, update `media-baseline.json` with its SHA-256 digest, land that
 pin update on dev, then promote normally. Routine QA leaves `record_baseline=false`
 and remains candidate-only.
 
@@ -213,16 +222,15 @@ Ubuntu HTTPS archive instead of the slow Azure mirror. Installation has a five-m
 deadline and bounded network retries.
 
 If the hosted key-service canary fails only at the transport layer, QA requires
-a fresh EC2 media run, even if older media evidence exists. The acceptance and
-full-disc suites must prove the service and decrypted outputs there. An HTTP
+a fresh EC2 media run, even if older media evidence exists. The acceptance
+suite must prove the service and decrypted outputs there. An HTTP
 authentication error, wrong key, or malformed response still fails preflight.
 
 A runner that stops before taking its media job is replaced once using the same
 launch path, a fresh registration token, and a refreshed launch record. This
-keeps a transient bootstrap failure from immediately canceling the other leg.
-Windows enables SSM diagnostics, verifies a pinned runner download, and saves a
-redacted bootstrap transcript in the build bucket before shutdown. Media hash
-collection processes four independent files at a time with the same hash method.
+keeps a transient bootstrap failure from failing the run. Media hash collection
+processes up to sixteen files at a time with the same hash method, and reads each
+media file once for both of its hashes.
 
 **macOS, on full-size media.** EC2 Mac requires a Dedicated Host with a
 24-hour minimum allocation, which is not worth it per qa push. macOS is still

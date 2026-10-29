@@ -1,6 +1,6 @@
 {
   "schema": 4,
-  "revision": 4,
+  "revision": 5,
   "libraries": ["libfreemkv", "freemkv-engine", "freemkv-keysources"],
   "library_required": ["src/**", "build.rs", "Cargo.toml"],
   "library_inert": [".github/**", "tests/**", "benches/**", "examples/**", "docs/**", "*.md", "*.rst",
@@ -38,9 +38,8 @@
   "runner_name_re": "^ephemeral-(linux|windows)(-perf)?-(i-[0-9a-f]{8,17})$",
   "harness": {"repository": "freemkv/freemkv-ci", "sha": "f2fcd7d0409596ee48a98fb27f6e0f97d88e0da9"},
   "launch": {
-    "linux": {"template": "freemkv-runner-linux", "types": ["c7i.4xlarge", "c6i.4xlarge", "m7i.4xlarge"],
-              "on_demand_only": true, "spot_max_price": "0.72", "on_demand_fallback": true},
-    "windows": {"template": "freemkv-runner-windows", "types": []}
+    "linux": {"template": "freemkv-runner-linux", "types": ["c6id.4xlarge", "m6id.4xlarge", "c6id.8xlarge"],
+              "on_demand_only": true, "spot_max_price": "0.72", "on_demand_fallback": true}
   },
   "fixtures": ["dvd.iso", "bd.iso", "uhd.iso", "hddvd.iso", "keydb.cfg",
     "synthetic-m2ts-h264-bframes-lpcm16-lpcm24.m2ts", "synthetic-mkv-h264-aac-mp2-mp3.mkv", "synthetic-mpg-mpeg2-interlaced-mp2-lpcm24.mpg", "bd-aacs-damage.patch.json"],

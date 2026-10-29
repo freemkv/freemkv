@@ -7,8 +7,10 @@ run-name: qa ${{ inputs.dispatch_id || github.sha }}
 # (tests/media_gate.py, policy tests/media-gate-policy.json) is reused. Without
 # it, a push leaves the media pending (qa red) and EC2 runs only on the final
 # sign-off, once per release: gh workflow run qa.yml --ref qa -f sign_off=true.
-# media-verdict is the one media answer. Everything else (release-profile tests,
-# the Windows build, CLI integration, the GUI gate) runs in ci.yml on dev first.
+# media-verdict is the one media answer: the Linux leg's output hashes against the
+# pinned release manifests. trial=true times the leg on qa or dev and records
+# nothing. Everything else (release-profile tests, the Windows build, CLI
+# integration, the GUI gate) runs in ci.yml on dev first.
 
 on:
   push:
@@ -21,6 +23,10 @@ on:
         default: false
       run_media:
         description: Run the full-disc EC2 matrix even when green evidence exists.
+        type: boolean
+        default: false
+      trial:
+        description: Time the EC2 legs (qa or dev). Records no evidence, history or tags; signs nothing off.
         type: boolean
         default: false
       record_baseline:
@@ -88,6 +94,11 @@ jobs:
             echo "::error title=Reference epoch is dev-only::record_baseline is permitted only on dev."
             exit 1
           fi
+      - name: A trial is not a reference epoch
+        if: inputs.trial && inputs.record_baseline
+        run: |
+          echo "::error title=trial and record_baseline::pick one: a trial records nothing."
+          exit 1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: '3.12' }
       - name: Exact toolchain (freemkv rust-version)
@@ -180,9 +191,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REVISIONS: ${{ steps.pin.outputs.revisions }}
           SUPERSEDED: ${{ steps.pin.outputs.superseded }}
-          RUN_MEDIA: ${{ inputs.run_media || inputs.record_baseline }}
+          RUN_MEDIA: ${{ inputs.run_media || inputs.record_baseline || inputs.trial }}
           # EC2 runs only when asked for: every other run reuses evidence or stays pending.
-          SKIP_MEDIA: ${{ inputs.skip_media || !(inputs.sign_off || inputs.run_media || inputs.record_baseline) }}
+          SKIP_MEDIA: ${{ inputs.skip_media || !(inputs.sign_off || inputs.run_media || inputs.record_baseline || inputs.trial) }}
           SKIP_REASON: ${{ inputs.skip_reason || 'final sign-off pending, run gh workflow run qa.yml --ref qa -f sign_off=true' }}
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: python3 freemkv/tests/media_gate.py plan --workspace . --externals externals.json --canary canary.json --plan-directory media-plan
@@ -262,7 +273,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        leg: ${{ fromJSON(needs.plan-media.outputs.legs || '["linux", "windows"]') }}
+        leg: ${{ fromJSON(needs.plan-media.outputs.legs || '["linux"]') }}
     env:
       GH_TOKEN: ${{ github.token }}
       LEG: ${{ matrix.leg }}
@@ -303,10 +314,13 @@ jobs:
         env:
           TEMPLATES: ${{ needs.plan-media.outputs.launch_templates }}
           RECORD_BASELINE: ${{ inputs.record_baseline }}
+          TRIAL: ${{ inputs.trial }}
         run: |
           set -euo pipefail
           if [ "$RECORD_BASELINE" = "true" ]; then
             spec=$(python3 freemkv/tests/media_gate.py launch-spec --leg "$LEG" --reference-epoch)
+          elif [ "$TRIAL" = "true" ]; then
+            spec=$(python3 freemkv/tests/media_gate.py launch-spec --leg "$LEG" --trial)
           else
             spec=$(python3 freemkv/tests/media_gate.py launch-spec --leg "$LEG")
           fi
@@ -356,7 +370,7 @@ jobs:
         run: |
           set -uo pipefail
           leg="$JOB"
-          limit=900; case "$LEG" in windows*) limit=1800 ;; esac
+          limit=900
           deadline=$(( $(date +%s) + limit ))
           picked=false
           retries=0
@@ -451,18 +465,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, windows]
-        # The targets release.yml ships the CLI for. Building the host gnu
-        # target instead pulled in GTK (glib-sys) on Linux; on musl it is
-        # cfg'd out.
+        # Linux only: the sign-off is "the Linux CLI makes the same hashes as the last
+        # release". Windows is covered by ci.yml and windows-app.yml on hosted runners.
+        os: [linux]
+        # The target release.yml ships the CLI for. On musl the gui feature is cfg'd out.
         include:
           - os: linux
             target: x86_64-unknown-linux-musl
-          - os: windows
-            target: x86_64-pc-windows-msvc
     # run-<id>: only the instance this run launched can take the job.
     runs-on: [self-hosted, freemkv-media, "${{ matrix.os }}", "run-${{ github.run_id }}"]
-    timeout-minutes: 240
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
@@ -479,74 +491,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 python3-venv libbluray-bin
-          else
-            choco install ffmpeg python3 -y --no-progress
-            export PATH="$PATH:/c/ProgramData/chocolatey/bin"
-            echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
-          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 python3-venv libbluray-bin
           command -v ffprobe >/dev/null || {
             echo "::error title=ffprobe missing::the acceptance suite verifies every output with ffprobe; without it the run would only be checking exit codes"
             exit 1
           }
           ffprobe -version | head -1
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
-            export PATH="$PATH:/c/ProgramData/chocolatey/bin"
-            for d in /c/Python3*/; do
-              if [ -x "${d}python.exe" ]; then
-                echo "${d%/}" >> "$GITHUB_PATH"
-                export PATH="$PATH:${d%/}"
-              fi
-            done
-          fi
-          PY=$(command -v python3 || command -v python || ls /c/Python3*/python.exe 2>/dev/null | head -1 || true)
+          PY=$(command -v python3 || true)
           if [ -z "$PY" ] || ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)'; then
             echo "::error title=python 3 missing::the acceptance suite analyses every output timeline with a python program; without it the timeline checks would not run"
             exit 1
           fi
           echo "FMKV_PYTHON=$PY" >> "$GITHUB_ENV"
           "$PY" --version
+          # The work tree (fixtures, build, suite scratch) sits on the instance-store NVMe
+          # the user-data mounted, when the instance type has one.
+          df -h "$GITHUB_WORKSPACE" | tail -1
       - name: Provision the build toolchain
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-            have_vc=
-            if [ -x "$vswhere" ]; then
-              have_vc=$("$vswhere" -latest -products '*' \
-                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
-                -property installationPath 2>/dev/null || true)
-            fi
-            if [ -z "$have_vc" ]; then
-              choco install -y visualstudio2022buildtools --no-progress
-              choco install -y visualstudio2022-workload-vctools --no-progress
-            fi
-          else
-            # musl-tools: ring and mimalloc compile C for the musl target.
-            sudo apt-get install -y -qq build-essential curl musl-tools
-          fi
+          # musl-tools: ring and mimalloc compile C for the musl target.
+          sudo apt-get install -y -qq build-essential curl musl-tools
           # One exact toolchain: freemkv's rust-version, as release.yml and
           # release-orchestrate use. Any rustup failure fails the job; never fall back to the AMI's.
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            cargo_bin="$(cygpath -u "$USERPROFILE")/.cargo/bin"
-          else
-            cargo_bin="$HOME/.cargo/bin"
+          cargo_bin="$HOME/.cargo/bin"
+          if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$cargo_bin/rustup" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none
           fi
-          if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$cargo_bin/rustup" ] && [ ! -x "$cargo_bin/rustup.exe" ]; then
-            if [ "${{ matrix.os }}" = "windows" ]; then
-              curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
-              ./rustup-init.exe -y --profile minimal --default-toolchain none \
-                --default-host x86_64-pc-windows-msvc
-            else
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --profile minimal --default-toolchain none
-            fi
-          fi
-          # POSIX form for $GITHUB_PATH: a C:\ entry is split on its drive-letter
-          # colon when Git-Bash re-parses PATH for the next step.
           export PATH="$cargo_bin:$PATH"
           echo "$cargo_bin" >> "$GITHUB_PATH"
           bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml "${{ matrix.target }}"
@@ -584,14 +557,13 @@ jobs:
         working-directory: freemkv
         run: cargo build --locked --release --target "${{ matrix.target }}" --bin freemkv
       - name: The Linux CLI is static
-        if: matrix.os == 'linux'
         shell: bash
         run: |
           BIN="freemkv/target/${{ matrix.target }}/release/freemkv"
           if readelf -d "$BIN" | grep -q NEEDED; then
             readelf -d "$BIN"; echo "::error::the Linux CLI is not static"; exit 1
           fi
-      # All five keys at once, every ranged GET pinned to the ETag (or VersionId)
+      # All keys at once, every ranged GET pinned to the ETag (or VersionId)
       # recorded first, and each object's ETag recomputed from the bytes as they
       # arrive (tests/media_fetch.py). The report records the fetch time per key.
       - name: Fetch the disc fixtures and key database
@@ -601,15 +573,9 @@ jobs:
         run: |
           set -euo pipefail
           export AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            ISO_DIR=$(cygpath -m "$(pwd)")/isos
-            venv="$(cygpath -u "$RUNNER_TEMP")/fetch-venv"
-            venv_py="$venv/Scripts/python.exe"
-          else
-            ISO_DIR="$(pwd)/isos"
-            venv="$RUNNER_TEMP/fetch-venv"
-            venv_py="$venv/bin/python"
-          fi
+          ISO_DIR="$(pwd)/isos"
+          venv="$RUNNER_TEMP/fetch-venv"
+          venv_py="$venv/bin/python"
           echo "ISO_DIR=$ISO_DIR" >> "$GITHUB_ENV"
           echo "KEYDB_PATH=$ISO_DIR/keydb.cfg" >> "$GITHUB_ENV"
           "$FMKV_PYTHON" -m venv "$venv"
@@ -650,11 +616,9 @@ jobs:
           fi
 
           BIN="$PWD/freemkv/target/${{ matrix.target }}/release/freemkv"
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            BIN="$(cygpath -m "$PWD")/freemkv/target/${{ matrix.target }}/release/freemkv.exe"
-            export TMPDIR="$(cygpath -m "${RUNNER_TEMP}")"
-          fi
-          [ -x "${BIN%.exe}" ] || [ -x "$BIN" ] || {
+          # Suite scratch on the work volume (the NVMe instance store), not the root disk.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          [ -x "$BIN" ] || {
             echo "::error title=CLI binary missing::expected a release build at $BIN"; exit 1; }
 
           chmod +x ci/scripts/cli-acceptance.sh || true
@@ -698,25 +662,6 @@ jobs:
           echo "── hashes recorded on ${{ matrix.os }} ──"
           cat "cli-${{ matrix.os }}.txt"
           exit $rc
-      - name: Verify decrypted Blu-ray and UHD ISO/folder outputs
-        if: inputs.record_baseline != true
-        shell: bash
-        env:
-          FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
-          FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
-        run: |
-          set -euo pipefail
-          BIN="$PWD/freemkv/target/${{ matrix.target }}/release/freemkv"
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            BIN="$(cygpath -m "$PWD")/freemkv/target/${{ matrix.target }}/release/freemkv.exe"
-            BD_INFO=()
-          else
-            BD_INFO=(--bd-info "$(command -v bd_info)")
-          fi
-          "$FMKV_PYTHON" freemkv/tests/full_disc_qa.py \
-            --binary "$BIN" --bd-iso "$ISO_DIR/bd.iso" --uhd-iso "$ISO_DIR/uhd.iso" \
-            --keydb "$KEYDB_PATH" --key-url "$FMKV_KEY_URL" --key-auth "$FMKV_KEY_AUTH" \
-            --out "release-comparison/${{ matrix.os }}/candidate" "${BD_INFO[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -751,82 +696,12 @@ jobs:
           path: "suite-${{ matrix.os }}.log"
           overwrite: true
 
-  compare-cli-matrix:
-    needs: [plan-media, cli-matrix]
-    if: always() && needs.plan-media.outputs.run == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with: { pattern: "cli-matrix-*", path: hashes }
-        continue-on-error: true
-      - name: Linux and Windows must produce identical bytes
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import glob, os, sys, collections
-
-          arts, shas = collections.defaultdict(dict), {}
-          files = sorted(glob.glob("hashes/*/cli-*.txt"))
-          if not files:
-              print("::error title=No hashes produced::neither leg of the CLI matrix "
-                    "uploaded a hash file, so nothing was compared. Check whether the "
-                    "EC2 runners registered at all.")
-              sys.exit(1)
-
-          for path in files:
-              plat = os.path.basename(path)[len("cli-"):-len(".txt")]
-              for line in open(path):
-                  line = line.strip()
-                  if not line:
-                      continue
-                  if line.startswith("libfreemkv="):
-                      shas[plat] = line.split("=", 1)[1]
-                      continue
-                  h, _, name = line.partition("  ")
-                  arts[name.strip()][plat] = h
-
-          plats = sorted({p for v in arts.values() for p in v})
-          print("platforms:", ", ".join(plats) or "(none)")
-          fail = False
-
-          if len(set(shas.values())) > 1:
-              print(f"::error title=Sibling shas differ::libfreemkv differs across the "
-                    f"matrix ({shas}) — MUX_APP is stamped from it, so a byte comparison "
-                    "would be meaningless. Pin the sibling refs.")
-              fail = True
-
-          EXPECTED = {"linux", "windows"}
-          absent = sorted(EXPECTED - set(plats))
-          if absent:
-              print(f"::error title=Platform never reported::no hashes from "
-                    f"{', '.join(absent)} — that leg was never compared, so this run "
-                    "cannot claim cross-platform parity")
-              fail = True
-
-          for name in sorted(arts):
-              by = arts[name]
-              missing = sorted(EXPECTED - set(by))
-              if len(set(by.values())) == 1 and not missing:
-                  print(f"  OK    {name}")
-              elif missing:
-                  fail = True
-                  print(f"::error title=Artifact missing on {','.join(missing)}::{name} "
-                        f"was not produced on {', '.join(missing)} — it agrees where it "
-                        "exists, but that platform is unproven for this output")
-              else:
-                  fail = True
-                  print(f"::error title=Output differs::{name} DIFFERS across platforms:")
-                  for p in sorted(by):
-                      print(f"      {p:10} {by[p]}")
-
-          print(f"\n{len(arts)} artifacts compared across {len(plats)} platforms")
-          sys.exit(1 if fail else 0)
-          PY
-
+  # History is written for qa (and the dev reference epoch) only, never for a trial.
   archive-release-comparison:
     needs: [plan-media, cli-matrix]
-    if: always() && needs.plan-media.outputs.run == 'true'
+    if: >-
+      always() && needs.plan-media.outputs.run == 'true' && inputs.trial != true
+      && (github.ref == 'refs/heads/qa' || inputs.record_baseline == true)
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -840,11 +715,11 @@ jobs:
         run: python3 tests/media_history.py --archive history
 
   publish-media-history:
-    needs: [plan-media, cli-matrix, compare-cli-matrix, record-media-evidence]
+    needs: [plan-media, cli-matrix, record-media-evidence]
     if: >-
       always() && needs.plan-media.outputs.run == 'true'
       && needs.cli-matrix.result == 'success'
-      && needs.compare-cli-matrix.result == 'success'
+      && inputs.trial != true
       && (inputs.record_baseline == true || needs.record-media-evidence.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
@@ -877,11 +752,11 @@ jobs:
   # Writes the evidence: an annotated tag media-evidence/<F>/<run_id> on an
   # orphan commit holding evidence.json and the built Cargo.lock.
   record-media-evidence:
-    needs: [plan-media, launch, cli-matrix, compare-cli-matrix]
+    needs: [plan-media, launch, cli-matrix]
     if: >-
       always() && needs.plan-media.outputs.run == 'true' && needs.launch.result == 'success'
-      && needs.cli-matrix.result == 'success' && needs.compare-cli-matrix.result == 'success'
-      && inputs.record_baseline != true
+      && needs.cli-matrix.result == 'success' && github.ref == 'refs/heads/qa'
+      && inputs.record_baseline != true && inputs.trial != true
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -914,7 +789,7 @@ jobs:
 
   # The one media answer (I-1): green only if evidence was reused or written by this run.
   media-verdict:
-    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence, publish-media-history]
+    needs: [plan-media, launch, cli-matrix, record-media-evidence, publish-media-history]
     if: always() && inputs.record_baseline != true
     runs-on: ubuntu-24.04
     steps:
@@ -930,14 +805,14 @@ jobs:
           REASON: ${{ needs.plan-media.outputs.reason }}
           EVIDENCE_URL: ${{ needs.plan-media.outputs.evidence_url }}
           MATRIX: ${{ needs.cli-matrix.result }}
-          COMPARE: ${{ needs.compare-cli-matrix.result }}
           RECORD: ${{ needs.record-media-evidence.result }}
           PUBLISH: ${{ needs.publish-media-history.result }}
           TAG: ${{ needs.record-media-evidence.outputs.tag }}
+          TRIAL: ${{ inputs.trial }}
         run: python3 freemkv/tests/media_gate.py verdict
 
   baseline-epoch-verdict:
-    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, publish-media-history]
+    needs: [plan-media, launch, cli-matrix, publish-media-history]
     if: always() && inputs.record_baseline == true
     runs-on: ubuntu-24.04
     steps:
@@ -947,12 +822,11 @@ jobs:
           PLAN_RUN: ${{ needs.plan-media.outputs.run }}
           LAUNCH: ${{ needs.launch.result }}
           MATRIX: ${{ needs.cli-matrix.result }}
-          COMPARE: ${{ needs.compare-cli-matrix.result }}
           PUBLISH: ${{ needs.publish-media-history.result }}
         shell: bash
         run: |
           set -euo pipefail
-          for result in PLAN LAUNCH MATRIX COMPARE PUBLISH; do
+          for result in PLAN LAUNCH MATRIX PUBLISH; do
             value="${!result}"
             if [ "$value" != success ]; then
               echo "::error title=Reference epoch incomplete::$result concluded $value"

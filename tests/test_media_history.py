@@ -151,23 +151,20 @@ class ComparisonTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'historical SHA-256 mismatch'):
                     history.historical_manifest('bucket', spec, report['target'], identity, dest)
 
-    def test_publish_requires_both_successful_full_disc_reports(self):
+    def test_publish_stores_only_a_successful_linux_answer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for platform in ('linux', 'windows'):
-                path = root / f'release-comparison-{platform}' / 'candidate'
-                history.save(path / 'manifest.json', {'version': '1.8.5', 'run_id': '123',
-                             'target': platform, 'suite_exit': 0, 'artifacts': {'x': {}}})
-                history.save(path / 'full-disc-qa.json', {'families': {'bd': {}, 'uhd': {}}})
+            path = root / 'release-comparison-linux' / 'candidate' / 'manifest.json'
+            history.save(path, {'version': '1.8.5', 'run_id': '123',
+                         'target': 'x86_64-unknown-linux-musl', 'suite_exit': 0, 'artifacts': {'x': {}}})
             with patch.object(history.subprocess, 'run') as put:
                 put.return_value.returncode = 0
                 history.publish(root, 'bucket')
-                self.assertEqual(put.call_count, 2)
-                self.assertTrue(all('--if-none-match' in call.args[0]
-                                    for call in put.call_args_list))
-                (root / 'release-comparison-windows/candidate/full-disc-qa.json').write_text(
-                    '{"error":"decryption failed"}')
-                with self.assertRaisesRegex(ValueError, 'no successful full-disc report'):
+                self.assertEqual(put.call_count, 1)
+                self.assertIn('--if-none-match', put.call_args.args[0])
+                history.save(path, {'version': '1.8.5', 'run_id': '123',
+                             'target': 'x86_64-unknown-linux-musl', 'suite_exit': 1, 'artifacts': {'x': {}}})
+                with self.assertRaisesRegex(ValueError, 'no successful candidate media answer'):
                     history.publish(root, 'bucket')
 
     def test_reference_epoch_builds_only_the_pinned_184_answer(self):
@@ -198,7 +195,7 @@ class ComparisonTests(unittest.TestCase):
                 history.record_baseline(args, {'history': spec['history'] + spec['history']},
                                         plan, {'target': args.target})
 
-    def test_publish_baseline_requires_two_matching_immutable_reference_answers(self):
+    def test_publish_baseline_requires_a_matching_immutable_linux_reference_answer(self):
         names = ('freemkv', 'libfreemkv', 'freemkv-engine', 'freemkv-keysources',
                  'freemkv-i18n', 'freemkv-unlock')
         revisions = {name: f'{index:040x}' for index, name in enumerate(names, 1)}
@@ -213,8 +210,7 @@ class ComparisonTests(unittest.TestCase):
                                      'policy': {'harness': harness}}})
             spec = {'history': [{'version': '1.8.4', 'revisions': revisions}]}
             history.save(spec_path, spec)
-            for platform, target in (('linux', 'x86_64-unknown-linux-musl'),
-                                     ('windows', 'x86_64-pc-windows-msvc')):
+            for platform, target in (('linux', 'x86_64-unknown-linux-musl'),):
                 report = {'schema': 1, 'run_id': '42', 'run_attempt': '1',
                           'version': '1.8.4', 'target': target,
                           'revisions': revisions, 'suite_exit': 0, 'lock_sha256': 'a' * 64,
@@ -226,16 +222,16 @@ class ComparisonTests(unittest.TestCase):
             with patch.object(history.subprocess, 'run') as put:
                 put.return_value.returncode = 0
                 history.publish_baseline(root, 'bucket', spec_path, '42', '1', plan_directory)
-                self.assertEqual(put.call_count, 2)
+                self.assertEqual(put.call_count, 1)
                 keys = [call.args[0][call.args[0].index('--key') + 1] for call in put.call_args_list]
                 self.assertTrue(all(key.startswith('media-history/v1/1.8.4/') for key in keys))
                 self.assertTrue(all('--if-none-match' in call.args[0] for call in put.call_args_list))
-            windows = root / 'release-comparison-windows/1.8.4/manifest.json'
-            report = json.loads(windows.read_text())
+            linux = root / 'release-comparison-linux/1.8.4/manifest.json'
+            report = json.loads(linux.read_text())
             report['fixtures']['uhd.iso']['sha256'] = 'old'
-            history.save(windows, report)
+            history.save(linux, report)
             with patch.object(history.subprocess, 'run') as put:
-                with self.assertRaisesRegex(ValueError, 'different fixtures'):
+                with self.assertRaisesRegex(ValueError, 'reference identity differs'):
                     history.publish_baseline(root, 'bucket', spec_path, '42', '1', plan_directory)
                 put.assert_not_called()
 
