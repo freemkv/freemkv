@@ -39,6 +39,14 @@ it, and the runner inherited that. The fix is to re-read PATH from the machine
 environment after the installs, then assert every tool is present — failing at
 boot rather than twenty minutes into a rip.
 
+## The work dir is on instance store
+
+qa launches Linux only (`user-data-windows.ps1` is kept but no leg uses it), on
+types with local NVMe. `user-data-linux.sh` formats the instance-store disk(s)
+(RAID 0 when there are several) and mounts it as `actions-runner/_work` before
+the runner registers, so fixtures, build and suite outputs are local. Without
+instance store the work dir stays on the template's EBS root.
+
 ## Where the registration token lives
 
 The token is **not** in an instance tag. A tag is readable by any principal with

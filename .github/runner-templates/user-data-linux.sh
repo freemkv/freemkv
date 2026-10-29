@@ -59,6 +59,29 @@ REG=$(aws ssm get-parameter --region "$REGION" --name "$PARAM" --with-decryption
 aws ssm delete-parameter --region "$REGION" --name "$PARAM" || true
 [ -n "$REG" ] || { echo "FATAL: registration token not found in SSM ($PARAM)"; exit 1; }
 
+# The job's fixtures (~110 GiB), build and suite outputs all live under the runner's _work.
+# Put it on the instance-store NVMe when the type has one (the gp3 root caps at 500 MB/s,
+# which bound the fetch and every full-disc rip); without one it stays on the EBS root.
+WORK_DIR="$RUNNER_HOME/actions-runner/_work"
+mkdir -p "$WORK_DIR"
+mapfile -t STORE < <(for d in /dev/disk/by-id/nvme-Amazon_EC2_NVMe_Instance_Storage_*; do
+  [ -e "$d" ] && [[ "$d" != *-part* ]] && readlink -f "$d"; done | sort -u)
+DEV=""
+if [ "${#STORE[@]}" -gt 1 ]; then
+  apt-get install -y mdadm
+  mdadm --create /dev/md0 --run --level=0 --raid-devices="${#STORE[@]}" "${STORE[@]}"
+  DEV=/dev/md0
+elif [ "${#STORE[@]}" -eq 1 ]; then
+  DEV="${STORE[0]}"
+fi
+if [ -n "$DEV" ]; then
+  mkfs.ext4 -q -F -E nodiscard,lazy_itable_init=1,lazy_journal_init=1 "$DEV"
+  mount -o noatime "$DEV" "$WORK_DIR"
+  echo "work dir on instance store $DEV: $(df -h "$WORK_DIR" | tail -1)"
+else
+  echo "no instance store: the work dir stays on the EBS root volume"
+fi
+
 mkdir -p "$RUNNER_HOME/actions-runner" && cd "$RUNNER_HOME/actions-runner"
 RUNNER_VER=$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | tr -d v)
 curl -sSL -o r.tar.gz "https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-x64-${RUNNER_VER}.tar.gz"
