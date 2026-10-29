@@ -1599,10 +1599,7 @@ impl Controller {
                     };
                     let label = text(
                         mtm,
-                        &format!(
-                            "{} — {status}",
-                            crate::strings::sanitize_display(&drive.label)
-                        ),
+                        &format!("{} — {status}", drive.display),
                         r(0.0, y, 360.0, 26.0),
                         false,
                         false,
@@ -1628,7 +1625,7 @@ impl Controller {
                     prefer.setEnabled(crate::ui::can_prefer_home_drive(
                         &v.startup_mode,
                         &v.preferred_drive,
-                        &drive.label,
+                        &drive.display,
                     ));
                     rows.addSubview(&prefer);
                 }

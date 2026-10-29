@@ -271,16 +271,24 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
         // Sanitize SCSI INQUIRY strings: vendor/product/revision come from the
         // drive/bridge firmware (untrusted — a spoofed enclosure could return
         // terminal escapes), so strip control bytes like every other external field.
+        // The drive is named as everywhere else: the OS name (`E:`, `/dev/sr0`), then
+        // `VENDOR MODEL (rev FW)`; the raw device path follows only when it differs.
+        let path = drive.device_path().to_string();
+        let name = libfreemkv::drive_info(&path)
+            .map(|d| sanitize(d.name()))
+            .unwrap_or_else(|| sanitize(&path));
         out.raw(
             Normal,
             &format!(
-                "Drive: {} {} {}",
+                "Drive: {name}  {} {} (rev {})",
                 sanitize(drive.drive_id.vendor_id.trim()),
                 sanitize(drive.drive_id.product_id.trim()),
                 sanitize(drive.drive_id.product_revision.trim())
             ),
         );
-        out.raw(Normal, &format!("Device: {}", drive.device_path()));
+        if name != sanitize(&path) {
+            out.raw(Normal, &format!("Device: {}", sanitize(&path)));
+        }
         out.raw(Normal, &format!("Region: {}", region_name(&disc.region)));
 
         if let Some(ref aacs) = disc.aacs {

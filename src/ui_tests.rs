@@ -3842,12 +3842,14 @@ fn home_drive_choice_obeys_explicit_source_and_unique_loaded_drive() {
         vec![
             HomeDrive {
                 device: "drive-a".into(),
-                label: "Drive A".into(),
+                display: "Drive A".into(),
+                legacy_label: "Drive A".into(),
                 present: Some(true),
             },
             HomeDrive {
                 device: "drive-b".into(),
-                label: "Drive B".into(),
+                display: "Drive B".into(),
+                legacy_label: "Drive B".into(),
                 present: Some(true),
             },
         ]
@@ -3884,7 +3886,8 @@ fn home_drive_choice_obeys_explicit_source_and_unique_loaded_drive() {
     app.settings.startup_mode = "Open preferred drive".into();
     app.settings.preferred_drive = "Drive A".into();
     let mut duplicates = drives();
-    duplicates[1].label = "Drive A".into();
+    duplicates[1].display = "Drive A".into();
+    duplicates[1].legacy_label = "Drive A".into();
     app.apply_home_drives(duplicates, true);
     assert!(
         app.probe.is_none(),
@@ -3913,12 +3916,14 @@ fn home_preferred_drive_requires_unique_hardware_label() {
         let drives = vec![
             HomeDrive {
                 device: "loaded".into(),
-                label: "Same hardware".into(),
+                display: "Same hardware".into(),
+                legacy_label: "Same hardware".into(),
                 present: Some(true),
             },
             HomeDrive {
                 device: "other".into(),
-                label: "Same hardware".into(),
+                display: "Same hardware".into(),
+                legacy_label: "Same hardware".into(),
                 present: other_presence,
             },
         ];
@@ -3949,22 +3954,26 @@ fn home_preferred_drive_opens_only_the_unique_loaded_match() {
         let drives = vec![
             HomeDrive {
                 device: "preferred".into(),
-                label: "Preferred".into(),
+                display: "Preferred".into(),
+                legacy_label: "Preferred".into(),
                 present: preferred_presence,
             },
             HomeDrive {
                 device: "empty".into(),
-                label: "Unrelated empty".into(),
+                display: "Unrelated empty".into(),
+                legacy_label: "Unrelated empty".into(),
                 present: Some(false),
             },
             HomeDrive {
                 device: "unknown".into(),
-                label: "Unrelated unknown".into(),
+                display: "Unrelated unknown".into(),
+                legacy_label: "Unrelated unknown".into(),
                 present: None,
             },
             HomeDrive {
                 device: "loaded".into(),
-                label: "Unrelated loaded".into(),
+                display: "Unrelated loaded".into(),
+                legacy_label: "Unrelated loaded".into(),
                 present: Some(true),
             },
         ];
@@ -3988,12 +3997,14 @@ fn home_any_loaded_disc_ignores_duplicate_hardware_labels() {
                 vec![
                     HomeDrive {
                         device: "loaded".into(),
-                        label: "Same hardware".into(),
+                        display: "Same hardware".into(),
+                        legacy_label: "Same hardware".into(),
                         present: Some(true),
                     },
                     HomeDrive {
                         device: "other".into(),
-                        label: "Same hardware".into(),
+                        display: "Same hardware".into(),
+                        legacy_label: "Same hardware".into(),
                         present: other_presence,
                     },
                 ],
@@ -4185,4 +4196,65 @@ fn use_at_startup_is_off_only_for_the_current_startup_drive() {
     assert!(on("Open preferred drive", "BD-RE", "DVD"));
     assert!(on("Show drives", "BD-RE", "BD-RE"));
     assert!(on("Open any loaded disc", "BD-RE", "BD-RE"));
+}
+
+fn identical_drives() -> Vec<HomeDrive> {
+    ["E:", "F:", "G:", "H:"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| HomeDrive {
+            device: format!("dev{i}"),
+            display: format!("{n}  HL-DT-ST BD-RE BU40N (rev 1.04)"),
+            legacy_label: "HL-DT-ST BD-RE BU40N".into(),
+            present: Some(true),
+        })
+        .collect()
+}
+
+#[test]
+fn one_of_four_identical_drives_can_be_preferred_and_auto_opens() {
+    let mut app = App::new();
+    app.home_drives = identical_drives();
+    app.prefer_home_drive(2);
+    assert_eq!(
+        app.settings.preferred_drive,
+        "G:  HL-DT-ST BD-RE BU40N (rev 1.04)"
+    );
+    app.settings.startup_mode = "Open preferred drive".into();
+    app.apply_home_drives(identical_drives(), true);
+    assert_eq!(
+        app.probe.as_ref().map(|p| p.path.as_str()),
+        Some("disc://dev2")
+    );
+}
+
+#[test]
+fn a_legacy_label_preference_matches_only_a_unique_drive() {
+    let mut app = App::new();
+    app.settings.startup_mode = "Open preferred drive".into();
+    app.settings.preferred_drive = "HL-DT-ST BD-RE BU40N".into();
+    app.apply_home_drives(identical_drives(), true);
+    assert!(app.probe.is_none(), "four identical drives: no auto-open");
+
+    let mut one = identical_drives();
+    one.truncate(1);
+    app.apply_home_drives(one, true);
+    assert_eq!(
+        app.probe.as_ref().map(|p| p.path.as_str()),
+        Some("disc://dev0")
+    );
+}
+
+#[test]
+fn the_open_log_names_the_drive_by_its_os_name() {
+    let drive = |name: &str| crate::engine::OpticalDrive {
+        device: r"\\.\CdRom0".into(),
+        display: format!("{name}  HL-DT-ST BD-RE BU40N (rev 1.04)"),
+        list_line: format!("{name}  HL-DT-ST BD-RE BU40N (rev 1.04)  \\\\.\\CdRom0"),
+        legacy_label: "HL-DT-ST BD-RE BU40N".into(),
+    };
+    let (_, line, _) = disc_open_plan(&[drive("E:")]);
+    assert!(line.contains("E:  HL-DT-ST"), "{line}");
+    let (_, line, _) = disc_open_plan(&[drive("E:"), drive("F:")]);
+    assert!(line.contains("E:  ") && line.contains("F:  "), "{line}");
 }

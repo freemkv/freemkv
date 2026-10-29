@@ -710,7 +710,7 @@ impl Shell {
                     crate::ui::can_prefer_home_drive(
                         &app.settings.startup_mode,
                         &app.settings.preferred_drive,
-                        &d.label,
+                        &d.display,
                     )
                 })
         };
@@ -1828,7 +1828,7 @@ impl Shell {
                         Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
                         None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
                     };
-                    format!("{} — {status}", crate::strings::sanitize_display(&d.label))
+                    format!("{} — {status}", d.display)
                 })
                 .collect();
             let _ = self.home_list.items().add(&labels);

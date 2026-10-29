@@ -2339,15 +2339,19 @@ pub struct App {
 }
 
 /// Whether "Use at startup" is on offer for a drive: not when it already is the startup drive.
-pub fn can_prefer_home_drive(startup_mode: &str, preferred_drive: &str, label: &str) -> bool {
-    !(startup_mode == "Open preferred drive" && preferred_drive == label)
+/// `shown` is the drive's `display`, the identity `prefer_home_drive` saves.
+pub fn can_prefer_home_drive(startup_mode: &str, preferred_drive: &str, shown: &str) -> bool {
+    !(startup_mode == "Open preferred drive" && preferred_drive == shown)
 }
 
 /// One ready-screen optical drive; `None` means presence could not be determined.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HomeDrive {
     pub device: String,
-    pub label: String,
+    /// libfreemkv's `E:  VENDOR MODEL (rev FW)`: shown and saved as the preferred drive.
+    pub display: String,
+    /// The pre-1.8.7 `vendor model` label, still honoured as a saved preferred drive.
+    pub legacy_label: String,
     pub present: Option<bool>,
 }
 
@@ -2359,7 +2363,8 @@ fn discover_home_drives() -> Vec<HomeDrive> {
             let present = crate::engine::disc_present(&format!("disc://{}", drive.device));
             HomeDrive {
                 device: drive.device,
-                label: drive.label,
+                display: drive.display,
+                legacy_label: drive.legacy_label,
                 present,
             }
         })
@@ -2477,7 +2482,7 @@ struct OpenedSource {
 pub(crate) fn disc_open_plan(
     drives: &[crate::engine::OpticalDrive],
 ) -> (LogKind, String, Option<String>) {
-    use crate::strings::{fmt_or, get_or, sanitize_display};
+    use crate::strings::{fmt_or, get_or};
     match drives {
         [] => (
             LogKind::Notice,
@@ -2494,17 +2499,14 @@ pub(crate) fn disc_open_plan(
             fmt_or(
                 "gui.log.opening_drive",
                 "Opening {label} ({device})",
-                &[
-                    ("label", &sanitize_display(&d.label)),
-                    ("device", &d.device),
-                ],
+                &[("label", &d.display), ("device", &d.device)],
             ),
             Some(format!("disc://{}", d.device)),
         ),
         _ => {
             let list = drives
                 .iter()
-                .map(|d| format!("{} ({})", sanitize_display(&d.label), d.device))
+                .map(|d| d.list_line.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
             let n = drives.len().to_string();
@@ -2547,13 +2549,13 @@ impl App {
             .map(|d| format!("disc://{}", d.device))
     }
 
-    /// Remember this hardware label for the next startup. Duplicate labels
+    /// Remember this drive (OS name plus model) for the next startup. Duplicates
     /// never qualify for an unattended open.
     pub fn prefer_home_drive(&mut self, index: usize) -> Vec<Effect> {
         let Some(drive) = self.home_drives.get(index) else {
             return Vec::new();
         };
-        self.settings.preferred_drive = drive.label.clone();
+        self.settings.preferred_drive = drive.display.clone();
         self.settings.startup_mode = "Open preferred drive".into();
         let mut fx = self.save_settings(false);
         fx.push(Effect::Redraw);
@@ -2565,9 +2567,11 @@ impl App {
         let target = match self.settings.startup_mode.as_str() {
             "Open any loaded disc" if loaded.len() == 1 => Some(loaded[0]),
             "Open preferred drive" => {
+                // A saved value is the shown identity; older settings hold the bare label.
+                let want = &self.settings.preferred_drive;
                 let preferred: Vec<_> = drives
                     .iter()
-                    .filter(|d| d.label == self.settings.preferred_drive)
+                    .filter(|d| d.display == *want || d.legacy_label == *want)
                     .collect();
                 (preferred.len() == 1)
                     .then(|| preferred[0])

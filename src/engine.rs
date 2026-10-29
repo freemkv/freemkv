@@ -824,29 +824,39 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
 pub struct OpticalDrive {
     /// Platform device path (`/dev/diskN` on macOS) — becomes `disc://<path>`.
     pub device: String,
-    /// Human label ("HL-DT-ST BD-RE BU40N") for the picker.
-    pub label: String,
+    /// The libfreemkv standard name, `E:  HL-DT-ST BD-RE BU40N (rev 1.04)`; tells identical
+    /// drives apart. Sanitized for display.
+    pub display: String,
+    /// [`display`](Self::display) plus the device path when it differs from the OS name.
+    pub list_line: String,
+    /// The pre-1.8.7 `vendor model` label, which older settings saved as the preferred drive.
+    #[cfg_attr(test, allow(dead_code))]
+    pub legacy_label: String,
 }
 
 /// Enumerate the optical drives attached to the machine. Empty if none. This is
 /// registry/enumeration only — no exclusive access or disc I/O.
 pub fn list_optical_drives() -> Vec<OpticalDrive> {
     libfreemkv::list_drives()
-        .into_iter()
-        .map(|d| {
-            let label = format!("{} {}", d.vendor.trim(), d.model.trim())
-                .trim()
-                .to_string();
-            OpticalDrive {
-                device: d.path,
-                label: if label.is_empty() {
-                    "Optical drive".to_string()
-                } else {
-                    label
-                },
-            }
-        })
+        .iter()
+        .map(optical_drive)
         .collect()
+}
+
+fn optical_drive(d: &libfreemkv::DriveInfo) -> OpticalDrive {
+    let legacy = format!("{} {}", d.vendor.trim(), d.model.trim())
+        .trim()
+        .to_string();
+    OpticalDrive {
+        device: d.path.clone(),
+        display: crate::strings::sanitize_display(&d.display()),
+        list_line: crate::strings::sanitize_display(&d.list_line()),
+        legacy_label: if legacy.is_empty() {
+            "Optical drive".to_string()
+        } else {
+            legacy
+        },
+    }
 }
 
 /// True for a `disc://` live-drive source.

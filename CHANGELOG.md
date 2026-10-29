@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.8.7] — UNRELEASED
+
+### Fixed
+
+- Drives are named the same everywhere: the OS name (drive letter on Windows, /dev/srN on Linux) before the model, on the ready screen, the open log, the preferred startup drive, `freemkv info` and the server. (CLI, app, server)
+
 ## [1.8.6] — 2026-10-29
 
 ### Changed

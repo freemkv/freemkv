@@ -192,7 +192,9 @@ fn the_menu_gate_matches_the_core_dispatch_rule() {
 fn open_disc_names_one_drive_autodetects_several_and_stops_on_none() {
     let drive = |d: &str| crate::engine::OpticalDrive {
         device: d.into(),
-        label: "HL-DT-ST\u{202e} BD".into(),
+        display: format!("{d}  HL-DT-ST BD"),
+        list_line: format!("{d}  HL-DT-ST BD"),
+        legacy_label: "HL-DT-ST BD".into(),
     };
     let (k, _, url) = disc_open_plan(&[]);
     assert_eq!((k, url), (LogKind::Notice, None));

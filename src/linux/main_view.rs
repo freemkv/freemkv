@@ -402,10 +402,7 @@ impl MainView {
                     Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
                     None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
                 };
-                let label = gtk::Label::new(Some(&format!(
-                    "{} — {status}",
-                    crate::strings::sanitize_display(&drive.label)
-                )));
+                let label = gtk::Label::new(Some(&format!("{} — {status}", &drive.display)));
                 label.set_xalign(0.0);
                 label.set_hexpand(true);
                 row.append(&label);
@@ -427,7 +424,7 @@ impl MainView {
                 prefer.set_sensitive(crate::ui::can_prefer_home_drive(
                     &v.startup_mode,
                     &v.preferred_drive,
-                    &drive.label,
+                    &drive.display,
                 ));
                 let shell = self.shell.clone();
                 prefer.connect_clicked(move |_| {
