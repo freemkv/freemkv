@@ -664,6 +664,22 @@ pub fn form_commit(why: FormCommit, window_visible: bool) -> CommitPlan {
     }
 }
 
+/// The ready screen's drive row to select after its list is refilled: the drive
+/// that was selected, while it is still listed, else the first row. A refill (a
+/// disc's status changing, "Use at startup" re-marking a drive) must not move
+/// the user's pick.
+#[must_use]
+pub fn home_reselect(
+    before: &[crate::ui::HomeDrive],
+    selected: Option<usize>,
+    after: &[crate::ui::HomeDrive],
+) -> Option<usize> {
+    let device = selected.and_then(|i| before.get(i)).map(|d| &d.device);
+    device
+        .and_then(|dev| after.iter().position(|d| d.device == *dev))
+        .or((!after.is_empty()).then_some(0))
+}
+
 #[cfg(test)]
 #[path = "win_layout_tests.rs"]
 mod tests;

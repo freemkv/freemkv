@@ -1826,6 +1826,15 @@ impl Shell {
             v.startup_mode.clone(),
         );
         if self.home_sig.borrow().as_ref() != Some(&home) {
+            // "Use at startup" or a disc's status refills the list; the picked drive stays picked.
+            let keep = lay::home_reselect(
+                self.home_sig
+                    .borrow()
+                    .as_ref()
+                    .map_or(&[][..], |(d, _, _)| d.as_slice()),
+                self.selected_home_drive(),
+                &v.home_drives,
+            );
             self.home_list.items().delete_all();
             let labels: Vec<String> = v
                 .home_drives
@@ -1840,11 +1849,11 @@ impl Shell {
                 })
                 .collect();
             let _ = self.home_list.items().add(&labels);
-            if !labels.is_empty() {
+            if let Some(i) = keep {
                 let _ = unsafe {
-                    self.home_list
-                        .hwnd()
-                        .SendMessage(msg::LbSetCurSel { index: Some(0) })
+                    self.home_list.hwnd().SendMessage(msg::LbSetCurSel {
+                        index: Some(i as u32),
+                    })
                 };
             }
             *self.home_sig.borrow_mut() = Some(home);
@@ -1984,6 +1993,17 @@ impl Shell {
                 true
             }
             LogPlan::Append(from) => {
+                // Appending moves the selection to the end, so text the user is selecting or
+                // copying is selected again after, as the macOS and GTK logs keep theirs. Raw
+                // EM_GETSEL: `msg::EmGetSel` passes its references' addresses, not the u32s'.
+                let (mut start, mut end) = (0u32, 0u32);
+                unsafe {
+                    self.log.hwnd().SendMessage(msg::Wm {
+                        msg_id: co::EM::GETSEL.into(),
+                        wparam: &mut start as *mut u32 as usize,
+                        lparam: &mut end as *mut u32 as isize,
+                    });
+                }
                 let n = self.log.hwnd().GetWindowTextLength().unwrap_or(0);
                 self.log.set_selection(n, n);
                 unsafe {
@@ -1991,6 +2011,9 @@ impl Shell {
                         can_be_undone: false,
                         replacement_text: w::WString::from_str(log_tail_text(&v.log, from)),
                     });
+                }
+                if start != end {
+                    self.log.set_selection(start as i32, end as i32);
                 }
                 true
             }
@@ -2777,6 +2800,15 @@ impl Shell {
             me.on_format_pick();
             Ok(())
         });
+        // A pick made in the open list is applied while it is still dropped, when `render`
+        // waits; with no tick running (an open file) nothing else would redraw it.
+        for c in [&self.cmb_pick_titles, &self.cmb_format] {
+            let me = self.clone();
+            c.on().cbn_close_up(move || {
+                me.render();
+                Ok(())
+            });
+        }
 
         // A typed-in output folder must reach the model, or Run writes somewhere
         // other than what the field says.
@@ -4052,18 +4084,36 @@ impl Prefs {
             });
         }
 
-        // The interface-language dropdown applies the moment a language is
-        // picked: commit the form, swap the catalog, and re-text every window.
+        // A picked interface language applies at once (commit, swap the catalog, re-text every
+        // window), but not while the list is open: arrowing through it picks, and re-texting
+        // rebuilds this combo and shuts the list. It applies when the list closes instead.
         let me = self.clone();
         let sh = shell.clone();
         if let Some((_, combo)) = self.combos.iter().find(|(k, _)| *k == "language") {
-            let combo = combo.clone();
-            #[allow(clippy::redundant_clone)]
-            combo.on().cbn_sel_change(move || {
+            let c = combo.clone();
+            let apply = move || {
+                if unsafe { c.hwnd().SendMessage(msg::CbGetDroppedState {}) } {
+                    return;
+                }
+                let picked = c
+                    .items()
+                    .selected_index()
+                    .and_then(|i| enum_options("language").get(i as usize).map(|(c, _)| *c));
+                if picked.is_none_or(|c| sh.app.borrow().settings_form().get("language") == c) {
+                    return;
+                }
                 me.commit(&sh, lay::FormCommit::Enter);
                 let code = sh.app.borrow().settings.language.clone();
                 crate::strings::set_locale(crate::ui::locale_code(&code));
                 sh.relocalize();
+            };
+            let on_close = apply.clone();
+            combo.on().cbn_sel_change(move || {
+                apply();
+                Ok(())
+            });
+            combo.on().cbn_close_up(move || {
+                on_close();
                 Ok(())
             });
         }

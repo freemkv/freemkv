@@ -638,3 +638,27 @@ fn unpx_inverts_px() {
         }
     }
 }
+
+#[test]
+fn a_refilled_drive_list_keeps_the_selected_drive() {
+    let drive = |device: &str, present| crate::ui::HomeDrive {
+        device: device.into(),
+        display: format!("{device} DRIVE"),
+        legacy_label: String::new(),
+        present,
+    };
+    let before = [drive("D:", Some(false)), drive("E:", Some(false))];
+    // E: gets a disc: the list is refilled, and E: stays picked.
+    let after = [drive("D:", Some(false)), drive("E:", Some(true))];
+    assert_eq!(home_reselect(&before, Some(1), &after), Some(1));
+    // The list reordered: the same drive, at its new row.
+    let swapped = [drive("E:", Some(true)), drive("D:", Some(false))];
+    assert_eq!(home_reselect(&before, Some(1), &swapped), Some(0));
+    assert_eq!(home_reselect(&before, Some(0), &swapped), Some(1));
+    // The picked drive is gone, or nothing was picked: the first row.
+    assert_eq!(home_reselect(&before, Some(1), &after[..1]), Some(0));
+    assert_eq!(home_reselect(&before, None, &after), Some(0));
+    assert_eq!(home_reselect(&[], Some(0), &after), Some(0));
+    // No drives: no row.
+    assert_eq!(home_reselect(&before, Some(1), &[]), None);
+}
