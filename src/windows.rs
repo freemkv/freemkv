@@ -1801,6 +1801,14 @@ impl Shell {
     /// Apply a fully-decided `View` to the widgets. The ONLY place the shell
     /// writes to controls, and it computes nothing.
     fn render(&self) {
+        // The 200 ms tick renders too: moving or re-selecting an open combo closes its
+        // list, so wait until the user closes it. The next render redraws everything.
+        if [&self.cmb_pick_titles, &self.cmb_format]
+            .iter()
+            .any(|c| unsafe { c.hwnd().SendMessage(msg::CbGetDroppedState {}) })
+        {
+            return;
+        }
         let v = self.app.borrow().view();
         self.prefs
             .paint_keydb(v.keydb_note.as_deref(), v.keydb_busy);
