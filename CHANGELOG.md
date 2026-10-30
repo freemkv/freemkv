@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Windows: a pick made in an open Titles or Format list now shows straight away; the Settings language list no longer closes while you arrow through it; the drive list keeps your selected drive; and text selected in the log stays selected as new lines arrive. (app only: desktop dropdowns and menus)
 - Drives are named the same everywhere: the OS name (drive letter on Windows, /dev/srN on Linux) before the model, on the ready screen, the open log, the preferred startup drive, `freemkv info` and the server. (CLI, app, server)
 
 ## [1.8.6] — 2026-10-29
