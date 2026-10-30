@@ -152,7 +152,7 @@ pub struct RipState {
     /// the operator can deliver the rip as-is instead of re-ripping.
     pub loss_aborted: bool,
     pub last_error: String,
-    /// What a finished rip still tells the operator (a kept `Unit_Key_RO.inf`); "" for none.
+    /// What a finished rip still tells the operator (a kept `AACS` folder); "" for none.
     pub notice: String,
     pub output_file: String,
     pub tmdb_title: String,

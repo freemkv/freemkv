@@ -4583,7 +4583,7 @@ fn a_finished_interrupted_reset_that_removed_the_job_is_no_hold() {
     forget_device(device);
 }
 
-// A finished ISO that keeps `Unit_Key_RO.inf` tells the dashboard; a renamed one is silent.
+// A finished ISO that keeps its `AACS` folder tells the dashboard; a renamed one is silent.
 #[test]
 fn a_kept_key_file_becomes_the_rips_notice() {
     use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
@@ -4593,9 +4593,9 @@ fn a_kept_key_file_becomes_the_rips_notice() {
         cause: NamesKept::Damaged,
     };
     let notice = iso_names_notice(device, Some(&kept));
-    assert!(notice.contains("Unit_Key_RO.inf"), "{notice}");
+    assert!(notice.contains("keeps its AACS folder"), "{notice}");
     assert!(
-        notice.contains("Unit_Key_RO.bak"),
+        notice.contains("renames the folder to SCAA"),
         "an ISO names the retry: {notice}"
     );
     // The card resets on eject; the device log keeps it.

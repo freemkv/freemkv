@@ -98,7 +98,7 @@ def fake_disc_run(barrier):
         if scheme == 'iso':
             target.write_bytes(Path(source.split('://', 1)[1]).read_bytes())
         elif scheme == 'dir':
-            for name, body in (('AACS/Unit_Key_RO.bak', b'key'), ('BDMV/index.bdmv', b'INDX'),
+            for name, body in (('SCAA/Unit_Key_RO.inf', b'key'), ('BDMV/index.bdmv', b'INDX'),
                                ('BDMV/PLAYLIST/00000.mpls', b'MPLS0200'),
                                ('BDMV/CLIPINF/00000.clpi', b'HDMV0200')):
                 (target / name).parent.mkdir(parents=True, exist_ok=True)
@@ -106,6 +106,25 @@ def fake_disc_run(barrier):
         else:
             target.write_bytes(b'mkv')
     return run
+
+
+NAVIGATION = ['BDMV/index.bdmv', 'BDMV/PLAYLIST/00000.mpls', 'BDMV/CLIPINF/00000.clpi']
+
+
+class DecryptedNamesTests(unittest.TestCase):
+    def test_the_aacs_folder_is_renamed_scaa_with_its_key_file_kept(self):
+        qa.assert_disc_tree({name: {} for name in ['SCAA/Unit_Key_RO.inf', 'SCAA/MKB_RO.inf',
+                                                   *NAVIGATION]})
+
+    def test_an_aacs_folder_or_a_renamed_key_file_fails(self):
+        for tree in (['AACS/Unit_Key_RO.inf'],                         # not renamed
+                     ['AACS/Unit_Key_RO.bak'],                         # 1.8.6's file rename
+                     ['SCAA/Unit_Key_RO.inf', 'AACS/Unit_Key_RO.inf'],  # both folders
+                     ['SCAA/Unit_Key_RO.bak'],                         # key file not OEM
+                     []):
+            with self.subTest(tree=tree):
+                with self.assertRaisesRegex(RuntimeError, 'SCAA'):
+                    qa.assert_disc_tree({name: {} for name in [*tree, *NAVIGATION]})
 
 
 class FullDiscFlowTests(unittest.TestCase):

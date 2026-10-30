@@ -289,7 +289,7 @@ fn a_lossy_copy_reports_its_loss_and_exits_with_its_own_code() {
     );
 }
 
-// A copy that keeps `Unit_Key_RO.inf` says so, even under -q, before "Complete"; the exit
+// A copy that keeps its `AACS` folder says so, even under -q, before "Complete"; the exit
 // code is the verdict's alone.
 #[test]
 fn a_kept_key_file_is_reported_before_complete() {
@@ -313,19 +313,19 @@ fn a_kept_key_file_is_reported_before_complete() {
     let (code, printed) = render(&loud(), Some(&kept));
     assert_eq!(code, 0, "{printed}");
     let note = printed
-        .find("Unit_Key_RO.inf")
+        .find("keeps its AACS folder")
         .expect("the note is printed");
-    assert!(printed.contains("Unit_Key_RO.bak"), "{printed}");
+    assert!(printed.contains("renames the folder to SCAA"), "{printed}");
     let complete = printed.find("Complete").expect("Complete is printed");
     assert!(note < complete, "{printed}");
     let (_, printed) = render(&quiet(), Some(&kept));
-    assert!(printed.contains("Unit_Key_RO.inf"), "{printed:?}");
+    assert!(printed.contains("keeps its AACS folder"), "{printed:?}");
     let renamed = DecryptedNames::Renamed {
         mirror_sectors_restored: 0,
     };
     let (code, printed) = render(&loud(), Some(&renamed));
     assert_eq!(code, 0);
-    assert!(!printed.contains("Unit_Key_RO"), "{printed}");
+    assert!(!printed.contains("AACS folder"), "{printed}");
 
     // A folder: same note, no ISO-only retry sentence, before the summary.
     let res = libfreemkv::ExtractResult {
@@ -336,9 +336,9 @@ fn a_kept_key_file_is_reported_before_complete() {
     let (ok, printed) = crate::output::capture(|| super::render_extract(&res, &loud()));
     assert!(ok, "{printed}");
     let note = printed
-        .find("Unit_Key_RO.inf")
+        .find("keeps its AACS folder")
         .expect("the note is printed");
-    assert!(!printed.contains("Unit_Key_RO.bak"), "{printed}");
+    assert!(!printed.contains("SCAA"), "{printed}");
     assert!(
         note < printed.find("Extracted").expect("summary"),
         "{printed}"

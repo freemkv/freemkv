@@ -2136,7 +2136,7 @@ pub fn summarize_extract(res: &libfreemkv::ExtractResult, dest: &std::path::Path
     with_names_note(extract_line(res, dest), res.names.as_ref(), false)
 }
 
-// A kept `Unit_Key_RO.inf` goes on its own line under the summary (shared renderer).
+// A kept `AACS` folder goes on its own line under the summary (shared renderer).
 fn with_names_note(mut summary: String, names: Option<&DecryptedNames>, iso: bool) -> String {
     if let Some(note) = crate::disc_copy_verdict::names_note(names, iso) {
         summary.push('\n');

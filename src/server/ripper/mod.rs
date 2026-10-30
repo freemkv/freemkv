@@ -5599,7 +5599,7 @@ fn handoff_done_row(device: &str, card: RipState) -> RipState {
     }
 }
 
-// A kept `Unit_Key_RO.inf` in the finished ISO, as the dashboard shows it; "" otherwise.
+// A kept `AACS` folder in the finished ISO, as the dashboard shows it; "" otherwise.
 // Logged too: the card resets to idle when the disc leaves.
 fn iso_names_notice(
     device: &str,

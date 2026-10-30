@@ -17,7 +17,7 @@ fn the_retry_hint_is_not_empty() {
 }
 
 #[test]
-fn a_kept_key_file_is_named_and_a_renamed_one_is_silent() {
+fn a_kept_aacs_folder_is_named_and_a_renamed_one_is_silent() {
     use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
     crate::strings::set_locale("en");
     let kept = |cause| DecryptedNames::Kept { cause };
@@ -35,13 +35,13 @@ fn a_kept_key_file_is_named_and_a_renamed_one_is_silent() {
         ] {
             let note = names_note(Some(&kept(cause)), iso).expect("a kept name is reported");
             assert!(
-                note.contains("Unit_Key_RO.inf") && note.contains("VLC"),
+                note.contains("keeps its AACS folder") && note.contains("VLC"),
                 "{note}"
             );
             // Only a damaged ISO can be renamed by a later run.
             let retry = iso && cause == NamesKept::Damaged;
             assert_eq!(
-                note.contains("Unit_Key_RO.bak"),
+                note.contains("renames the folder to SCAA"),
                 retry,
                 "{cause:?} iso={iso}: {note}"
             );

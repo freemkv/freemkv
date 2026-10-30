@@ -75,10 +75,10 @@ def manifest(root):
 
 def assert_disc_tree(files):
     names = set(files)
-    if 'AACS/Unit_Key_RO.bak' not in names or 'AACS/Unit_Key_RO.inf' in names:
-        raise RuntimeError('decrypted output must retain AACS/Unit_Key_RO.bak and omit .inf')
-    if not any(name.startswith('AACS/') for name in names):
-        raise RuntimeError('decrypted output lost the AACS directory')
+    # The AACS folder is renamed SCAA, its files kept as the disc has them.
+    if 'SCAA/Unit_Key_RO.inf' not in names or any(name.startswith('AACS/') for name in names):
+        raise RuntimeError('decrypted output must rename the AACS folder to SCAA, '
+                           'keeping SCAA/Unit_Key_RO.inf, and have no AACS folder')
     if 'BDMV/index.bdmv' not in names:
         raise RuntimeError('decrypted output lost BDMV/index.bdmv')
     navigation = []

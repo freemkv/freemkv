@@ -2,6 +2,10 @@
 
 ## [1.8.7] — UNRELEASED
 
+### Changed
+
+- Decrypted ISO and folder copies rename the disc's AACS folder to SCAA instead of renaming AACS/Unit_Key_RO.inf to Unit_Key_RO.bak; every AACS file stays exactly as on the disc, and with no AACS folder VLC and other libaacs players no longer treat the copy as encrypted. A copy 1.8.6 renamed gets its folder renamed when it is resumed or run again. When the folder cannot be renamed, the result says the copy keeps its AACS folder. (CLI, app, server)
+
 ### Fixed
 
 - Drives are named the same everywhere: the OS name (drive letter on Windows, /dev/srN on Linux) before the model, on the ready screen, the open log, the preferred startup drive, `freemkv info` and the server. (CLI, app, server)

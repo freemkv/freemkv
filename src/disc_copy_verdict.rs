@@ -32,9 +32,10 @@ pub fn retry_with_multipass_hint() -> String {
     )
 }
 
-/// A decrypted copy that keeps `AACS/Unit_Key_RO.inf` says so: some players then treat it
-/// as encrypted. `None` once it was renamed (or there was nothing to rename). Only an ISO
-/// whose directory was unreadable can be renamed by a later run, so only it says so.
+/// A decrypted copy that keeps its `AACS` folder says so: some players then treat it as
+/// encrypted. `None` once the folder was renamed `SCAA` (or there was nothing to rename).
+/// Only an ISO whose root directory was unreadable can be renamed by a later run, so only
+/// it says so.
 ///
 /// `get_or` with literal keys: new keys, and the key-drift check reads them as written.
 pub fn names_note(
@@ -47,13 +48,13 @@ pub fn names_note(
     };
     let mut note = crate::strings::get_or(
         "rip.aacs_key_file_kept",
-        "The copy keeps AACS/Unit_Key_RO.inf, so some players (such as VLC) may treat the copy as encrypted. The copy's content is decrypted.",
+        "The copy keeps its AACS folder, so some players (such as VLC) may treat the copy as encrypted. The copy's content is decrypted.",
     );
     if iso && *cause == NamesKept::Damaged {
         note.push(' ');
         note.push_str(&crate::strings::get_or(
             "rip.aacs_key_file_kept_retry",
-            "A resumed run that reads the damaged area renames the file to Unit_Key_RO.bak.",
+            "A resumed run that reads the damaged area renames the folder to SCAA.",
         ));
     }
     Some(note)

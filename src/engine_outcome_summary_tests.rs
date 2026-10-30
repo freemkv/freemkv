@@ -408,7 +408,7 @@ fn a_halted_extraction_still_beats_unreadable_wording() {
     assert!(msg.starts_with("Cancelled"), "{msg}");
 }
 
-// The finish summary of every whole-disc path names a kept `Unit_Key_RO.inf` on its own line.
+// The finish summary of every whole-disc path names a kept `AACS` folder on its own line.
 #[test]
 fn a_kept_key_file_is_named_in_every_whole_disc_summary() {
     use libfreemkv::whole_disc::{DecryptedNames, NamesKept};
@@ -427,7 +427,7 @@ fn a_kept_key_file_is_named_in_every_whole_disc_summary() {
         "{msg}"
     );
     assert!(
-        msg.contains("Unit_Key_RO.inf") && msg.contains("Unit_Key_RO.bak"),
+        msg.contains("keeps its AACS folder") && msg.contains("renames the folder to SCAA"),
         "{msg}"
     );
     assert_eq!(
@@ -450,7 +450,7 @@ fn a_kept_key_file_is_named_in_every_whole_disc_summary() {
     };
     let msg = super::iso_recovery_result(&recovery, "/x.iso", Some(&kept)).expect("a copy");
     assert!(msg.starts_with("ISO image written to /x.iso\n"), "{msg}");
-    assert!(msg.contains("Unit_Key_RO.inf"), "{msg}");
+    assert!(msg.contains("keeps its AACS folder"), "{msg}");
 
     let mut res = extract_result(false, 3, 0);
     res.names = Some(DecryptedNames::Kept {
@@ -462,7 +462,7 @@ fn a_kept_key_file_is_named_in_every_whole_disc_summary() {
         "{msg}"
     );
     assert!(
-        msg.contains("Unit_Key_RO.inf") && !msg.contains(".bak"),
+        msg.contains("keeps its AACS folder") && !msg.contains("SCAA"),
         "{msg}"
     );
 }
