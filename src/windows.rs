@@ -1982,15 +1982,16 @@ impl Shell {
         // ── log ──
         // Only new lines are appended, so selection survives an ordinary tick.
         let plan = log_plan(self.memo.borrow().log, v.log_first, v.log.len());
-        let changed = match plan {
-            LogPlan::Keep => false,
+        // `(changed, scroll)`: a restored selection is not scrolled away from on every append.
+        let (changed, scroll) = match plan {
+            LogPlan::Keep => (false, false),
             LogPlan::Rebuild => {
                 // The EDIT default cap is 32K chars; the log holds far more.
                 self.log.limit_text(None);
                 let _ = self.log.set_text(&log_text(&v.log));
                 let n = self.log.hwnd().GetWindowTextLength().unwrap_or(0);
                 self.log.set_selection(n, n);
-                true
+                (true, true)
             }
             LogPlan::Append(from) => {
                 // Appending moves the selection to the end, so text the user is selecting or
@@ -2015,12 +2016,14 @@ impl Shell {
                 if start != end {
                     self.log.set_selection(start as i32, end as i32);
                 }
-                true
+                (true, start == end)
             }
         };
-        if changed {
+        if scroll {
             // Keep the newest line in view, as the macOS log does.
             unsafe { self.log.hwnd().SendMessage(msg::EmScrollCaret {}) };
+        }
+        if changed {
             self.memo.borrow_mut().log = Some(LogShown {
                 first: v.log_first,
                 len: v.log.len(),
