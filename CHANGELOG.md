@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.8] — UNRELEASED
+
+### Fixed
+
+- Video DVDs read at the drive's full speed: freemkv now sends SET STREAMING as well as SET CD SPEED, since many drives ignore the CD command for DVDs and stayed at their slow default. The log shows the read speed the drive reports. (CLI, app, server)
+- Decrypted DVD ISO and folder copies descramble every VOB, menus included: `VIDEO_TS.VOB` and each menu VOB are keyed from their own sectors. Before, a copy from a drive could keep `VIDEO_TS.VOB` scrambled, so players needed libdvdcss to open the ISO. (CLI, app, server)
+
 ## [1.8.7] — 2026-10-31
 
 ### Changed
