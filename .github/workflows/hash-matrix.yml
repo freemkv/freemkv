@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   media:
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
     runs-on: ubuntu-latest
     outputs:
       libfreemkv: ${{ steps.revisions.outputs.libfreemkv }}

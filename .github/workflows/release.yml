@@ -14,7 +14,7 @@ on:
     # binaries) and publishes, signs and tags nothing. dev shows a break first;
     # release-orchestrate gates on the qa run, so a target that cannot build
     # stops the release before any tag is public.
-    branches: [dev, qa]
+    branches: [dev]
   # Backfill: build ONLY the targets added after a release (the legs marked
   # `backfill`, plus the multi-arch server image) from that tag's source, with
   # this workflow's packaging, and add them to its existing GitHub release. The
@@ -46,6 +46,7 @@ concurrency:
 
 jobs:
   verify:
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -348,6 +349,7 @@ jobs:
   # The CLI legs, one JSON object per line. `backfill: true` marks a leg added
   # after v1.8.0, which the backfill dispatch builds for an already-published tag.
   cli-plan:
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
     runs-on: ubuntu-latest
     outputs:
       legs: ${{ steps.legs.outputs.legs }}

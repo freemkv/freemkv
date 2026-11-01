@@ -11,7 +11,7 @@ name: doc-links
 # push is a commit its branch run already checked.
 on:
   push:
-    branches: ['**']
+    branches: [dev]
   pull_request:
 
 concurrency:

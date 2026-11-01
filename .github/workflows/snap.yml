@@ -8,7 +8,7 @@ name: Snap
 on:
   workflow_dispatch:
   push:
-    branches: [dev, qa]
+    branches: [qa]
     tags: ['v*', '!v*-rc*']
   pull_request:
     paths: ['snap/**', 'packaging/snap/**', '.github/workflows/snap.yml']
@@ -27,6 +27,7 @@ env:
 
 jobs:
   packaging-tests:
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,6 +36,7 @@ jobs:
 
   # Secrets cannot appear in a job-level `if`, so their presence is surfaced here.
   secrets:
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
     runs-on: ubuntu-24.04
     outputs:
       store: ${{ steps.check.outputs.store }}

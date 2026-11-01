@@ -3,7 +3,7 @@ name: identity-guard
 # Thin caller → the canonical reusable guard in freemkv/.github.
 on:
   push:
-    branches: [dev, qa, main]
+    branches: [dev]
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

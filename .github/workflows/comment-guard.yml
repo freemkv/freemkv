@@ -2,7 +2,10 @@ name: comment-guard
 
 # Thin caller → the canonical reusable guard in freemkv/.github (one definition
 # for every repo). Fork PRs still run it; same-repo pushes aren't double-run.
-on: [push, pull_request]
+on:
+  push:
+    branches: [dev]
+  pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

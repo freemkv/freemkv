@@ -21,7 +21,7 @@ on:
         type: string
         default: ''
   push:
-    branches: [dev, qa]
+    branches: [dev]
     tags: ['v*', '!v*-rc*']
   pull_request:
     paths: ['packaging/arch/**', '.github/workflows/arch.yml']
@@ -35,6 +35,7 @@ permissions:
 
 jobs:
   packaging-tests:
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

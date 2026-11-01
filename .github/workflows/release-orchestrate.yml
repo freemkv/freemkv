@@ -90,12 +90,13 @@ jobs:
             st=0; sha=$(ref_sha "$r" qa) || st=$?
             [ "$st" -ne 2 ] || { ref_err "$r" qa; fail=1; continue; }
             [ -n "$sha" ] || { echo "::error::$r has no qa branch"; fail=1; continue; }
-            # Only qa runs gate (qa may share its sha with main's scheduled runs), and only the newest
-            # run of each workflow: a superseded or re-dispatched run must not gate.
+            # qa and dev runs of this exact sha gate: CI and the builds run on dev, which qa
+            # fast-forwards to, and qa adds qa.yml (main's scheduled runs never gate). Only the
+            # newest run of each workflow counts: a superseded or re-dispatched run must not gate.
             runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$sha&per_page=100" \
                      -q '[.workflow_runs[] | {name, head_branch, status, conclusion, created_at}]')
             gating=$(echo "$runs" | jq --arg re "$NON_GATING" \
-                       '[.[] | select(.head_branch == "qa" and (.name | test($re) | not))] | group_by(.name) | map(max_by(.created_at))')
+                       '[.[] | select((.head_branch == "qa" or .head_branch == "dev") and (.name | test($re) | not))] | group_by(.name) | map(max_by(.created_at))')
             [ "$(echo "$gating" | jq 'length')" != "0" ] || { echo "::error::$r: no qa run for ${sha:0:7}"; fail=1; continue; }
             [ "$(echo "$gating" | jq '[.[]|select(.status!="completed")]|length')" = "0" ] \
               || { echo "::error::$r: qa still running for ${sha:0:7}"; fail=1; continue; }

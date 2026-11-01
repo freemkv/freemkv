@@ -11,7 +11,7 @@ name: AppImage
 on:
   workflow_dispatch:
   push:
-    branches: [dev, qa]
+    branches: [dev]
   # release.yml calls this with release: true on a version tag.
   workflow_call:
     inputs:
@@ -38,6 +38,7 @@ jobs:
   # The legs, one JSON object per line. `backfill: true` marks one added after
   # v1.8.0, which a backfill run builds for an already-published tag.
   plan:
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
     runs-on: ubuntu-24.04
     outputs:
       legs: ${{ steps.legs.outputs.legs }}
