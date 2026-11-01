@@ -107,7 +107,7 @@ jobs:
           chmod +x "linuxdeploy-$ARCH.AppImage" linuxdeploy-plugin-gtk.sh
       - name: Exact toolchain (freemkv rust-version)
         run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
           key: appimage-${{ matrix.arch }}
@@ -156,7 +156,7 @@ jobs:
             [ "$rc" = 124 ] || { echo "::error::GUI '$args' exited early (rc=$rc)"; exit 1; }
           done
       - if: ${{ !inputs.release }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: freemkv-appimage-${{ matrix.arch }}-${{ github.run_id }}
           path: freemkv-*.AppImage
@@ -169,7 +169,7 @@ jobs:
           mv "freemkv-${{ matrix.arch }}.AppImage" "$A.AppImage"
           sha256sum "$A.AppImage" > "$A.AppImage.sha256"
       - if: ${{ inputs.release }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: freemkv-appimage-release-${{ matrix.arch }}
           path: freemkv-${{ matrix.arch }}-linux.AppImage*
@@ -183,7 +183,7 @@ jobs:
       contents: write
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: freemkv-appimage-release-*
           merge-multiple: true

@@ -82,7 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # tests/media_gate.py reads TOML with tomllib (Python 3.11+).
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: '3.12' }
       - run: pip install --quiet pyyaml
       - run: python3 -m unittest discover -s tests -p 'test_media*.py' -v
@@ -128,7 +128,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
       - run: cargo fmt --check
@@ -155,7 +155,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
       - run: cargo test --tests
@@ -185,7 +185,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
       - run: cargo fmt --check
@@ -213,7 +213,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
       - run: cargo test --tests
@@ -240,7 +240,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
       - run: cargo build --release --features gui
@@ -269,7 +269,7 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
       - run: cargo build --release --target x86_64-apple-darwin --bin freemkv
@@ -303,7 +303,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
       # The only rustfmt gate on dev and on pull requests.
@@ -451,7 +451,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
       - run: cargo check --lib
@@ -525,7 +525,7 @@ jobs:
         if: runner.os == 'Linux' && matrix.features != ''
         run: |
           bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
           key: ${{ matrix.features == '' && 'release-cli' || 'release-app' }}
@@ -562,7 +562,7 @@ jobs:
       - name: Exact toolchain (freemkv rust-version)
         shell: bash
         run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
           key: release-tests
@@ -591,12 +591,12 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: '3.12' }
       - name: Exact toolchain (freemkv rust-version)
         shell: bash
         run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
           key: release-cli
@@ -645,7 +645,7 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: '3.12' }
       - name: Exact toolchain (freemkv rust-version)
         shell: bash
@@ -655,7 +655,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
           key: gui-gate
@@ -675,7 +675,7 @@ jobs:
           else
             "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}.exe" "$RUNNER_TEMP/gui-gate"
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: "gui-gate-${{ matrix.os }}"
@@ -713,7 +713,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv-i18n
       - run: cargo test --test freemkv_keys
@@ -750,10 +750,10 @@ jobs:
         with:
           toolchain: stable
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
-      - uses: taiki-e/install-action@3ce020901a1c1292716d3268bf506c1ae55a84cd # v2
+      - uses: taiki-e/install-action@1215446185352662cec6825af8e979af4006a502 # v2
         with:
           tool: cargo-llvm-cov
       - run: cargo llvm-cov --workspace --features gui --ignore-run-fail --lcov --output-path lcov.info
