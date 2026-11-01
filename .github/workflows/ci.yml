@@ -64,7 +64,7 @@ permissions:
 # again on qa (release-orchestrate gates on this workflow at the qa sha).
 jobs:
   web-tests:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,7 +77,7 @@ jobs:
   # Hard-fails on main (and PRs targeting main); warns elsewhere so an
   # in-progress dev/qa branch whose entry isn't written yet is not blocked.
   media-harness-tests:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -90,7 +90,7 @@ jobs:
       - run: python3 -m unittest discover -s tests -p 'test_gui*.py' -v
 
   changelog:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,7 +113,7 @@ jobs:
   # ── macOS: the whole crate, GUI shell included ─────────────────────────────
   # --all-targets so the tests and the AppKit shell are linted too.
   lint-macos:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -141,7 +141,7 @@ jobs:
   # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
   # this runs the platform-neutral suite without needing media on the runner.
   test-macos:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -170,7 +170,7 @@ jobs:
   # `platform.rs` in particular has a `#[cfg(windows)]` `GetDiskFreeSpaceExW`
   # arm that no other job compiles, so nothing else can catch a regression.
   lint-windows:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -199,7 +199,7 @@ jobs:
   # themselves when FMKV_TEST_ISO is unset). If a test needs editing to pass
   # on Windows, the Windows port has broken something — that is the signal.
   test-windows:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -226,7 +226,7 @@ jobs:
   # release-only failures are real (LTO, codegen-units, opt-level). Cheap
   # insurance that the artifact the release workflow zips actually links.
   release-build-windows:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -254,7 +254,7 @@ jobs:
   # runners are arm64, so a break would have surfaced at tag time, in the
   # release workflow, after the version bump and the tag push.
   build-macos-intel:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -281,7 +281,7 @@ jobs:
   # The app build's gtk4/libadwaita build.rs probe pkg-config, hence the
   # apt-get. The musl CLI release binaries are built in release.yml.
   cli-linux:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -329,7 +329,7 @@ jobs:
   # The CLI build must link no UI crate on any target. `--target all` resolves
   # every platform's deps from one Linux runner.
   cli-has-no-ui-deps:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -364,7 +364,7 @@ jobs:
   # The server crates (web server, JSON log sink) belong to the server build
   # only: the CLI and app builds must link none of them, on any target.
   no-server-deps-outside-server:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -413,7 +413,7 @@ jobs:
   # resolves the freemkv crates from their dev tips via the generated
   # .cargo/config.toml, exactly as the build jobs do.
   deny:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -437,7 +437,7 @@ jobs:
   # it fails here long before the Windows shell exists to notice. Checked
   # without the gui feature, so no GTK4 headers are needed.
   core-is-portable:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -468,7 +468,7 @@ jobs:
   # the release-time check becomes a formality rather than a gate anyone can
   # arrive at too late.
   version-consistency:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -500,7 +500,7 @@ jobs:
   # Built on the exact toolchain release.yml ships with, after the same
   # clean-environment check, against the sibling tips (not qa's pinned lock).
   release-tests:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -540,7 +540,7 @@ jobs:
   # bootstrap parsed before qa can launch it. The installer is built and
   # round-tripped by windows-app.yml on the same push.
   windows-build:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -576,7 +576,7 @@ jobs:
         working-directory: freemkv
 
   cli-integration:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -622,7 +622,7 @@ jobs:
   # render whole, as do the Settings destination path and every dropdown's choice, with no
   # crash on the way. A debug build, the only one with the FMKV_* hooks.
   gui-gate:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -689,7 +689,7 @@ jobs:
   # with a compiled-in English fallback must ship in en.json with the same text.
   # freemkv-i18n's own CI runs it too, but only on i18n pushes.
   freemkv-key-drift:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -731,7 +731,7 @@ jobs:
   # machine, not a release. Uploads with CODECOV_TOKEN (empty on forks, where
   # Codecov falls back to its tokenless mode) and never fails CI.
   coverage:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, ': bump version')) }}
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && contains(github.event.head_commit.message, 'bump version')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
