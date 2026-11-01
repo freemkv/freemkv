@@ -174,7 +174,7 @@ reports a key error that reads like a media defect.
 **Teardown — independent mechanisms**, because each can fail alone:
 `--ephemeral` de-registers the runner after one job; `shutdown` against
 `InstanceInitiatedShutdownBehavior=terminate` deletes the instance and its
-volume; the in-instance 4 h self-destruct stops a hung box; and the `launch`
+volume; the in-instance 90-min self-destruct stops a hung box; and the `launch`
 job's `if: always()` Tear down step at the end of qa.yml terminates every
 instance tagged `launched-by=<run id>` (success, failure or cancel). There is no
 scheduled sweeper.

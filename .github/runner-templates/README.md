@@ -76,7 +76,7 @@ Independent mechanisms, because each fails alone:
 1. `--ephemeral` — GitHub de-registers the runner after exactly one job.
 2. `shutdown` + `InstanceInitiatedShutdownBehavior=terminate` — the instance
    deletes itself, and the EBS volume goes with it.
-3. In-instance 4h self-destruct (`sleep 14400; shutdown`) — stops a hung box.
+3. In-instance 90-min self-destruct (`sleep 5400; shutdown`; Windows keeps 4h) — stops a hung box.
 4. qa.yml's `launch` job ends with an `if: always()` Tear down step that
    terminates every instance tagged `launched-by=<run id>`, on success, failure
    or cancel. There is no scheduled sweeper.

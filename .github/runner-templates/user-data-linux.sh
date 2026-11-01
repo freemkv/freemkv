@@ -6,7 +6,7 @@
 #   2. shutdown -h now  (an EXIT trap, so any failure also reaches it) +
 #                       InstanceInitiatedShutdownBehavior=terminate on the
 #                       launch template, so the instance DELETES itself.
-# A third, the 4h self-destruct below, stops a hang; qa.yml's end-of-run
+# A third, the 90-min self-destruct below, stops a hang; qa.yml's end-of-run
 # teardown (if: always()) catches a box that never runs this script.
 # NOTE: no `x` (no `set -x`). The decrypted registration token is expanded on
 # the `config.sh --token $REG` command line (and in the `$REG` guard below), and
@@ -18,8 +18,8 @@ trap 'shutdown -h now' EXIT
 exec > >(tee /var/log/freemkv-runner.log) 2>&1
 
 # Hard deadline: terminate no matter what, even if the job hangs and the
-# runner never returns. 4h is well past the longest real-media rip (~90m).
-( sleep 14400 ; shutdown -h now ) &
+# runner never returns. 90 min is well past an NVMe leg (~25 min).
+( sleep 5400 ; shutdown -h now ) &
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y

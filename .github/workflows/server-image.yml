@@ -59,6 +59,8 @@ jobs:
             slug: armv7
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
+    # A build takes ~6 min; a hung apt/QEMU setup must not hold qa for hours.
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -108,6 +110,7 @@ jobs:
     needs: build
     if: inputs.tag
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write

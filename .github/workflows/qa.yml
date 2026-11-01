@@ -265,7 +265,9 @@ jobs:
     needs: [plan-media]
     if: needs.plan-media.outputs.run == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    # The NVMe leg takes ~25 min; a stuck leg is torn down well before the
+    # instance's own 90-min self-destruct.
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -474,7 +476,7 @@ jobs:
             target: x86_64-unknown-linux-musl
     # run-<id>: only the instance this run launched can take the job.
     runs-on: [self-hosted, freemkv-media, "${{ matrix.os }}", "run-${{ github.run_id }}"]
-    timeout-minutes: 120
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
