@@ -1691,6 +1691,48 @@ fn a_wrong_title_iso_corrected_to_tv_honours_tv_auto_and_takes_the_shows_name() 
     }
 }
 
+// A saved match's titles plan the remux (design §4.4): an unproven disc that holds for its
+// episodes runs the operator's set in their order; a pick this ISO lacks holds, never guesses.
+#[test]
+fn a_saved_title_pick_plans_the_remux_in_its_order() {
+    use crate::server::planner::{MediaMetadata, TitleRequest};
+    use crate::title_identity::TitleIdentity;
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        output_dir: tmp.path().to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let titles = crate::server::titles::tests::play_all_disc();
+    let media = MediaMetadata {
+        title: "Samurai Champloo".into(),
+        season: Some(1),
+        kind: Some(MediaKind::Tv),
+        ..Default::default()
+    };
+    let held = corrected_plan(&cfg, &titles, &media)
+        .unwrap_err()
+        .to_string();
+    assert!(held.contains("E9086"), "{held}");
+    let pick: Vec<_> = [4, 1, 3]
+        .iter()
+        .map(|&i| TitleIdentity::of(&titles[i]))
+        .collect();
+    let request = TitleRequest::new(media.clone(), Some(&pick), &titles);
+    let (plan, targets) = corrected_request_plan(&cfg, &titles, &request).unwrap();
+    assert_eq!(
+        plan.outputs
+            .iter()
+            .map(|o| (o.title_index, o.episode))
+            .collect::<Vec<_>>(),
+        vec![(4, Some(1)), (1, Some(2)), (3, Some(3))]
+    );
+    assert_eq!(targets.len(), 3);
+    let mut foreign = titles[2].clone();
+    foreign.playlist_id = 999;
+    let stale = TitleRequest::new(media, Some(&[TitleIdentity::of(&foreign)]), &titles);
+    assert!(corrected_request_plan(&cfg, &titles, &stale).is_err());
+}
+
 #[path = "worker_retire_tests.rs"]
 mod retire_runs;
 

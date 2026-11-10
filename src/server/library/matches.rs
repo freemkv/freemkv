@@ -2,6 +2,7 @@
 
 use crate::server::planner::{MediaKind, MediaMetadata};
 use crate::server::util::Stamp;
+use crate::title_identity::TitleIdentity;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
@@ -15,6 +16,10 @@ pub struct SavedMatch {
     /// The ISO the match was confirmed for; another disc later filed at the path differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iso_stamp: Option<Stamp>,
+    /// The operator's titles, in order (design §4.4): a Movie's feature or a TV episode set.
+    /// Remapped by identity onto the ISO's scan when planned; a mismatch holds the remux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_pick: Option<Vec<TitleIdentity>>,
 }
 
 impl SavedMatch {
@@ -40,7 +45,7 @@ impl MatchStore {
             Err(e) => return Err(e),
         };
         for (source, saved) in &entries {
-            validate(source, &saved.media)
+            validate(source, &saved.media, saved.title_pick.as_deref())
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             if saved.revision == 0 {
                 return Err(io::Error::new(
@@ -90,7 +95,19 @@ impl MatchStore {
         media: MediaMetadata,
         iso_stamp: Option<Stamp>,
     ) -> io::Result<SavedMatch> {
-        validate(source, &media)?;
+        self.save_with_pick(source, expected_revision, media, None, iso_stamp)
+    }
+
+    /// [`Self::save_for`] with the operator's titles (`None` = automatic selection).
+    pub fn save_with_pick(
+        &self,
+        source: &Path,
+        expected_revision: u64,
+        media: MediaMetadata,
+        title_pick: Option<Vec<TitleIdentity>>,
+        iso_stamp: Option<Stamp>,
+    ) -> io::Result<SavedMatch> {
+        validate(source, &media, title_pick.as_deref())?;
         let _writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let (saved, next) = {
             let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
@@ -107,6 +124,7 @@ impl MatchStore {
                     .ok_or_else(|| io::Error::other("match revision exhausted"))?,
                 media,
                 iso_stamp,
+                title_pick,
             };
             let mut next = entries.clone();
             next.insert(source.to_path_buf(), saved.clone());
@@ -120,7 +138,22 @@ impl MatchStore {
     }
 }
 
-fn validate(source: &Path, media: &MediaMetadata) -> io::Result<()> {
+fn validate(
+    source: &Path,
+    media: &MediaMetadata,
+    pick: Option<&[TitleIdentity]>,
+) -> io::Result<()> {
+    // A pick suits its kind as on a drive: one Movie feature, or TV episodes (one alone needs
+    // its First episode).
+    if let Some(pick) = pick
+        && let Err(error) = crate::server::titles::check_pick(
+            media.kind.unwrap_or_default(),
+            pick.len(),
+            media.episode_start,
+        )
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+    }
     if !source.is_absolute()
         || source
             .components()
@@ -194,6 +227,52 @@ mod tests {
         );
     }
 
+    // The operator's titles are saved with the match, in order, and read back; they must suit
+    // the kind (one Movie feature; TV episodes, one alone with its First episode). A file
+    // written before the field existed reads as automatic.
+    #[test]
+    fn a_title_pick_round_trips_with_the_match_and_suits_its_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("show.iso");
+        let store = MatchStore::open(dir.path()).unwrap();
+        let titles = crate::server::titles::tests::play_all_disc();
+        let pick: Vec<_> = [3, 1]
+            .iter()
+            .map(|&i| TitleIdentity::of(&titles[i]))
+            .collect();
+        let saved = store
+            .save_with_pick(&iso, 0, media(MediaKind::Tv), Some(pick.clone()), None)
+            .unwrap();
+        let reopened = MatchStore::open(dir.path()).unwrap().get(&iso).unwrap();
+        assert_eq!(reopened, saved);
+        assert_eq!(reopened.title_pick, Some(pick.clone()));
+        assert_eq!(
+            crate::server::planner::remap_pick(&titles, reopened.title_pick.as_deref().unwrap()),
+            Some(vec![3, 1])
+        );
+        let one = Some(vec![pick[0].clone()]);
+        for (kind, start, pick) in [
+            (MediaKind::Movie, None, Some(pick.clone())),
+            (MediaKind::Tv, None, one.clone()),
+            (MediaKind::Tv, Some(1), Some(Vec::new())),
+        ] {
+            let mut value = media(kind);
+            value.episode_start = start;
+            let error = store
+                .save_with_pick(&iso, 1, value, pick, None)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+        let mut tv = media(MediaKind::Tv);
+        tv.episode_start = Some(4);
+        assert!(store.save_with_pick(&iso, 1, tv, one, None).is_ok());
+        let legacy =
+            serde_json::json!({ "/iso/old.iso": { "revision": 1, "media": media(MediaKind::Tv) } });
+        std::fs::write(store.path.clone(), legacy.to_string()).unwrap();
+        let old = MatchStore::open(dir.path()).unwrap();
+        assert_eq!(old.get(Path::new("/iso/old.iso")).unwrap().title_pick, None);
+    }
+
     #[test]
     fn persistence_failure_does_not_publish_match() {
         let dir = tempfile::tempdir().unwrap();
@@ -249,6 +328,7 @@ mod tests {
                     revision,
                     media: identity,
                     iso_stamp: None,
+                    title_pick: None,
                 },
             )]))
             .unwrap();

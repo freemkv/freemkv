@@ -243,8 +243,14 @@ fn match_then_refile() -> (tempfile::TempDir, Config, Library, PathBuf) {
     let image = crate::ku_fixture::bd_image();
     std::fs::write(&iso, &image.img.image).unwrap();
     lib.rescan(&super::super::super::dirs(&cfg));
-    lib.confirm_match_and_queue(&cfg, &iso, 0, super::super::super::match_tests::show())
-        .unwrap();
+    lib.confirm_match_and_queue(
+        &cfg,
+        &iso,
+        0,
+        super::super::super::match_tests::show(),
+        None,
+    )
+    .unwrap();
     // The next disc of the show is filed at the same ISO path.
     std::fs::remove_file(&iso).unwrap();
     let mut other = image.img.image.clone();
@@ -290,8 +296,14 @@ fn a_remux_of_a_matched_iso_restamped_at_the_same_size_fails_rather_than_auto_pl
     let iso = sources[0].clone();
     std::fs::write(&iso, &crate::ku_fixture::bd_image().img.image).unwrap();
     lib.rescan(&super::super::super::dirs(&cfg));
-    lib.confirm_match_and_queue(&cfg, &iso, 0, super::super::super::match_tests::show())
-        .unwrap();
+    lib.confirm_match_and_queue(
+        &cfg,
+        &iso,
+        0,
+        super::super::super::match_tests::show(),
+        None,
+    )
+    .unwrap();
     let id = lib.queue.snapshot().jobs[0].id;
     lib.queue.drop_job(id);
     // Same size, new time: the same disc or another one, which cannot be told.

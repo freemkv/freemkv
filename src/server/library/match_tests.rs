@@ -71,7 +71,7 @@ pub(super) fn show() -> crate::server::planner::MediaMetadata {
 fn confirming_a_match_for_an_idle_source_saves_it_and_queues_one_remux() {
     let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
     let (saved, queued) = lib
-        .confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .confirm_match_and_queue(&cfg, &sources[0], 0, show(), None)
         .unwrap();
     assert_eq!((saved.revision, queued), (1, 1));
     assert_eq!(lib.source_match(&sources[0]).unwrap(), Some(saved));
@@ -89,7 +89,7 @@ fn an_unverified_source_match_saves_nothing_and_queues_nothing() {
     lib.iso_stat = Arc::new(|_| None);
     let generation = lib.index_generation();
     let error = lib
-        .confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .confirm_match_and_queue(&cfg, &sources[0], 0, show(), None)
         .unwrap_err();
     assert_ne!(error.kind(), io::ErrorKind::TimedOut);
     let message = error.to_string();
@@ -121,7 +121,7 @@ fn an_unverified_source_match_preserves_the_previous_correction_and_revision() {
     lib.iso_stat = Arc::new(|_| None);
     let mut changed = show();
     changed.title = "Corrected title".into();
-    lib.confirm_match_and_queue(&cfg, &sources[0], old.revision, changed.clone())
+    lib.confirm_match_and_queue(&cfg, &sources[0], old.revision, changed.clone(), None)
         .unwrap_err();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert_eq!(lib.source_match(&sources[0]).unwrap(), Some(old.clone()));
@@ -136,7 +136,7 @@ fn an_unverified_source_match_preserves_the_previous_correction_and_revision() {
     // A successful bounded observation allows the unchanged expected revision to retry.
     lib.iso_stat = Arc::new(move |_| Some(stamp));
     let (saved, queued) = lib
-        .confirm_match_and_queue(&cfg, &sources[0], old.revision, changed.clone())
+        .confirm_match_and_queue(&cfg, &sources[0], old.revision, changed.clone(), None)
         .unwrap();
     assert_eq!(saved.revision, old.revision + 1);
     assert_eq!(saved.media, changed);
@@ -178,7 +178,7 @@ fn same_title_corrections_from_two_discs_each_get_their_own_job() {
     let (_t, cfg, lib, sources) = corrected_library(&["Show Disc 1", "Show Disc 2"]);
     for source in &sources {
         let (_, queued) = lib
-            .confirm_match_and_queue(&cfg, source, 0, show())
+            .confirm_match_and_queue(&cfg, source, 0, show(), None)
             .unwrap();
         assert_eq!(queued, 1);
     }
@@ -198,7 +198,7 @@ fn a_busy_source_refuses_the_match_and_leaves_it_unchanged() {
         replace: false,
     }]);
     let error = lib
-        .confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .confirm_match_and_queue(&cfg, &sources[0], 0, show(), None)
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
     assert_eq!(lib.source_match(&sources[0]).unwrap(), None);
@@ -217,7 +217,7 @@ fn another_isos_job_at_the_same_title_does_not_block_a_correction() {
         replace: false,
     }]);
     let (saved, queued) = lib
-        .confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .confirm_match_and_queue(&cfg, &sources[0], 0, show(), None)
         .unwrap();
     assert_eq!(queued, 1);
     assert_eq!(lib.source_match(&sources[0]).unwrap(), Some(saved));
@@ -230,7 +230,7 @@ fn a_match_for_an_unindexed_path_saves_nothing() {
     let outside = t.path().join("outside.iso");
     std::fs::write(&outside, b"x").unwrap();
     let error = lib
-        .confirm_match_and_queue(&cfg, &outside, 0, show())
+        .confirm_match_and_queue(&cfg, &outside, 0, show(), None)
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert!(!t.path().join("config/library-matches.json").exists());
@@ -296,7 +296,7 @@ fn a_hung_share_gives_the_rule_filtered_list_and_a_flag() {
 #[test]
 fn only_a_change_match_may_retire_old_files() {
     let (_t, cfg, lib, sources) = corrected_library(&["Castaway", "Other"]);
-    lib.confirm_match_and_queue(&cfg, &sources[0], 0, show())
+    lib.confirm_match_and_queue(&cfg, &sources[0], 0, show(), None)
         .unwrap();
     let job = serde_json::to_value(&lib.queue.snapshot().jobs[0]).unwrap();
     assert_eq!(job["retire"], true, "{job}");
@@ -351,7 +351,7 @@ fn two_isos_with_one_name_in_different_folders_each_get_their_own_correction() {
     lib.rescan(&d);
     for source in &sources {
         let (_, queued) = lib
-            .confirm_match_and_queue(&cfg, source, 0, show())
+            .confirm_match_and_queue(&cfg, source, 0, show(), None)
             .unwrap();
         assert_eq!(queued, 1, "{}", source.display());
     }
@@ -394,7 +394,7 @@ fn the_listing_does_not_present_a_match_saved_for_an_earlier_disc_at_the_path() 
 fn a_change_match_job_shows_on_its_iso_only_row_and_unqueues_from_it() {
     let (_t, cfg, lib, sources) = corrected_library(&["Castaway"]);
     let d = dirs(&cfg);
-    lib.confirm_match_and_queue(&cfg, &sources[0], 0, show())
+    lib.confirm_match_and_queue(&cfg, &sources[0], 0, show(), None)
         .unwrap();
     let row = lib
         .listing(&d)
@@ -453,7 +453,7 @@ fn a_change_match_queued_from_a_row_with_an_mkv_shows_there_and_can_be_unqueued(
     };
     assert_eq!(row(&lib).iso.as_ref(), Some(&sources[0]));
     let (_, queued) = lib
-        .confirm_match_and_queue(&cfg, &sources[0], 0, show())
+        .confirm_match_and_queue(&cfg, &sources[0], 0, show(), None)
         .unwrap();
     assert_eq!(queued, 1);
     let shown = row(&lib)

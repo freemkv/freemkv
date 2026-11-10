@@ -69,6 +69,9 @@ struct MatchRequest {
     source: PathBuf,
     expected_revision: u64,
     media: crate::server::planner::MediaMetadata,
+    /// The operator's titles as `/api/library/titles` gave them, in order; absent = automatic.
+    #[serde(default)]
+    title_pick: Option<Vec<crate::title_identity::TitleIdentity>>,
 }
 
 /// Serve a `/api/library*` request; one that is not ours is handed back.
@@ -127,6 +130,23 @@ pub fn handle(
                 }
             }
         }
+        (true, _, "/api/library/titles") => {
+            let source = PathBuf::from(query_param(&url, "source").unwrap_or_default());
+            if not_ready(&lib)
+                || !lib
+                    .listing(&d)
+                    .rows
+                    .iter()
+                    .any(|r| r.iso.as_ref() == Some(&source))
+            {
+                err(request, 404, "source ISO is not in the current library");
+            } else {
+                match super::worker::source_titles(&lib, &c, &source) {
+                    Ok(body) => json_response(request, 200, &body.to_string()),
+                    Err(error) => err(request, 409, &error.to_string()),
+                }
+            }
+        }
         (_, true, "/api/library/match/remux") => {
             let Ok((request, body)) = read_json_body(request) else {
                 return None;
@@ -140,6 +160,7 @@ pub fn handle(
                 &change.source,
                 change.expected_revision,
                 change.media,
+                change.title_pick.filter(|pick| !pick.is_empty()),
             ) {
                 Ok((saved, queued)) => json_response(
                     request,

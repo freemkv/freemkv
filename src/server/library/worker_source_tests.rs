@@ -565,7 +565,7 @@ fn frozen_source_replaced_after_match_validation_is_refused_before_corrected_sca
         &lib,
         &cfg(&dirs),
         &mut job,
-        &media,
+        (&media, None),
         None,
         matched_source,
         |_| panic!("saved match for A must not scan B"),

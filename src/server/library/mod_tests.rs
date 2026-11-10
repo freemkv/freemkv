@@ -748,7 +748,7 @@ fn a_matched_iso_is_stat_once_outside_the_match_gate() {
     let lib = &lib;
     std::thread::scope(|scope| {
         let confirm = scope.spawn(|| {
-            lib.confirm_match_and_queue(&cfg, &sources[0], 0, super::match_tests::show())
+            lib.confirm_match_and_queue(&cfg, &sources[0], 0, super::match_tests::show(), None)
         });
         entered.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(

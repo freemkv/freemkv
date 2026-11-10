@@ -265,7 +265,7 @@ fn maybe_attach_tv_plan(lib: &Library, cfg: &Config, job: &mut Job) -> std::io::
                 lib,
                 cfg,
                 job,
-                &saved.media,
+                (&saved.media, saved.title_pick.as_deref()),
                 row.as_deref(),
                 source_stamp,
             );
@@ -545,6 +545,53 @@ fn persist_movie_plan(
     persist_auto_plan(lib, cfg, job, tv_plan_result(plan)?, source_stamp, titles)
 }
 
+/// `source`'s titles for the remux Confirm episodes dialog, planned as its saved match (with its
+/// titles) would plan them, else as a TV disc named by its labels: what a confirmed pick saves.
+pub(crate) fn source_titles(
+    lib: &Library,
+    cfg: &Config,
+    source: &Path,
+) -> std::io::Result<serde_json::Value> {
+    use crate::server::planner::{MediaMetadata, ScopeMode, TitleRequest};
+    let saved = lib.match_store()?.get(source);
+    let current = saved.as_ref().filter(|m| lib.match_is_current(source, m));
+    let iso_title = (lib.snapshot().isos.iter())
+        .find(|iso| iso.path == source)
+        .map(|iso| iso.title.clone())
+        .unwrap_or_default();
+    let (disc, _reader) =
+        freemkv_engine::scan_image(&freemkv_engine::ImageSource::from_path(source))
+            .map_err(planning_scan_error)?;
+    let operator = current.map_or_else(
+        || MediaMetadata {
+            title: crate::server::tmdb::clean_title(&iso_title),
+            kind: Some(MediaKind::Tv),
+            ..MediaMetadata::default()
+        },
+        |m| m.media.clone(),
+    );
+    let media = MediaMetadata::resolve(&operator, None, &disc_labels(&disc, &iso_title));
+    let pick = current.and_then(|m| m.title_pick.as_deref());
+    let request = TitleRequest::new(media, pick, &disc.titles);
+    let list = crate::server::titles::list(cfg, &disc.titles, &request, ScopeMode::Mux);
+    Ok(serde_json::json!({
+        "source": source,
+        "revision": saved.as_ref().map_or(0, |m| m.revision),
+        "saved": current,
+        "show": request.media.title,
+        "year": request.media.year,
+        "tmdb_id": request.media.tmdb_id,
+        "kind": request.media.kind.unwrap_or_default(),
+        "season": request.media.season,
+        "disc": request.media.disc,
+        "episode_start": request.media.episode_start,
+        "pick": request.pick,
+        "confirm": list.confirm,
+        "automatic": list.automatic,
+        "titles": list.titles,
+    }))
+}
+
 // The labels a plan reads season and disc numbers from: the volume ID, the disc's own title,
 // then the Library's title for the ISO.
 fn disc_labels<'a>(disc: &'a libfreemkv::Disc, title: &'a str) -> [&'a str; 3] {
@@ -560,11 +607,11 @@ fn attach_corrected_plan(
     lib: &Library,
     cfg: &Config,
     job: &mut Job,
-    media: &crate::server::planner::MediaMetadata,
+    saved: SavedChoice,
     row: Option<&Path>,
     source_stamp: crate::server::util::Stamp,
 ) -> std::io::Result<()> {
-    attach_corrected_plan_with_scan(lib, cfg, job, media, row, source_stamp, |iso| {
+    attach_corrected_plan_with_scan(lib, cfg, job, saved, row, source_stamp, |iso| {
         let source = freemkv_engine::ImageSource::from_path(iso);
         freemkv_engine::scan_image(&source)
             .map(|(disc, _reader)| disc)
@@ -572,11 +619,17 @@ fn attach_corrected_plan(
     })
 }
 
+// A saved match: its metadata and the operator's titles, if any.
+type SavedChoice<'a> = (
+    &'a crate::server::planner::MediaMetadata,
+    Option<&'a [crate::title_identity::TitleIdentity]>,
+);
+
 fn attach_corrected_plan_with_scan(
     lib: &Library,
     cfg: &Config,
     job: &mut Job,
-    media: &crate::server::planner::MediaMetadata,
+    (media, pick): SavedChoice,
     row: Option<&Path>,
     matched_source: crate::server::util::Stamp,
     scan: impl FnOnce(&Path) -> std::io::Result<libfreemkv::Disc>,
@@ -593,18 +646,34 @@ fn attach_corrected_plan_with_scan(
         None,
         &disc_labels(&disc, &job.title),
     );
-    let (plan, targets) = corrected_plan_for(cfg, &disc.titles, media, row)?;
+    let request = crate::server::planner::TitleRequest::new(media.clone(), pick, &disc.titles);
+    let (plan, targets) = corrected_request_plan_for(cfg, &disc.titles, &request, row)?;
     persist_plan(lib, job, plan, Some(targets), source_stamp, &disc.titles)
 }
 
 // The corrected plan, or for an episode `row` only the output that lands on it.
+#[cfg(test)]
 fn corrected_plan_for(
     cfg: &Config,
     titles: &[libfreemkv::DiscTitle],
     media: &crate::server::planner::MediaMetadata,
     row: Option<&Path>,
 ) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
-    let (plan, targets) = corrected_plan(cfg, titles, media)?;
+    let request = crate::server::planner::TitleRequest {
+        media: media.clone(),
+        ..Default::default()
+    };
+    corrected_request_plan_for(cfg, titles, &request, row)
+}
+
+// [`corrected_plan_for`] with the saved match's titles remapped onto this scan.
+fn corrected_request_plan_for(
+    cfg: &Config,
+    titles: &[libfreemkv::DiscTitle],
+    request: &crate::server::planner::TitleRequest,
+    row: Option<&Path>,
+) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
+    let (plan, targets) = corrected_request_plan(cfg, titles, request)?;
     match row {
         None => Ok((plan, targets)),
         Some(row) => only_the_row(plan, targets, row).ok_or_else(|| episode_alone(row)),
@@ -612,11 +681,26 @@ fn corrected_plan_for(
 }
 
 // The plan and library paths a confirmed match produces from the disc's titles.
+#[cfg(test)]
 fn corrected_plan(
     cfg: &Config,
     titles: &[libfreemkv::DiscTitle],
     media: &crate::server::planner::MediaMetadata,
 ) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
+    let request = crate::server::planner::TitleRequest {
+        media: media.clone(),
+        ..Default::default()
+    };
+    corrected_request_plan(cfg, titles, &request)
+}
+
+// [`corrected_plan`] for a request that may carry the operator's titles.
+fn corrected_request_plan(
+    cfg: &Config,
+    titles: &[libfreemkv::DiscTitle],
+    request: &crate::server::planner::TitleRequest,
+) -> std::io::Result<(crate::server::planner::RemuxPlan, Vec<std::path::PathBuf>)> {
+    let media = &request.media;
     let Some(kind) = media.kind else {
         return Err(std::io::Error::other("saved match has no media type"));
     };
@@ -637,13 +721,14 @@ fn corrected_plan(
         &crate::server::ripper::staged_output_name(&name, "mkv"),
         media.season,
     ));
-    let plan = crate::server::planner::plan(cfg, titles, media, &target).map_err(|e| {
-        std::io::Error::other(e.with_action(crate::strings::fmt_or(
-            "server.library.plan.correction_review",
-            "Corrected match needs review: {reason}",
-            &[("reason", &e.to_string())],
-        )))
-    })?;
+    let plan =
+        crate::server::planner::plan_request(cfg, titles, request, &target).map_err(|e| {
+            std::io::Error::other(e.with_action(crate::strings::fmt_or(
+                "server.library.plan.correction_review",
+                "Corrected match needs review: {reason}",
+                &[("reason", &e.to_string())],
+            )))
+        })?;
     let targets = tv_destinations(cfg, &plan)
         .map(|(_, paths)| paths)
         .unwrap_or_else(|| vec![target]);

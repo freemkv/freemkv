@@ -717,6 +717,7 @@ impl Library {
         source: &Path,
         expected_revision: u64,
         media: crate::server::planner::MediaMetadata,
+        title_pick: Option<Vec<crate::title_identity::TitleIdentity>>,
     ) -> std::io::Result<(matches::SavedMatch, usize)> {
         let d = dirs(cfg);
         // New corrections need a verified disc identity; an unstamped legacy match
@@ -743,7 +744,7 @@ impl Library {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "source ISO is not indexed")
             })?;
         let saved = self.queue.with_idle_source(source, || {
-            store.save_for(source, expected_revision, media, Some(disc))
+            store.save_with_pick(source, expected_revision, media, title_pick, Some(disc))
         })?;
         self.touch_index();
         // Keyed by the source path, so two ISOs of one title never share a queue identity;
