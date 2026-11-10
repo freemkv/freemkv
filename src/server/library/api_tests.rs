@@ -56,6 +56,8 @@ fn clear_staging_removes_only_abandoned_failures_and_empty_leftovers() {
     std::fs::create_dir(&corrected).unwrap();
     let mut st = DiscState::new(StagingState::Stopped);
     st.user_metadata = Some(UserMetadata {
+        season: None,
+        disc: None,
         title: "Cast Away".into(),
         year: 2000,
         media_type: crate::server::planner::MediaKind::Movie,

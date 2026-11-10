@@ -26,9 +26,8 @@ fn accept_damage_after_a_loss_abort_remuxes_the_planned_title() {
     let plan = super::super::capture_plan(
         &multipass(),
         &titles,
-        (MediaKind::Movie, "MOVIE", 0),
+        &super::super::test_request(MediaKind::Movie, "MOVIE", 0, None),
         "Movie.mkv",
-        None,
     );
     assert!(plan.as_ref().is_some_and(|p| p.outputs.is_ok()));
     staging::start_sweep(&dir, |s| {
@@ -64,9 +63,8 @@ fn a_single_pass_rip_records_no_plan_at_capture_start() {
         super::super::capture_plan(
             &cfg,
             &titles,
-            (MediaKind::Movie, "MOVIE", 0),
-            "Movie.mkv",
-            None
+            &super::super::test_request(MediaKind::Movie, "MOVIE", 0, None),
+            "Movie.mkv"
         )
         .is_none()
     );
@@ -113,5 +111,76 @@ fn a_recapture_drops_an_older_titles_partial_but_never_the_capture() {
     assert!(
         staging::superseded_partials(&dir, &["Dune.mkv".into()], &[], &[]).is_empty(),
         "a delivery owns the job's files"
+    );
+}
+
+// A held capture swept only part of the disc (Keep ISO off): its episode suggestion offers
+// only the titles the sweep read; anything else needs the disc.
+#[test]
+fn a_held_captures_suggestion_is_limited_to_its_sweep() {
+    use freemkv_engine::{Mapfile, SectorStatus, mapfile_path_for};
+    let dir = scratch("swept");
+    let fx = crate::ku_fixtures::bd_image(&[None, None, None], 1);
+    let iso = fx.write(&dir, "Show.iso");
+    let len = fx.img.image.len() as u64;
+    let (start, sectors) = fx.clip(2);
+    let (gap_start, gap_end) = (u64::from(start) * 2048, u64::from(start + sectors) * 2048);
+    let map_path = mapfile_path_for(&iso);
+    let mut map = Mapfile::create(&map_path, len, "t").unwrap();
+    map.record(0, gap_start, SectorStatus::Finished).unwrap();
+    map.record(gap_end, len - gap_end, SectorStatus::Finished)
+        .unwrap();
+    map.flush().unwrap();
+    let confirm = crate::server::planner::EpisodeConfirm {
+        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+        suggested: vec![0, 1, 2],
+        clusters: vec![vec![0, 1, 2]],
+        alternates: Vec::new(),
+    };
+    let held = swept_confirm(&fx.disc, confirm.clone(), &iso, &map_path);
+    assert_eq!(held.suggested, [0, 1]);
+    assert_eq!(held.clusters, [vec![0, 1]]);
+    // A whole-disc capture offers everything.
+    crate::ku_fixtures::sidecar(&fx, &iso, false);
+    assert_eq!(
+        swept_confirm(&fx.disc, confirm.clone(), &iso, &map_path),
+        confirm
+    );
+}
+
+// Resume rebuilds a held plan from the operator's pick, remapped by identity onto the
+// rescan of the saved image: exactly the picked titles, in the picked order.
+#[test]
+fn resume_remaps_the_operator_pick() {
+    let titles = crate::selection_test_fixtures::separate_titles();
+    assert!(titles.len() >= 2);
+    let mut st = staging::DiscState::new(staging::StagingState::Ripped);
+    st.disc_label = "SHOW_S1_D1".into();
+    st.title = "Show".into();
+    st.title_pick = Some(vec![
+        crate::title_identity::TitleIdentity::of(&titles[1]),
+        crate::title_identity::TitleIdentity::of(&titles[0]),
+    ]);
+    let mut rescan = titles.clone();
+    rescan.swap(0, 1);
+    let request = resume_request(Some(&st), &rescan, MediaKind::Movie, "");
+    assert_eq!(request.media.kind, Some(MediaKind::Tv));
+    assert_eq!(request.pick, Some(vec![0, 1]));
+    assert!(check_resume_selection(&rescan, &multipass(), &request, false, true).is_ok());
+    let plan = super::super::plan_mux_outputs(&rescan, &multipass(), &request, "Show.mkv").unwrap();
+    assert_eq!(
+        plan.iter()
+            .map(|o| (o.title_index, o.episode, o.title_identity.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (0, Some(1), st.title_pick.as_ref().map(|p| p[0].clone())),
+            (1, Some(2), st.title_pick.as_ref().map(|p| p[1].clone())),
+        ]
+    );
+    // A pick the image no longer has holds; it never falls back to an automatic choice.
+    let request = resume_request(Some(&st), &rescan[..1], MediaKind::Movie, "");
+    assert_eq!(
+        check_resume_selection(&rescan[..1], &multipass(), &request, false, true),
+        Err(crate::server::planner::PlanError::PickMismatch)
     );
 }

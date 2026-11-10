@@ -77,6 +77,18 @@ fn test_state_json_serialization_round_trip() {
         key_status: "keys ok".to_string(),
         resumable: Some(Resumable::Remux),
         claim_gen: 9,
+        plan: freemkv::server::ripper::TitlePlanView {
+            media_kind: Some(freemkv::server::planner::MediaKind::Tv),
+            season: Some(1),
+            disc: Some(2),
+            title_pick: Some(vec![3, 1]),
+            confirm: Some(freemkv::server::planner::EpisodeConfirm {
+                reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+                suggested: vec![1, 3],
+                clusters: vec![vec![1, 3]],
+                alternates: vec![freemkv::server::planner::ConfirmAlternate { index: 4, of: 3 }],
+            }),
+        },
     };
 
     // Serialize the same way get_state_json does: serde_json::to_value.
@@ -140,6 +152,14 @@ fn test_state_json_serialization_round_trip() {
     assert_eq!(v["started_epoch_secs"], 1_700_000_000u64);
     assert_eq!(v["key_status"], "keys ok");
     assert_eq!(v["resumable"], "remux");
+    // The resolved title plan the title and confirm dialogs read, flat on the row.
+    assert_eq!(v["media_kind"], "tv");
+    assert_eq!(v["season"], 1);
+    assert_eq!(v["disc"], 2);
+    assert_eq!(v["title_pick"], serde_json::json!([3, 1]));
+    assert_eq!(v["confirm"]["reason"], "missing-episode-roster");
+    assert_eq!(v["confirm"]["suggested"], serde_json::json!([1, 3]));
+    assert_eq!(v["confirm"]["alternates"][0]["of"], 3);
     // Server-side bookkeeping stays off the wire.
     for hidden in [
         "claim_gen",

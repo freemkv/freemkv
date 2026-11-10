@@ -39,8 +39,12 @@ fn ambiguous_tv_capture_requires_review_for_muxed_formats() {
         needs_review(check_capture_selection(
             &titles(),
             &cfg,
-            crate::server::planner::MediaKind::Tv,
-            "",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "",
+                0,
+                None,
+            ),
         ));
     }
 }
@@ -53,20 +57,36 @@ fn ambiguous_tv_iso_capture_remains_available() {
         ..Default::default()
     };
     assert!(
-        check_capture_selection(&titles(), &cfg, crate::server::planner::MediaKind::Tv, "").is_ok()
+        check_capture_selection(
+            &titles(),
+            &cfg,
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "",
+                0,
+                None
+            )
+        )
+        .is_ok()
     );
 }
 
+// A movie is never split and never held, even when its titles look like an episode set;
+// with "Rip TV seasons automatically" off a TV disc rips its main title.
 #[test]
 fn selection_guard_preserves_movie_and_disabled_tv_auto_policy() {
+    use crate::server::planner::MediaKind;
     let mut cfg = Config::default();
+    let main = crate::server::planner::main_title(&cfg, &titles()).unwrap();
     for kind in ["movie", ""] {
-        assert!(check_capture_selection(&titles(), &cfg, kind.into(), "").is_ok());
+        let request = crate::server::ripper::test_request(kind.into(), "", 0, None);
+        assert_eq!(capture_title_index(&titles(), &cfg, &request), Ok(main));
+        assert!(fanout_episode_indices(&titles(), &cfg, &request, ScopeMode::Mux).is_empty());
     }
     cfg.tv_auto = false;
-    assert!(
-        check_capture_selection(&titles(), &cfg, crate::server::planner::MediaKind::Tv, "").is_ok()
-    );
+    let tv = crate::server::ripper::test_request(MediaKind::Tv, "", 0, None);
+    assert_eq!(capture_title_index(&titles(), &cfg, &tv), Ok(main));
+    assert!(fanout_episode_indices(&titles(), &cfg, &tv, ScopeMode::Mux).is_empty());
 }
 
 #[test]
@@ -82,14 +102,28 @@ fn authored_tv_evidence_allows_capture_and_replan() {
     }
     let cfg = Config::default();
     assert!(
-        check_capture_selection(&titles, &cfg, crate::server::planner::MediaKind::Tv, "").is_ok()
+        check_capture_selection(
+            &titles,
+            &cfg,
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "",
+                0,
+                None
+            )
+        )
+        .is_ok()
     );
     assert!(
         resume::check_resume_selection(
             &titles,
             &cfg,
-            crate::server::planner::MediaKind::Tv,
-            "",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "",
+                0,
+                None
+            ),
             true,
             true
         )
@@ -105,8 +139,12 @@ fn ambiguous_tv_resume_keeps_explicit_plan_but_refuses_reselection() {
         resume::check_resume_selection(
             &titles,
             &cfg,
-            crate::server::planner::MediaKind::Tv,
-            "",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "",
+                0,
+                None
+            ),
             true,
             false
         )
@@ -115,16 +153,14 @@ fn ambiguous_tv_resume_keeps_explicit_plan_but_refuses_reselection() {
     needs_review(resume::check_resume_selection(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "",
+        &crate::server::ripper::test_request(crate::server::planner::MediaKind::Tv, "", 0, None),
         true,
         true,
     ));
     needs_review(resume::check_resume_selection(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "",
+        &crate::server::ripper::test_request(crate::server::planner::MediaKind::Tv, "", 0, None),
         false,
         false,
     ));
@@ -139,8 +175,7 @@ fn iso_setting_does_not_authorize_ambiguous_resume_mux() {
     needs_review(resume::check_resume_selection(
         &titles(),
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "",
+        &crate::server::ripper::test_request(crate::server::planner::MediaKind::Tv, "", 0, None),
         true,
         true,
     ));
@@ -162,8 +197,12 @@ fn explicit_single_output_resume_preserves_nonzero_title_and_metadata() {
         resume::check_resume_selection(
             &disc.titles,
             &Config::default(),
-            crate::server::planner::MediaKind::Tv,
-            "",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "",
+                0,
+                None
+            ),
             true,
             false
         )
@@ -187,37 +226,44 @@ fn explicit_resume_rejects_out_of_range_titles_without_movie_substitution() {
 }
 
 // A film labelled like a season ("SERIES_7") held by E9086: the operator's Movie
-// correction lifts the hold, as the hold's advice says; a TMDB Movie guess does not.
+// correction lifts the hold, as the hold's advice says; a TMDB Movie guess does not
+// (a season label outranks it, so a TV disc TMDB mismatched to a film stays TV).
 #[test]
 fn an_operator_movie_correction_overrides_a_season_label() {
+    use crate::server::planner::{MediaKind, MediaMetadata, TitleRequest};
     let cfg = Config::default();
-    let movie = crate::server::planner::MediaKind::Movie;
     needs_review(check_capture_selection(
         &titles(),
         &cfg,
-        movie,
-        planning_label("SERIES_7", None),
+        &crate::server::ripper::test_request(MediaKind::Movie, "SERIES_7", 0, None),
     ));
-    assert!(
-        check_capture_selection(
-            &titles(),
-            &cfg,
-            movie,
-            planning_label("SERIES_7", Some(movie))
-        )
-        .is_ok()
-    );
-    assert!(
-        resume::check_resume_selection(
-            &titles(),
-            &cfg,
-            movie,
-            planning_label("SERIES_7", Some(movie)),
-            false,
-            true
-        )
-        .is_ok()
-    );
-    let tv = crate::server::planner::MediaKind::Tv;
-    assert_eq!(planning_label("SERIES_7", Some(tv)), "SERIES_7");
+    let operator = MediaMetadata {
+        title: "Series 7".into(),
+        kind: Some(MediaKind::Movie),
+        ..MediaMetadata::default()
+    };
+    let corrected = TitleRequest {
+        media: MediaMetadata::resolve(&operator, None, &["SERIES_7"]),
+        ..TitleRequest::default()
+    };
+    assert_eq!(corrected.media.kind, Some(MediaKind::Movie));
+    assert!(check_capture_selection(&titles(), &cfg, &corrected).is_ok());
+    assert!(resume::check_resume_selection(&titles(), &cfg, &corrected, false, true).is_ok());
+    // The same correction saved with the job resolves the same way on resume.
+    let mut saved = staging::DiscState::new(staging::StagingState::Ripped);
+    saved.disc_label = "SERIES_7".into();
+    saved.user_metadata = Some(staging::UserMetadata {
+        title: "Series 7".into(),
+        year: 0,
+        media_type: MediaKind::Movie,
+        episode_start: None,
+        season: None,
+        disc: None,
+        tmdb_id: 0,
+        poster_url: String::new(),
+        overview: String::new(),
+    });
+    let request = resume::resume_request(Some(&saved), &titles(), MediaKind::Tv, "");
+    assert_eq!(request.media.kind, Some(MediaKind::Movie));
+    assert!(resume::check_resume_selection(&titles(), &cfg, &request, false, true).is_ok());
 }

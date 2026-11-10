@@ -8,7 +8,7 @@
 //! Lifecycle: `Sweeping` → `Ripped` → `Done`/`Review` → `Completed`; terminal `Failed`;
 //! resumable `AbortedLoss`.
 
-use crate::server::planner::MediaKind;
+use crate::server::planner::{MediaKind, MediaMetadata};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -50,6 +50,11 @@ pub struct UserMetadata {
     pub media_type: MediaKind,
     #[serde(default)]
     pub episode_start: Option<u16>,
+    /// The operator's TV season and disc number; older saves read as unset (no schema bump).
+    #[serde(default)]
+    pub season: Option<u16>,
+    #[serde(default)]
+    pub disc: Option<u16>,
     pub tmdb_id: u64,
     pub poster_url: String,
     pub overview: String,
@@ -63,21 +68,38 @@ impl UserMetadata {
             year: st.year,
             media_type: st.media_type,
             episode_start: st.episode_start,
+            season: st.season,
+            disc: st.disc_number,
             tmdb_id: st.tmdb_id,
             poster_url: st.tmdb_poster.clone(),
             overview: st.tmdb_overview.clone(),
         }
     }
 
+    /// The operator's choice as the top tier of [`MediaMetadata::resolve`].
+    pub(crate) fn as_media(&self) -> MediaMetadata {
+        MediaMetadata {
+            title: self.title.clone(),
+            year: self.year,
+            tmdb_id: self.tmdb_id,
+            season: self.season,
+            disc: self.disc,
+            episode_start: self.episode_start,
+            kind: Some(self.media_type),
+        }
+    }
+
     fn apply(&self, st: &mut DiscState) {
         st.title = self.title.clone();
         st.year = self.year;
-        st.media_type = self.media_type;
         st.episode_start = self.episode_start;
         st.tmdb_id = self.tmdb_id;
         st.tmdb_poster = self.poster_url.clone();
         st.tmdb_overview = self.overview.clone();
         st.title_confident = true;
+        // The kind, season and disc the mover files under, with the labels' numbers.
+        let resolved = MediaMetadata::resolve(&self.as_media(), None, &st.labels());
+        st.stamp_resolved(&resolved);
     }
 }
 
@@ -318,9 +340,62 @@ pub struct DiscState {
     pub date: String,
     #[serde(default)]
     pub resumed: bool,
+
+    // --- operator title choice (design §4.2, §4.3) ---------------------------
+    /// The operator's titles, in order: a Movie's feature or a TV episode set. Remapped by
+    /// identity on replan and resume; a binary that predates it ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_pick: Option<Vec<crate::title_identity::TitleIdentity>>,
+    /// The episode suggestion a held plan is waiting on the operator to confirm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_confirm: Option<crate::server::planner::EpisodeConfirm>,
 }
 
 impl DiscState {
+    /// The disc labels a plan reads season and disc numbers from: the raw volume label,
+    /// then the displayed disc name.
+    pub(crate) fn labels(&self) -> [&str; 2] {
+        [self.disc_label.as_str(), self.disc_name.as_str()]
+    }
+
+    /// The metadata this job plans and files under: the operator's correction over the saved
+    /// match, over its labels (design §3.1).
+    pub(crate) fn resolved_media(&self) -> MediaMetadata {
+        let saved = MediaMetadata {
+            title: self.title.clone(),
+            year: self.year,
+            tmdb_id: self.tmdb_id,
+            kind: Some(self.media_type),
+            ..MediaMetadata::default()
+        };
+        let operator =
+            (self.user_metadata.as_ref()).map_or_else(MediaMetadata::default, |m| m.as_media());
+        let mut media = MediaMetadata::resolve(&operator, Some(&saved), &self.labels());
+        if media.kind == Some(MediaKind::Tv) {
+            media.episode_start = media.episode_start.or(self.episode_start);
+        }
+        media
+    }
+
+    /// [`Self::resolved_media`] with the saved title pick remapped onto `titles`.
+    pub(crate) fn title_request(
+        &self,
+        titles: &[libfreemkv::DiscTitle],
+    ) -> crate::server::planner::TitleRequest {
+        crate::server::planner::TitleRequest::new(
+            self.resolved_media(),
+            self.title_pick.as_deref(),
+            titles,
+        )
+    }
+
+    /// Record the resolved kind, season and disc number the mover files under (R5).
+    pub(crate) fn stamp_resolved(&mut self, media: &MediaMetadata) {
+        self.media_type = media.kind.unwrap_or_default();
+        self.season = media.season;
+        self.disc_number = media.disc;
+    }
+
     /// A minimal `DiscState` in the given lifecycle state — every data field
     /// default. Used by transition helpers that seed a fresh file and by tests.
     pub fn new(state: StagingState) -> Self {
@@ -363,6 +438,8 @@ impl DiscState {
             outputs: Vec::new(),
             date: String::new(),
             resumed: false,
+            title_pick: None,
+            episode_confirm: None,
         }
     }
 }
@@ -570,9 +647,12 @@ fn try_write_state_inner(staging_disc_dir: &Path, st: &DiscState) -> io::Result<
 }
 
 fn metadata_changes_plan(st: &DiscState, metadata: &UserMetadata) -> bool {
-    // An unknown detected type already reads as Movie.
+    // An unknown detected type already reads as Movie; a TV plan also names its season.
+    let resolved = MediaMetadata::resolve(&metadata.as_media(), None, &st.labels());
+    let tv = metadata.media_type.is_tv();
     st.media_type != metadata.media_type
-        || (metadata.media_type.is_tv() && st.tmdb_id != metadata.tmdb_id)
+        || (tv && st.tmdb_id != metadata.tmdb_id)
+        || (tv && (st.season != resolved.season || st.disc_number != resolved.disc))
         || st.episode_start != metadata.episode_start
 }
 
@@ -648,9 +728,15 @@ fn save_user_metadata_inner(
 ) -> io::Result<u64> {
     if !metadata.media_type.is_tv() {
         metadata.episode_start = None;
+        metadata.season = None;
+        metadata.disc = None;
     } else if metadata.episode_start == Some(0) {
         return Err(io::Error::other(
             "First episode must be between 1 and 65535",
+        ));
+    } else if metadata.season == Some(0) || metadata.disc == Some(0) {
+        return Err(io::Error::other(
+            "Season and disc must be between 1 and 65535",
         ));
     }
     let lock = state_lock(dir);
@@ -758,7 +844,19 @@ pub fn save_replanned_outputs(dir: &Path, revision: u64, outputs: Vec<Output>) -
     }
     st.outputs = outputs;
     st.replan_required = false;
+    st.episode_confirm = None;
     write_state_unlocked(dir, &st)
+}
+
+/// Persist the episode suggestion a held plan waits on (or clear it), so the operator's
+/// confirmation dialog can show it after a restart.
+pub(crate) fn record_episode_confirm(
+    dir: &Path,
+    confirm: Option<&crate::server::planner::EpisodeConfirm>,
+) {
+    if read_state(dir).is_some_and(|st| st.episode_confirm.as_ref() != confirm) {
+        mutate_state_if_present(dir, |st| st.episode_confirm = confirm.cloned());
+    }
 }
 
 fn write_state_unlocked(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
@@ -1319,8 +1417,14 @@ pub(super) fn stamp_capture_plan(
         .map(|o| o.filename.clone())
         .collect();
     match plan {
-        Some(Ok(outputs)) => st.outputs = outputs.clone(),
-        Some(Err(_)) => st.outputs.clear(),
+        Some(Ok(outputs)) => {
+            st.outputs = outputs.clone();
+            st.episode_confirm = None;
+        }
+        Some(Err(error)) => {
+            st.outputs.clear();
+            st.episode_confirm = error.confirm().cloned();
+        }
         None => {}
     }
     previous

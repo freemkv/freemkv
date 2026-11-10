@@ -3,6 +3,8 @@ use staging::{DiscState, StagingState, UserMetadata};
 
 fn selection(title: &str) -> UserMetadata {
     UserMetadata {
+        season: None,
+        disc: None,
         episode_start: None,
         title: title.into(),
         year: 2000,

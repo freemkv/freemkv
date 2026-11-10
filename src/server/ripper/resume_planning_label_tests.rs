@@ -16,15 +16,9 @@ fn scratch(tag: &str) -> PathBuf {
 fn a_capture_records_the_label_its_replan_reads() {
     let mut st = staging::DiscState::new(staging::StagingState::Sweeping);
     staging::stamp_capture_label(&mut st, "SHOW_S2_D2");
-    assert_eq!(planning_label(&st), "SHOW_S2_D2");
-    assert_eq!(
-        crate::server::tmdb::season_from_label(planning_label(&st)),
-        Some(2)
-    );
-    assert_eq!(
-        crate::server::tmdb::disc_from_label(planning_label(&st)),
-        Some(2)
-    );
+    let media = st.resolved_media();
+    assert_eq!(media.kind, Some(crate::server::planner::MediaKind::Tv));
+    assert_eq!((media.season, media.disc), (Some(2), Some(2)));
 }
 
 // Jobs captured before the label was recorded carry it only in disc_name.
@@ -32,7 +26,16 @@ fn a_capture_records_the_label_its_replan_reads() {
 fn an_earlier_capture_plans_from_its_disc_name() {
     let mut st = staging::DiscState::new(staging::StagingState::Review);
     st.disc_name = "SHOW_S2_D2".into();
-    assert_eq!(planning_label(&st), "SHOW_S2_D2");
+    let media = st.resolved_media();
+    assert_eq!((media.season, media.disc), (Some(2), Some(2)));
+    // A job with no label at all reads the drive's.
+    let st = staging::DiscState::new(staging::StagingState::Review);
+    let request = resume_request(Some(&st), &[], MediaKind::Movie, "SHOW_S3_D1");
+    assert_eq!(request.media.kind, Some(MediaKind::Tv));
+    assert_eq!(
+        (request.media.season, request.media.disc),
+        (Some(3), Some(1))
+    );
 }
 
 #[test]

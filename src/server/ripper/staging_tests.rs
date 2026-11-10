@@ -9,6 +9,8 @@ fn capture_reset_keeps_corrected_identity_but_discards_old_artifacts() {
     old.title = "Castaway".into();
     try_write_state(dir.path(), &old).unwrap();
     let correction = UserMetadata {
+        season: None,
+        disc: None,
         episode_start: None,
         title: "Cast Away".into(),
         year: 2000,
@@ -171,6 +173,8 @@ fn capture_reset_does_not_hold_the_state_lock_while_deleting() {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let correction = UserMetadata {
+                season: None,
+                disc: None,
                 episode_start: None,
                 title: "Cast Away".into(),
                 year: 2000,
@@ -2073,6 +2077,8 @@ fn singlepass_empty_outputs_refuse_plan_change_from_persisted_mode() {
     let result = super::save_user_metadata(
         dir.path(),
         super::UserMetadata {
+            season: None,
+            disc: None,
             episode_start: None,
             title: "Show".into(),
             year: 2020,
@@ -2098,6 +2104,8 @@ fn operator_metadata_survives_stale_worker_snapshot_and_restart() {
     super::save_user_metadata(
         dir.path(),
         super::UserMetadata {
+            season: None,
+            disc: None,
             episode_start: None,
             title: "Cast Away".into(),
             year: 2000,
@@ -2133,6 +2141,8 @@ fn persisted_mode_guard_allows_idle_selection_and_multipass_replanning() {
         super::save_user_metadata(
             dir.path(),
             super::UserMetadata {
+                season: None,
+                disc: None,
                 episode_start: None,
                 title: "Selected".into(),
                 year: 2020,
@@ -2178,6 +2188,8 @@ fn a_metadata_edit_while_mux_finishes_holds_the_old_plan() {
         super::save_user_metadata(
             dir,
             super::UserMetadata {
+                season: None,
+                disc: None,
                 episode_start: None,
                 title: "Correct show".into(),
                 year: 2020,
@@ -2246,6 +2258,8 @@ fn a_correction_needing_a_pruned_iso_is_refused_and_the_job_held() {
     try_write_state(dir.path(), &st).unwrap();
     fs::write(dir.path().join("Castaway.mkv"), b"muxed").unwrap();
     let as_tv = UserMetadata {
+        season: None,
+        disc: None,
         episode_start: None,
         title: "Castaway Show".into(),
         year: 2000,
@@ -2263,6 +2277,8 @@ fn a_correction_needing_a_pruned_iso_is_refused_and_the_job_held() {
     assert_eq!(held.metadata_revision, 0);
     // A correction that keeps the plan needs no image and is accepted.
     let same_plan = UserMetadata {
+        season: None,
+        disc: None,
         title: "Cast Away".into(),
         media_type: crate::server::planner::MediaKind::Movie,
         ..as_tv.clone()
@@ -2370,6 +2386,8 @@ fn clear_staging_reclaims_stopped_unverified_jobs_no_drive_shows() {
         fs::create_dir(&dir).unwrap();
         let mut st = DiscState::new(StagingState::Stopped);
         st.user_metadata = Some(UserMetadata {
+            season: None,
+            disc: None,
             title: "Scratched".into(),
             year: 2001,
             media_type: crate::server::planner::MediaKind::Movie,
@@ -2612,6 +2630,8 @@ fn prune_preserves_an_acknowledged_correction_when_state_becomes_unreadable() {
     let revision = save_review_metadata(
         dir.path(),
         UserMetadata {
+            season: None,
+            disc: None,
             title: "Heat".into(),
             year: 1995,
             media_type: crate::server::planner::MediaKind::Tv,
@@ -2652,6 +2672,8 @@ fn an_unreadable_state_keeps_its_error_kind() {
     let io_fault = tempfile::tempdir().unwrap();
     fs::create_dir(state_path(io_fault.path())).unwrap();
     let selection = UserMetadata {
+        season: None,
+        disc: None,
         title: "Heat".into(),
         year: 1995,
         media_type: crate::server::planner::MediaKind::Movie,

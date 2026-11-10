@@ -69,8 +69,12 @@ fn the_staged_titles_are_every_title_the_mux_reads() {
         staged_titles(
             &titles,
             &movie,
-            crate::server::planner::MediaKind::Movie,
-            "Film",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Movie,
+                "Film",
+                0,
+                None
+            ),
             1
         ),
         [0, 1]
@@ -79,8 +83,12 @@ fn the_staged_titles_are_every_title_the_mux_reads() {
         staged_titles(
             &titles,
             &movie,
-            crate::server::planner::MediaKind::Movie,
-            "Film",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Movie,
+                "Film",
+                0,
+                None
+            ),
             0
         ),
         [0]
@@ -90,8 +98,12 @@ fn the_staged_titles_are_every_title_the_mux_reads() {
         staged_titles(
             &titles,
             &movie,
-            crate::server::planner::MediaKind::Movie,
-            "Film",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Movie,
+                "Film",
+                0,
+                None
+            ),
             9
         ),
         [0]

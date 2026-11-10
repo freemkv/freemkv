@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::planner::MediaKind;
 use libfreemkv::disc::{ContentFormat, EpisodeEvidence, Extent};
 
 fn title(dur_secs: f64, start_lba: u32) -> libfreemkv::DiscTitle {
@@ -47,19 +48,30 @@ fn tv_plan(
     super::super::plan_mux_outputs(
         titles,
         &Config::default(),
-        MediaKind::Tv,
-        "Show Season 2 Disc 2",
-        0,
+        &super::super::test_request(MediaKind::Tv, "Show Season 2 Disc 2", 0, start),
         "Show.mkv",
-        start,
     )
     .unwrap()
+}
+
+// A correction's metadata as the title picker saves it.
+fn correction_media(
+    kind: MediaKind,
+    tmdb_id: u64,
+    start: Option<u16>,
+) -> crate::server::planner::MediaMetadata {
+    crate::server::planner::MediaMetadata {
+        kind: Some(kind),
+        tmdb_id,
+        episode_start: start,
+        ..Default::default()
+    }
 }
 
 #[test]
 fn an_episode_plan_lists_each_episode_with_its_length() {
     let titles = episode_disc();
-    let rows = card_episodes(&titles, "Show Season 2 Disc 2", &tv_plan(&titles, Some(4)));
+    let rows = card_episodes(&titles, 2, &tv_plan(&titles, Some(4)));
     let shown: Vec<_> = rows
         .iter()
         .map(|r| (r.season, r.episode, r.duration.as_str()))
@@ -75,7 +87,7 @@ fn a_single_feature_lists_no_episodes() {
     let titles = episode_disc();
     let mut plan = tv_plan(&titles, None);
     plan.truncate(1);
-    assert!(card_episodes(&titles, "Show", &plan).is_empty());
+    assert!(card_episodes(&titles, 1, &plan).is_empty());
 }
 
 #[test]
@@ -83,7 +95,7 @@ fn an_output_without_an_episode_number_is_no_episode_plan() {
     let titles = episode_disc();
     let mut plan = tv_plan(&titles, None);
     plan[1].episode = None;
-    assert!(card_episodes(&titles, "Show", &plan).is_empty());
+    assert!(card_episodes(&titles, 1, &plan).is_empty());
 }
 
 // title(3060 s, LBA 100): 3060 MB over 1000 sectors at 1 MB/s of playback.
@@ -175,6 +187,7 @@ fn publish_test(cache: &Arc<Cache>, job: &str) {
         Inputs {
             titles: titles.clone(),
             label: "Show Season 2 Disc 2".into(),
+            pick: None,
             filename: "Show.mkv".into(),
             mapfile: job.into(),
         },
@@ -182,9 +195,7 @@ fn publish_test(cache: &Arc<Cache>, job: &str) {
         Correction {
             cfg: Config::default(),
             revision: 0,
-            kind: MediaKind::Tv,
-            tmdb_id: 0,
-            start: Some(4),
+            media: correction_media(MediaKind::Tv, 0, Some(4)),
         },
     );
 }
@@ -194,9 +205,7 @@ fn correct(cache: &Arc<Cache>, job: &str, revision: u64, start: u16) {
         Correction {
             cfg: Config::default(),
             revision,
-            kind: MediaKind::Tv,
-            tmdb_id: 0,
-            start: Some(start),
+            media: correction_media(MediaKind::Tv, 0, Some(start)),
         },
     );
 }
@@ -343,7 +352,7 @@ fn old_measurement_cannot_change_a_new_row_generation_or_incarnation() {
         // A changed selection order associates each number with a new title.
         rows.rotate_left(1);
         for (index, row) in rows.iter_mut().enumerate() {
-            row.episode = correction.start.unwrap() + index as u16;
+            row.episode = correction.media.episode_start.unwrap() + index as u16;
         }
         Ok(rows)
     });
@@ -463,9 +472,7 @@ fn durable_revision_orders_delayed_enqueues_and_movie_clears_tv_rows() {
         Correction {
             cfg: Config::default(),
             revision: 3,
-            kind: MediaKind::Movie,
-            tmdb_id: 0,
-            start: None,
+            media: correction_media(MediaKind::Movie, 0, None),
         },
     );
     work.finish();
@@ -488,6 +495,7 @@ fn republishing_retains_newer_correction_and_rejects_old_scan_completion() {
         Inputs {
             titles: titles.clone(),
             label: "Show Season 5 Disc 2".into(),
+            pick: None,
             filename: "New.mkv".into(),
             mapfile: "new-map".into(),
         },
@@ -495,9 +503,7 @@ fn republishing_retains_newer_correction_and_rejects_old_scan_completion() {
         Correction {
             cfg: Config::default(),
             revision: 0,
-            kind: MediaKind::Tv,
-            tmdb_id: 0,
-            start: Some(4),
+            media: correction_media(MediaKind::Tv, 0, Some(4)),
         },
     );
     let new_scan_worker = work.pop();
@@ -516,6 +522,8 @@ fn prepublication_correction_is_reconciled_and_old_capture_revision_is_ignored()
     let device = "card-plan-prepublication-device";
     let job = "card-plan-prepublication-job";
     let metadata = super::super::staging::UserMetadata {
+        season: None,
+        disc: None,
         episode_start: Some(20),
         media_type: MediaKind::Tv,
         title: "Show".into(),
@@ -546,6 +554,7 @@ fn prepublication_correction_is_reconciled_and_old_capture_revision_is_ignored()
         Inputs {
             titles: titles.clone(),
             label: "Show Season 2".into(),
+            pick: None,
             filename: "Show.mkv".into(),
             mapfile: job.into(),
         },
@@ -553,9 +562,7 @@ fn prepublication_correction_is_reconciled_and_old_capture_revision_is_ignored()
         Correction {
             cfg: Config::default(),
             revision: 3,
-            kind: MediaKind::Tv,
-            tmdb_id: 0,
-            start: Some(30),
+            media: correction_media(MediaKind::Tv, 0, Some(30)),
         },
     );
     correct(&cache, job, 2, 20);
@@ -698,6 +705,7 @@ fn capture_revision_retains_matching_payload_for_later_older_republication() {
         Inputs {
             titles: titles.clone(),
             label: "Show Season 2".into(),
+            pick: None,
             filename: "Show.mkv".into(),
             mapfile: "job".into(),
         },
@@ -705,9 +713,7 @@ fn capture_revision_retains_matching_payload_for_later_older_republication() {
         Correction {
             cfg: Config::default(),
             revision: 3,
-            kind: MediaKind::Tv,
-            tmdb_id: 0,
-            start: Some(30),
+            media: correction_media(MediaKind::Tv, 0, Some(30)),
         },
     );
     publish_test(&cache, "job"); // replacement scan computed from revision 0

@@ -545,7 +545,16 @@ fn presentation_preference_key_scope_tracks_selected_title_not_index_zero() {
             ..Default::default()
         };
         assert_eq!(
-            super::rip_key_scope(&disc, &cfg, crate::server::planner::MediaKind::Movie, ""),
+            super::rip_key_scope(
+                &disc,
+                &cfg,
+                &crate::server::ripper::test_request(
+                    crate::server::planner::MediaKind::Movie,
+                    "",
+                    0,
+                    None
+                )
+            ),
             libfreemkv::keys::KeyScope::Titles(expected)
         );
     }
@@ -3899,6 +3908,8 @@ fn ordinary_wipe_preserves_cast_away_metadata() {
             staging::save_user_metadata(
                 d,
                 staging::UserMetadata {
+                    season: None,
+                    disc: None,
                     episode_start: None,
                     title: "Cast Away".into(),
                     year: 2000,

@@ -49,9 +49,8 @@ fn captured_movie_and_every_episode_keep_container_after_both_setting_switches()
             let original = super::super::capture_plan(
                 &cfg(saved_format),
                 &titles,
-                (kind, label, 0),
+                &super::super::test_request(kind, label, 0, Some(4)),
                 &format!("Film.{ext}"),
-                Some(4),
             )
             .unwrap()
             .outputs
@@ -106,11 +105,8 @@ fn stopped_episode_partials_and_moved_flags_survive_two_reload_retries() {
     let outputs = super::super::plan_mux_outputs(
         &titles,
         &cfg("m2ts"),
-        MediaKind::Tv,
-        "SHOW_S1_D1",
-        0,
+        &crate::server::ripper::test_request(MediaKind::Tv, "SHOW_S1_D1", 0, Some(4)),
         "Show.m2ts",
-        Some(4),
     )
     .unwrap();
     let mut st = tagged(
@@ -169,11 +165,8 @@ fn metadata_replan_after_settings_switch_keeps_frozen_extension_and_revision() {
     st.outputs = super::super::plan_mux_outputs(
         &titles,
         &cfg("m2ts"),
-        MediaKind::Movie,
-        "SHOW",
-        0,
+        &crate::server::ripper::test_request(MediaKind::Movie, "SHOW", 0, None),
         "Show.m2ts",
-        None,
     )
     .unwrap();
     st.metadata_revision = 7;
@@ -185,6 +178,8 @@ fn metadata_replan_after_settings_switch_keeps_frozen_extension_and_revision() {
     staging::save_user_metadata(
         tmp.path(),
         staging::UserMetadata {
+            season: None,
+            disc: None,
             title: "Corrected".into(),
             year: 2024,
             media_type: MediaKind::Tv,
@@ -207,11 +202,8 @@ fn metadata_replan_after_settings_switch_keeps_frozen_extension_and_revision() {
     let outputs = super::super::plan_mux_outputs(
         &titles,
         &local,
-        MediaKind::Tv,
-        "SHOW_S1_D1",
-        0,
+        &crate::server::ripper::test_request(MediaKind::Tv, "SHOW_S1_D1", 0, Some(6)),
         &filename,
-        Some(6),
     )
     .unwrap();
     assert_eq!(outputs.len(), 2);

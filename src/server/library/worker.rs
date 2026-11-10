@@ -384,39 +384,25 @@ fn attach_from_lookup(
     let source_stamp = planning_source_stamp(&job.iso)?;
     let source = freemkv_engine::ImageSource::from_path(&job.iso);
     let (disc, _reader) = freemkv_engine::scan_image(&source).map_err(planning_scan_error)?;
-    // TV as the ripper decides it: a TMDB TV match, or a disc label that names a season.
-    let kind = if tv_match.is_some() {
-        MediaKind::Tv
-    } else {
-        MediaKind::Movie
-    };
-    let tv = [
-        disc.volume_id.as_str(),
-        disc.meta_title.as_deref().unwrap_or_default(),
-        label.as_str(),
-    ]
-    .into_iter()
-    .any(|l| crate::server::ripper::plan_kind(kind, l).is_some());
-    if !tv {
+    // TV as the ripper decides it (`MediaMetadata::resolve`): a confident TMDB TV match, or
+    // a disc label that names a season; season and disc come from the labels.
+    let matched = tv_match
+        .as_ref()
+        .map(crate::server::planner::MediaMetadata::from);
+    let mut media = crate::server::planner::MediaMetadata::resolve(
+        &crate::server::planner::MediaMetadata::default(),
+        matched.as_ref(),
+        &disc_labels(&disc, &label),
+    );
+    if media.kind != Some(MediaKind::Tv) {
         if episode {
             return Err(episode_alone(&job.target));
         }
         return persist_movie_plan(lib, cfg, job, &disc.titles, source_stamp);
     }
-    let (season, disc_number) = label_numbers(&disc.volume_id, disc.meta_title.as_deref(), &label);
-    let (title, year, tmdb_id) = match tv_match {
-        Some(m) => (m.title, m.year, m.tmdb_id),
-        None => (crate::server::tmdb::clean_title(&label), 0, 0),
-    };
-    let media = crate::server::planner::MediaMetadata {
-        title,
-        year,
-        tmdb_id,
-        season,
-        disc: disc_number,
-        kind: Some(MediaKind::Tv),
-        episode_start: None,
-    };
+    if media.title.is_empty() {
+        media.title = crate::server::tmdb::clean_title(&label);
+    }
     let plan = tv_plan_result(crate::server::planner::plan(
         cfg,
         &disc.titles,
@@ -559,37 +545,14 @@ fn persist_movie_plan(
     persist_auto_plan(lib, cfg, job, tv_plan_result(plan)?, source_stamp, titles)
 }
 
-// Season and disc number from the disc's labels, as automatic TV planning reads them.
-fn label_numbers(
-    volume_id: &str,
-    meta_title: Option<&str>,
-    title: &str,
-) -> (Option<u16>, Option<u16>) {
-    let read = |from: fn(&str) -> Option<u16>| {
-        from(volume_id)
-            .or_else(|| meta_title.and_then(from))
-            .or_else(|| from(title))
-    };
-    (
-        read(crate::server::tmdb::season_from_label),
-        read(crate::server::tmdb::disc_from_label),
-    )
+// The labels a plan reads season and disc numbers from: the volume ID, the disc's own title,
+// then the Library's title for the ISO.
+fn disc_labels<'a>(disc: &'a libfreemkv::Disc, title: &'a str) -> [&'a str; 3] {
+    labels(&disc.volume_id, disc.meta_title.as_deref(), title)
 }
 
-// A confirmed TV match that leaves season or disc open takes them from the disc's labels.
-fn with_label_numbers(
-    media: &crate::server::planner::MediaMetadata,
-    volume_id: &str,
-    meta_title: Option<&str>,
-    title: &str,
-) -> crate::server::planner::MediaMetadata {
-    let mut media = media.clone();
-    if media.kind == Some(crate::server::planner::MediaKind::Tv) {
-        let (season, disc) = label_numbers(volume_id, meta_title, title);
-        media.season = media.season.or(season);
-        media.disc = media.disc.or(disc);
-    }
-    media
+fn labels<'a>(volume_id: &'a str, meta_title: Option<&'a str>, title: &'a str) -> [&'a str; 3] {
+    [volume_id, meta_title.unwrap_or_default(), title]
 }
 
 // `row`: the episode row a plain Remux was asked for; only its output is planned.
@@ -624,11 +587,11 @@ fn attach_corrected_plan_with_scan(
     check_source_stamp(&job.iso, Some(matched_source))?;
     let source_stamp = matched_source;
     let disc = scan(&job.iso)?;
-    let media = &with_label_numbers(
+    // The confirmed match outranks the labels, which fill only the numbers it left open.
+    let media = &crate::server::planner::MediaMetadata::resolve(
         media,
-        &disc.volume_id,
-        disc.meta_title.as_deref(),
-        &job.title,
+        None,
+        &disc_labels(&disc, &job.title),
     );
     let (plan, targets) = corrected_plan_for(cfg, &disc.titles, media, row)?;
     persist_plan(lib, job, plan, Some(targets), source_stamp, &disc.titles)

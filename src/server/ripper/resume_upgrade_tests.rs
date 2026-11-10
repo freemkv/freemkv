@@ -171,6 +171,8 @@ fn a_v1_8_3_capture_awaiting_mux_is_held_for_review_then_muxes() {
     staging::save_review_metadata(
         &job,
         staging::UserMetadata {
+            season: None,
+            disc: None,
             title: "Ember Falls".into(),
             year: 2021,
             media_type: crate::server::planner::MediaKind::Movie,

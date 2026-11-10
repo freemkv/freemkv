@@ -30,7 +30,7 @@ pub use session::{
 };
 #[allow(unused_imports)]
 pub use state::{
-    BadRange, Resumable, RipState, STATE, device_known, hold_stopped_disc, is_busy,
+    BadRange, Resumable, RipState, STATE, TitlePlanView, device_known, hold_stopped_disc, is_busy,
     release_stopped_disc, set_stop_cooldown, try_claim_active, try_claim_active_checked,
     update_state, update_state_with,
 };
@@ -91,7 +91,7 @@ use std::time::Duration;
 
 use crate::server::config::Config;
 use crate::server::keysource::KeyReads;
-use crate::server::planner::MediaKind;
+use crate::server::planner::{MediaMetadata, ScopeMode, TitleRequest};
 
 // Live-drive structure scan options: lookup-free, plus AACS host credentials for the
 // handshake. With capture_without_keys an unreadable AACS key file does not stop the
@@ -305,8 +305,7 @@ fn resolve_rip_keys(
 fn rip_key_scope(
     disc: &libfreemkv::Disc,
     cfg: &Config,
-    media_type: MediaKind,
-    disc_name: &str,
+    request: &TitleRequest,
 ) -> libfreemkv::keys::KeyScope {
     if output_is_iso_image(&cfg.output_format) {
         return libfreemkv::keys::KeyScope::WholeDisc;
@@ -314,13 +313,7 @@ fn rip_key_scope(
     if disc.titles.is_empty() {
         return libfreemkv::keys::KeyScope::None;
     }
-    let mut titles = fanout_episode_indices(&disc.titles, cfg, media_type, disc_name);
-    if let Ok(index) = capture_title_index(&disc.titles, cfg, media_type, disc_name) {
-        titles.push(index);
-    }
-    titles.sort_unstable();
-    titles.dedup();
-    libfreemkv::keys::KeyScope::Titles(titles)
+    libfreemkv::keys::KeyScope::Titles(request.scope(cfg, &disc.titles, ScopeMode::capture(cfg)))
 }
 
 /// The engine plan for a server rip of the drive at `device_path` writing `dest` (an
@@ -1866,7 +1859,11 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
         .map(|m| m.title.clone())
         .unwrap_or_else(|| id_name.clone());
     let saved_revision = saved_state.as_ref().map_or(0, |s| s.metadata_revision);
+    let saved_pick = saved_state.as_ref().and_then(|s| s.title_pick.clone());
     let saved_user_metadata = saved_state.and_then(|s| s.user_metadata);
+    let operator_media = (saved_user_metadata.as_ref())
+        .map(|m| m.as_media())
+        .unwrap_or_default();
     update_state_with(device, |s| {
         s.restore_job_metadata(&job_id, &identity, saved_user_metadata, saved_revision);
     });
@@ -1882,12 +1879,27 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
     // The rip's key set, resolved ONCE here, right after the scan, for every title the rip
     // produces (KU §2.1); memory only, it keys the whole rip. Online can take a minute or
     // two, so the status says so. A DVD's CSS needs no key source (the resolve is a no-op).
-    let media_type = tmdb.as_ref().map(|t| t.media_type).unwrap_or_default();
     let scan_name = disc
         .meta_title
         .clone()
         .unwrap_or_else(|| disc.volume_id.clone());
-    let key_scope = rip_key_scope(&disc, &cfg_read, media_type, &scan_name);
+    // The plan as the rip will resolve it, shown on the card (kind, numbers, the pick, and
+    // an episode set to confirm before the rip holds for it).
+    let request = TitleRequest::new(
+        MediaMetadata::resolve(
+            &operator_media,
+            tmdb.as_ref().map(MediaMetadata::from).as_ref(),
+            &[&scan_name],
+        ),
+        saved_pick.as_deref(),
+        &disc.titles,
+    );
+    let confirm = (request
+        .run(&cfg_read, &disc.titles, ScopeMode::capture(&cfg_read))
+        .err())
+    .and_then(|error| error.confirm().cloned());
+    update_state_with(device, |s| s.plan = TitlePlanView::of(&request, confirm));
+    let key_scope = rip_key_scope(&disc, &cfg_read, &request);
     if announces_online_resolve(&cfg_read, &disc, &key_scope) {
         crate::server::log::device_log(device, "Communicating with online keyserver...");
         update_state_with(device, |s| {
@@ -3130,8 +3142,10 @@ fn rip_disc_inner(
             ));
 
             // The rip's key set, once, right after the scan (KU §2.1); see scan_disc.
-            let media_type = tmdb.as_ref().map(|t| t.media_type).unwrap_or_default();
-            let scope = rip_key_scope(&disc, &cfg_read, media_type, &disc_name);
+            let matched = tmdb.as_ref().map(MediaMetadata::from);
+            let media =
+                MediaMetadata::resolve(&MediaMetadata::default(), matched.as_ref(), &[&disc_name]);
+            let scope = rip_key_scope(&disc, &cfg_read, &TitleRequest::new(media, None, &[]));
             scan_wd.enter_resolve();
             let mut key_reads = KeyReads::default();
             let keys = resolve_rip_keys(
@@ -3235,21 +3249,19 @@ fn rip_disc_inner(
         staging: job_path.clone(),
     };
     let card_revision = saved_state.as_ref().map_or(0, |s| s.metadata_revision);
-    let episode_start = saved_state.as_ref().and_then(|s| s.episode_start);
     let overridden = saved_state
         .as_ref()
         .is_some_and(|s| s.user_metadata.is_some());
+    let operator_media = (saved_state.as_ref())
+        .and_then(|s| s.user_metadata.as_ref())
+        .map(|m| m.as_media())
+        .unwrap_or_default();
+    let saved_pick = saved_state.as_ref().and_then(|s| s.title_pick.clone());
     let saved_metadata = saved_state.and_then(jobs::metadata_from_state);
     // Saved metadata is a correction or an earlier confident match; else this scan's lookup.
     let tmdb_confident =
         saved_metadata.is_some() || jobs::lookup_confident(&disc_name, session.tmdb.as_ref());
     let tmdb_owned = saved_metadata.or_else(|| session.tmdb.clone());
-    let operator_kind = overridden.then(|| {
-        tmdb_owned
-            .as_ref()
-            .map(|t| t.media_type)
-            .unwrap_or_default()
-    });
     let tmdb = &tmdb_owned;
     let tmdb_title = tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default();
     let tmdb_year = tmdb.as_ref().map(|t| t.year).unwrap_or(0);
@@ -3263,7 +3275,18 @@ fn rip_disc_inner(
         .unwrap_or_default();
     // No TMDB result routes as a movie.
     let tmdb_media_type = tmdb.as_ref().map(|t| t.media_type).unwrap_or_default();
-    let plan_label = planning_label(&disc_name, operator_kind).to_string();
+    // What the disc is (operator > TMDB > label) and the operator's titles, resolved once:
+    // every scope below (keys, sweep, recovery, reserve, plan) reads this one request.
+    let request = TitleRequest::new(
+        MediaMetadata::resolve(
+            &operator_media,
+            tmdb.as_ref().map(MediaMetadata::from).as_ref(),
+            &[&disc_name],
+        ),
+        saved_pick.as_deref(),
+        &disc.titles,
+    );
+    let episode_start = request.media.episode_start;
     // TMDB numeric id (0 = no match). Persisted in the hand-off marker so a
     // consumer can enrich metadata by id later; the mover reads it back.
     let tmdb_id = tmdb.as_ref().map(|t| t.tmdb_id).unwrap_or(0);
@@ -3309,33 +3332,17 @@ fn rip_disc_inner(
     }
 
     // Missing authored episode evidence must not turn a TV capture into one
-    // movie-style output. Whole-disc ISO capture does not select mux titles.
-    if let Err(error) =
-        check_capture_selection(&disc.titles, &cfg_read, tmdb_media_type, &plan_label)
-    {
-        let reason = selection_review_message(&error);
-        crate::server::log::device_log(device, &reason);
-        update_state_with(device, |s| {
-            s.status = "error".into();
-            s.last_error = reason;
-        });
-        return;
-    }
-
-    // The main movie, picked by the engine exactly as the CLI and GUI pick it.
-    let main_idx = match capture_title_index(&disc.titles, &cfg_read, tmdb_media_type, &plan_label)
-    {
+    // movie-style output: it holds with a suggestion for the operator to confirm. Whole-disc
+    // ISO capture does not select mux titles. The title is the operator's pick, the first
+    // episode, or the main movie picked by the engine exactly as the CLI and GUI pick it.
+    let main_idx = match capture_title_index(&disc.titles, &cfg_read, &request) {
         Ok(index) => index,
         Err(error) => {
-            let reason = selection_review_message(&error);
-            crate::server::log::device_log(device, &reason);
-            update_state_with(device, |s| {
-                s.status = "error".into();
-                s.last_error = reason;
-            });
+            hold_capture_selection(device, &job_path, &request, &error);
             return;
         }
     };
+    update_state_with(device, |s| s.plan = TitlePlanView::of(&request, None));
     let title = disc.titles[main_idx].clone();
     let selected_identity = crate::title_identity::TitleIdentity::of(&title);
     let duration = crate::server::util::format_duration_hm(title.duration_secs);
@@ -3349,7 +3356,7 @@ fn rip_disc_inner(
     let mut seed_verdict = rip_seed_verdict(resume_decode_reach, banked_verdict);
     // The rip's key set, resolved once at the scan (KU §2.1). A scope that outgrew the scan's
     // (a title override made it a TV rip) tops up only the titles it lacks.
-    let key_scope = rip_key_scope(&disc, &cfg_read, tmdb_media_type, &plan_label);
+    let key_scope = rip_key_scope(&disc, &cfg_read, &request);
     // The scan's key reads: every resolve below is served what the scan already read.
     let mut key_reads = std::mem::take(&mut session.key_reads);
     // The scan's set when it covers the rip, forensic keys aside (a multipass rip asks for
@@ -3587,13 +3594,7 @@ fn rip_disc_inner(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    let mut capture_plan = capture_plan(
-        &cfg_read,
-        &disc.titles,
-        (tmdb_media_type, &plan_label, tmdb_id),
-        &filename,
-        episode_start,
-    );
+    let mut capture_plan = capture_plan(&cfg_read, &disc.titles, &request, &filename);
     let mut superseded = Vec::new();
     // One Sweeping write governs the sweep+patch window (begin_capture already
     // stamped the identity); without it a crash mid-sweep leaves the dir ungoverned.
@@ -3605,7 +3606,7 @@ fn rip_disc_inner(
         s.title = display_name.clone();
         s.tmdb_confident = tmdb_confident;
         s.year = tmdb_year;
-        s.media_type = tmdb_media_type;
+        s.stamp_resolved(&request.media);
         s.tmdb_id = tmdb_id;
         s.tmdb_poster = tmdb_poster.clone();
         s.tmdb_overview = tmdb_overview.clone();
@@ -3624,17 +3625,14 @@ fn rip_disc_inner(
     if let Some(Ok(outputs)) = capture_plan.as_ref().map(|p| &p.outputs) {
         card_plan::publish(
             &job_id,
-            &disc.titles,
-            &plan_label,
+            (&disc.titles, &disc_name, request.pick.as_deref()),
             &filename,
             std::path::Path::new(&mapfile_path_str),
             outputs,
             card_plan::Correction {
                 cfg: cfg_read.clone(),
                 revision: card_revision,
-                kind: tmdb_media_type,
-                tmdb_id,
-                start: episode_start,
+                media: request.media.clone(),
             },
         );
         // A correction can commit before the cache entry exists. Its handler
@@ -3852,13 +3850,8 @@ fn rip_disc_inner(
             } else {
                 None
             };
-            let title_output_bytes = mux_output_reserve_bytes(
-                &disc.titles,
-                &cfg_read,
-                tmdb_media_type,
-                &plan_label,
-                title.size_bytes,
-            );
+            let title_output_bytes =
+                mux_output_reserve_bytes(&disc.titles, &cfg_read, &request, title.size_bytes);
             let required = disk_space_required_bytes(
                 bytes_total_disc,
                 title_output_bytes,
@@ -3894,13 +3887,7 @@ fn rip_disc_inner(
 
         // An MKV rip that discards its ISO after the mux sweeps only what the mux reads; an
         // ISO deliverable or a kept ISO sweeps the whole disc.
-        let staged = staged_titles(
-            &disc.titles,
-            &cfg_read,
-            tmdb_media_type,
-            &plan_label,
-            main_idx,
-        );
+        let staged = staged_titles(&disc.titles, &cfg_read, &request, main_idx);
         let staging_scope = match sweep_scope(&cfg_read, &disc, &mut session.drive, &staged) {
             Ok(scope) => scope,
             Err(libfreemkv::Error::Halted) => {
@@ -3990,7 +3977,7 @@ fn rip_disc_inner(
             titles: freemkv_engine::Selection::Titles(recovery_titles(
                 &disc.titles,
                 &cfg_read,
-                (tmdb_media_type, &plan_label),
+                &request,
                 main_idx,
             )),
             raw: !iso_decrypts,
@@ -4291,12 +4278,10 @@ fn rip_disc_inner(
                 s.disc_name = disc_name.clone();
                 s.disc_format = disc_format.clone();
                 s.year = tmdb_year;
-                s.media_type = tmdb_media_type;
                 s.tmdb_id = tmdb_id;
                 s.tmdb_poster = tmdb_poster.clone();
                 s.tmdb_overview = tmdb_overview.clone();
-                s.season = crate::server::tmdb::season_from_label(&disc_name);
-                s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
+                s.stamp_resolved(&request.media);
                 s.outputs = vec![staging::Output {
                     filename: iso_leaf,
                     ..Default::default()
@@ -4370,7 +4355,8 @@ fn rip_disc_inner(
             tmdb_year,
             tmdb_poster: tmdb_poster.clone(),
             tmdb_overview: tmdb_overview.clone(),
-            tmdb_media_type,
+            // The resolved kind (a label-only TV disc is TV), which the resume hand-off files.
+            tmdb_media_type: request.media.kind.unwrap_or(tmdb_media_type),
             max_retries: cfg_read.max_retries,
             abort_on_lost_secs: cfg_read.abort_on_lost_secs as u32,
             rip_elapsed_secs: 0.0, // mux worker re-derives elapsed from its own start
@@ -4405,9 +4391,8 @@ fn rip_disc_inner(
             plan_with_season(
                 &disc.titles,
                 &cfg_read,
-                (tmdb_media_type, &plan_label, tmdb_id),
+                &request,
                 &filename,
-                episode_start,
                 crate::server::tmdb::season_episodes,
             )
         };
@@ -4435,8 +4420,7 @@ fn rip_disc_inner(
                 s.tmdb_id = tmdb_id;
                 s.episode_start = episode_start;
                 s.disc_name = disc_name.clone();
-                s.season = crate::server::tmdb::season_from_label(&disc_name);
-                s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
+                s.stamp_resolved(&request.media);
                 s.outputs = plan;
             })
         });
@@ -5041,12 +5025,10 @@ fn rip_disc_inner(
                 s.disc_name = disc_name.clone();
                 s.disc_format = disc_format.clone();
                 s.year = tmdb_year;
-                s.media_type = tmdb_media_type;
                 s.tmdb_id = tmdb_id;
                 s.tmdb_poster = tmdb_poster.clone();
                 s.tmdb_overview = tmdb_overview.clone();
-                s.season = crate::server::tmdb::season_from_label(&disc_name);
-                s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
+                s.stamp_resolved(&request.media);
                 s.outputs = vec![staging::Output {
                     filename: mkv_leaf,
                     title_index: main_idx,
@@ -5564,6 +5546,10 @@ fn hold_failed_plan(
         keys,
         &selection_review_message(error),
     );
+    staging::record_episode_confirm(staging_path, error.confirm());
+    if let Some(confirm) = error.confirm() {
+        update_state_with(device, |s| s.plan.confirm = Some(confirm.clone()));
+    }
     unregister_halt(device);
 }
 
@@ -5640,40 +5626,79 @@ fn handoff_marker_name(title_confident: bool) -> &'static str {
     if title_confident { ".done" } else { ".review" }
 }
 
-// Capture may preserve a whole-disc ISO without committing to any mux titles. A single-pass
-// rip muxes one title and never fans out (1.8.3), so no episode selection applies to it.
+// A capture's titles under the one policy (`planner::resolve_titles`): a whole-disc ISO
+// commits to none, a single pass muxes one title and never fans out (1.8.3), and a multipass
+// capture runs the operator's pick, a proven episode set, or the main film. The rip checks it
+// through `capture_title_index`, which holds on the same errors.
+#[cfg(test)]
 fn check_capture_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: MediaKind,
-    disc_name: &str,
+    request: &TitleRequest,
 ) -> Result<(), crate::server::planner::PlanError> {
-    if output_is_iso_image(&cfg.output_format) {
-        return Ok(());
-    }
-    if !uses_multipass(cfg.max_retries) {
-        return capture_title_index(titles, cfg, media_type, disc_name).map(|_| ());
-    }
-    crate::server::planner::check_episode_selection(titles, cfg, plan_kind(media_type, disc_name))?;
-    capture_title_index(titles, cfg, media_type, disc_name).map(|_| ())
+    capture_title_index(titles, cfg, request).map(|_| ())
 }
 
 fn capture_title_index(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: MediaKind,
-    disc_name: &str,
+    request: &TitleRequest,
 ) -> Result<usize, crate::server::planner::PlanError> {
-    if output_is_iso_image(&cfg.output_format) && !titles.is_empty() {
-        return Ok(0); // Whole-disc capture makes no presentation choice.
+    // Whole-disc capture makes no presentation choice (title 0).
+    request
+        .run(cfg, titles, ScopeMode::capture(cfg))
+        .map(|run| run.titles[0])
+}
+
+// A capture held before it reads anything: the title selection needs the operator. The
+// episode suggestion is kept with the job and shown on the card for the confirm dialog; a
+// saved pick that no longer matches the scan is cleared, so the next rip selects again.
+fn hold_capture_selection(
+    device: &str,
+    job_path: &std::path::Path,
+    request: &TitleRequest,
+    error: &crate::server::planner::PlanError,
+) {
+    let reason = selection_review_message(error);
+    crate::server::log::device_log(device, &reason);
+    let mismatch = *error == crate::server::planner::PlanError::PickMismatch;
+    if mismatch {
+        staging::mutate_state_if_present(job_path, |s| s.title_pick = None);
     }
-    // Only a multipass capture fans out; single-pass muxes the main title as one output.
-    if uses_multipass(cfg.max_retries)
-        && let Some(index) = fanout_episode_indices(titles, cfg, media_type, disc_name).first()
-    {
-        return Ok(*index);
+    let confirm = error.confirm().cloned();
+    staging::record_episode_confirm(job_path, confirm.as_ref());
+    update_state_with(device, |s| {
+        s.status = "error".into();
+        s.last_error = reason;
+        s.plan = TitlePlanView::of(request, confirm);
+        if mismatch {
+            s.plan.title_pick = None;
+        }
+    });
+}
+
+/// The request a scan resolves with no operator correction: TMDB's `kind` (and id) over the
+/// disc `label`, with an operator First episode `start`.
+#[cfg(test)]
+pub(crate) fn test_request(
+    kind: crate::server::planner::MediaKind,
+    label: &str,
+    tmdb_id: u64,
+    start: Option<u16>,
+) -> TitleRequest {
+    let operator = MediaMetadata {
+        episode_start: start,
+        ..MediaMetadata::default()
+    };
+    let matched = MediaMetadata {
+        kind: Some(kind),
+        tmdb_id,
+        ..MediaMetadata::default()
+    };
+    TitleRequest {
+        media: MediaMetadata::resolve(&operator, Some(&matched), &[label]),
+        ..TitleRequest::default()
     }
-    crate::server::planner::main_title(cfg, titles)
 }
 
 // A held plan for the operator: why (E9086 and its reason, or the numbering), that nothing
@@ -5687,35 +5712,18 @@ fn selection_review_message(error: &crate::server::planner::PlanError) -> String
     ))
 }
 
-// Episode titles a TV disc fans out to under `tv_auto`; empty = one movie-style output.
+// Episode titles a plan fans out to in `mode`; empty = one movie-style output.
 // Pure (no TMDB): the preflight sizes the same plan `plan_mux_outputs` later names.
 fn fanout_episode_indices(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: MediaKind,
-    disc_name: &str,
+    request: &TitleRequest,
+    mode: ScopeMode,
 ) -> Vec<usize> {
-    crate::server::planner::episode_indices(titles, cfg, plan_kind(media_type, disc_name))
-}
-
-// The label a plan reads for `plan_kind`: an operator's Movie correction (`operator`)
-// overrides a season-marked label, so the E9086 advice to correct the match works.
-pub(super) fn planning_label(label: &str, operator: Option<MediaKind>) -> &str {
-    if operator.is_some_and(|kind| !kind.is_tv()) {
-        ""
-    } else {
-        label
+    match request.run(cfg, titles, mode) {
+        Ok(run) if run.episodes => run.titles,
+        _ => Vec::new(),
     }
-}
-
-// Whether a disc is TV for `tv_auto` planning (1.7.7): TMDB says tv, or its label
-// names a season even without a TMDB tv match. Evidence gates still apply.
-pub(crate) fn plan_kind(
-    media_type: MediaKind,
-    disc_name: &str,
-) -> Option<crate::server::planner::MediaKind> {
-    (media_type.is_tv() || crate::server::tmdb::season_from_label(disc_name).is_some())
-        .then_some(MediaKind::Tv)
 }
 
 // The titles the retry passes must recover before they stop: every episode a TV plan muxes,
@@ -5723,11 +5731,11 @@ pub(crate) fn plan_kind(
 fn recovery_titles(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    (media_type, disc_name): (MediaKind, &str),
+    request: &TitleRequest,
     main_idx: usize,
 ) -> Vec<usize> {
     let mut out = vec![main_idx];
-    for index in fanout_episode_indices(titles, cfg, media_type, disc_name) {
+    for index in fanout_episode_indices(titles, cfg, request, ScopeMode::capture(cfg)) {
         if !out.contains(&index) {
             out.push(index);
         }
@@ -5740,11 +5748,10 @@ fn recovery_titles(
 fn staged_titles(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: MediaKind,
-    disc_name: &str,
+    request: &TitleRequest,
     main_idx: usize,
 ) -> Vec<usize> {
-    let mut staged = fanout_episode_indices(titles, cfg, media_type, disc_name);
+    let mut staged = fanout_episode_indices(titles, cfg, request, ScopeMode::capture(cfg));
     staged.extend([0, main_idx]);
     staged.retain(|&i| i < titles.len());
     staged.sort_unstable();
@@ -5780,11 +5787,10 @@ fn scope_bytes(scope: &[(u32, u32)]) -> u64 {
 fn mux_output_reserve_bytes(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: MediaKind,
-    disc_name: &str,
+    request: &TitleRequest,
     selected_title_bytes: u64,
 ) -> u64 {
-    let fanout = fanout_episode_indices(titles, cfg, media_type, disc_name);
+    let fanout = fanout_episode_indices(titles, cfg, request, ScopeMode::capture(cfg));
     mux_reserve_for(cfg, titles, &fanout, selected_title_bytes)
 }
 
@@ -5876,17 +5882,15 @@ struct CapturePlan {
 fn capture_plan(
     cfg: &Config,
     titles: &[libfreemkv::DiscTitle],
-    (media_type, label, tmdb_id): (MediaKind, &str, u64),
+    request: &TitleRequest,
     movie_filename: &str,
-    episode_start: Option<u16>,
 ) -> Option<CapturePlan> {
     (uses_multipass(cfg.max_retries) && !output_is_iso_image(&cfg.output_format)).then(|| {
         plan_with_season(
             titles,
             cfg,
-            (media_type, label, tmdb_id),
+            request,
             movie_filename,
-            episode_start,
             crate::server::tmdb::season_episodes,
         )
     })
@@ -5909,46 +5913,42 @@ fn handoff_plan(start: CapturePlan, replan: impl FnOnce() -> CapturePlan) -> Pla
 }
 
 // Decide the deliverables a captured disc produces: titles to mux out of the ISO + staging
-// filename of each. Movie → one output; TV under `tv_auto` → one per episode, `S{NN}E{MM}`.
+// filename of each. One title → one output; an episode run → one per episode, `S{NN}E{MM}`.
 fn plan_mux_outputs(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: MediaKind,
-    disc_name: &str,
-    tmdb_id: u64,
+    request: &TitleRequest,
     movie_filename: &str,
-    episode_start: Option<u16>,
 ) -> PlanResult {
     plan_with_season(
         titles,
         cfg,
-        (media_type, disc_name, tmdb_id),
+        request,
         movie_filename,
-        episode_start,
         crate::server::tmdb::season_episodes,
     )
     .outputs
 }
 
-// `plan_mux_outputs` with the TMDB season fetch (`season_episodes`) injected.
+// `plan_mux_outputs` with the TMDB season fetch (`season_episodes`) injected. Planned from the
+// captured image, so the gates of a fresh capture (ISO, single pass) do not apply.
 fn plan_with_season(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    (media_type, disc_name, tmdb_id): (MediaKind, &str, u64),
+    request: &TitleRequest,
     movie_filename: &str,
-    episode_start: Option<u16>,
     season_episodes: impl FnOnce(u64, u16, &str) -> Vec<crate::server::tmdb::Episode>,
 ) -> CapturePlan {
     let plan = |outputs| CapturePlan {
         outputs,
         without_tmdb: false,
     };
-    let indices = fanout_episode_indices(titles, cfg, media_type, disc_name);
-    if indices.is_empty() {
-        let title_index = match crate::server::planner::main_title(cfg, titles) {
-            Ok(index) => index,
-            Err(e) => return plan(Err(e)),
-        };
+    let run = match request.run(cfg, titles, ScopeMode::Mux) {
+        Ok(run) => run,
+        Err(e) => return plan(Err(e)),
+    };
+    if !run.episodes {
+        let title_index = run.titles[0];
         return plan(Ok(vec![staging::Output {
             filename: movie_filename.to_string(),
             title_index,
@@ -5958,41 +5958,42 @@ fn plan_with_season(
             ..Default::default()
         }]));
     }
-    let season_num = crate::server::tmdb::season_from_label(disc_name).unwrap_or(1);
-    // An operator First episode out of range fails before the blocking TMDB fetch.
-    if let Err(e) = crate::server::planner::check_episode_range(episode_start, indices.len()) {
+    let media = &request.media;
+    let season_num = media.season.unwrap_or(1);
+    // Numbering out of range fails before the blocking TMDB fetch.
+    if let Err(e) =
+        crate::server::planner::episode_start(run.titles.len(), media.disc, media.episode_start)
+    {
         return plan(Err(e));
     }
     // TMDB episode list, best-effort (empty on any failure → sequential naming).
-    let episodes = season_episodes(tmdb_id, season_num, &cfg.tmdb_api_key);
+    let episodes = season_episodes(media.tmdb_id, season_num, &cfg.tmdb_api_key);
     CapturePlan {
         outputs: plan_episode_outputs(
             titles,
-            &indices,
-            disc_name,
+            &run.titles,
+            (media.season, media.disc),
             &episodes,
             movie_filename,
-            episode_start,
+            media.episode_start,
         ),
         without_tmdb: episodes.is_empty(),
     }
 }
 
-// Name the fanned-out episode `indices` against the season's TMDB `episodes`.
+// Name the episode `indices` against the season's TMDB `episodes`.
 fn plan_episode_outputs(
     titles: &[libfreemkv::DiscTitle],
     indices: &[usize],
-    disc_name: &str,
+    (season, disc): (Option<u16>, Option<u16>),
     episodes: &[crate::server::tmdb::Episode],
     movie_filename: &str,
     episode_start: Option<u16>,
 ) -> Result<Vec<staging::Output>, crate::server::planner::PlanError> {
-    let season_num = crate::server::tmdb::season_from_label(disc_name).unwrap_or(1);
-    let disc_num = crate::server::tmdb::disc_from_label(disc_name).unwrap_or(1);
     Ok(crate::server::planner::episode_outputs(
         indices,
-        season_num,
-        disc_num,
+        season.unwrap_or(1),
+        disc,
         episodes,
         std::path::Path::new(movie_filename),
         episode_start,

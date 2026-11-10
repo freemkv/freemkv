@@ -2,6 +2,8 @@ use super::*;
 
 fn metadata(title: &str, media_type: &str) -> staging::UserMetadata {
     staging::UserMetadata {
+        season: None,
+        disc: None,
         episode_start: None,
         title: title.into(),
         year: 2020,

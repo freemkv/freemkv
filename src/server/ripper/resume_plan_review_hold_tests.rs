@@ -67,6 +67,8 @@ fn an_operator_correction_of_the_hold_replans_once() {
     let (iso, map) = corrected_job(&dir);
     hold_plan_for_review("_mux", (&dir, &iso, &map), "Show", "held".into());
     let metadata = staging::UserMetadata {
+        season: None,
+        disc: None,
         title: "Show".into(),
         year: 2001,
         media_type: crate::server::planner::MediaKind::Tv,

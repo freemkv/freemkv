@@ -147,7 +147,7 @@ fn a_rip_time_hold_is_dispatched_by_the_mux_worker_once_corrected() {
     std::fs::write(&iso, b"image").unwrap();
     std::fs::write(&map, b"map").unwrap();
     staging::begin_capture(&dir, 2, "hash").unwrap();
-    let failed = crate::server::planner::check_episode_range(Some(u16::MAX), 2).map(|()| vec![]);
+    let failed = crate::server::planner::episode_start(2, None, Some(u16::MAX)).map(|_| vec![]);
     staging::start_sweep(&dir, |s| {
         s.outputs = vec![staging::Output {
             filename: "Old.mkv".into(),
@@ -179,6 +179,8 @@ fn a_rip_time_hold_is_dispatched_by_the_mux_worker_once_corrected() {
     staging::save_review_metadata(
         &dir,
         staging::UserMetadata {
+            season: None,
+            disc: None,
             title: "Show".into(),
             year: 2001,
             media_type: crate::server::planner::MediaKind::Movie,

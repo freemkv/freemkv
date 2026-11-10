@@ -27,10 +27,10 @@ impl Job {
             ..Default::default()
         };
         assert!(matches!(
-            crate::server::planner::check_episode_selection(
-                &fx.disc.titles,
+            crate::server::ripper::test_request(MediaKind::Tv, "", 0, None).run(
                 &config,
-                Some(MediaKind::Tv)
+                &fx.disc.titles,
+                crate::server::planner::ScopeMode::Mux
             ),
             Err(crate::server::planner::PlanError::Selection(_))
         ));
@@ -128,6 +128,8 @@ impl Drop for Job {
 
 fn correction(id: u64) -> staging::UserMetadata {
     staging::UserMetadata {
+        season: None,
+        disc: None,
         title: "Corrected show".into(),
         year: 2025,
         media_type: MediaKind::Tv,

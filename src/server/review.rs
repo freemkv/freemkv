@@ -21,6 +21,12 @@ pub struct HeldRip {
     pub year: u16,
     pub media_type: MediaKind,
     pub episode_start: Option<u16>,
+    /// The resolved TV season and disc number (the picker shows them for TV).
+    pub season: Option<u16>,
+    pub disc: Option<u16>,
+    /// The episode set the held plan waits on the operator to confirm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode_confirm: Option<crate::server::planner::EpisodeConfirm>,
     /// The ripped media file inside the dir (for display).
     pub file: String,
     /// Why it's held (human-readable).
@@ -34,6 +40,9 @@ fn state_marker(st: &crate::server::ripper::staging::DiscState) -> serde_json::V
         "year": st.year,
         "media_type": st.media_type,
         "episode_start": st.episode_start,
+        "season": st.season,
+        "disc": st.disc_number,
+        "episode_confirm": st.episode_confirm,
         "failure_reason": st.failure_reason,
         "disc_name": st.disc_name,
     })
@@ -120,6 +129,9 @@ pub fn list_held(staging_root: &str) -> Vec<HeldRip> {
             episode_start: m["episode_start"]
                 .as_u64()
                 .and_then(|n| u16::try_from(n).ok()),
+            season: m["season"].as_u64().and_then(|n| u16::try_from(n).ok()),
+            disc: m["disc"].as_u64().and_then(|n| u16::try_from(n).ok()),
+            episode_confirm: serde_json::from_value(m["episode_confirm"].clone()).ok(),
             file: media_file(&dir).unwrap_or_default(),
             reason: if let Some(reason) = m["failure_reason"].as_str() {
                 reason.to_string()

@@ -573,9 +573,9 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
     }
     let mut poster = clamp_chars(poster_raw, 1000);
     let mut overview = clamp_chars(v["overview"].as_str().unwrap_or(""), 2000);
-    // Preserve the disc's DETECTED media_type when the caller omits one
-    // (Manual Rename does): defaulting to "movie" would flip a TV disc and
-    // collapse all its episodes into one file. Fall back only when unknown.
+    // Preserve the disc's RESOLVED kind when the caller omits one: defaulting to "movie"
+    // (or to TMDB's kind, which misses a disc that is TV by its label) would flip a TV disc
+    // and collapse all its episodes into one file. The picker always sends one.
     let media_type = match v["media_type"].as_str().filter(|s| !s.is_empty()) {
         Some(mt) => MediaKind::parse(mt),
         None => {
@@ -586,7 +586,7 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(device)
-                .and_then(|rs| rs.tmdb_media_type)
+                .and_then(|rs| rs.plan.media_kind.or(rs.tmdb_media_type))
                 .unwrap_or_default()
         }
     };
@@ -608,8 +608,15 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
             overview = clamp_chars(&hit.overview, 2000);
         }
     }
-    let episode_start = match capture_episode_start(&v["episode_start"], media_type) {
-        Ok(start) => start,
+    let numbers = capture_episode_start(&v["episode_start"], media_type).and_then(|start| {
+        Ok((
+            start,
+            capture_tv_number(&v["season"], media_type, TvNumber::Season)?,
+            capture_tv_number(&v["disc"], media_type, TvNumber::Disc)?,
+        ))
+    });
+    let (episode_start, season, disc) = match numbers {
+        Ok(numbers) => numbers,
         Err(error) => {
             return json_response(
                 request,
@@ -628,6 +635,8 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
             year,
             media_type,
             episode_start,
+            season,
+            disc,
             tmdb_id,
             poster_url: poster.clone(),
             overview: overview.clone(),
@@ -655,6 +664,8 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
                 overview: overview.clone(),
                 media_type,
                 episode_start,
+                season,
+                disc,
                 tmdb_id,
             },
         );
@@ -664,9 +675,15 @@ fn handle_title_override(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>,
         snapshot,
         expected_job,
         revision,
-        media_type,
-        tmdb_id,
-        episode_start,
+        crate::server::planner::MediaMetadata {
+            title: title.clone(),
+            year,
+            tmdb_id,
+            season,
+            disc,
+            episode_start,
+            kind: Some(media_type),
+        },
     );
     json_response(request, 200, r#"{"ok":true}"#);
 }
@@ -709,19 +726,53 @@ fn metadata_error_status(e: &std::io::Error) -> u16 {
     }
 }
 
+// The operator's First episode: TV only. One sent with Movie is refused, never dropped.
 fn capture_episode_start(
     value: &serde_json::Value,
     media_type: MediaKind,
-) -> Result<Option<u16>, &'static str> {
-    if !media_type.is_tv() || value.is_null() {
+) -> Result<Option<u16>, String> {
+    capture_tv_number(value, media_type, TvNumber::FirstEpisode)
+}
+
+#[derive(Clone, Copy)]
+enum TvNumber {
+    FirstEpisode,
+    Season,
+    Disc,
+}
+
+// An operator TV number (absent or null = unset): 1..=65535, and only for TV.
+fn capture_tv_number(
+    value: &serde_json::Value,
+    media_type: MediaKind,
+    which: TvNumber,
+) -> Result<Option<u16>, String> {
+    use crate::strings::get_or;
+    if value.is_null() {
         return Ok(None);
+    }
+    let (key, field) = match which {
+        TvNumber::FirstEpisode => ("first_episode", "First episode"),
+        TvNumber::Season => ("season", "Season"),
+        TvNumber::Disc => ("disc", "Disc"),
+    };
+    if !media_type.is_tv() {
+        return Err(get_or(
+            &format!("error.title.{key}_movie"),
+            &format!("{field} applies to TV only; clear it or choose TV"),
+        ));
     }
     value
         .as_u64()
         .and_then(|n| u16::try_from(n).ok())
         .filter(|n| *n > 0)
         .map(Some)
-        .ok_or("First episode must be an integer between 1 and 65535")
+        .ok_or_else(|| {
+            get_or(
+                &format!("error.title.{key}_range"),
+                &format!("{field} must be an integer between 1 and 65535"),
+            )
+        })
 }
 
 /// `POST /api/review/resolve` — resolve a held rip. Body:
@@ -765,12 +816,33 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
                 .filter(|s| !s.is_empty())
                 .map(MediaKind::parse)
                 .unwrap_or(saved.media_type);
-            let start_value = v
-                .get("episode_start")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!(saved.episode_start));
-            let episode_start = match capture_episode_start(&start_value, media_type) {
-                Ok(start) => start,
+            // Omitted numbers keep the saved ones (a Movie has none); sent ones are checked.
+            let saved_operator = saved.user_metadata.as_ref();
+            let tv = media_type.is_tv();
+            let number = |key: &str, saved: Option<u16>| {
+                v.get(key)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!(saved.filter(|_| tv)))
+            };
+            let numbers =
+                capture_episode_start(&number("episode_start", saved.episode_start), media_type)
+                    .and_then(|start| {
+                        Ok((
+                            start,
+                            capture_tv_number(
+                                &number("season", saved_operator.and_then(|m| m.season)),
+                                media_type,
+                                TvNumber::Season,
+                            )?,
+                            capture_tv_number(
+                                &number("disc", saved_operator.and_then(|m| m.disc)),
+                                media_type,
+                                TvNumber::Disc,
+                            )?,
+                        ))
+                    });
+            let (episode_start, season, disc) = match numbers {
+                Ok(numbers) => numbers,
                 Err(error) => {
                     return json_response(
                         request,
@@ -818,6 +890,8 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
                 },
                 media_type,
                 episode_start,
+                season,
+                disc,
                 tmdb_id: v["tmdb_id"].as_u64().unwrap_or(saved.tmdb_id),
                 poster_url,
                 overview,

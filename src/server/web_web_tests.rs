@@ -3814,6 +3814,43 @@ mod http {
         assert_eq!(std::fs::read(&saved.iso_path).unwrap(), b"capture");
     }
 
+    // R1: a First episode, season or disc sent with Movie is refused (400), never dropped;
+    // with TV the operator's season and disc are saved with the correction.
+    #[test]
+    fn review_resolve_saves_tv_numbers_and_refuses_them_for_a_movie() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let dir = tmp.path().join("held-numbers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = ripper::staging::DiscState::new(ripper::staging::StagingState::Review);
+        saved.title = "Samurai Champloo".into();
+        saved.disc_identity = "stable-disc".into();
+        saved.iso_path = dir.join("disc.iso").to_string_lossy().into_owned();
+        std::fs::write(&saved.iso_path, b"capture").unwrap();
+        ripper::staging::write_state(&dir, &saved);
+        for field in ["episode_start", "season", "disc"] {
+            let body = format!(
+                r#"{{"dir":"held-numbers","action":"proceed","media_type":"movie","{field}":2}}"#
+            );
+            let (status, reply) = roundtrip(&cfg, "POST", "/api/review/resolve", Some(&body), &[]);
+            assert_eq!(status, 400, "{field}: {reply}");
+            assert!(reply.contains("TV only"), "{field}: {reply}");
+        }
+        let body = r#"{"dir":"held-numbers","action":"proceed","media_type":"tv","season":2,"disc":3,"episode_start":null}"#;
+        assert_eq!(
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[]).0,
+            200
+        );
+        let current = ripper::staging::read_state(&dir).unwrap();
+        let operator = current.user_metadata.clone().unwrap();
+        assert_eq!((operator.season, operator.disc), (Some(2), Some(3)));
+        assert_eq!(current.media_type, crate::server::planner::MediaKind::Tv);
+        assert_eq!((current.season, current.disc_number), (Some(2), Some(3)));
+    }
+
     // A review retitle picks a new TMDB entry; the old match's poster and overview
     // must not ride along into delivery (the live title override drops them too).
     #[test]

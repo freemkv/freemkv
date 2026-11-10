@@ -30,8 +30,10 @@ pub enum PlanError {
     NoTitles,
     NoOutputs,
     DuplicateOutput(String),
-    /// The engine's episode selection needs review (E9086).
-    Selection(freemkv_engine::SelectionReview),
+    /// An episode set the disc does not prove (E9086): held for the operator to confirm.
+    Selection(EpisodeConfirm),
+    /// The operator's saved title pick no longer matches the scanned titles.
+    PickMismatch,
     /// The episode numbers would run past the supported range.
     EpisodeRange,
 }
@@ -42,8 +44,12 @@ impl PlanError {
         use crate::strings::get_or;
         match self {
             PlanError::Selection(_) => Some(get_or(
-                "error.plan.action.roster",
-                "If it is a film, correct its match to the movie; to rip it as one title, turn off \"Rip TV seasons automatically\" in Settings.",
+                "error.plan.action.confirm_episodes",
+                "Confirm which titles are the episodes, and their order, to rip them; if it is a film, correct its match to Movie.",
+            )),
+            PlanError::PickMismatch => Some(get_or(
+                "error.plan.action.repick",
+                "Choose the titles again for this disc.",
             )),
             PlanError::EpisodeRange => Some(get_or(
                 "error.plan.action.first_episode",
@@ -58,6 +64,14 @@ impl PlanError {
         match self.action() {
             Some(action) => format!("{held} {action}"),
             None => held,
+        }
+    }
+
+    /// The episode suggestion a held selection carries for the operator, if any.
+    pub(crate) fn confirm(&self) -> Option<&EpisodeConfirm> {
+        match self {
+            PlanError::Selection(confirm) => Some(confirm),
+            _ => None,
         }
     }
 }
@@ -77,34 +91,339 @@ impl std::fmt::Display for PlanError {
                 "error.plan.episode_range",
                 "Episode numbering is outside the supported range.",
             ),
-            PlanError::Selection(review) => crate::strings::selection_review_text(review),
+            PlanError::PickMismatch => get_or(
+                "error.plan.pick_mismatch",
+                "the chosen titles are not on this disc as scanned",
+            ),
+            PlanError::Selection(confirm) => format!(
+                "E{} {}",
+                libfreemkv::error::E_SELECTION_REVIEW_REQUIRED,
+                crate::strings::review_reason_text(confirm.reason)
+            ),
         };
         f.write_str(&text)
     }
 }
 
-/// What `media` produces from `titles`: one output per episode when `cfg.tv_auto`
-/// finds a TV episode set, else the main title as `movie_filename`'s leaf.
+/// A suggested episode set the operator confirms (design §3.3, §4.3). Indices are the scan's
+/// title order, which a rescan of the same disc or image reproduces; nothing here is proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpisodeConfirm {
+    /// Why the disc does not prove its episodes (`SelectionReviewReason::key`).
+    #[serde(with = "review_reason")]
+    pub reason: freemkv_engine::SelectionReviewReason,
+    /// The one qualifying cluster, pre-ticked; empty when none or several qualify.
+    #[serde(default)]
+    pub suggested: Vec<usize>,
+    /// Every cluster of 2+ like titles, shown grouped with nothing ticked.
+    #[serde(default)]
+    pub clusters: Vec<Vec<usize>>,
+    /// Variants folded into a kept title (`of`), listed unticked.
+    #[serde(default)]
+    pub alternates: Vec<ConfirmAlternate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmAlternate {
+    pub index: usize,
+    pub of: usize,
+}
+
+impl EpisodeConfirm {
+    /// Every title the suggestion names: the suggested set, the clusters and the alternates.
+    pub fn titles(&self) -> Vec<usize> {
+        let mut all: Vec<usize> = (self.suggested.iter().copied())
+            .chain(self.clusters.iter().flatten().copied())
+            .chain(self.alternates.iter().flat_map(|a| [a.index, a.of]))
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+
+    /// Only the titles `keep` allows (a held capture's swept scope): anything else needs the
+    /// disc. A cluster left with fewer than 2 titles is dropped, as is an alternate of a
+    /// dropped title.
+    pub fn within(mut self, keep: impl Fn(usize) -> bool) -> Self {
+        self.suggested.retain(|&index| keep(index));
+        for cluster in &mut self.clusters {
+            cluster.retain(|&index| keep(index));
+        }
+        self.clusters.retain(|cluster| cluster.len() >= 2);
+        if self.suggested.len() < 2 {
+            self.suggested.clear();
+        }
+        self.alternates
+            .retain(|alternate| keep(alternate.index) && keep(alternate.of));
+        self
+    }
+}
+
+mod review_reason {
+    use freemkv_engine::SelectionReviewReason as R;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(reason: &R, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(reason.key())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<R, D::Error> {
+        let key = String::deserialize(d)?;
+        Ok([
+            R::IncompleteEpisodeRoster,
+            R::ConflictingEpisodeRoster,
+            R::InvalidEpisodeRoster,
+        ]
+        .into_iter()
+        .find(|reason| reason.key() == key)
+        .unwrap_or(R::MissingEpisodeRoster))
+    }
+}
+
+/// How a run reads titles (design §3.2, rule 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeMode {
+    /// Whole-disc ISO output: no title choice; title 0 stands for the image.
+    WholeDisc,
+    /// A single-pass rip muxes one title and never splits or holds.
+    SinglePass,
+    /// A multipass capture, a resume or a Library remux: picks and episode sets apply.
+    Mux,
+}
+
+impl ScopeMode {
+    /// A fresh capture's mode under `cfg`.
+    pub fn capture(cfg: &Config) -> Self {
+        if cfg.output_format == crate::server::config::OUTPUT_FORMAT_ISO {
+            ScopeMode::WholeDisc
+        } else if cfg.max_retries == 0 {
+            ScopeMode::SinglePass
+        } else {
+            ScopeMode::Mux
+        }
+    }
+}
+
+/// The one title policy every scope consumer uses (design §3.2):
+/// 1. whole-disc ISO or single-pass: no split and no hold (a single pass muxes a Movie
+///    pick's feature, else the main title);
+/// 2. an operator `pick` (scan indices, in order): exactly those titles; a Movie keeps one;
+/// 3. TV under `tv_auto`: the proven roster, else a suggestion to confirm;
+/// 4. otherwise the main film. Movies are never split and never held.
+pub fn resolve_titles(
+    cfg: &Config,
+    titles: &[DiscTitle],
+    media: &MediaMetadata,
+    pick: Option<&[usize]>,
+    mode: ScopeMode,
+) -> freemkv_engine::Resolved {
+    use freemkv_engine::Resolved;
+    let model = freemkv_engine::SelectionModel::from_titles(titles);
+    let tv = media.kind == Some(MediaKind::Tv);
+    let main = || {
+        let titles = model
+            .main_title(&freemkv_engine::StreamFilter::All, presentation(cfg))
+            .into_iter()
+            .collect();
+        Resolved::Run {
+            titles,
+            episodes: false,
+        }
+    };
+    let pick = pick.map(|pick| match model.resolve_explicit(pick, tv) {
+        Resolved::Run { mut titles, .. } => {
+            if !tv {
+                titles.truncate(1);
+            }
+            titles
+        }
+        Resolved::Confirm { .. } => Vec::new(),
+    });
+    match mode {
+        ScopeMode::WholeDisc => Resolved::Run {
+            titles: (!titles.is_empty()).then_some(0).into_iter().collect(),
+            episodes: false,
+        },
+        ScopeMode::SinglePass => match pick.filter(|pick| !tv && !pick.is_empty()) {
+            Some(pick) => Resolved::Run {
+                titles: pick,
+                episodes: false,
+            },
+            None => main(),
+        },
+        ScopeMode::Mux => match pick {
+            Some(titles) => Resolved::Run {
+                titles,
+                episodes: tv,
+            },
+            None if tv && cfg.tv_auto => model.resolve_episodes(
+                &freemkv_engine::StreamFilter::All,
+                presentation(cfg),
+                cfg.min_length_secs as f64,
+            ),
+            None => main(),
+        },
+    }
+}
+
+/// What a source is and which titles the operator chose, resolved once for a plan: the
+/// metadata from [`MediaMetadata::resolve`] and the saved pick remapped onto the scan.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TitleRequest {
+    pub media: MediaMetadata,
+    /// The operator's titles as scan indices, in order.
+    pub pick: Option<Vec<usize>>,
+    /// A saved pick did not match the scan: the plan holds and never falls back.
+    pub pick_mismatch: bool,
+}
+
+/// The run a [`TitleRequest`] resolves to: titles in order, and whether they are episodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleRun {
+    pub titles: Vec<usize>,
+    pub episodes: bool,
+}
+
+impl TitleRequest {
+    /// `media` (already resolved) with the saved `pick` remapped onto `titles` by identity.
+    pub fn new(
+        media: MediaMetadata,
+        pick: Option<&[crate::title_identity::TitleIdentity]>,
+        titles: &[DiscTitle],
+    ) -> Self {
+        let remapped = pick.map(|pick| remap_pick(titles, pick));
+        Self {
+            media,
+            pick_mismatch: matches!(remapped, Some(None)),
+            pick: remapped.flatten(),
+        }
+    }
+
+    /// [`resolve_titles`] for this request.
+    pub fn resolve(
+        &self,
+        cfg: &Config,
+        titles: &[DiscTitle],
+        mode: ScopeMode,
+    ) -> freemkv_engine::Resolved {
+        resolve_titles(cfg, titles, &self.media, self.pick.as_deref(), mode)
+    }
+
+    /// The run, or why it holds: a pick that no longer matches, an episode set to confirm,
+    /// or no titles at all.
+    pub fn run(
+        &self,
+        cfg: &Config,
+        titles: &[DiscTitle],
+        mode: ScopeMode,
+    ) -> Result<TitleRun, PlanError> {
+        if self.pick_mismatch && mode != ScopeMode::WholeDisc {
+            return Err(PlanError::PickMismatch);
+        }
+        match self.resolve(cfg, titles, mode) {
+            freemkv_engine::Resolved::Run { titles, .. } if titles.is_empty() => {
+                Err(PlanError::NoTitles)
+            }
+            freemkv_engine::Resolved::Run { titles, episodes } => Ok(TitleRun { titles, episodes }),
+            freemkv_engine::Resolved::Confirm {
+                suggested,
+                clusters,
+                alternates,
+                reason,
+            } => Err(PlanError::Selection(EpisodeConfirm {
+                reason,
+                suggested,
+                clusters,
+                alternates: alternates
+                    .into_iter()
+                    .map(|a| ConfirmAlternate {
+                        index: a.index,
+                        of: a.of,
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
+    /// Every title this request may read: the run, or for a hold the titles it suggests plus
+    /// the main title (they size a key scope; they never authorize a rip).
+    pub fn scope(&self, cfg: &Config, titles: &[DiscTitle], mode: ScopeMode) -> Vec<usize> {
+        let mut scope = match self.run(cfg, titles, mode) {
+            Ok(run) => run.titles,
+            Err(error) => {
+                let mut held = error
+                    .confirm()
+                    .map(EpisodeConfirm::titles)
+                    .unwrap_or_default();
+                held.extend(main_title(cfg, titles).ok());
+                held
+            }
+        };
+        scope.sort_unstable();
+        scope.dedup();
+        scope
+    }
+}
+
+/// `pick` as indices into `titles`, in order; `None` when any identity is missing, repeated,
+/// or matches more than one title.
+pub fn remap_pick(
+    titles: &[DiscTitle],
+    pick: &[crate::title_identity::TitleIdentity],
+) -> Option<Vec<usize>> {
+    let scanned: Vec<_> = titles
+        .iter()
+        .map(crate::title_identity::TitleIdentity::of)
+        .collect();
+    let mut out = Vec::with_capacity(pick.len());
+    for identity in pick {
+        let mut matches = (scanned.iter().enumerate()).filter(|(_, scanned)| *scanned == identity);
+        let (index, _) = matches.next()?;
+        if matches.next().is_some() || out.contains(&index) {
+            return None;
+        }
+        out.push(index);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// What `media` produces from `titles` (a remux of an image, [`ScopeMode::Mux`]): one output
+/// per episode of the resolved run, else its one title as `movie_filename`'s leaf.
 pub fn plan(
     cfg: &Config,
     titles: &[DiscTitle],
     media: &MediaMetadata,
     movie_filename: &Path,
 ) -> Result<RemuxPlan, PlanError> {
-    check_episode_selection(titles, cfg, media.kind)?;
-    let indices = episode_indices(titles, cfg, media.kind);
+    plan_request(
+        cfg,
+        titles,
+        &TitleRequest {
+            media: media.clone(),
+            ..TitleRequest::default()
+        },
+        movie_filename,
+    )
+}
+
+/// [`plan`] for a request that may carry an operator pick.
+pub fn plan_request(
+    cfg: &Config,
+    titles: &[DiscTitle],
+    request: &TitleRequest,
+    movie_filename: &Path,
+) -> Result<RemuxPlan, PlanError> {
+    let media = &request.media;
+    let run = request.run(cfg, titles, ScopeMode::Mux)?;
     // A TV movie or a single detected feature remains one output.
-    if indices.len() <= 1 {
-        let title_index = main_title(cfg, titles)?;
-        return Ok(single_plan(media, title_index, leaf(movie_filename)));
+    if !run.episodes {
+        return Ok(single_plan(media, run.titles[0], leaf(movie_filename)));
     }
     let season = media.season.unwrap_or(1);
-    // Validate an operator First episode before the blocking TMDB fetch.
-    check_episode_range(media.episode_start, indices.len())?;
+    // Numbering is checked before the blocking TMDB fetch.
+    let start = episode_start(run.titles.len(), media.disc, media.episode_start)?;
     let episodes = crate::server::tmdb::season_episodes(media.tmdb_id, season, &cfg.tmdb_api_key);
-    // The disc number is the caller's (from the ISO labels), never the show title.
-    let start = episode_start(indices.len(), media.disc.unwrap_or(1), media.episode_start)?;
-    let outputs = episode_outputs_from_start(&indices, season, start, &episodes, movie_filename);
+    let outputs = episode_outputs_from_start(&run.titles, season, start, &episodes, movie_filename);
     validate_outputs(outputs).map(|outputs| RemuxPlan {
         media: media.clone(),
         outputs,
@@ -118,47 +437,6 @@ pub(crate) fn main_title(cfg: &Config, titles: &[DiscTitle]) -> Result<usize, Pl
         .ok_or(PlanError::NoTitles)
 }
 
-/// Automatic fan-out is a TV-only policy shared by capture and remux.
-pub(crate) fn check_episode_selection(
-    titles: &[DiscTitle],
-    cfg: &Config,
-    kind: Option<MediaKind>,
-) -> Result<(), PlanError> {
-    if !cfg.tv_auto || kind != Some(MediaKind::Tv) || titles.len() <= 1 {
-        return Ok(());
-    }
-    freemkv_engine::SelectionModel::from_titles(titles)
-        .select(
-            &freemkv_engine::Selection::Episodes,
-            &freemkv_engine::StreamFilter::All,
-            presentation(cfg),
-        )
-        .map(|_| ())
-        .map_err(PlanError::Selection)
-}
-
-pub(crate) fn episode_indices(
-    titles: &[DiscTitle],
-    cfg: &Config,
-    kind: Option<MediaKind>,
-) -> Vec<usize> {
-    if !cfg.tv_auto || kind != Some(MediaKind::Tv) {
-        return Vec::new();
-    }
-    let indices = freemkv_engine::SelectionModel::from_titles(titles)
-        .select(
-            &freemkv_engine::Selection::Episodes,
-            &freemkv_engine::StreamFilter::All,
-            presentation(cfg),
-        )
-        .unwrap_or_default();
-    if indices.len() > 1 {
-        indices
-    } else {
-        Vec::new()
-    }
-}
-
 fn presentation(cfg: &Config) -> Option<&str> {
     Some(cfg.presentation_language.as_str()).filter(|language| !language.trim().is_empty())
 }
@@ -167,7 +445,7 @@ fn presentation(cfg: &Config) -> Option<&str> {
 pub(crate) fn episode_outputs(
     indices: &[usize],
     season: u16,
-    disc: u16,
+    disc: Option<u16>,
     episodes: &[crate::server::tmdb::Episode],
     movie_filename: &Path,
     episode_start: Option<u16>,
@@ -182,37 +460,15 @@ pub(crate) fn episode_outputs(
     ))
 }
 
-/// A disc's first episode number: the operator's First episode, otherwise
-/// disc N begins at `(N-1)*count+1`. Metadata cannot change that number.
-fn episode_start(count: usize, disc: u16, explicit: Option<u16>) -> Result<u16, PlanError> {
-    let start = match explicit {
-        Some(start) => start,
-        None => {
-            let offset = usize::from(disc.max(1) - 1)
-                .checked_mul(count)
-                .and_then(|offset| offset.checked_add(1))
-                .ok_or(PlanError::EpisodeRange)?;
-            u16::try_from(offset).map_err(|_| PlanError::EpisodeRange)?
-        }
-    };
-    check_episode_range(Some(start), count)?;
-    Ok(start)
-}
-
-/// Episodes `start..start+count` must be numbered 1..=65535.
-pub(crate) fn check_episode_range(start: Option<u16>, count: usize) -> Result<(), PlanError> {
-    let Some(start) = start else {
-        return Ok(());
-    };
-    if start == 0
-        || count == 0
-        || usize::from(start)
-            .checked_add(count - 1)
-            .is_none_or(|last| last > usize::from(u16::MAX))
-    {
-        return Err(PlanError::EpisodeRange);
-    }
-    Ok(())
+/// A disc's first episode number (the engine's `episode_numbers`): the operator's First
+/// episode, otherwise disc N begins at `(N-1)*count+1`. Metadata cannot change that number.
+pub(crate) fn episode_start(
+    count: usize,
+    disc: Option<u16>,
+    explicit: Option<u16>,
+) -> Result<u16, PlanError> {
+    freemkv_engine::metadata::episode_numbers(count, disc, explicit)
+        .map_err(|_| PlanError::EpisodeRange)
 }
 
 fn episode_outputs_from_start(
@@ -304,8 +560,8 @@ mod tests {
 
     #[test]
     fn a_later_disc_is_numbered_from_disc_order_not_tmdb_runtimes() {
-        assert_eq!(episode_start(2, 1, None), Ok(1));
-        assert_eq!(episode_start(2, 2, None), Ok(3));
+        assert_eq!(episode_start(2, Some(1), None), Ok(1));
+        assert_eq!(episode_start(2, Some(2), None), Ok(3));
         // Even distinctive TMDB runtimes cannot shift disc-derived numbering.
         let episodes = (1..=5)
             .map(|number| crate::server::tmdb::Episode {
@@ -314,10 +570,10 @@ mod tests {
                 runtime_min: if number < 4 { 40 } else { 50 },
             })
             .collect::<Vec<_>>();
-        let start = episode_start(2, 2, None).unwrap();
+        let start = episode_start(2, Some(2), None).unwrap();
         assert_eq!(start, 3);
         // The operator's First episode wins.
-        assert_eq!(episode_start(2, 2, Some(2)), Ok(2));
+        assert_eq!(episode_start(2, Some(2), Some(2)), Ok(2));
         let outputs =
             episode_outputs_from_start(&[0, 1], 1, start, &episodes, Path::new("Show.mkv"));
         assert_eq!(
@@ -326,11 +582,11 @@ mod tests {
         );
         assert_eq!(outputs[0].episode_name, "Episode 3");
         assert_eq!(outputs[1].filename, "Show_S01E04.mkv");
-        assert!(episode_start(2, 2, Some(u16::MAX)).is_err());
-        assert!(episode_start(2, 2, Some(0)).is_err());
+        assert!(episode_start(2, Some(2), Some(u16::MAX)).is_err());
+        assert!(episode_start(2, Some(2), Some(0)).is_err());
         // A disc number past the numbering range is held, never wrapped.
         assert_eq!(
-            episode_start(2, u16::MAX, None),
+            episode_start(2, Some(u16::MAX), None),
             Err(PlanError::EpisodeRange)
         );
     }
@@ -534,8 +790,8 @@ mod tests {
         assert_eq!(plan_one.outputs[0].episode, None);
         assert!(matches!(
             plan(&cfg, &disc(0), &media, Path::new("Show.mkv")),
-            Err(PlanError::Selection(review))
-                if review.reason == freemkv_engine::SelectionReviewReason::IncompleteEpisodeRoster
+            Err(PlanError::Selection(confirm))
+                if confirm.reason == freemkv_engine::SelectionReviewReason::IncompleteEpisodeRoster
         ));
     }
 
@@ -579,10 +835,13 @@ mod tests {
             PlanError::NoTitles,
             PlanError::NoOutputs,
             PlanError::DuplicateOutput("a.mkv".into()),
-            PlanError::Selection(freemkv_engine::SelectionReview {
+            PlanError::Selection(EpisodeConfirm {
                 reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
-                candidates: vec![0],
+                suggested: vec![0, 1],
+                clusters: vec![vec![0, 1]],
+                alternates: Vec::new(),
             }),
+            PlanError::PickMismatch,
             PlanError::EpisodeRange,
         ] {
             let text = error.to_string();
@@ -603,3 +862,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "planner_resolve_tests.rs"]
+mod resolve_tests;

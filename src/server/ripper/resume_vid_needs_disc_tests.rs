@@ -245,6 +245,8 @@ fn legacy_identity_review_confirmation_replans_saved_iso_without_disc() {
         staging::mutate_state_if_present(dir, |state| {
             state.outputs[0].title_identity = None;
             state.user_metadata = Some(staging::UserMetadata {
+                season: None,
+                disc: None,
                 title: "KU_Disc".into(),
                 year: 0,
                 media_type: crate::server::planner::MediaKind::Movie,
@@ -285,6 +287,8 @@ fn legacy_identity_review_confirmation_replans_saved_iso_without_disc() {
     staging::save_review_metadata(
         &dir,
         staging::UserMetadata {
+            season: None,
+            disc: None,
             title: "KU_Disc".into(),
             year: 0,
             media_type: crate::server::planner::MediaKind::Movie,
@@ -460,6 +464,8 @@ fn a_replanned_movie_output_is_named_from_its_title() {
     let (staging, outcome, _t, ..) = resume_ripped(Keys::UnitKey, |dir, _, _| {
         staging::mutate_state_if_present(dir, |state| {
             state.user_metadata = Some(staging::UserMetadata {
+                season: None,
+                disc: None,
                 title: "Cast Away".into(),
                 year: 2000,
                 media_type: crate::server::planner::MediaKind::Movie,
@@ -490,6 +496,8 @@ fn a_replan_drops_the_superseded_outputs() {
         std::fs::write(dir.join("KU_Disc.mkv"), b"superseded movie output").unwrap();
         staging::mutate_state_if_present(dir, |state| {
             state.user_metadata = Some(staging::UserMetadata {
+                season: None,
+                disc: None,
                 title: "Cast Away".into(),
                 year: 2000,
                 media_type: crate::server::planner::MediaKind::Movie,
@@ -514,6 +522,8 @@ fn a_replan_with_an_unreadable_map_is_not_held_for_the_disc() {
         std::fs::write(dir.join("KU_Disc.iso.mapfile"), b"not a mapfile").unwrap();
         staging::mutate_state_if_present(dir, |state| {
             state.user_metadata = Some(staging::UserMetadata {
+                season: None,
+                disc: None,
                 title: "Cast Away".into(),
                 year: 2000,
                 media_type: crate::server::planner::MediaKind::Movie,

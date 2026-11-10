@@ -227,6 +227,46 @@ pub struct RipState {
     /// serialized: a pure server-side bookkeeping field the UI never reads.
     #[serde(skip)]
     pub claim_gen: u64,
+
+    /// What the plan resolved for this disc, for the title and confirm dialogs.
+    #[serde(flatten)]
+    pub plan: TitlePlanView,
+}
+
+/// The resolved title plan a drive card shows (design §4.1): the kind, season and disc after
+/// operator > TMDB > label precedence, the operator's pick, and an episode set to confirm.
+/// Carried across fresh state pushes for the same job, like the operator metadata.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct TitlePlanView {
+    /// The resolved kind ("movie"/"tv"); absent when nothing says either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_kind: Option<crate::server::planner::MediaKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disc: Option<u16>,
+    /// The operator's titles as indices into this scan, in order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_pick: Option<Vec<usize>>,
+    /// The episode suggestion the plan holds for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<crate::server::planner::EpisodeConfirm>,
+}
+
+impl TitlePlanView {
+    /// The view of `request`'s metadata and pick, with `confirm` when it holds.
+    pub(crate) fn of(
+        request: &crate::server::planner::TitleRequest,
+        confirm: Option<crate::server::planner::EpisodeConfirm>,
+    ) -> Self {
+        Self {
+            media_kind: request.media.kind,
+            season: request.media.season,
+            disc: request.media.disc,
+            title_pick: request.pick.clone(),
+            confirm,
+        }
+    }
 }
 
 impl RipState {
@@ -274,6 +314,18 @@ impl RipState {
         self.tmdb_poster = m.poster_url.clone();
         self.tmdb_overview = m.overview.clone();
         self.tmdb_media_type = Some(m.media_type);
+        // The correction outranks TMDB; the disc's label still supplies open numbers.
+        let resolved = crate::server::planner::MediaMetadata::resolve(
+            &m.as_media(),
+            None,
+            &[self.disc_label.as_str()],
+        );
+        self.plan.media_kind = resolved.kind;
+        self.plan.season = resolved.season;
+        self.plan.disc = resolved.disc;
+        if !m.media_type.is_tv() {
+            self.plan.confirm = None;
+        }
     }
 }
 
@@ -337,6 +389,7 @@ impl Default for RipState {
             key_status: String::new(),
             resumable: None,
             claim_gen: 0,
+            plan: TitlePlanView::default(),
         }
     }
 }
@@ -579,6 +632,9 @@ pub fn update_state(device: &str, mut state: RipState) {
             state.user_metadata = prev.user_metadata.clone();
             state.metadata_revision = prev.metadata_revision;
             state.episode_start = prev.episode_start;
+            if state.plan == TitlePlanView::default() {
+                state.plan = prev.plan.clone();
+            }
             if let Some(m) = state.user_metadata.clone() {
                 state.disc_label = prev.disc_label.clone();
                 state.show_user_metadata(&m);

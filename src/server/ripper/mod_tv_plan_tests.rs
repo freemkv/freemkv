@@ -12,11 +12,13 @@ fn presentation_preference_capture_freezes_the_chosen_cut_and_never_holds() {
         let plan = plan_mux_outputs(
             &titles,
             &cfg,
-            crate::server::planner::MediaKind::Movie,
-            "Movie",
-            0,
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Movie,
+                "Movie",
+                0,
+                None,
+            ),
             "movie.mkv",
-            None,
         )
         .unwrap();
         assert_eq!(plan[0].title_index, expected);
@@ -25,13 +27,31 @@ fn presentation_preference_capture_freezes_the_chosen_cut_and_never_holds() {
             Some(crate::title_identity::TitleIdentity::of(&titles[expected]))
         );
         assert_eq!(
-            capture_title_index(&titles, &cfg, crate::server::planner::MediaKind::Movie, "")
-                .unwrap(),
+            capture_title_index(
+                &titles,
+                &cfg,
+                &crate::server::ripper::test_request(
+                    crate::server::planner::MediaKind::Movie,
+                    "",
+                    0,
+                    None
+                )
+            )
+            .unwrap(),
             expected
         );
         assert!(
-            check_capture_selection(&titles, &cfg, crate::server::planner::MediaKind::Movie, "")
-                .is_ok()
+            check_capture_selection(
+                &titles,
+                &cfg,
+                &crate::server::ripper::test_request(
+                    crate::server::planner::MediaKind::Movie,
+                    "",
+                    0,
+                    None
+                )
+            )
+            .is_ok()
         );
     }
 }
@@ -56,11 +76,13 @@ fn later_disc_confirmed_first_episode_plans_and_rejects_overflow() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "Show Season 1 Disc 2",
-        0,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Tv,
+            "Show Season 1 Disc 2",
+            0,
+            Some(4),
+        ),
         "Show.mkv",
-        Some(4),
     )
     .unwrap();
     assert_eq!(plan.len(), 2);
@@ -70,11 +92,13 @@ fn later_disc_confirmed_first_episode_plans_and_rejects_overflow() {
         plan_mux_outputs(
             &titles,
             &cfg,
-            crate::server::planner::MediaKind::Tv,
-            "Show Season 1 Disc 2",
-            0,
-            "Show.mkv",
-            Some(u16::MAX)
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "Show Season 1 Disc 2",
+                0,
+                Some(u16::MAX)
+            ),
+            "Show.mkv"
         )
         .is_err()
     );
@@ -108,11 +132,13 @@ fn movie_yields_a_single_untouched_output() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Movie,
-        "The Matrix",
-        0,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Movie,
+            "The Matrix",
+            0,
+            None,
+        ),
         "The Matrix.mkv",
-        None,
     )
     .unwrap();
     assert_eq!(plan.len(), 1);
@@ -132,17 +158,21 @@ fn a_season_label_is_tv_for_fan_out_without_a_tmdb_tv_match() {
         let plan = plan_mux_outputs(
             &titles,
             &cfg,
-            media_type.into(),
-            "Show Season 1",
-            0,
+            &crate::server::ripper::test_request(media_type.into(), "Show Season 1", 0, None),
             "Show.mkv",
-            None,
         )
         .unwrap();
         assert_eq!(plan.len(), 2, "{media_type:?}");
         assert!(plan[0].filename.contains("S01E01"), "{}", plan[0].filename);
         assert!(plan[1].filename.contains("S01E02"), "{}", plan[1].filename);
-        assert!(check_capture_selection(&titles, &cfg, media_type.into(), "Show Season 1").is_ok());
+        assert!(
+            check_capture_selection(
+                &titles,
+                &cfg,
+                &crate::server::ripper::test_request(media_type.into(), "Show Season 1", 0, None)
+            )
+            .is_ok()
+        );
     }
     let off = Config {
         tv_auto: false,
@@ -151,11 +181,13 @@ fn a_season_label_is_tv_for_fan_out_without_a_tmdb_tv_match() {
     let plan = plan_mux_outputs(
         &titles,
         &off,
-        crate::server::planner::MediaKind::Movie,
-        "Show Season 1",
-        0,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Movie,
+            "Show Season 1",
+            0,
+            None,
+        ),
         "Show.mkv",
-        None,
     )
     .unwrap();
     assert_eq!(plan.len(), 1);
@@ -163,22 +195,40 @@ fn a_season_label_is_tv_for_fan_out_without_a_tmdb_tv_match() {
 }
 
 // A season-labelled disc with no authored episode evidence is held for review on
-// capture and on resume reselection, never silently ripped as one title.
+// capture and on resume reselection, never silently ripped as one title: the hold carries
+// the like-length titles as the suggested episode set for the operator to confirm.
 #[test]
 fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
     let titles = vec![title(2640.0, 100), title(2650.0, 200)];
     let cfg = Config::default();
+    let held = capture_title_index(
+        &titles,
+        &cfg,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Movie,
+            "Show Season 1",
+            0,
+            None,
+        ),
+    );
+    let Err(crate::server::planner::PlanError::Selection(confirm)) = held else {
+        panic!("held for confirmation: {held:?}");
+    };
+    assert_eq!(confirm.suggested, [0, 1]);
     for media_type in ["movie", ""] {
         assert!(matches!(
-            check_capture_selection(&titles, &cfg, media_type.into(), "Show Season 1"),
+            check_capture_selection(
+                &titles,
+                &cfg,
+                &crate::server::ripper::test_request(media_type.into(), "Show Season 1", 0, None)
+            ),
             Err(crate::server::planner::PlanError::Selection(_))
         ));
         assert!(matches!(
             resume::check_resume_selection(
                 &titles,
                 &cfg,
-                media_type.into(),
-                "Show Season 1",
+                &crate::server::ripper::test_request(media_type.into(), "Show Season 1", 0, None),
                 false,
                 false
             ),
@@ -193,8 +243,12 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
         check_capture_selection(
             &titles,
             &off,
-            crate::server::planner::MediaKind::Movie,
-            "Show Season 1"
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Movie,
+                "Show Season 1",
+                0,
+                None
+            )
         )
         .is_ok()
     );
@@ -202,8 +256,12 @@ fn a_season_labelled_disc_without_episode_evidence_is_held_for_review() {
         resume::check_resume_selection(
             &titles,
             &off,
-            crate::server::planner::MediaKind::Movie,
-            "Show Season 1",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Movie,
+                "Show Season 1",
+                0,
+                None
+            ),
             false,
             false
         )
@@ -236,11 +294,13 @@ fn capture_and_remux_number_a_later_disc_as_1_8_3_did() {
             let capture = plan_mux_outputs(
                 &titles,
                 &cfg,
-                crate::server::planner::MediaKind::Tv,
-                &label,
-                0,
+                &crate::server::ripper::test_request(
+                    crate::server::planner::MediaKind::Tv,
+                    &label,
+                    0,
+                    None,
+                ),
                 "Show.mkv",
-                None,
             );
             let remux = plan(&cfg, &titles, &media, Path::new("Show.mkv")).unwrap();
             // 1.8.3: disc 2 of two-episode discs starts at (2-1)*2+1 = E03.
@@ -273,11 +333,13 @@ fn tv_disc_fans_out_one_output_per_episode() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "Endeavour Season 5",
-        44264,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Tv,
+            "Endeavour Season 5",
+            44264,
+            None,
+        ),
         "Endeavour.mkv",
-        None,
     );
     let plan = plan.unwrap();
     assert_eq!(plan.len(), 6, "one output per episode title");
@@ -308,11 +370,13 @@ fn mux_reserve_sums_every_planned_episode() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "Show Season 1",
-        0,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Tv,
+            "Show Season 1",
+            0,
+            None,
+        ),
         "Show.mkv",
-        None,
     )
     .unwrap();
     let planned: u64 = plan.iter().map(|o| titles[o.title_index].size_bytes).sum();
@@ -321,8 +385,12 @@ fn mux_reserve_sums_every_planned_episode() {
         mux_output_reserve_bytes(
             &titles,
             &cfg,
-            crate::server::planner::MediaKind::Tv,
-            "Show Season 1",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "Show Season 1",
+                0,
+                None
+            ),
             selected
         ),
         planned,
@@ -338,8 +406,12 @@ fn mux_reserve_sums_every_planned_episode() {
         mux_output_reserve_bytes(
             &with_playall,
             &cfg,
-            crate::server::planner::MediaKind::Tv,
-            "Show Season 1",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "Show Season 1",
+                0,
+                None
+            ),
             big
         ),
         sum
@@ -361,8 +433,12 @@ fn mux_reserve_sums_every_planned_episode() {
             mux_output_reserve_bytes(
                 &titles,
                 &c,
-                crate::server::planner::MediaKind::Tv,
-                "Show Season 1",
+                &crate::server::ripper::test_request(
+                    crate::server::planner::MediaKind::Tv,
+                    "Show Season 1",
+                    0,
+                    None
+                ),
                 selected
             ),
             0,
@@ -374,8 +450,12 @@ fn mux_reserve_sums_every_planned_episode() {
         mux_output_reserve_bytes(
             &titles,
             &cfg,
-            crate::server::planner::MediaKind::Movie,
-            "Some Film",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Movie,
+                "Some Film",
+                0,
+                None
+            ),
             selected
         ),
         selected
@@ -388,8 +468,12 @@ fn mux_reserve_sums_every_planned_episode() {
         mux_output_reserve_bytes(
             &titles,
             &off,
-            crate::server::planner::MediaKind::Tv,
-            "Show Season 1",
+            &crate::server::ripper::test_request(
+                crate::server::planner::MediaKind::Tv,
+                "Show Season 1",
+                0,
+                None
+            ),
             selected
         ),
         selected
@@ -409,11 +493,13 @@ fn disc_two_of_four_episode_discs_is_e05_to_e08() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "Endeavour Season 5 Disc 2",
-        44264,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Tv,
+            "Endeavour Season 5 Disc 2",
+            44264,
+            None,
+        ),
         "Endeavour.mkv",
-        None,
     );
     let plan = plan.unwrap();
     assert_eq!(
@@ -425,31 +511,39 @@ fn disc_two_of_four_episode_discs_is_e05_to_e08() {
     let first = plan_mux_outputs(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "Endeavour Season 5 Disc 2",
-        44264,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Tv,
+            "Endeavour Season 5 Disc 2",
+            44264,
+            Some(9),
+        ),
         "Endeavour.mkv",
-        Some(9),
     )
     .unwrap();
     assert_eq!(first[0].episode, Some(9));
 }
 
-// A single feature carrying a TV label (a TV movie) is one movie-style output, not E01.
+// A single feature carrying a TV label (a TV movie) is one movie-style output, not E01, when
+// the disc's episode list proves it. Without one, the plan holds for the operator (pick the
+// feature, or correct the match to Movie) with nothing suggested: it is never guessed.
 #[test]
 fn a_single_feature_tv_disc_stays_one_output() {
     let cfg = Config::default(); // tv_auto = true
-    let titles = vec![title(95.0 * 60.0, 1000), title(90.0, 5)];
-    let plan = plan_mux_outputs(
-        &titles,
-        &cfg,
+    let mut titles = vec![title(95.0 * 60.0, 1000), title(90.0, 5)];
+    let request = crate::server::ripper::test_request(
         crate::server::planner::MediaKind::Tv,
         "Show Season 2",
         0,
-        "Show.mkv",
         None,
-    )
-    .unwrap();
+    );
+    let Err(crate::server::planner::PlanError::Selection(confirm)) =
+        plan_mux_outputs(&titles, &cfg, &request, "Show.mkv")
+    else {
+        panic!("a TV disc without an episode list is held for confirmation");
+    };
+    assert!(confirm.suggested.is_empty() && confirm.clusters.is_empty());
+    authored_roster(&mut titles, 0..1);
+    let plan = plan_mux_outputs(&titles, &cfg, &request, "Show.mkv").unwrap();
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].filename, "Show.mkv");
     assert!(plan[0].episode.is_none());
@@ -469,7 +563,7 @@ fn later_disc_numbering_ignores_tmdb_runtime_and_accepts_manual_first_episode() 
     let plan = plan_episode_outputs(
         &titles,
         &[0, 1],
-        "Show Season 1 Disc 2",
+        (Some(1), Some(2)),
         &season,
         "Show.mkv",
         None,
@@ -483,7 +577,7 @@ fn later_disc_numbering_ignores_tmdb_runtime_and_accepts_manual_first_episode() 
     let corrected = plan_episode_outputs(
         &titles,
         &[0, 1],
-        "Show Season 1 Disc 2",
+        (Some(1), Some(2)),
         &season,
         "Show.mkv",
         Some(4),
@@ -507,11 +601,13 @@ fn tv_auto_off_does_not_fan_out() {
     let plan = plan_mux_outputs(
         &titles,
         &cfg,
-        crate::server::planner::MediaKind::Tv,
-        "Endeavour Season 5",
-        44264,
+        &crate::server::ripper::test_request(
+            crate::server::planner::MediaKind::Tv,
+            "Endeavour Season 5",
+            44264,
+            None,
+        ),
         "Endeavour.mkv",
-        None,
     );
     let plan = plan.unwrap();
     assert_eq!(plan.len(), 1);
@@ -521,16 +617,25 @@ fn tv_auto_off_does_not_fan_out() {
 #[test]
 fn a_selection_review_message_is_a_sentence_not_an_enum_dump() {
     use crate::server::planner::PlanError;
-    let roster = selection_review_message(&PlanError::Selection(freemkv_engine::SelectionReview {
-        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
-        candidates: vec![0, 1],
-    }));
+    let roster = selection_review_message(&PlanError::Selection(
+        crate::server::planner::EpisodeConfirm {
+            reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+            suggested: vec![0, 1],
+            clusters: vec![vec![0, 1]],
+            alternates: Vec::new(),
+        },
+    ));
     assert_eq!(
         roster,
-        "Title selection needs review before muxing: E9086 the disc has no authored episode list. No fallback title was selected. If it is a film, correct its match to the movie; to rip it as one title, turn off \"Rip TV seasons automatically\" in Settings."
+        "Title selection needs review before muxing: E9086 the disc has no authored episode list. No fallback title was selected. Confirm which titles are the episodes, and their order, to rip them; if it is a film, correct its match to Movie."
     );
-    // Never the impossible action: the server has no title picker.
-    assert!(!roster.contains("Select episode titles"), "{roster}");
+    // The advice is the confirmation the server now offers, not the old dead end.
+    assert!(!roster.contains("turn off"), "{roster}");
+    let mismatch = selection_review_message(&PlanError::PickMismatch);
+    assert!(
+        mismatch.ends_with("Choose the titles again for this disc."),
+        "{mismatch}"
+    );
     let numbering = selection_review_message(&PlanError::EpisodeRange);
     assert!(!numbering.contains(".."), "{numbering}");
     assert!(numbering.ends_with("Set the First episode when you correct its match."));
@@ -559,18 +664,55 @@ fn a_single_pass_tv_rip_muxes_the_main_title_not_the_first_episode() {
     let main = crate::server::planner::main_title(&single, &titles).unwrap();
     assert_ne!(
         main,
-        fanout_episode_indices(&titles, &single, kind, "Show Season 1")[0]
+        fanout_episode_indices(
+            &titles,
+            &single,
+            &crate::server::ripper::test_request(kind, "Show Season 1", 0, None),
+            ScopeMode::Mux
+        )[0]
     );
     assert_eq!(
-        capture_title_index(&titles, &single, kind, "Show Season 1").unwrap(),
+        capture_title_index(
+            &titles,
+            &single,
+            &crate::server::ripper::test_request(kind, "Show Season 1", 0, None)
+        )
+        .unwrap(),
         main
     );
-    assert!(check_capture_selection(&titles, &single, kind, "Show Season 1").is_ok());
+    assert!(
+        check_capture_selection(
+            &titles,
+            &single,
+            &crate::server::ripper::test_request(kind, "Show Season 1", 0, None)
+        )
+        .is_ok()
+    );
+    // A single pass never fans out.
+    assert!(
+        fanout_episode_indices(
+            &titles,
+            &single,
+            &crate::server::ripper::test_request(kind, "Show Season 1", 0, None),
+            ScopeMode::capture(&single)
+        )
+        .is_empty()
+    );
     // Multipass still captures the episode set for its fan-out.
     let multi = Config::default();
     assert_eq!(
-        capture_title_index(&titles, &multi, kind, "Show Season 1").unwrap(),
-        fanout_episode_indices(&titles, &multi, kind, "Show Season 1")[0]
+        capture_title_index(
+            &titles,
+            &multi,
+            &crate::server::ripper::test_request(kind, "Show Season 1", 0, None)
+        )
+        .unwrap(),
+        fanout_episode_indices(
+            &titles,
+            &multi,
+            &crate::server::ripper::test_request(kind, "Show Season 1", 0, None),
+            ScopeMode::capture(&multi)
+        )[0]
     );
 }
 
@@ -634,13 +776,13 @@ fn the_hand_off_replans_a_start_plan_made_without_tmdb() {
         plan_with_season(
             &titles,
             &cfg,
-            (
+            &crate::server::ripper::test_request(
                 crate::server::planner::MediaKind::Tv,
                 "Show Season 1 Disc 2",
                 7,
+                first,
             ),
             "Show.mkv",
-            first,
             move |_, _, _| episodes,
         )
     };
@@ -676,11 +818,53 @@ fn retry_passes_measure_every_planned_episode() {
     let mut titles = vec![title(2640.0, 100), title(2650.0, 5000), title(2660.0, 9000)];
     authored_roster(&mut titles, 0..3);
     let cfg = Config::default();
-    let tv = (
+    let tv = test_request(
         crate::server::planner::MediaKind::Tv,
         "Show Season 1 Disc 2",
+        0,
+        None,
     );
-    assert_eq!(recovery_titles(&titles, &cfg, tv, 0), [0, 1, 2]);
-    let movie = (crate::server::planner::MediaKind::Movie, "Movie");
-    assert_eq!(recovery_titles(&titles, &cfg, movie, 0), [0]);
+    assert_eq!(recovery_titles(&titles, &cfg, &tv, 0), [0, 1, 2]);
+    let movie = test_request(crate::server::planner::MediaKind::Movie, "Movie", 0, None);
+    assert_eq!(recovery_titles(&titles, &cfg, &movie, 0), [0]);
+}
+
+// A TV disc that TMDB mismatched to a film stays TV when its label names a season (the
+// engine's `MediaMetadata::resolve`), as 1.7.7's `plan_kind` decided: it fans out when the
+// disc proves its episodes and holds with a suggestion when it does not.
+#[test]
+fn a_tmdb_movie_match_with_a_season_label_stays_tv() {
+    use crate::server::planner::{MediaKind, MediaMetadata, TitleRequest};
+    let film = crate::server::tmdb::TmdbResult {
+        title: "Show".into(),
+        year: 2004,
+        poster_url: String::new(),
+        overview: String::new(),
+        media_type: MediaKind::Movie,
+        tmdb_id: 7,
+    };
+    // As rip_disc resolves it: no operator correction, the TMDB match, the disc label.
+    let media = MediaMetadata::resolve(
+        &MediaMetadata::default(),
+        Some(&MediaMetadata::from(&film)),
+        &["SHOW_S1_D2"],
+    );
+    assert_eq!(media.kind, Some(MediaKind::Tv));
+    assert_eq!((media.season, media.disc), (Some(1), Some(2)));
+    let request = TitleRequest {
+        media,
+        ..TitleRequest::default()
+    };
+    let cfg = Config::default();
+    let mut titles = vec![title(2640.0, 100), title(2650.0, 200)];
+    assert!(matches!(
+        check_capture_selection(&titles, &cfg, &request),
+        Err(crate::server::planner::PlanError::Selection(_))
+    ));
+    authored_roster(&mut titles, 0..2);
+    let plan = plan_mux_outputs(&titles, &cfg, &request, "Show.mkv").unwrap();
+    assert_eq!(
+        plan.iter().map(|o| o.filename.as_str()).collect::<Vec<_>>(),
+        ["Show_S01E03.mkv", "Show_S01E04.mkv"]
+    );
 }

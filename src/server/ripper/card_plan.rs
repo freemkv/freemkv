@@ -4,7 +4,7 @@
 //! carries the playback time its not-yet-good sectors cover, read from the job's mapfile.
 
 use crate::server::config::Config;
-use crate::server::planner::{MediaKind, PlanError};
+use crate::server::planner::{MediaMetadata, PlanError, TitleRequest};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -28,17 +28,29 @@ pub struct CardEpisode {
 struct Inputs {
     titles: Vec<libfreemkv::DiscTitle>,
     label: String,
+    /// The operator's titles the capture planned with (scan indices); a correction keeps them.
+    pick: Option<Vec<usize>>,
     filename: String,
     mapfile: PathBuf,
 }
 
+/// The metadata a card plan is made from: the capture's resolved metadata, or an operator
+/// correction. Either is resolved again over the disc label, as the mux will.
 #[derive(Clone)]
 pub(crate) struct Correction {
     pub cfg: Config,
     pub revision: u64,
-    pub kind: MediaKind,
-    pub tmdb_id: u64,
-    pub start: Option<u16>,
+    pub media: MediaMetadata,
+}
+
+impl Inputs {
+    fn request(&self, correction: &Correction) -> TitleRequest {
+        TitleRequest {
+            media: MediaMetadata::resolve(&correction.media, None, &[&self.label]),
+            pick: self.pick.clone(),
+            pick_mismatch: false,
+        }
+    }
 }
 
 struct Planned {
@@ -91,17 +103,10 @@ impl CardWork for CardIo {
         inputs: &Inputs,
         correction: &Correction,
     ) -> Result<Vec<CardEpisode>, PlanError> {
-        let label = super::planning_label(&inputs.label, Some(correction.kind));
-        super::plan_mux_outputs(
-            &inputs.titles,
-            &correction.cfg,
-            correction.kind,
-            label,
-            correction.tmdb_id,
-            &inputs.filename,
-            correction.start,
-        )
-        .map(|outputs| card_episodes(&inputs.titles, label, &outputs))
+        let request = inputs.request(correction);
+        let season = request.media.season.unwrap_or(1);
+        super::plan_mux_outputs(&inputs.titles, &correction.cfg, &request, &inputs.filename)
+            .map(|outputs| card_episodes(&inputs.titles, season, &outputs))
     }
 
     fn spawn(&self, task: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
@@ -207,7 +212,8 @@ impl Cache {
         outputs: &[super::staging::Output],
         initial: Correction,
     ) {
-        let episodes = card_episodes(&inputs.titles, &inputs.label, outputs);
+        let season = inputs.request(&initial).media.season.unwrap_or(1);
+        let episodes = card_episodes(&inputs.titles, season, outputs);
         let inputs = Arc::new(inputs);
         let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
         let latest = plans
@@ -278,9 +284,7 @@ impl Cache {
                 s.user_metadata.as_ref().map(|m| Correction {
                     cfg: cfg.clone(),
                     revision: s.metadata_revision,
-                    kind: m.media_type,
-                    tmdb_id: m.tmdb_id,
-                    start: m.episode_start,
+                    media: m.as_media(),
                 })
             })
         };
@@ -433,8 +437,7 @@ impl Task {
 /// Record the revision used to compute the capture plan along with its rows.
 pub(crate) fn publish(
     job: &str,
-    titles: &[libfreemkv::DiscTitle],
-    label: &str,
+    (titles, label, pick): (&[libfreemkv::DiscTitle], &str, Option<&[usize]>),
     filename: &str,
     mapfile: &Path,
     outputs: &[super::staging::Output],
@@ -443,6 +446,7 @@ pub(crate) fn publish(
     let inputs = Inputs {
         titles: titles.to_vec(),
         label: label.into(),
+        pick: pick.map(<[usize]>::to_vec),
         filename: filename.into(),
         mapfile: mapfile.into(),
     };
@@ -460,22 +464,13 @@ pub(crate) fn episodes(job: &str) -> Option<Vec<CardEpisode>> {
 }
 
 /// Carry the durable revision and its matching correction together.
-pub(crate) fn replan(
-    cfg: Config,
-    job: &str,
-    revision: u64,
-    kind: MediaKind,
-    tmdb_id: u64,
-    start: Option<u16>,
-) {
+pub(crate) fn replan(cfg: Config, job: &str, revision: u64, media: MediaMetadata) {
     PLANS.replan(
         job,
         Correction {
             cfg,
             revision,
-            kind,
-            tmdb_id,
-            start,
+            media,
         },
     );
 }
@@ -483,13 +478,12 @@ pub(crate) fn replan(
 /// The card rows for a plan: one per episode output, or none for a single feature.
 pub(crate) fn card_episodes(
     titles: &[libfreemkv::DiscTitle],
-    label: &str,
+    season: u16,
     outputs: &[super::staging::Output],
 ) -> Vec<CardEpisode> {
     if outputs.len() < 2 {
         return Vec::new();
     }
-    let season = crate::server::tmdb::season_from_label(label).unwrap_or(1);
     // An output without its episode number makes it no episode plan.
     let rows: Option<Vec<_>> = outputs
         .iter()

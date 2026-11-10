@@ -459,26 +459,54 @@ fn validate_replanned_capture(
     mapfile: &Path,
 ) -> Result<(), ReplanRefusal> {
     use ReplanRefusal::{NeedsDisc, Unusable};
-    let map = freemkv_engine::Mapfile::load(mapfile)
-        .map_err(|e| Unusable(format!("the saved recovery map could not be read: {e}")))?;
-    let mut reader = libfreemkv::FileSectorSource::open(iso)
-        .map_err(|e| Unusable(format!("the saved disc image could not be opened: {e}")))?;
     let titles = resume_titles(disc, outputs).map_err(Unusable)?;
+    if !titles_captured(disc, &titles, iso, mapfile).map_err(Unusable)? {
+        return Err(NeedsDisc("the corrected episode plan needs sectors not captured yet; insert the same disc and resume to read them".into()));
+    }
+    Ok(())
+}
+
+// Whether the capture read every sector `titles` mux from: an MKV capture that discards its
+// ISO sweeps only its plan's titles (`mkv_staging_scope`).
+fn titles_captured(
+    disc: &libfreemkv::Disc,
+    titles: &[usize],
+    iso: &Path,
+    mapfile: &Path,
+) -> Result<bool, String> {
+    let map = freemkv_engine::Mapfile::load(mapfile)
+        .map_err(|e| format!("the saved recovery map could not be read: {e}"))?;
+    let mut reader = libfreemkv::FileSectorSource::open(iso)
+        .map_err(|e| format!("the saved disc image could not be opened: {e}"))?;
     let ranges = disc
-        .mkv_staging_ranges(&mut reader, &titles)
-        .map_err(|e| Unusable(format!("the saved disc image could not be read: {e}")))?;
+        .mkv_staging_ranges(&mut reader, titles)
+        .map_err(|e| format!("the saved disc image could not be read: {e}"))?;
     let missing = map.ranges_with(&[freemkv_engine::SectorStatus::NonTried]);
-    if ranges.iter().any(|&(start, count)| {
+    Ok(!ranges.iter().any(|&(start, count)| {
         let start = u64::from(start) * 2048;
         let end = start + u64::from(count) * 2048;
         end > map.total_size()
             || missing
                 .iter()
                 .any(|&(p, n)| p < end && p.saturating_add(n) > start)
-    }) {
-        return Err(NeedsDisc("the corrected episode plan needs sectors not captured yet; insert the same disc and resume to read them".into()));
-    }
-    Ok(())
+    }))
+}
+
+// A held capture's episode suggestion, limited to titles its sweep captured: anything else
+// needs the disc. A suggestion that cannot be checked against the image is kept whole.
+pub(super) fn swept_confirm(
+    disc: &libfreemkv::Disc,
+    confirm: crate::server::planner::EpisodeConfirm,
+    iso: &Path,
+    mapfile: &Path,
+) -> crate::server::planner::EpisodeConfirm {
+    let candidates = confirm.titles();
+    let swept: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&title| titles_captured(disc, &[title], iso, mapfile).unwrap_or(true))
+        .collect();
+    confirm.within(|title| swept.contains(&title))
 }
 
 // A resume's keys, memory only: the inserted disc's up-front set, else the set the process
@@ -818,6 +846,32 @@ pub(super) fn review_status(reason: &str, held: &std::io::Result<()>) -> String 
 
 // A plan only the operator can settle (E9086, numbering): hold it in Review with the
 // ISO and outputs kept, so the mux worker stops re-dispatching it until a correction.
+// A resume whose selection the operator must settle: an episode set to confirm (limited to
+// what the capture swept) is kept with the job; a saved pick that no longer matches is
+// cleared, so the next resume selects again.
+fn hold_resume_selection(
+    device: &str,
+    paths: (&Path, &Path, &Path),
+    display_name: &str,
+    (disc, error): (&libfreemkv::Disc, &crate::server::planner::PlanError),
+) {
+    let (staging_dir, iso, mapfile) = paths;
+    hold_plan_for_review(
+        device,
+        paths,
+        display_name,
+        super::selection_review_message(error),
+    );
+    if *error == crate::server::planner::PlanError::PickMismatch {
+        staging::mutate_state_if_present(staging_dir, |s| s.title_pick = None);
+    }
+    let confirm = (error.confirm().cloned()).map(|c| swept_confirm(disc, c, iso, mapfile));
+    staging::record_episode_confirm(staging_dir, confirm.as_ref());
+    if let Some(confirm) = confirm {
+        super::update_state_with(device, |s| s.plan.confirm = Some(confirm));
+    }
+}
+
 fn hold_plan_for_review(
     device: &str,
     paths: (&Path, &Path, &Path),
@@ -997,15 +1051,6 @@ fn forget_space_refusal(staging_dir: &Path) {
         .remove(staging_dir);
 }
 
-/// The raw volume label a job's plan is made from (season, disc number, label-only TV).
-pub(super) fn planning_label(st: &staging::DiscState) -> &str {
-    if st.disc_label.is_empty() {
-        &st.disc_name
-    } else {
-        &st.disc_label
-    }
-}
-
 pub(super) fn check_resume_state(saved: &staging::DiscState) -> Result<(), String> {
     if saved.reset_in_progress {
         return Err("Capture reset is incomplete; finish Start over before resuming. Staging is held unchanged.".into());
@@ -1064,18 +1109,49 @@ fn resume_destination(cfg: &Config, output_path: &str) -> String {
 pub(super) fn check_resume_selection(
     titles: &[libfreemkv::DiscTitle],
     cfg: &Config,
-    media_type: MediaKind,
-    disc_label: &str,
+    request: &crate::server::planner::TitleRequest,
     has_plan: bool,
     replan_required: bool,
 ) -> Result<(), crate::server::planner::PlanError> {
+    use crate::server::planner::PlanError;
     // A saved deliverable plan is already explicit. Do not replace it using
     // newly scanned evidence; only a missing or invalidated plan is selected.
     if has_plan && !replan_required {
         return Ok(());
     }
-    let kind = super::plan_kind(media_type, disc_label);
-    crate::server::planner::check_episode_selection(titles, cfg, kind)
+    // Planned from the captured image: the capture's ISO/single-pass gates do not apply.
+    match request.run(cfg, titles, crate::server::planner::ScopeMode::Mux) {
+        Err(error @ (PlanError::Selection(_) | PlanError::PickMismatch)) => Err(error),
+        _ => Ok(()),
+    }
+}
+
+// The request a resume plans with: the job's resolved metadata and title pick, reading the
+// drive's `label` too; a legacy dir without `state.json` has only the scan's TMDB `kind`.
+pub(super) fn resume_request(
+    saved: Option<&staging::DiscState>,
+    titles: &[libfreemkv::DiscTitle],
+    kind: MediaKind,
+    label: &str,
+) -> crate::server::planner::TitleRequest {
+    use crate::server::planner::{MediaMetadata, TitleRequest};
+    match saved {
+        Some(saved) => {
+            let mut saved = saved.clone();
+            if saved.labels().iter().all(|l| l.is_empty()) {
+                saved.disc_label = label.to_string();
+            }
+            saved.title_request(titles)
+        }
+        None => {
+            let matched = MediaMetadata {
+                kind: Some(kind),
+                ..MediaMetadata::default()
+            };
+            let media = MediaMetadata::resolve(&MediaMetadata::default(), Some(&matched), &[label]);
+            TitleRequest::new(media, None, titles)
+        }
+    }
 }
 
 pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: ResumeClass) {
@@ -1285,6 +1361,11 @@ fn resume_remux_within<S>(
                 .unwrap_or_else(|e| e.into_inner())
                 .get(device)
                 .and_then(|s| s.tmdb_media_type)
+                .or_else(|| {
+                    crate::server::muxer::read_marker(&staging_dir)
+                        .ok()
+                        .map(|m| m.tmdb_media_type)
+                })
                 .unwrap_or_default()
         });
     // Only durable capture authority proves that no title/episode selection is
@@ -1296,41 +1377,30 @@ fn resume_remux_within<S>(
     if let Some(saved) = &saved_state {
         plan_outputs = saved.outputs.clone();
     }
-    // The raw label the replan plans from (plan_mux_outputs), else the scan's.
-    let disc_label = saved_state
-        .as_ref()
-        .map(|s| planning_label(s).to_string())
-        .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| {
-            super::STATE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(device)
-                .map(|s| s.disc_label.clone())
-                .unwrap_or_default()
-        });
-    // An operator's Movie correction overrides a season-marked label.
-    let operator_kind = saved_state
-        .as_ref()
-        .and_then(|s| s.user_metadata.as_ref())
-        .map(|m| m.media_type);
-    let plan_label = super::planning_label(&disc_label, operator_kind).to_string();
+    // The scan's raw label, for a job that saved none.
+    let state_label = super::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .map(|s| s.disc_label.clone())
+        .unwrap_or_default();
+    // What the job is (operator > saved match > labels) and the operator's titles, remapped
+    // onto this scan of the image; the replan and every hand-off below file under it.
+    let request = resume_request(saved_state.as_ref(), &disc.titles, media_type, &state_label);
     if !saved_whole_iso
         && let Err(error) = check_resume_selection(
             &disc.titles,
             &cfg_read,
-            media_type,
-            &plan_label,
+            &request,
             !plan_outputs.is_empty(),
             replan_required,
         )
     {
-        let reason = super::selection_review_message(&error);
-        hold_plan_for_review(
+        hold_resume_selection(
             device,
             (&staging_dir, &iso_path, &mapfile_path),
             &display_name,
-            reason,
+            (&disc, &error),
         );
         return;
     }
@@ -1360,27 +1430,19 @@ fn resume_remux_within<S>(
                 title,
                 super::output_extension_for(&cfg_read.output_format, &disc),
             );
-            let outputs = match super::plan_mux_outputs(
-                &disc.titles,
-                &cfg_read,
-                saved.media_type,
-                &plan_label,
-                saved.tmdb_id,
-                &filename,
-                saved.episode_start,
-            ) {
-                Ok(outputs) => outputs,
-                Err(error) => {
-                    let reason = super::selection_review_message(&error);
-                    hold_plan_for_review(
-                        device,
-                        (&staging_dir, &iso_path, &mapfile_path),
-                        &display_name,
-                        reason,
-                    );
-                    return;
-                }
-            };
+            let outputs =
+                match super::plan_mux_outputs(&disc.titles, &cfg_read, &request, &filename) {
+                    Ok(outputs) => outputs,
+                    Err(error) => {
+                        hold_resume_selection(
+                            device,
+                            (&staging_dir, &iso_path, &mapfile_path),
+                            &display_name,
+                            (&disc, &error),
+                        );
+                        return;
+                    }
+                };
             match validate_replanned_capture(&disc, &outputs, &iso_path, &mapfile_path) {
                 Ok(()) => {}
                 Err(ReplanRefusal::NeedsDisc(e)) => {
@@ -1779,13 +1841,13 @@ fn resume_remux_within<S>(
         .as_ref()
         .map(|rs| rs.codecs.clone())
         .unwrap_or_default();
-    let (tmdb_title, tmdb_year, tmdb_poster, tmdb_overview, tmdb_media_type) = match &marker_tmdb {
+    // The kind, season and disc the hand-off files under are the plan's (`request`).
+    let (tmdb_title, tmdb_year, tmdb_poster, tmdb_overview) = match &marker_tmdb {
         Some(m) => (
             m.tmdb_title.clone(),
             m.tmdb_year,
             m.tmdb_poster.clone(),
             m.tmdb_overview.clone(),
-            Some(m.tmdb_media_type),
         ),
         None => state_tmdb
             .as_ref()
@@ -1795,12 +1857,10 @@ fn resume_remux_within<S>(
                     rs.tmdb_year,
                     rs.tmdb_poster.clone(),
                     rs.tmdb_overview.clone(),
-                    rs.tmdb_media_type,
                 )
             })
             .unwrap_or_default(),
     };
-    let media_type = tmdb_media_type.unwrap_or_default();
 
     // Title-confidence gate — routes through the SAME `title_is_confident`
     // (mod.rs) the fresh-rip completion path uses (the Done/Review hand-off is
@@ -1866,7 +1926,7 @@ fn resume_remux_within<S>(
             s.disc_name = disc_label.clone();
             s.disc_format = disc_format.clone();
             s.year = tmdb_year;
-            s.media_type = media_type;
+            s.stamp_resolved(&request.media);
             s.tmdb_poster = tmdb_poster.clone();
             s.tmdb_overview = tmdb_overview.clone();
             s.resumed = true;
@@ -2320,7 +2380,7 @@ fn resume_remux_within<S>(
         s.disc_name = disc_label.clone();
         s.disc_format = disc_format.clone();
         s.year = tmdb_year;
-        s.media_type = media_type;
+        s.stamp_resolved(&request.media);
         s.tmdb_poster = tmdb_poster.clone();
         s.tmdb_overview = tmdb_overview.clone();
         s.resumed = true;

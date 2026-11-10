@@ -153,14 +153,30 @@ fn successful_or_skipped_tv_planning_enters_remux_once() {
     assert_eq!(calls.get(), 1);
 }
 
+// Season and disc numbers of a TV plan, read from the disc's labels as the planner reads them.
+fn with_label_numbers(
+    media: &crate::server::planner::MediaMetadata,
+    volume_id: &str,
+    meta_title: Option<&str>,
+    title: &str,
+) -> crate::server::planner::MediaMetadata {
+    crate::server::planner::MediaMetadata::resolve(
+        media,
+        None,
+        &labels(volume_id, meta_title, title),
+    )
+}
+
 #[test]
 fn disc_number_reads_volume_id_then_meta_title() {
-    assert_eq!(
-        label_numbers("SHOW_S1_D2", Some("Show D3"), "Show").1,
-        Some(2)
-    );
-    assert_eq!(label_numbers("SHOW", Some("Show D3"), "Show").1, Some(3));
-    assert_eq!(label_numbers("SHOW", None, "Show").1, None);
+    let tv = crate::server::planner::MediaMetadata {
+        kind: Some(crate::server::planner::MediaKind::Tv),
+        ..Default::default()
+    };
+    let disc = |volume_id, meta_title| with_label_numbers(&tv, volume_id, meta_title, "Show").disc;
+    assert_eq!(disc("SHOW_S1_D2", Some("Show D3")), Some(2));
+    assert_eq!(disc("SHOW", Some("Show D3")), Some(3));
+    assert_eq!(disc("SHOW", None), None);
 }
 
 #[test]
@@ -170,10 +186,13 @@ fn planner_errors_require_review_without_entering_remux_or_requeueing() {
         PlanError::NoTitles,
         PlanError::NoOutputs,
         PlanError::DuplicateOutput("episode.mkv".into()),
-        PlanError::Selection(freemkv_engine::SelectionReview {
+        PlanError::Selection(crate::server::planner::EpisodeConfirm {
             reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
-            candidates: vec![0],
+            suggested: vec![0, 1],
+            clusters: vec![vec![0, 1]],
+            alternates: Vec::new(),
         }),
+        PlanError::PickMismatch,
         PlanError::EpisodeRange,
     ] {
         let detail = error.to_string();

@@ -13,6 +13,8 @@ use freemkv_engine::{Mapfile, SectorStatus};
 
 fn scan_metadata(title: &str) -> super::super::staging::UserMetadata {
     super::super::staging::UserMetadata {
+        season: None,
+        disc: None,
         episode_start: None,
         title: title.into(),
         year: 2020,
@@ -98,6 +100,8 @@ fn metadata_publication_cannot_reverse_commit_order() {
         },
     );
     let metadata = |title: &str| super::super::staging::UserMetadata {
+        season: None,
+        disc: None,
         episode_start: None,
         title: title.into(),
         year: 2020,
@@ -179,6 +183,8 @@ fn metadata_publication_rejects_another_job() {
         "removed",
         99,
         super::super::staging::UserMetadata {
+            season: None,
+            disc: None,
             episode_start: None,
             title: "Old disc".into(),
             year: 2020,
@@ -1543,6 +1549,8 @@ fn set_pass_progress_keeps_an_operator_correction_on_the_card() {
         s.job_id = "disc-x".into();
     });
     let corrected = crate::server::ripper::staging::UserMetadata {
+        season: None,
+        disc: None,
         title: "Cast Away".into(),
         year: 2000,
         media_type: crate::server::planner::MediaKind::Movie,
