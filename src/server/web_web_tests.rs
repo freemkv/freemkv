@@ -4902,6 +4902,302 @@ mod http {
         let _: serde_json::Value =
             serde_json::from_str(json).expect("the first SSE frame must carry valid state JSON");
     }
+
+    // ── Titles dialogs (design §4.2-4.4) ───────────────────────────────────
+
+    fn ids(titles: &[libfreemkv::DiscTitle], pick: &[usize]) -> serde_json::Value {
+        serde_json::to_value(
+            pick.iter()
+                .map(|&i| crate::title_identity::TitleIdentity::of(&titles[i]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    // A scanned drive row for `device` (its job has the same name) of the resolved `kind`.
+    fn titled_drive(
+        device: &str,
+        kind: crate::server::planner::MediaKind,
+        episode_start: Option<u16>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<RwLock<Config>>,
+        Vec<libfreemkv::DiscTitle>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let titles = crate::server::titles::tests::play_all_disc();
+        ripper::remember_titles_for_test(device, &titles);
+        let mut row = ripper::RipState {
+            device: device.to_string(),
+            status: "idle".into(),
+            disc_present: true,
+            disc_name: "Show".into(),
+            job_id: device.into(),
+            episode_start,
+            ..Default::default()
+        };
+        row.plan.media_kind = Some(kind);
+        ripper::update_state(device, row);
+        (tmp, cfg, titles)
+    }
+
+    // The pick endpoint: a Movie takes one title; TV one or more, one needing its First
+    // episode; titles not on the scan, another job, or a stale revision are refused.
+    #[test]
+    fn title_pick_validates_kind_identity_job_and_revision() {
+        use crate::server::planner::MediaKind;
+        let device = "sgtitlespickmovie";
+        let (_tmp, cfg, titles) = titled_drive(device, MediaKind::Movie, None);
+        let post = |body: serde_json::Value| {
+            roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/titles/{device}"),
+                Some(&body.to_string()),
+                &[],
+            )
+        };
+        let job =
+            |pick: &[usize]| serde_json::json!({"job_id": device, "titles": ids(&titles, pick)});
+        let (status, reply) = post(job(&[1, 2]));
+        assert_eq!(status, 400, "{reply}");
+        assert!(reply.contains("exactly one"), "{reply}");
+        let mut foreign = titles[2].clone();
+        foreign.playlist_id = 999;
+        let stranger = serde_json::json!({"job_id": device, "titles": [crate::title_identity::TitleIdentity::of(&foreign)]});
+        assert_eq!(post(stranger).0, 400, "a title not on this scan");
+        assert_eq!(
+            post(serde_json::json!({"job_id": device, "titles": "1"})).0,
+            400
+        );
+        assert_eq!(
+            post(serde_json::json!({"job_id": "other", "titles": ids(&titles, &[1])})).0,
+            409,
+            "another disc's dialog"
+        );
+        assert_eq!(
+            post(
+                serde_json::json!({"job_id": device, "revision": 7, "titles": ids(&titles, &[1])})
+            )
+            .0,
+            409,
+            "a dialog opened before another correction"
+        );
+        ripper::STATE.lock().unwrap().remove(device);
+
+        let device = "sgtitlespicktv";
+        let (_tmp, cfg, titles) = titled_drive(device, MediaKind::Tv, None);
+        let post = |body: serde_json::Value| {
+            roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/titles/{device}"),
+                Some(&body.to_string()),
+                &[],
+            )
+        };
+        let (status, reply) =
+            post(serde_json::json!({"job_id": device, "titles": ids(&titles, &[2])}));
+        assert_eq!(status, 400, "{reply}");
+        assert!(reply.contains("First episode"), "{reply}");
+        ripper::STATE.lock().unwrap().remove(device);
+        let device = "sgtitlespicktvone";
+        let (_tmp, cfg, titles) = titled_drive(device, MediaKind::Tv, Some(5));
+        let body =
+            serde_json::json!({"job_id": device, "revision": 0, "titles": ids(&titles, &[2])});
+        let (status, reply) = roundtrip(
+            &cfg,
+            "POST",
+            &format!("/api/titles/{device}"),
+            Some(&body.to_string()),
+            &[],
+        );
+        assert_eq!(status, 200, "one episode with its First episode: {reply}");
+        ripper::STATE.lock().unwrap().remove(device);
+    }
+
+    // A saved pick lands in state.json by identity, in order, shows on the card, and lifts the
+    // suggestion the card held for; an empty pick goes back to automatic.
+    #[test]
+    fn title_pick_is_persisted_and_replans_the_card() {
+        use crate::server::planner::MediaKind;
+        let device = "sgtitlespicksave";
+        let (tmp, cfg, titles) = titled_drive(device, MediaKind::Tv, None);
+        let (status, listed) = roundtrip(&cfg, "GET", &format!("/api/titles/{device}"), None, &[]);
+        assert_eq!(status, 200, "{listed}");
+        let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+        assert_eq!(listed["titles"].as_array().unwrap().len(), titles.len());
+        assert_eq!(
+            listed["confirm"]["suggested"],
+            serde_json::json!([1, 3, 2, 4])
+        );
+        assert_eq!(listed["titles"][0]["play_all"], true);
+        ripper::update_state_with(device, |s| {
+            s.status = "error".into();
+            s.last_error = "E9086 held".into();
+            s.plan.confirm = serde_json::from_value(listed["confirm"].clone()).ok();
+        });
+        // The operator confirms the suggestion with two episodes swapped.
+        let body = serde_json::json!({"job_id": device, "revision": listed["revision"], "titles": ids(&titles, &[1, 2, 3, 4])});
+        let (status, reply) = roundtrip(
+            &cfg,
+            "POST",
+            &format!("/api/titles/{device}"),
+            Some(&body.to_string()),
+            &[],
+        );
+        assert_eq!(status, 200, "{reply}");
+        let saved = ripper::staging::read_state(&tmp.path().join(device)).unwrap();
+        assert_eq!(
+            saved.title_pick.as_deref().unwrap(),
+            {
+                let ids: Vec<_> = [1, 2, 3, 4]
+                    .iter()
+                    .map(|&i| crate::title_identity::TitleIdentity::of(&titles[i]))
+                    .collect();
+                ids
+            }
+            .as_slice()
+        );
+        assert_eq!(saved.metadata_revision, 1);
+        assert!(saved.episode_confirm.is_none());
+        let row = ripper::STATE.lock().unwrap().get(device).cloned().unwrap();
+        assert_eq!(row.plan.title_pick, Some(vec![1, 2, 3, 4]));
+        assert!(row.plan.confirm.is_none());
+        assert_eq!(row.metadata_revision, 1);
+        assert_eq!((row.status.as_str(), row.last_error.as_str()), ("idle", ""));
+        // Clearing it brings back the suggestion to confirm.
+        let body = serde_json::json!({"job_id": device, "titles": []});
+        assert_eq!(
+            roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/titles/{device}"),
+                Some(&body.to_string()),
+                &[]
+            )
+            .0,
+            200
+        );
+        assert!(
+            ripper::staging::read_state(&tmp.path().join(device))
+                .unwrap()
+                .title_pick
+                .is_none()
+        );
+        let row = ripper::STATE.lock().unwrap().remove(device).unwrap();
+        assert_eq!(row.plan.title_pick, None);
+        assert!(row.plan.confirm.is_some());
+    }
+
+    // A held capture confirms only titles its sweep read; the rest need the disc. Confirming
+    // saves the pick, keeps the name, and requeues the replan from the saved image.
+    #[test]
+    fn review_episodes_confirms_only_swept_titles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let dir = tmp.path().join("held-episodes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let iso = dir.join("Saved.iso");
+        let map = dir.join("Saved.iso.mapfile");
+        let k = crate::ku_fixture::K1;
+        let image = crate::ku_fixtures::bd_image(&[Some(k), Some(k)], 1)
+            .img
+            .image;
+        std::fs::write(&iso, &image).unwrap();
+        let (disc, _) =
+            freemkv_engine::scan_image(&freemkv_engine::ImageSource::Iso(iso.clone())).unwrap();
+        assert!(disc.titles.len() >= 2);
+        // The sweep read everything except the second title's own sectors.
+        let mut mapfile =
+            freemkv_engine::Mapfile::create(&map, image.len() as u64, "test").unwrap();
+        mapfile
+            .record(
+                0,
+                image.len() as u64,
+                freemkv_engine::SectorStatus::Finished,
+            )
+            .unwrap();
+        for extent in &disc.titles[1].extents {
+            mapfile
+                .record(
+                    u64::from(extent.start_lba) * 2048,
+                    u64::from(extent.sector_count) * 2048,
+                    freemkv_engine::SectorStatus::NonTried,
+                )
+                .unwrap();
+        }
+        drop(mapfile);
+        let mut saved = ripper::staging::DiscState::new(ripper::staging::StagingState::Review);
+        saved.title = "Show".into();
+        saved.media_type = crate::server::planner::MediaKind::Tv;
+        saved.episode_start = Some(3);
+        saved.iso_path = iso.to_string_lossy().into_owned();
+        saved.mapfile_path = map.to_string_lossy().into_owned();
+        ripper::staging::write_state(&dir, &saved);
+
+        let (status, listed) = roundtrip(
+            &cfg,
+            "GET",
+            "/api/review/titles?dir=held-episodes",
+            None,
+            &[],
+        );
+        assert_eq!(status, 200, "{listed}");
+        let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+        assert_eq!(listed["titles"][0]["swept"], true);
+        assert_eq!(listed["titles"][1]["swept"], false);
+        let post = |pick: &[usize], revision: Option<u64>| {
+            let body = serde_json::json!({"dir": "held-episodes", "action": "episodes", "revision": revision, "titles": ids(&disc.titles, pick)});
+            roundtrip(
+                &cfg,
+                "POST",
+                "/api/review/resolve",
+                Some(&body.to_string()),
+                &[],
+            )
+        };
+        let (status, reply) = post(&[1], None);
+        assert_eq!(status, 400, "{reply}");
+        assert!(reply.contains("insert the disc"), "{reply}");
+        assert_eq!(
+            post(&[0, 1], None).0,
+            400,
+            "one title outside the scope refuses all"
+        );
+        assert_eq!(post(&[], None).0, 400, "a held capture needs episodes");
+        assert_eq!(post(&[0], Some(9)).0, 409, "a stale dialog");
+        assert_eq!(
+            ripper::staging::read_state(&dir).unwrap(),
+            {
+                let mut unchanged = saved.clone();
+                unchanged.schema = ripper::staging::read_state(&dir).unwrap().schema;
+                unchanged
+            },
+            "refusals change nothing"
+        );
+        let (status, reply) = post(&[0], Some(0));
+        assert_eq!(status, 200, "{reply}");
+        let current = ripper::staging::read_state(&dir).unwrap();
+        assert_eq!(
+            current.title_pick,
+            Some(vec![crate::title_identity::TitleIdentity::of(
+                &disc.titles[0]
+            )])
+        );
+        assert_eq!(current.state, ripper::staging::StagingState::Ripped);
+        assert!(current.replan_required);
+        assert!(current.episode_confirm.is_none());
+        assert_eq!(current.user_metadata.unwrap().title, "Show");
+        assert_eq!(current.metadata_revision, 1);
+    }
 }
 
 // Stop all leaves audits paused (Audits::stop_all); the dialog must say so.

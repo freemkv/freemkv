@@ -859,6 +859,121 @@ pub(crate) fn record_episode_confirm(
     }
 }
 
+/// Where an operator title pick is saved from: a drive's scanned job (which may have no
+/// `state.json` yet), or a held capture in Review.
+pub(crate) enum PickOrigin<'a> {
+    Device {
+        identity: &'a str,
+        label: &'a str,
+        device: &'a str,
+    },
+    Review,
+}
+
+/// Save the operator's titles (`None` = automatic) as a correction (design §4.2, §4.3): a new
+/// revision that clears the waiting suggestion and replans a job that already has a plan.
+/// `expected_revision` refuses a dialog opened before another correction; `check` validates
+/// the pick against the job under the state lock. Returns the committed revision.
+pub(crate) fn save_title_pick(
+    dir: &Path,
+    pick: Option<Vec<crate::title_identity::TitleIdentity>>,
+    origin: PickOrigin,
+    expected_revision: Option<u64>,
+    check: impl FnOnce(&DiscState) -> io::Result<()>,
+) -> io::Result<u64> {
+    let review = matches!(origin, PickOrigin::Review);
+    let lock = state_lock(dir);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = match read_state_checked(dir) {
+        StateRead::Valid(st) => *st,
+        StateRead::Absent if !review => DiscState::new(StagingState::Stopped),
+        StateRead::Unreadable(u) => return Err(u.to_io_error()),
+        StateRead::Absent => {
+            return Err(io::Error::other(
+                "staging state unavailable; retry after scan",
+            ));
+        }
+    };
+    if st.reset_in_progress {
+        return Err(io::Error::other(
+            "capture reset is incomplete; finish Start over before choosing titles",
+        ));
+    }
+    if review && st.state != StagingState::Review {
+        return Err(io::Error::other("not a held rip"));
+    }
+    if matches!(st.state, StagingState::Done | StagingState::Completed) {
+        return Err(io::Error::other(
+            "delivery has started; the staged job's titles can no longer be changed",
+        ));
+    }
+    if expected_revision.is_some_and(|expected| expected != st.metadata_revision) {
+        return Err(io::Error::other(
+            "the disc's title or titles changed meanwhile; refresh and choose again",
+        ));
+    }
+    check(&st)?;
+    let changes = st.title_pick != pick;
+    let mut needs_replan = false;
+    if st.title_identity_review {
+        if st.iso_path.is_empty() {
+            return Err(io::Error::other(
+                "review needs the retained ISO to rebuild the title plan",
+            ));
+        }
+        st.title_identity_review = false;
+        st.replan_required = true;
+        needs_replan = true;
+    }
+    if changes
+        && st.max_retries == 0
+        && st.iso_path.is_empty()
+        && (st.state == StagingState::Sweeping || !st.outputs.is_empty())
+    {
+        return Err(io::Error::other(
+            "changing the titles needs a saved ISO; stop this single-pass rip first",
+        ));
+    }
+    if (changes && !st.outputs.is_empty())
+        || (st.state == StagingState::Review && !st.iso_path.is_empty())
+    {
+        st.replan_required = true;
+        needs_replan = true;
+    }
+    if needs_replan && !saved_image_present(dir, &st) {
+        return Err(io::Error::other(
+            "this rip's saved disc image is no longer in staging, so its titles cannot be changed; rip the disc again to change them",
+        ));
+    }
+    st.metadata_revision = st
+        .metadata_revision
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("metadata revision exhausted"))?;
+    if let PickOrigin::Device {
+        identity,
+        label,
+        device,
+    } = origin
+    {
+        st.disc_identity = identity.to_string();
+        st.disc_label = label.to_string();
+        st.origin_device = device.to_string();
+    }
+    st.title_pick = pick;
+    st.episode_confirm = None;
+    // Confirming a held capture's titles also confirms the name it shows, as Keep this name.
+    if review && st.user_metadata.is_none() {
+        st.user_metadata = Some(UserMetadata::shown_by(&st));
+    }
+    apply_user_metadata(&mut st);
+    if st.state == StagingState::Ripped && st.replan_required {
+        st.failure_reason = None;
+        st.needs_disc = false;
+    }
+    write_state_unlocked(dir, &st)?;
+    Ok(st.metadata_revision)
+}
+
 fn write_state_unlocked(staging_disc_dir: &Path, st: &DiscState) -> io::Result<()> {
     let p = state_path(staging_disc_dir);
     let serialized = serde_json::to_string_pretty(st).map_err(|e| {

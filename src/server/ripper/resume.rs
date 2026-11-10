@@ -492,6 +492,31 @@ fn titles_captured(
     }))
 }
 
+/// A held capture's saved image: its scanned titles and, per title, whether the sweep read it
+/// (only those can be chosen without the disc). Errs when the image is gone or unreadable.
+pub(crate) fn held_titles(
+    dir: &Path,
+    st: &staging::DiscState,
+) -> Result<(Vec<libfreemkv::DiscTitle>, Vec<bool>), String> {
+    let (iso, mapfile) = if st.iso_path.is_empty() || st.mapfile_path.is_empty() {
+        find_iso_and_mapfile(dir).ok_or_else(|| {
+            crate::strings::get_or(
+                "error.titles.no_image",
+                "This rip's saved disc image is no longer in staging, so its titles cannot be listed.",
+            )
+        })?
+    } else {
+        (dir.join(&st.iso_path), dir.join(&st.mapfile_path))
+    };
+    let (disc, _reader) =
+        freemkv_engine::scan_image(&freemkv_engine::ImageSource::Iso(iso.clone()))
+            .map_err(|e| super::format_lib_error("reading the saved disc image", &e))?;
+    let swept = (0..disc.titles.len())
+        .map(|title| titles_captured(&disc, &[title], &iso, &mapfile).unwrap_or(false))
+        .collect();
+    Ok((disc.titles, swept))
+}
+
 // A held capture's episode suggestion, limited to titles its sweep captured: anything else
 // needs the disc. A suggestion that cannot be checked against the image is kept whole.
 pub(super) fn swept_confirm(

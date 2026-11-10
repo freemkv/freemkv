@@ -66,6 +66,7 @@ fn allowed(method: &Method, target: &str) -> bool {
                 | "/api/version"
                 | "/api/system"
                 | "/api/review"
+                | "/api/review/titles"
                 | "/api/tmdb/search"
                 | "/api/debug"
         )
@@ -92,11 +93,11 @@ fn allowed(method: &Method, target: &str) -> bool {
     };
     super::web::is_valid_device_name(&super::web::percent_decode(device))
         && device != "download"
-        && ((*method == Method::Get && action == "logs")
+        && ((*method == Method::Get && matches!(action, "logs" | "titles"))
             || (*method == Method::Post
                 && matches!(
                     action,
-                    "scan" | "rip" | "stop" | "eject" | "title" | "accept-loss"
+                    "scan" | "rip" | "stop" | "eject" | "title" | "titles" | "accept-loss"
                 )))
 }
 fn new_id() -> String {

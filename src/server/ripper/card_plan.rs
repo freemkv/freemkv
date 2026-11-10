@@ -277,6 +277,26 @@ impl Cache {
         self.dispatch(None);
     }
 
+    // An operator pick replans from the same scan with its titles; the metadata stays.
+    fn repick(self: &Arc<Self>, job: &str, revision: u64, pick: Option<Vec<usize>>) {
+        let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = plans.entries.iter_mut().find(|p| p.job == job)
+            && revision > p.latest.revision
+        {
+            p.inputs = Arc::new(Inputs {
+                titles: p.inputs.titles.clone(),
+                label: p.inputs.label.clone(),
+                pick,
+                filename: p.inputs.filename.clone(),
+                mapfile: p.inputs.mapfile.clone(),
+            });
+            p.latest.revision = revision;
+            p.replan_pending = true;
+        }
+        drop(plans);
+        self.dispatch(None);
+    }
+
     fn reconcile(self: &Arc<Self>, cfg: &Config, device: &str, job: &str) {
         let correction = {
             let state = super::STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -473,6 +493,11 @@ pub(crate) fn replan(cfg: Config, job: &str, revision: u64, media: MediaMetadata
             media,
         },
     );
+}
+
+/// Replan `job`'s card with the operator's titles (scan indices) at `revision`.
+pub(crate) fn repick(job: &str, revision: u64, pick: Option<Vec<usize>>) {
+    PLANS.repick(job, revision, pick);
 }
 
 /// The card rows for a plan: one per episode output, or none for a single feature.

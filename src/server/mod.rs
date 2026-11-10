@@ -55,6 +55,7 @@ pub mod planner;
 pub mod review;
 pub mod ripper;
 pub mod settings_schema;
+pub mod titles;
 pub mod tmdb;
 pub mod util;
 pub mod web;

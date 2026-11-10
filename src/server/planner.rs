@@ -437,7 +437,7 @@ pub(crate) fn main_title(cfg: &Config, titles: &[DiscTitle]) -> Result<usize, Pl
         .ok_or(PlanError::NoTitles)
 }
 
-fn presentation(cfg: &Config) -> Option<&str> {
+pub(crate) fn presentation(cfg: &Config) -> Option<&str> {
     Some(cfg.presentation_language.as_str()).filter(|language| !language.trim().is_empty())
 }
 

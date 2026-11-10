@@ -2728,3 +2728,89 @@ fn startup_removes_an_interrupted_prunes_leftovers_from_unheld_jobs() {
     assert!(root.join("Heat/notes.pruning").exists());
     assert!(root.join("Heat/Heat.mkv").exists());
 }
+
+// A pick on a planned job replans it from the saved image and drops the waiting suggestion;
+// without the image it is refused, as is any pick during a single pass.
+#[test]
+fn a_title_pick_replans_a_planned_job_and_needs_its_image() {
+    let titles = crate::server::titles::tests::play_all_disc();
+    let pick = Some(vec![crate::title_identity::TitleIdentity::of(&titles[1])]);
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("Show.iso");
+    fs::write(&iso, b"iso").unwrap();
+    let mut st = DiscState::new(StagingState::Ripped);
+    st.max_retries = 3;
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.outputs = vec![Output {
+        filename: "Show.mkv".into(),
+        title_index: 0,
+        title_identity: None,
+        episode: None,
+        episode_name: String::new(),
+        moved: false,
+    }];
+    st.episode_confirm = Some(crate::server::planner::EpisodeConfirm {
+        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+        suggested: vec![1, 2],
+        clusters: vec![vec![1, 2]],
+        alternates: Vec::new(),
+    });
+    try_write_state(dir.path(), &st).unwrap();
+    let device = PickOrigin::Device {
+        identity: "disc",
+        label: "SHOW_S1",
+        device: "sg0",
+    };
+    let revision = save_title_pick(dir.path(), pick.clone(), device, Some(0), |_| Ok(())).unwrap();
+    let saved = read_state(dir.path()).unwrap();
+    assert_eq!((revision, saved.metadata_revision), (1, 1));
+    assert_eq!(saved.title_pick, pick);
+    assert!(saved.replan_required);
+    assert!(saved.episode_confirm.is_none());
+    assert_eq!(saved.disc_label, "SHOW_S1");
+    // A review hold's own check runs under the lock and can refuse.
+    let refused = save_title_pick(dir.path(), None, PickOrigin::Review, None, |_| Ok(()));
+    assert!(refused.is_err(), "not a held rip");
+    let review = |_: &DiscState| Err(io::Error::other("no"));
+    assert!(
+        save_title_pick(
+            dir.path(),
+            None,
+            PickOrigin::Device {
+                identity: "disc",
+                label: "",
+                device: "sg0"
+            },
+            None,
+            review
+        )
+        .is_err()
+    );
+
+    fs::remove_file(&iso).unwrap();
+    let error = save_title_pick(
+        dir.path(),
+        None,
+        PickOrigin::Device {
+            identity: "disc",
+            label: "",
+            device: "sg0",
+        },
+        None,
+        |_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("saved disc image"), "{error}");
+    assert_eq!(read_state(dir.path()).unwrap().metadata_revision, 1);
+
+    let single = tempfile::tempdir().unwrap();
+    let mut sweeping = DiscState::new(StagingState::Sweeping);
+    sweeping.max_retries = 0;
+    try_write_state(single.path(), &sweeping).unwrap();
+    let origin = PickOrigin::Device {
+        identity: "disc",
+        label: "",
+        device: "sg0",
+    };
+    assert!(save_title_pick(single.path(), pick, origin, None, |_| Ok(())).is_err());
+}

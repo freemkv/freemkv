@@ -44,6 +44,56 @@ pub fn retitle_staging_for_device(
     metadata: staging::UserMetadata,
 ) -> std::io::Result<u64> {
     let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let (dir, row) = correction_dir(&c, device, expected_job)?;
+    staging::save_user_metadata_for_device(
+        &dir,
+        metadata,
+        &row.disc_identity,
+        &row.disc_label,
+        device,
+    )
+}
+
+/// One job's scanned titles, as the Titles dialog lists them.
+pub(crate) struct ScannedTitles {
+    pub job: String,
+    pub titles: Vec<libfreemkv::DiscTitle>,
+}
+
+// The last scans by job, so the dialog lists a disc's titles while it rips or holds.
+static SCANNED: std::sync::Mutex<Vec<Arc<ScannedTitles>>> = std::sync::Mutex::new(Vec::new());
+const SCANNED_KEEP: usize = 8;
+
+fn remember_titles(job: &str, titles: &[libfreemkv::DiscTitle]) {
+    let mut scanned = SCANNED.lock().unwrap_or_else(|e| e.into_inner());
+    scanned.retain(|s| s.job != job);
+    scanned.push(Arc::new(ScannedTitles {
+        job: job.to_string(),
+        titles: titles.to_vec(),
+    }));
+    let over = scanned.len().saturating_sub(SCANNED_KEEP);
+    scanned.drain(..over);
+}
+
+/// The titles `job` was last scanned with, if this process scanned it.
+pub(crate) fn scanned_titles(job: &str) -> Option<Arc<ScannedTitles>> {
+    (SCANNED.lock().unwrap_or_else(|e| e.into_inner()).iter())
+        .find(|s| s.job == job)
+        .cloned()
+}
+
+#[cfg(test)]
+pub(crate) fn remember_titles_for_test(job: &str, titles: &[libfreemkv::DiscTitle]) {
+    remember_titles(job, titles);
+}
+
+// The live row's job dir, for a correction to `expected_job`: refused when the disc changed,
+// is not identified yet, or the staging share is not there to take it.
+fn correction_dir(
+    c: &Config,
+    device: &str,
+    expected_job: &str,
+) -> std::io::Result<(std::path::PathBuf, RipState)> {
     let row = STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -67,17 +117,70 @@ pub fn retitle_staging_for_device(
             "the staging network share is not mounted; the correction was not saved",
         ));
     }
-    crate::server::config::staging_root_ready(&c)
+    crate::server::config::staging_root_ready(c)
         .map_err(|p| std::io::Error::other(staging_problem_text(&p)))?;
     create_job_dir(&dir)
         .map_err(|e| std::io::Error::new(e.kind(), format!("cannot create staging: {e}")))?;
-    staging::save_user_metadata_for_device(
+    Ok((dir, row))
+}
+
+/// Persist the operator's titles (`None` = automatic) onto the current disc's staging entry,
+/// then show them on the card and replan its episodes. Returns the committed revision.
+pub fn pick_titles_for_device(
+    cfg: &Arc<RwLock<Config>>,
+    device: &str,
+    expected_job: &str,
+    expected_revision: Option<u64>,
+    pick: Option<(Vec<crate::title_identity::TitleIdentity>, Vec<usize>)>,
+) -> std::io::Result<u64> {
+    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let (dir, row) = correction_dir(&c, device, expected_job)?;
+    if expected_revision.is_some_and(|expected| expected != row.metadata_revision) {
+        return Err(std::io::Error::other(
+            "the disc's title or titles changed meanwhile; refresh and choose again",
+        ));
+    }
+    let (identities, indices) = pick.unzip();
+    let revision = staging::save_title_pick(
         &dir,
-        metadata,
-        &row.disc_identity,
-        &row.disc_label,
-        device,
-    )
+        identities,
+        staging::PickOrigin::Device {
+            identity: &row.disc_identity,
+            label: &row.disc_label,
+            device,
+        },
+        expected_revision,
+        |_| Ok(()),
+    )?;
+    // The card's plan as the rip will resolve it now: the pick runs as chosen, and clearing
+    // it brings back the automatic plan (or its suggestion to confirm).
+    let confirm = scanned_titles(expected_job).and_then(|scan| {
+        let request = TitleRequest {
+            media: card_media(&row),
+            pick: indices.clone(),
+            pick_mismatch: false,
+        };
+        (request.run(&c, &scan.titles, ScopeMode::capture(&c)).err())
+            .and_then(|error| error.confirm().cloned())
+    });
+    update_state_with(device, |s| {
+        s.publish_title_pick(expected_job, revision, indices.clone(), confirm)
+    });
+    card_plan::repick(expected_job, revision, indices);
+    Ok(revision)
+}
+
+// The resolved metadata a live card shows, enough to resolve its titles.
+pub(crate) fn card_media(row: &RipState) -> MediaMetadata {
+    MediaMetadata {
+        title: row.tmdb_title.clone(),
+        year: row.tmdb_year,
+        kind: row.plan.media_kind,
+        season: row.plan.season,
+        disc: row.plan.disc,
+        episode_start: row.episode_start,
+        ..MediaMetadata::default()
+    }
 }
 
 // Internal-use imports for the orchestrator code that lives in this
@@ -1898,6 +2001,7 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
         .run(&cfg_read, &disc.titles, ScopeMode::capture(&cfg_read))
         .err())
     .and_then(|error| error.confirm().cloned());
+    remember_titles(&job_id, &disc.titles);
     update_state_with(device, |s| s.plan = TitlePlanView::of(&request, confirm));
     let key_scope = rip_key_scope(&disc, &cfg_read, &request);
     if announces_online_resolve(&cfg_read, &disc, &key_scope) {
@@ -3286,6 +3390,7 @@ fn rip_disc_inner(
         saved_pick.as_deref(),
         &disc.titles,
     );
+    remember_titles(&job_id, &disc.titles);
     let episode_start = request.media.episode_start;
     // TMDB numeric id (0 = no match). Persisted in the hand-off marker so a
     // consumer can enrich metadata by id later; the mover reads it back.

@@ -507,6 +507,18 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         );
     } else if is_post && url == "/api/review/resolve" {
         handle_review_resolve(request, cfg);
+    } else if is_get && path == "/api/review/titles" {
+        handle_review_titles(request, cfg, &url);
+    } else if url.starts_with("/api/titles/") && (is_get || is_post) {
+        let device = percent_decode(path.trim_start_matches("/api/titles/"));
+        if !is_valid_device_name(&device) {
+            return json_response(request, 400, r#"{"error":"invalid device name"}"#);
+        }
+        if is_get {
+            handle_titles_list(request, cfg, &device);
+        } else {
+            handle_titles_pick(request, cfg, &device);
+        }
     } else if is_get && url.starts_with("/api/tmdb/search") {
         handle_tmdb_search(request, cfg, &url);
     } else if is_post && url.starts_with("/api/title/") {
@@ -775,8 +787,280 @@ fn capture_tv_number(
         })
 }
 
+/// `GET /api/titles/<dev>`: every title of the drive's scanned disc, for the Titles and
+/// Confirm episodes dialogs, with the job and revision a pick must name.
+fn handle_titles_list(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &str) {
+    let Some(row) = live_row(device) else {
+        return json_response(request, 404, UNKNOWN_DEVICE_BODY);
+    };
+    let Some(scan) = ripper::scanned_titles(&row.job_id).filter(|_| !row.job_id.is_empty()) else {
+        return titles_unscanned(request);
+    };
+    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let request_plan = crate::server::planner::TitleRequest {
+        media: ripper::card_media(&row),
+        pick: row.plan.title_pick.clone(),
+        pick_mismatch: false,
+    };
+    let list = crate::server::titles::list(
+        &c,
+        &scan.titles,
+        &request_plan,
+        crate::server::planner::ScopeMode::capture(&c),
+    );
+    let body = serde_json::json!({
+        "job_id": row.job_id,
+        "revision": row.metadata_revision,
+        "show": if row.tmdb_title.is_empty() { &row.disc_name } else { &row.tmdb_title },
+        "kind": row.plan.media_kind.unwrap_or_default(),
+        "season": row.plan.season,
+        "disc": row.plan.disc,
+        "episode_start": row.episode_start,
+        "pick": row.plan.title_pick,
+        "confirm": row.plan.confirm.clone().or(list.confirm),
+        "automatic": list.automatic,
+        "titles": list.titles,
+    });
+    json_response(request, 200, &body.to_string())
+}
+
+/// `POST /api/titles/<dev>`: save the operator's titles for the drive's disc. Body:
+/// `{"job_id":"…","revision":N,"titles":[<id>, …]}` with ids as the list gave them, in order;
+/// `[]` goes back to automatic. A Movie takes exactly one; TV one or more (one needs its
+/// First episode). `revision` (optional) refuses a dialog opened before another correction.
+fn handle_titles_pick(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &str) {
+    if !ripper::device_known(device) {
+        return json_response(request, 404, UNKNOWN_DEVICE_BODY);
+    }
+    let (request, body) = match read_json_body(request) {
+        Ok(rb) => rb,
+        Err(()) => return,
+    };
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return json_response(request, 400, r#"{"ok":false,"error":"invalid json"}"#),
+    };
+    let bad = |request, error: String| {
+        json_response(
+            request,
+            400,
+            &serde_json::json!({"ok": false, "error": error}).to_string(),
+        )
+    };
+    let pick = match crate::server::titles::parse_pick(&v["titles"]) {
+        Ok(pick) => pick,
+        Err(error) => return bad(request, error),
+    };
+    let expected_job = v["job_id"].as_str().unwrap_or("");
+    let revision = v["revision"].as_u64();
+    let Some(row) =
+        live_row(device).filter(|row| !row.job_id.is_empty() && row.job_id == expected_job)
+    else {
+        return json_response(
+            request,
+            409,
+            r#"{"ok":false,"error":"the disc changed or is not identified yet; refresh and try again"}"#,
+        );
+    };
+    let Some(scan) = ripper::scanned_titles(expected_job) else {
+        return titles_unscanned(request);
+    };
+    let pick = match pick {
+        None => None,
+        Some(pick) => {
+            let checked = crate::server::titles::remap(&scan.titles, &pick).and_then(|indices| {
+                crate::server::titles::check_pick(
+                    row.plan.media_kind.unwrap_or_default(),
+                    indices.len(),
+                    row.episode_start,
+                )
+                .map(|()| indices)
+            });
+            match checked {
+                Ok(indices) => Some((pick, indices)),
+                Err(error) => return bad(request, error),
+            }
+        }
+    };
+    match ripper::pick_titles_for_device(cfg, device, expected_job, revision, pick) {
+        Ok(revision) => json_response(
+            request,
+            200,
+            &serde_json::json!({"ok": true, "revision": revision}).to_string(),
+        ),
+        Err(e) => json_response(
+            request,
+            metadata_error_status(&e),
+            &serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+        ),
+    }
+}
+
+fn live_row(device: &str) -> Option<ripper::RipState> {
+    ripper::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .cloned()
+}
+
+fn titles_unscanned(request: tiny_http::Request) {
+    let error = crate::strings::get_or(
+        "error.titles.unscanned",
+        "This disc's titles are not known yet; scan the disc, then try again.",
+    );
+    json_response(
+        request,
+        409,
+        &serde_json::json!({"ok": false, "error": error}).to_string(),
+    )
+}
+
+// A held rip's staging dir from the operator's `dir`: one plain name inside staging, never a
+// symlink. `None` for anything else.
+fn review_dir(staging: &str, dir: &str) -> Option<std::path::PathBuf> {
+    let name = std::path::Path::new(dir);
+    if dir.is_empty()
+        || name.components().count() != 1
+        || !name
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let path = std::path::Path::new(staging).join(dir);
+    (!std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())).then_some(path)
+}
+
+// A held capture's dir, state, and its saved image's titles with what the sweep read.
+type HeldCapture = (
+    std::path::PathBuf,
+    ripper::staging::DiscState,
+    Vec<libfreemkv::DiscTitle>,
+    Vec<bool>,
+);
+
+// The held capture `dir` names, or the status and error that say why not.
+fn held_capture(cfg: &Arc<RwLock<Config>>, dir: &str) -> Result<HeldCapture, (u16, String)> {
+    let staging = cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .staging_dir
+        .clone();
+    let path = review_dir(&staging, dir).ok_or((400, "invalid dir".to_string()))?;
+    let st = ripper::staging::read_state(&path)
+        .filter(|st| st.state == ripper::staging::StagingState::Review)
+        .ok_or((409, "not a held rip".to_string()))?;
+    let (titles, swept) = ripper::resume::held_titles(&path, &st).map_err(|e| (409, e))?;
+    Ok((path, st, titles, swept))
+}
+
+/// `GET /api/review/titles?dir=<staging subdir>`: a held capture's titles, as
+/// `/api/titles/<dev>` lists a drive's, each with `swept` (only those can be chosen).
+fn handle_review_titles(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, url: &str) {
+    let dir = parse_query(url).remove("dir").unwrap_or_default();
+    let (_, st, titles, swept) = match held_capture(cfg, &dir) {
+        Ok(held) => held,
+        Err((status, error)) => {
+            return json_response(
+                request,
+                status,
+                &serde_json::json!({"ok": false, "error": error}).to_string(),
+            );
+        }
+    };
+    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let plan = st.title_request(&titles);
+    let mut list =
+        crate::server::titles::list(&c, &titles, &plan, crate::server::planner::ScopeMode::Mux);
+    for row in &mut list.titles {
+        row.swept = swept.get(row.index).copied();
+    }
+    let confirm = (st.episode_confirm.clone().or(list.confirm))
+        .map(|c| c.within(|index| swept.get(index).copied().unwrap_or(false)));
+    let body = serde_json::json!({
+        "dir": dir,
+        "revision": st.metadata_revision,
+        "show": st.title,
+        "kind": plan.media.kind.unwrap_or_default(),
+        "season": plan.media.season,
+        "disc": plan.media.disc,
+        "episode_start": plan.media.episode_start,
+        "pick": plan.pick,
+        "confirm": confirm,
+        "automatic": list.automatic,
+        "titles": list.titles,
+    });
+    json_response(request, 200, &body.to_string())
+}
+
+// `action: "episodes"` on a held capture: save the operator's titles, all within what its
+// sweep read, and requeue its replan. Anything outside that scope needs the disc.
+fn resolve_review_episodes(
+    request: tiny_http::Request,
+    cfg: &Arc<RwLock<Config>>,
+    v: &serde_json::Value,
+    dir: &str,
+) {
+    use crate::strings::get_or;
+    let respond = |request, status: u16, error: String| {
+        json_response(
+            request,
+            status,
+            &serde_json::json!({"ok": false, "error": error}).to_string(),
+        )
+    };
+    let pick = match crate::server::titles::parse_pick(&v["titles"]) {
+        Ok(Some(pick)) => pick,
+        Ok(None) => {
+            return respond(
+                request,
+                400,
+                get_or("error.titles.tv_none", "Choose at least one episode."),
+            );
+        }
+        Err(error) => return respond(request, 400, error),
+    };
+    let (path, st, titles, swept) = match held_capture(cfg, dir) {
+        Ok(held) => held,
+        Err((status, error)) => return respond(request, status, error),
+    };
+    let media = st.resolved_media();
+    let checked = crate::server::titles::remap(&titles, &pick).and_then(|indices| {
+        if indices.iter().any(|&i| !swept.get(i).copied().unwrap_or(false)) {
+            return Err(get_or(
+                "error.titles.not_swept",
+                "Only titles this capture read can be chosen here; to rip the others, insert the disc and choose them on its drive.",
+            ));
+        }
+        crate::server::titles::check_pick(
+            media.kind.unwrap_or_default(),
+            indices.len(),
+            media.episode_start,
+        )
+    });
+    if let Err(error) = checked {
+        return respond(request, 400, error);
+    }
+    match ripper::staging::save_title_pick(
+        &path,
+        Some(pick),
+        ripper::staging::PickOrigin::Review,
+        v["revision"].as_u64(),
+        |_| Ok(()),
+    ) {
+        Ok(revision) => json_response(
+            request,
+            200,
+            &serde_json::json!({"ok": true, "revision": revision}).to_string(),
+        ),
+        Err(e) => respond(request, metadata_error_status(&e), e.to_string()),
+    }
+}
+
 /// `POST /api/review/resolve` — resolve a held rip. Body:
-/// `{"dir":"<staging subdir>","action":"proceed|retitle|cancel","title":"…","year":2024}`.
+/// `{"dir":"<staging subdir>","action":"proceed|retitle|cancel|episodes","title":"…","year":2024}`;
+/// `episodes` takes `"titles":[<id>, …]` (and an optional `revision`) as the titles list gave.
 fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     let (request, body) = match read_json_body(request) {
         Ok(rb) => rb,
@@ -794,22 +1078,15 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
         .unwrap_or_else(|e| e.into_inner())
         .staging_dir
         .clone();
+    if v["action"] == "episodes" {
+        return resolve_review_episodes(request, cfg, &v, &dir);
+    }
     // Unified held captures can replan their saved ISO without the drive. Use
     // the same atomic correction transaction as the live title picker.
     if matches!(v["action"].as_str(), Some("retitle" | "proceed")) {
-        let path = std::path::Path::new(&dir);
-        if dir.is_empty()
-            || path.components().count() != 1
-            || !path
-                .components()
-                .all(|c| matches!(c, std::path::Component::Normal(_)))
-        {
+        let Some(path) = review_dir(&staging, &dir) else {
             return json_response(request, 400, r#"{"ok":false,"error":"invalid dir"}"#);
-        }
-        let path = std::path::Path::new(&staging).join(&dir);
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-            return json_response(request, 400, r#"{"ok":false,"error":"invalid dir"}"#);
-        }
+        };
         if let Some(saved) = ripper::staging::read_state(&path) {
             let media_type = v["media_type"]
                 .as_str()

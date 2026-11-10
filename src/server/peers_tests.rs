@@ -56,6 +56,30 @@ fn origins_and_proxy_are_scoped() {
         assert!(!allowed(&Method::Post, path), "{path}");
     }
 }
+// The title dialogs cross a connection as the title override does: one valid device segment,
+// the list as GET and the pick as POST; a held capture's list is a fixed GET path.
+#[test]
+fn title_dialog_endpoints_cross_like_the_title_override() {
+    for method in [Method::Get, Method::Post] {
+        assert!(allowed(&method, "/api/titles/sg3"));
+        assert!(allowed(&method, "/api/titles/ioreg:42"));
+        for bad in [
+            "/api/titles/sg3/pick",
+            "/api/titles/../settings",
+            "/api/titles/%2f",
+            "/api/titles/",
+        ] {
+            assert!(!allowed(&method, bad), "{bad}");
+        }
+    }
+    assert!(allowed(&Method::Get, "/api/review/titles?dir=disc-1"));
+    assert!(!allowed(&Method::Post, "/api/review/titles?dir=disc-1"));
+    assert!(!allowed(
+        &Method::Get,
+        "/api/library/titles?source=/iso/a.iso"
+    ));
+}
+
 #[test]
 fn events_relay_flushes_before_upstream_finishes() {
     use std::io::{BufRead, Write};

@@ -305,6 +305,28 @@ impl RipState {
         self.user_metadata = Some(metadata);
     }
 
+    /// Publish a durably committed title pick (scan indices; `None` = automatic) onto the
+    /// matching live job, with the suggestion the plan now waits on, if any.
+    pub fn publish_title_pick(
+        &mut self,
+        expected_job: &str,
+        revision: u64,
+        pick: Option<Vec<usize>>,
+        confirm: Option<crate::server::planner::EpisodeConfirm>,
+    ) {
+        if self.job_id != expected_job || revision <= self.metadata_revision {
+            return;
+        }
+        // The hold this pick answers is over: the card is ready to rip again.
+        if self.plan.confirm.is_some() && confirm.is_none() && self.status == "error" {
+            self.status = "idle".to_string();
+            self.last_error.clear();
+        }
+        self.metadata_revision = revision;
+        self.plan.title_pick = pick;
+        self.plan.confirm = confirm;
+    }
+
     // The card's display fields for a correction; the one projection both
     // publication and progress updates use.
     fn show_user_metadata(&mut self, m: &super::staging::UserMetadata) {
