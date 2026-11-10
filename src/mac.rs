@@ -54,6 +54,8 @@ const BAR_ROW_Y: f64 = 20.0;
 const BAR_LABEL_Y: f64 = 50.0;
 // The selection bar over the title tree: Titles, Audio and Subtitles choosers on one row.
 const PICK_H: f64 = 30.0;
+/// The disc details row over the selection bar.
+const DETAILS_H: f64 = 30.0;
 // Title-tree row height: room above and below the text, so the rows do not read as cramped.
 const ROW_H: f64 = 22.0;
 /// Rip page is shorter than the tree page; the log takes the slack
@@ -698,6 +700,13 @@ struct Ivars {
     pick_subs: RefCell<Option<Retained<NSPopUpButton>>>,
     pick_shown: RefCell<Option<crate::ui::PickView>>,
     pick_row: RefCell<Option<Retained<NSView>>>,
+    /// Why the ticks need checking, at the end of the selection bar.
+    pick_banner: RefCell<Option<Retained<NSTextField>>>,
+    // The disc details row: its text boxes, Movie / TV popup, and the view last painted.
+    details_row: RefCell<Option<Retained<NSView>>>,
+    details_fields: RefCell<Vec<(crate::ui::DetailField, Retained<NSTextField>)>>,
+    details_kind: RefCell<Option<Retained<NSPopUpButton>>>,
+    details_shown: RefCell<Option<crate::ui::DetailsView>>,
     tabs: RefCell<Option<Retained<objc2_app_kit::NSTabView>>>,
     page_main: RefCell<Option<Retained<NSView>>>,
     page_prog: RefCell<Option<Retained<NSView>>>,
@@ -825,6 +834,19 @@ define_class!(
         // the STALE `output_dir`. Mirrors Windows' `edit_out.on().en_change`.
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, n: Option<&objc2_foundation::NSNotification>) {
+            // A disc details box tells the core every keystroke, so Start never misses one.
+            let detail = n.and_then(|n| { n.object() }).and_then(|obj| {
+                self.ivars()
+                    .details_fields
+                    .borrow()
+                    .iter()
+                    .find(|(_, f)| std::ptr::eq(&**f as *const NSTextField as *const AnyObject, &*obj))
+                    .map(|(field, f)| (*field, { f.stringValue() }.to_string()))
+            });
+            if let Some((field, text)) = detail {
+                self.step(|a| a.set_detail(field, &text));
+                return;
+            }
             let Some(f) = self.ivars().out_field.borrow().clone() else {
                 return;
             };
@@ -1167,6 +1189,16 @@ define_class!(
             let choice = self.ivars().pick_shown.borrow().as_ref().zip(tag).and_then(|(v, t)| v.subs_choice(t));
             if let Some(choice) = choice {
                 self.step(|a| a.pick_subtitles(choice));
+            }
+        }
+
+        #[unsafe(method(onDetailKind:))]
+        fn on_detail_kind(&self, _s: Option<&AnyObject>) {
+            let Some(p) = self.ivars().details_kind.borrow().clone() else {
+                return;
+            };
+            if let Ok(at) = usize::try_from(p.indexOfSelectedItem()) {
+                self.step(|a| a.set_detail_kind(at));
             }
         }
 
@@ -1670,6 +1702,15 @@ impl Controller {
             self.fill_pick_bar(v.pick.as_ref());
             *iv.pick_shown.borrow_mut() = v.pick.clone();
         }
+        // details row: likewise; showing or hiding it moves the tree
+        if iv.details_shown.borrow().as_ref() != v.details.as_ref() {
+            let moved = iv.details_shown.borrow().is_some() != v.details.is_some();
+            self.fill_details(v.details.as_ref());
+            *iv.details_shown.borrow_mut() = v.details.clone();
+            if moved {
+                self.relayout_now();
+            }
+        }
 
         // output row
         {
@@ -1885,12 +1926,17 @@ impl Controller {
                 v.setFrame(r(0.0, ty - RESULT_H - 2.0, w, RESULT_H));
             }
             // main page internals: the tree over the full width, the output bar under it
+            let dh = if iv.details_shown.borrow().is_some() {
+                DETAILS_H
+            } else {
+                0.0
+            };
             if let Some(sv) = iv.tree_scroll.borrow().as_ref() {
                 sv.setFrame(r(
                     PAD,
                     BAR_H + PAD,
                     w - PAD * 2.0,
-                    (ph - BAR_H - PAD - PICK_H).max(40.0),
+                    (ph - BAR_H - PAD - PICK_H - dh).max(40.0),
                 ));
                 // Fit the columns to the new width (Description takes up the
                 // change), so Size stays in view.
@@ -1904,8 +1950,47 @@ impl Controller {
                 g.setFrame(r(PAD, 0.0, w - PAD * 2.0, BAR_H));
             }
             if let Some(row) = iv.pick_row.borrow().as_ref() {
-                row.setFrame(r(PAD, ph - PICK_H, w - PAD * 2.0, PICK_H));
+                row.setFrame(r(PAD, ph - PICK_H - dh, w - PAD * 2.0, PICK_H));
             }
+            if let Some(row) = iv.details_row.borrow().as_ref() {
+                row.setFrame(r(PAD, ph - DETAILS_H, w - PAD * 2.0, DETAILS_H));
+            }
+        }
+    }
+
+    // Fill the disc details row from the view; hidden with no disc open. A box is written
+    // only when the core holds something else, so typing is never overwritten.
+    fn fill_details(&self, details: Option<&crate::ui::DetailsView>) {
+        let iv = self.ivars();
+        if let Some(row) = iv.details_row.borrow().as_ref() {
+            row.setHidden(details.is_none());
+        }
+        let Some(v) = details else { return };
+        for (field, f) in iv.details_fields.borrow().iter() {
+            let want = v.get(*field);
+            if f.stringValue().to_string() != want {
+                f.setStringValue(&NSString::from_str(want));
+            }
+            if matches!(
+                field,
+                crate::ui::DetailField::Season
+                    | crate::ui::DetailField::Disc
+                    | crate::ui::DetailField::FirstEpisode
+            ) {
+                f.setEnabled(v.numbering);
+            }
+        }
+        if let Some(p) = iv.details_kind.borrow().as_ref() {
+            let have: Vec<String> = (0..p.numberOfItems())
+                .map(|i| p.itemTitleAtIndex(i).to_string())
+                .collect();
+            if have != v.kinds {
+                p.removeAllItems();
+                for label in &v.kinds {
+                    p.addItemWithTitle(&NSString::from_str(label));
+                }
+            }
+            p.selectItemAtIndex(v.kind_index as isize);
         }
     }
 
@@ -1917,6 +2002,11 @@ impl Controller {
             row.setHidden(pick.is_none());
         }
         let Some(v) = pick else { return };
+        if let Some(b) = iv.pick_banner.borrow().as_ref() {
+            let banner = v.banner.clone().unwrap_or_default();
+            b.setStringValue(&NSString::from_str(&banner));
+            b.setToolTip(Some(&NSString::from_str(&banner)));
+        }
         if let Some(p) = iv.pick_titles.borrow().as_ref() {
             p.removeAllItems();
             for (_, label) in &v.titles {
@@ -2692,6 +2782,70 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     let top_y = 0.0;
 
     // ── title tree ─────────────────────────────────────────────────────
+    // ── disc details row: name, year, kind and numbering, over the selection bar ──
+    let details_row = {
+        NSView::initWithFrame(
+            NSView::alloc(mtm),
+            r(PAD, top_y + top_h - DETAILS_H, tree_w, DETAILS_H),
+        )
+    };
+    {
+        use crate::ui::DetailField as F;
+        let [name, year, kind, season, disc, first] = crate::ui::details_labels();
+        let mut x = 0.0;
+        let mut fields = Vec::new();
+        let label = |s: &str, x: &mut f64| {
+            let lw = 8.0 + 7.0 * s.chars().count() as f64;
+            let l = text(mtm, &format!("{s}:"), r(*x, 6.0, lw, 17.0), false, false);
+            details_row.addSubview(&l);
+            *x += lw + 4.0;
+        };
+        let mut boxes = |s: &str, field: F, w: f64, x: &mut f64| {
+            label(s, x);
+            let f = { NSTextField::initWithFrame(NSTextField::alloc(mtm), r(*x, 4.0, w, 22.0)) };
+            f.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+            unsafe { f.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(c))) };
+            details_row.addSubview(&f);
+            fields.push((field, f));
+            *x += w + 14.0;
+        };
+        boxes(&name, F::Name, 240.0, &mut x);
+        boxes(&year, F::Year, 52.0, &mut x);
+        {
+            let lw = 8.0 + 7.0 * kind.chars().count() as f64;
+            let l = text(mtm, &format!("{kind}:"), r(x, 6.0, lw, 17.0), false, false);
+            details_row.addSubview(&l);
+            x += lw + 4.0;
+            let p = {
+                NSPopUpButton::initWithFrame_pullsDown(
+                    NSPopUpButton::alloc(mtm),
+                    r(x, 2.0, 150.0, 26.0),
+                    false,
+                )
+            };
+            unsafe {
+                p.setTarget(Some(c));
+                p.setAction(Some(sel!(onDetailKind:)));
+            }
+            details_row.addSubview(&p);
+            x += 150.0 + 18.0;
+            *c.ivars().details_kind.borrow_mut() = Some(p);
+        }
+        boxes(&season, F::Season, 40.0, &mut x);
+        boxes(&disc, F::Disc, 40.0, &mut x);
+        boxes(&first, F::FirstEpisode, 48.0, &mut x);
+        *c.ivars().details_fields.borrow_mut() = fields;
+        *c.ivars().details_shown.borrow_mut() = None;
+        details_row.setHidden(true);
+    }
+    mask(
+        &details_row,
+        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+            | objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin,
+    );
+    add(&details_row);
+    *c.ivars().details_row.borrow_mut() = Some(details_row.clone());
+
     // ── selection bar: Titles / Audio / Subtitles over the tree ────────
     let pick_row = {
         NSView::initWithFrame(
@@ -2729,6 +2883,22 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         *c.ivars().pick_audio.borrow_mut() = Some(a);
         *c.ivars().pick_subs.borrow_mut() = Some(sb);
         *c.ivars().pick_shown.borrow_mut() = None;
+        // The banner takes the rest of the bar; its whole text is in the log and tooltip.
+        let banner = text(
+            mtm,
+            "",
+            r(x, 6.0, (tree_w - x).max(40.0), 17.0),
+            false,
+            false,
+        );
+        banner.setTextColor(Some(&NSColor::systemOrangeColor()));
+        banner.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+        mask(
+            &banner,
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable,
+        );
+        pick_row.addSubview(&banner);
+        *c.ivars().pick_banner.borrow_mut() = Some(banner);
     }
     mask(
         &pick_row,
@@ -3977,6 +4147,15 @@ fn build_prefs(
         "{title}_t{n}",
         220.0,
     );
+    t.check(
+        mtm,
+        "organize_library",
+        &crate::strings::get_or(
+            "gui.set.organize_library",
+            "Organize into Movies/TV folders",
+        ),
+        false,
+    );
     t.gap();
     t.check(
         mtm,
@@ -4036,20 +4215,6 @@ fn build_prefs(
         "min_title_secs",
         &crate::strings::get("gui.set.min_length"),
         "120",
-        80.0,
-    );
-    t.field(
-        mtm,
-        "tv_season",
-        &crate::strings::get("gui.set.tv_season"),
-        "",
-        80.0,
-    );
-    t.field(
-        mtm,
-        "tv_first_episode",
-        &crate::strings::get("gui.set.tv_first_episode"),
-        "",
         80.0,
     );
     t.note(mtm, &crate::strings::get("gui.set.min_length_note"), tw);

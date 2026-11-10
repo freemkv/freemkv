@@ -8,7 +8,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 
 use super::Shell;
-use super::pick_bar::PickBar;
+use super::pick_bar::{DetailsBar, PickBar};
 use super::tree::TitleTree;
 use crate::linux_glue::{self as glue, LogDelta, LogMemo};
 use crate::ui::{Cmd, Effect, LogKind, LogLine, View};
@@ -31,6 +31,7 @@ pub(super) struct MainView {
     pub root: gtk::Box,
     stack: gtk::Stack,
     pick_bar: PickBar,
+    details_bar: DetailsBar,
     tree: TitleTree,
     empty: adw::StatusPage,
     open_disc: gtk::Button,
@@ -156,6 +157,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
 
     // ── titles page: selection bar, tree, output ──
     let pick_bar = PickBar::new(shell);
+    let details_bar = DetailsBar::new(shell);
     let me_sel = shell.clone();
     let me_tog = shell.clone();
     let tree = TitleTree::new(
@@ -226,6 +228,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     output.append(&out_hint);
 
     let titles = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    titles.append(&details_bar.widget);
     titles.append(&pick_bar.widget);
     titles.append(&tree.widget);
     titles.append(&output);
@@ -343,6 +346,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
         root,
         stack,
         pick_bar,
+        details_bar,
         empty,
         open_disc,
         drive_rows,
@@ -450,6 +454,7 @@ impl MainView {
             self.tree.sync_checks(&v.title_rows);
         }
         self.pick_bar.render(v.pick.as_ref());
+        self.details_bar.render(v.details.as_ref());
 
         if self.out_entry.text() != v.output_dir {
             self.out_entry.set_text(&v.output_dir);

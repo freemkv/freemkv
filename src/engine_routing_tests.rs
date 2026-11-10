@@ -1,11 +1,12 @@
 use super::{
     DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, TvNamingRequest, UiSink,
-    damage_note, demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme,
-    image_title_run, is_disc_source, is_stream_source, iso_recovery_result, mux_opts, out_kind,
-    recovery_plan, recovery_produced_no_data, recovery_raw, run_disc_scanning, run_stream,
-    should_delete_staging_iso, source_scheme, staging_not_kept_note, stream_selection_for,
-    title_dest, title_options, title_plan, tv_first_episode, tv_names_from_roster,
-    tv_names_if_free, verify_selection_identity, verify_title_identity, whole_image_gate,
+    damage_note, demux_needs_subdirs, disc_device, disc_raw_copy, episode_file_leaf, fe,
+    image_or_dir_scheme, image_title_run, is_disc_source, is_stream_source, iso_recovery_result,
+    library_path, make_parent, mux_opts, out_kind, recovery_plan, recovery_produced_no_data,
+    recovery_raw, run_disc_scanning, run_stream, should_delete_staging_iso, source_scheme,
+    staging_not_kept_note, stream_selection_for, title_dest, title_options, title_plan,
+    tv_names_from_roster, tv_names_if_free, tv_naming_plan, verify_selection_identity,
+    verify_title_identity, whole_image_gate,
 };
 use std::sync::Arc;
 
@@ -1029,11 +1030,11 @@ fn tv_names_follow_authored_roster_even_when_only_one_episode_is_ripped() {
     );
     assert_eq!(
         names.get(&2).map(String::as_str),
-        Some("Kung Fu_S01E04 - The Choice")
+        Some("Kung Fu S01E04 - The Choice")
     );
     let (url, path) = title_dest(&req(), OutKind::File("mkv"), "KUNG_FU", 2, false, &names);
     assert_eq!(url, format!("mkv://{path}"));
-    assert_eq!(path, "/out/Kung Fu_S01E04 - The Choice.mkv");
+    assert_eq!(path, "/out/Kung Fu S01E04 - The Choice.mkv");
     let (_, unchanged) = title_dest(
         &req(),
         OutKind::File("mkv"),
@@ -1045,22 +1046,15 @@ fn tv_names_follow_authored_roster_even_when_only_one_episode_is_ripped() {
     assert_eq!(unchanged, "/out/KUNG_FU_t3.mkv");
 }
 
-fn tv(roster: Vec<usize>) -> TvNamingRequest {
-    TvNamingRequest {
-        api_key: "k".into(),
-        roster,
-        season: Some(1),
-        first_episode: None,
-    }
-}
-
 // Disc `label`'s episode targets in `dir` after the existing-file guard.
 fn guarded_tv_paths(dir: &std::path::Path, label: &str, roster: &[usize]) -> Vec<String> {
-    let first = tv_first_episode(&tv(roster.to_vec()), label).expect("first episode");
+    let disc = freemkv_engine::metadata::tmdb::disc_from_label(label);
+    let first =
+        freemkv_engine::metadata::episode_numbers(roster.len(), disc, None).expect("first episode");
     let names = tv_names_from_roster(roster, "Show", 1, first, &[]);
     let mut r = req();
     r.dest_dir = dir.to_string_lossy().into_owned();
-    let names = tv_names_if_free(names, &r.dest_dir, "mkv");
+    let names = tv_names_if_free(names, &r.dest_dir, "mkv", &[]);
     roster
         .iter()
         .map(|&idx| title_dest(&r, OutKind::File("mkv"), label, idx, true, &names).1)
@@ -1093,7 +1087,7 @@ fn an_uneven_split_disc_never_targets_an_earlier_discs_episode_file() {
     let disc1 = guarded_tv_paths(&dir, "SHOW_S1_DISC1", &[0, 1, 2, 3]);
     write_all(&disc1, "d1");
     let disc2 = guarded_tv_paths(&dir, "SHOW_S1_DISC2", &[0, 1, 2, 3]);
-    assert!(disc2[0].ends_with("Show_S01E05.mkv"), "{disc2:?}");
+    assert!(disc2[0].ends_with("Show S01E05.mkv"), "{disc2:?}");
     write_all(&disc2, "d2");
     let disc3 = guarded_tv_paths(&dir, "SHOW_S1_DISC3", &[0, 1]);
     assert_untouched(&disc1, "d1", &disc3);
@@ -1109,7 +1103,7 @@ fn an_unnumbered_disc_never_targets_an_earlier_discs_episode_file() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let first = guarded_tv_paths(&dir, "SHOW_S1", &[0, 1]);
-    assert!(first[0].ends_with("Show_S01E01.mkv"), "{first:?}");
+    assert!(first[0].ends_with("Show S01E01.mkv"), "{first:?}");
     write_all(&first, "a");
     let second = guarded_tv_paths(&dir, "SHOW_S1_EXTRA", &[0, 1]);
     assert_untouched(&first, "a", &second);
@@ -1721,4 +1715,226 @@ fn unquantifiable_loss_does_not_corrupt_the_note() {
     };
     let note = damage_note(&result);
     assert!(!note.to_lowercase().contains("nan"), "{note}");
+}
+
+// ── naming without TMDB, the legacy-name guard, and the library layout ────
+
+// A disc of `n` titles, each told apart by its playlist number.
+fn disc_of(n: usize) -> libfreemkv::Disc {
+    libfreemkv::Disc {
+        volume_id: String::new(),
+        meta_title: None,
+        format: libfreemkv::DiscFormat::Dvd,
+        capacity_sectors: 0,
+        capacity_bytes: 0,
+        layers: 1,
+        titles: (0..n)
+            .map(|i| {
+                let mut t = libfreemkv::DiscTitle::empty();
+                t.playlist_id = i as u16 + 1;
+                t.duration_secs = 1400.0 + i as f64;
+                t
+            })
+            .collect(),
+        region: libfreemkv::disc::DiscRegion::Free,
+        aacs: None,
+        css: None,
+        encrypted: false,
+        aacs_error: None,
+        css_error: None,
+        layer_map: None,
+        content_format: libfreemkv::ContentFormat::DvdPs,
+    }
+}
+
+fn scratch_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("fmkv-naming-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn tv_meta(title: &str) -> freemkv_engine::metadata::MediaMetadata {
+    freemkv_engine::metadata::MediaMetadata {
+        title: title.into(),
+        kind: Some(freemkv_engine::metadata::MediaKind::Tv),
+        ..Default::default()
+    }
+}
+
+// The plan for `roster` (all ripped) of a 4-title disc into `dir`, with no TMDB key.
+fn plan(
+    dir: &std::path::Path,
+    label: &str,
+    operator: freemkv_engine::metadata::MediaMetadata,
+    roster: &[usize],
+    titles: &[usize],
+    organize: bool,
+) -> std::collections::HashMap<usize, String> {
+    let disc = disc_of(4);
+    let mut r = req();
+    r.dest_dir = dir.to_string_lossy().into_owned();
+    r.titles = titles.to_vec();
+    r.title_ids = disc.titles.iter().map(TitleIdentity::of).collect();
+    r.tv_naming = Some(TvNamingRequest {
+        api_key: String::new(),
+        roster: roster.to_vec(),
+        operator,
+        organize,
+    });
+    let state = Arc::new(RunState::default());
+    tv_naming_plan(&r, &disc, label, &UiSink(state))
+}
+
+fn named(names: &std::collections::HashMap<usize, String>, idx: usize) -> &str {
+    names.get(&idx).map_or("", String::as_str)
+}
+
+#[test]
+fn episodes_are_named_from_the_disc_details_without_tmdb() {
+    let dir = scratch_dir("no-tmdb");
+    // The operator's TV, name and disc: disc 2 of 4-episode discs starts at E05.
+    let mut operator = tv_meta("Samurai Champloo");
+    operator.disc = Some(2);
+    let names = plan(
+        &dir,
+        "SAMURAI_VOL2",
+        operator,
+        &[1, 3, 0, 2],
+        &[1, 3, 0, 2],
+        false,
+    );
+    assert_eq!(named(&names, 1), "Samurai Champloo S01E05");
+    assert_eq!(named(&names, 2), "Samurai Champloo S01E08");
+    // The operator's first episode wins over the disc's place.
+    let mut operator = tv_meta("Samurai Champloo");
+    (operator.season, operator.disc, operator.episode_start) = (Some(2), Some(2), Some(13));
+    let names = plan(&dir, "SAMURAI_VOL2", operator, &[0, 1], &[0, 1], false);
+    assert_eq!(named(&names, 1), "Samurai Champloo S02E14");
+    // A label naming a season is TV by itself, the unedited name being the label.
+    let names = plan(
+        &dir,
+        "SHOW_S2_D2",
+        Default::default(),
+        &[0, 1],
+        &[0, 1],
+        false,
+    );
+    assert_eq!(named(&names, 0), "SHOW_S2_D2 S02E03");
+    // Kind unknown or Movie, with no TMDB: the filename template, as before.
+    assert!(plan(&dir, "SHOW", Default::default(), &[0, 1], &[0, 1], false).is_empty());
+    let movie = freemkv_engine::metadata::MediaMetadata {
+        kind: Some(freemkv_engine::metadata::MediaKind::Movie),
+        ..tv_meta("Show")
+    };
+    assert!(plan(&dir, "SHOW_S2", movie, &[0, 1], &[0, 1], false).is_empty());
+    // A roster none of whose titles is ripped names nothing.
+    assert!(plan(&dir, "SHOW", tv_meta("Show"), &[0, 1], &[2], false).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn non_latin_names_survive_and_ascii_matches_the_engine_leaf() {
+    let dir = scratch_dir("unicode");
+    let names = plan(
+        &dir,
+        "VOL1",
+        tv_meta("サムライチャンプルー"),
+        &[0],
+        &[0],
+        false,
+    );
+    assert_eq!(named(&names, 0), "サムライチャンプルー S01E01");
+    let leaf = episode_file_leaf("Cowboy Bebop", 1, 2, "Стрэй Дог Страт: вой");
+    assert_eq!(leaf, "Cowboy Bebop S01E02 - Стрэй Дог Страт_ вой");
+    for (show, name) in [("Kung Fu", "The Choice"), ("Kung Fu", "")] {
+        assert_eq!(
+            episode_file_leaf(show, 3, 12, name),
+            freemkv_engine::metadata::episode_leaf(show, 3, 12, name)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A re-rip never lands beside the same episode under its old desktop name
+// (`Show_S01E01[ - Name]`) or under another episode name.
+#[test]
+fn an_episode_under_a_legacy_or_other_name_is_taken() {
+    for existing in [
+        "Show_S01E02 - The Old Name.mkv",
+        "Show_S01E02.mkv",
+        "Show S01E02 - A TMDB Name.mkv",
+        "Show S01E02.mkv",
+    ] {
+        let dir = scratch_dir("legacy");
+        std::fs::write(dir.join(existing), "old").unwrap();
+        let names = plan(&dir, "SHOW", tv_meta("Show"), &[0, 1], &[0, 1], false);
+        assert!(names.is_empty(), "{existing}: {names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // Another format, or another episode, is no duplicate.
+    let dir = scratch_dir("legacy-free");
+    std::fs::write(dir.join("Show_S01E02.mp4"), "old").unwrap();
+    std::fs::write(dir.join("Show_S01E09.mkv"), "old").unwrap();
+    let names = plan(&dir, "SHOW", tv_meta("Show"), &[0, 1], &[0, 1], false);
+    assert_eq!(named(&names, 1), "Show S01E02");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_library_layout_is_opt_in() {
+    let dir = scratch_dir("layout");
+    let mut show = tv_meta("Show");
+    (show.year, show.season) = (2004, Some(2));
+    // Off: flat.
+    let flat = plan(&dir, "SHOW", show.clone(), &[0, 1], &[0, 1], false);
+    assert_eq!(named(&flat, 0), "Show S02E01");
+    // On: TV under Show (Year)/Season NN, every other ripped title beside it.
+    let tv = plan(&dir, "SHOW", show.clone(), &[0, 1], &[0, 1, 3], true);
+    assert_eq!(named(&tv, 0), "Show (2004)/Season 02/Show S02E01");
+    assert_eq!(named(&tv, 3), "Show (2004)/Season 02/SHOW_t4");
+    // A movie alone is its folder's file; several keep their names in it. With no name
+    // typed and no TMDB, the label names the folder.
+    let film = freemkv_engine::metadata::MediaMetadata {
+        title: "Film".into(),
+        year: 1999,
+        kind: Some(freemkv_engine::metadata::MediaKind::Movie),
+        ..Default::default()
+    };
+    let one = plan(&dir, "FILM", film.clone(), &[], &[0], true);
+    assert_eq!(named(&one, 0), "Film (1999)/Film (1999)");
+    let two = plan(&dir, "FILM", film, &[], &[0, 2], true);
+    assert_eq!(named(&two, 2), "Film (1999)/FILM_t3");
+    let label = plan(&dir, "ネコ", Default::default(), &[], &[0], true);
+    assert_eq!(named(&label, 0), "ネコ/ネコ");
+    assert!(plan(&dir, "FILM", Default::default(), &[], &[0], false).is_empty());
+    // The layout is the engine's for an ASCII name, with an extension added.
+    for (meta, leaf, single) in [
+        (show.clone(), "Show S02E01", false),
+        (
+            freemkv_engine::metadata::MediaMetadata {
+                title: "Film".into(),
+                year: 1999,
+                ..Default::default()
+            },
+            "x",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            std::path::PathBuf::from(format!("{}.mkv", library_path(&meta, leaf, single))),
+            freemkv_engine::metadata::layout::relative_path(&meta, &format!("{leaf}.mkv"))
+        );
+    }
+    // Its folders are made before the file is opened, under the destination.
+    let mut r = req();
+    r.dest_dir = dir.to_string_lossy().into_owned();
+    let (_, target) = title_dest(&r, OutKind::File("mkv"), "SHOW", 0, false, &tv);
+    assert!(
+        target.ends_with("/Show (2004)/Season 02/Show S02E01.mkv"),
+        "{target}"
+    );
+    make_parent(&target);
+    assert!(dir.join("Show (2004)/Season 02").is_dir());
+    let _ = std::fs::remove_dir_all(&dir);
 }

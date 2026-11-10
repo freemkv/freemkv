@@ -55,6 +55,7 @@ fn titles(info_rows: usize) -> MainState {
         log_hidden: false,
         info_rows,
         pick_labels: LABELS,
+        details_labels: None,
     }
 }
 
@@ -95,6 +96,7 @@ fn the_titles_page_stacks_its_rows_at_every_dpi() {
         let (w, h) = default_size(dpi);
         let st = MainState {
             pick_labels: LABELS.map(|v| s.px(v)),
+            details_labels: None,
             ..titles(0)
         };
         let l = main_layout(dpi, w, h, st);
@@ -123,6 +125,7 @@ fn progress_page_scales() {
         log_hidden: false,
         info_rows: 7,
         pick_labels: LABELS,
+        details_labels: None,
     };
 
     let l = main_layout(96, 1180, 760, st);
@@ -179,6 +182,7 @@ fn result_page_scales() {
         log_hidden: false,
         info_rows: 7,
         pick_labels: LABELS,
+        details_labels: None,
     };
     let l = main_layout(96, 1180, 760, st);
     assert_eq!(l.result_head, Rect::new(8, 38, 1164, 26));
@@ -213,6 +217,7 @@ fn empty_page_is_centred_at_every_dpi() {
                 log_hidden: false,
                 info_rows: 0,
                 pick_labels: LABELS,
+                details_labels: None,
             },
         );
         // The headline shares the window's horizontal centre, and the
@@ -242,6 +247,7 @@ fn empty_page_is_centred_at_every_dpi() {
             log_hidden: false,
             info_rows: 0,
             pick_labels: LABELS,
+            details_labels: None,
         },
     );
     // log_h = 1520 * 0.24 = 364; top_h = 1520 - 364 - 48 - 8 = 1100; cy = 24 + 550.
@@ -266,6 +272,7 @@ fn hidden_log_gives_its_height_to_the_page() {
                 log_hidden: true,
                 info_rows: 0,
                 pick_labels: LABELS,
+                details_labels: None,
             },
         );
         assert_eq!(l.log.h, 0, "dpi {dpi}");
@@ -299,6 +306,7 @@ fn nothing_collapses_at_the_minimum_size() {
                         log_hidden,
                         info_rows: 7,
                         pick_labels: LABELS.map(|v| Scale::new(dpi).px(v)),
+                        details_labels: None,
                     },
                 );
                 for (name, r) in [
@@ -345,6 +353,7 @@ fn ninety_six_to_one_ninety_two_is_a_clean_doubling() {
         1520,
         MainState {
             pick_labels: LABELS.map(|v| v * 2),
+            details_labels: None,
             ..st
         },
     );
@@ -661,4 +670,33 @@ fn a_refilled_drive_list_keeps_the_selected_drive() {
     assert_eq!(home_reselect(&[], Some(0), &after), Some(0));
     // No drives: no row.
     assert_eq!(home_reselect(&before, Some(1), &[]), None);
+}
+
+/// The disc details row sits over the selection bar, takes its height from the tree, and
+/// fits the minimum window; hidden, it takes nothing.
+#[test]
+fn the_details_row_moves_the_bar_and_fits_the_minimum_window() {
+    let (w, h) = min_size(96);
+    let hidden = main_layout(96, w, h, titles(0));
+    let shown = main_layout(
+        96,
+        w,
+        h,
+        MainState {
+            details_labels: Some([40, 32, 32, 48, 32, 90]),
+            ..titles(0)
+        },
+    );
+    assert_eq!(hidden.details, [(Rect::default(), Rect::default()); 6]);
+    assert_eq!(shown.pick_titles.y, hidden.pick_titles.y + DETAILS_H);
+    assert_eq!(shown.tree.y, hidden.tree.y + DETAILS_H);
+    assert_eq!(shown.tree.h, hidden.tree.h - DETAILS_H);
+    let last = shown.details[5].1;
+    assert!(last.x + last.w <= w - PAD, "{last:?} in {w}");
+    assert!(shown.details[0].1.y >= hidden.pick_titles.y);
+    // The banner runs from the last chooser to Eject.
+    assert_eq!(
+        shown.pick_banner.x + shown.pick_banner.w,
+        shown.btn_eject.x - PAD
+    );
 }

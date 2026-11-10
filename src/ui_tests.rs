@@ -4021,11 +4021,12 @@ fn home_any_loaded_disc_ignores_duplicate_hardware_labels() {
 fn source_numbering_app() -> App {
     let mut app = App::new();
     app.apply_scan("/media/a.mkv", Ok(probe_scan()), false);
-    app.settings.tv_season = "3".into();
-    app.settings.tv_first_episode = "8".into();
+    app.set_detail(DetailField::Season, "3");
+    app.set_detail(DetailField::FirstEpisode, "8");
     app
 }
 
+// The disc details are this source's: every adopted scan starts them over from its label.
 #[test]
 fn source_numbering_resets_on_every_successful_scan_adoption() {
     // A path cannot identify media: the same file can be replaced or the same
@@ -4042,21 +4043,12 @@ fn source_numbering_resets_on_every_successful_scan_adoption() {
         assert_eq!(app.source, path);
         assert_eq!(app.disc_label, "NEW_DISC");
         assert!(!app.tree.arena.is_empty());
-        assert!(
-            app.settings.tv_season.is_empty(),
-            "{path}: old season survived"
+        assert_eq!(
+            app.details,
+            DiscDetails::for_label("NEW_DISC"),
+            "{path}: old details survived"
         );
-        assert!(
-            app.settings.tv_first_episode.is_empty(),
-            "{path}: old episode survived"
-        );
-        let mut expected = general;
-        expected.tv_season.clear();
-        expected.tv_first_episode.clear();
-        assert!(
-            app.settings == expected,
-            "new scan changed general settings"
-        );
+        assert!(app.settings == general, "new scan changed general settings");
     }
 }
 
@@ -4073,13 +4065,12 @@ fn source_numbering_async_adoption_preserves_current_general_settings() {
     edited.selection = "All titles".into();
     edited.audio_langs = "de".into();
     edited.sub_langs = "fr".into();
+    edited.organize_library = true;
     app.commit_settings(&before, edited);
-    let mut expected = app.settings.clone();
-    expected.tv_season.clear();
-    expected.tv_first_episode.clear();
+    let expected = app.settings.clone();
     assert_eq!(
-        app.settings.tv_season, "3",
-        "request initiation cleared numbering"
+        app.details.season, "3",
+        "request initiation cleared details"
     );
     tx.send(OpenedSource {
         path: "/media/b.mkv".into(),
@@ -4089,64 +4080,34 @@ fn source_numbering_async_adoption_preserves_current_general_settings() {
     .unwrap();
     app.tick();
     assert_eq!(app.source, "/media/b.mkv");
-    assert!(
-        app.settings == expected,
-        "adoption lost edits or retained old numbering"
-    );
+    assert!(app.settings == expected, "adoption lost edits");
+    assert_eq!(app.details, DiscDetails::for_label("PROBE_DISC"));
 }
 
+// The details are not Settings: no form commit, stale or not, reaches them.
 #[test]
-fn source_numbering_stale_form_cannot_restore_unchanged_overrides() {
-    for clear in [true, false] {
-        let mut app = source_numbering_app();
-        let mut form = opened_form(&mut app);
-        if clear {
-            app.clear_source();
-        } else {
-            app.apply_scan("/media/b.mkv", Ok(probe_scan()), false);
-        }
-        // Queue saves behind a controlled pending save: no filesystem or timing.
-        let (_save_tx, save_rx) = std::sync::mpsc::channel();
-        app.saving = Some((save_rx, false));
-        form.filename_template = "{title}_edited".into();
-        app.dispatch(Cmd::CommitSettings(Box::new(form)));
-        assert!(
-            app.settings.tv_season.is_empty(),
-            "stale form restored season"
-        );
-        assert!(
-            app.settings.tv_first_episode.is_empty(),
-            "stale form restored episode"
-        );
-        assert!(
-            app.settings_form().tv_season.is_empty(),
-            "shell baseline retained season"
-        );
-        assert!(
-            app.settings_form().tv_first_episode.is_empty(),
-            "shell baseline retained episode"
-        );
-        assert_eq!(app.settings.filename_template, "{title}_edited");
-        // Refilling the shell controls from that baseline must remain safe on
-        // its next unrelated commit, while an explicit numbering edit applies.
-        let mut form = app.settings_form().clone();
-        form.tv_season = "5".into();
-        app.dispatch(Cmd::CommitSettings(Box::new(form)));
-        assert_eq!(app.settings.tv_season, "5");
-        assert!(app.settings.tv_first_episode.is_empty());
-    }
+fn source_numbering_is_not_in_the_settings_form() {
+    let mut app = source_numbering_app();
+    let mut form = opened_form(&mut app);
+    let (_save_tx, save_rx) = std::sync::mpsc::channel();
+    app.saving = Some((save_rx, false));
+    form.filename_template = "{title}_edited".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    assert_eq!(app.settings.filename_template, "{title}_edited");
+    assert_eq!(app.details.season, "3");
+    assert_eq!(app.details.first_episode, "8");
 }
 
 #[test]
 fn source_numbering_repick_and_preflight_refresh_retain_overrides() {
     let mut app = source_numbering_app();
-    let expected = app.settings.clone();
+    let expected = app.details.clone();
     app.repick();
     let (tx, rx) = std::sync::mpsc::channel();
     app.recheck = Some((app.source.clone(), libfreemkv::Halt::new(), rx));
     tx.send((None, Ok(Vec::new()))).unwrap();
     app.poll_recheck();
-    assert!(app.settings == expected);
+    assert_eq!(app.details, expected);
 }
 
 #[test]
@@ -4154,39 +4115,32 @@ fn source_numbering_scan_error_clears_but_retained_sources_keep_overrides() {
     let mut app = source_numbering_app();
     app.apply_scan("/media/b.mkv", Err("unreadable".into()), false);
     assert!(app.source.is_empty());
-    assert!(app.settings.tv_season.is_empty());
-    assert!(app.settings.tv_first_episode.is_empty());
+    assert_eq!(app.details, DiscDetails::default());
 
     let mut app = source_numbering_app();
-    let expected = app.settings.clone();
+    let expected = app.details.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     app.opening = Some(rx);
     drop(tx);
     app.tick();
     assert_eq!(app.source, "/media/a.mkv");
-    assert!(
-        app.settings == expected,
-        "disconnected worker discarded numbering"
+    assert_eq!(
+        app.details, expected,
+        "disconnected worker discarded details"
     );
 
     app.run = Some(Arc::default());
     app.open("/media/b.mkv");
     app.open_async("/media/b.mkv");
     assert_eq!(app.source, "/media/a.mkv");
-    assert!(
-        app.settings == expected,
-        "rejected Open discarded numbering"
-    );
+    assert_eq!(app.details, expected, "rejected Open discarded details");
     app.run = None;
     let (_tx, rx) = std::sync::mpsc::channel();
     app.ejecting = Some((app.source.clone(), rx));
     app.open("/media/b.mkv");
     app.open_async("/media/b.mkv");
     assert_eq!(app.source, "/media/a.mkv");
-    assert!(
-        app.settings == expected,
-        "ejecting Open discarded numbering"
-    );
+    assert_eq!(app.details, expected, "ejecting Open discarded details");
 }
 
 #[test]
@@ -4257,4 +4211,238 @@ fn the_open_log_names_the_drive_by_its_os_name() {
     assert!(line.contains("E:  HL-DT-ST"), "{line}");
     let (_, line, _) = disc_open_plan(&[drive("E:"), drive("F:")]);
     assert!(line.contains("E:  ") && line.contains("F:  "), "{line}");
+}
+
+// ── disc details, TV episodes and the library layout ──────────────────────
+
+// A DVD title `id` (TT_SRPT order) of `minutes` over one cell at `lba`.
+fn dvd_title(id: u16, minutes: f64, lba: u32) -> libfreemkv::DiscTitle {
+    let mut t = libfreemkv::DiscTitle::empty();
+    t.content_format = libfreemkv::ContentFormat::DvdPs;
+    t.playlist_id = id;
+    t.duration_secs = minutes * 60.0;
+    t.extents = vec![libfreemkv::Extent {
+        start_lba: lba,
+        sector_count: 9_000,
+    }];
+    t.selection_evidence.segments = libfreemkv::disc::ContentSegment::from_cell_extents(&t.extents);
+    t
+}
+
+// A scan of `titles` labelled `label`: one Title row each.
+fn scan_of(titles: &[libfreemkv::DiscTitle], label: &str) -> Scanned {
+    let mut sc = probe_scan();
+    sc.rows.clear();
+    for (ti, title) in titles.iter().enumerate() {
+        let mut t = row("Title", 0, "", false);
+        (t.depth, t.pid, t.title, t.duration_secs) = (1, None, ti, title.duration_secs);
+        sc.rows.push(t);
+    }
+    sc.selection_model = freemkv_engine::SelectionModel::from_titles(titles);
+    sc.title_count = titles.len();
+    (sc.label, sc.volume_id) = (label.to_string(), label.to_string());
+    sc
+}
+
+// Samurai Champloo Vol. 1: 4 × ~23-min episodes in TT_SRPT order 3, 1, 4, 2 (scan order by
+// length), no play-all and no authored roster, and short extras.
+fn samurai(label: &str) -> Scanned {
+    let mut titles = vec![
+        dvd_title(3, 24.0, 30_000),
+        dvd_title(1, 23.7, 10_000),
+        dvd_title(4, 23.8, 40_000),
+        dvd_title(2, 23.6, 20_000),
+    ];
+    for n in 0..4u16 {
+        titles.push(dvd_title(5 + n, 2.0, 100_000 + u32::from(n) * 10_000));
+    }
+    scan_of(&titles, label)
+}
+
+fn opened(sc: Scanned) -> App {
+    let mut app = App::new();
+    app.settings.selection = "Main film / episodes".into();
+    app.settings.min_title_secs = "120".into();
+    app.apply_scan("/media/disc.iso", Ok(sc), false);
+    app
+}
+
+fn offered(app: &App) -> Vec<&'static str> {
+    app.view()
+        .pick
+        .unwrap()
+        .titles
+        .iter()
+        .map(|t| t.0)
+        .collect()
+}
+
+fn title_notes(app: &App, ti: usize) -> String {
+    let n = app
+        .tree
+        .arena
+        .iter()
+        .find(|n| n.type_s == "Title" && n.title_idx == ti);
+    n.map(|n| n.notes.clone()).unwrap_or_default()
+}
+
+#[test]
+fn episodes_are_offered_when_the_operator_or_the_label_says_tv() {
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+    assert!(
+        !offered(&app).contains(&"Episodes"),
+        "no roster, no TV: no Episodes"
+    );
+    app.set_detail_kind(2);
+    assert_eq!(
+        app.details.kind,
+        Some(freemkv_engine::metadata::MediaKind::Tv)
+    );
+    assert!(offered(&app).contains(&"Episodes"));
+    app.set_detail_kind(1);
+    assert!(!offered(&app).contains(&"Episodes"));
+    // A label naming a season is TV without the operator saying so.
+    let app = opened(samurai("SAMURAI_CHAMPLOO_S1"));
+    assert!(offered(&app).contains(&"Episodes"));
+    let details = app.view().details.expect("details row");
+    assert_eq!((details.kind_index, details.numbering), (0, true));
+    assert_eq!(details.name, "SAMURAI_CHAMPLOO_S1");
+}
+
+#[test]
+fn a_tv_disc_without_a_roster_ticks_the_suggestion_in_its_order() {
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+    assert_eq!(app.tree.ticked_titles(), vec![0], "not TV: the main film");
+    app.set_detail_kind(2);
+    // Ticked, and run, in the suggested (TT_SRPT) order, not scan order.
+    assert_eq!(app.tree.ticked_titles(), vec![1, 3, 0, 2]);
+    assert_eq!(title_notes(&app, 1), "Suggested episode 1");
+    assert_eq!(title_notes(&app, 2), "Suggested episode 4");
+    assert_eq!(title_notes(&app, 4), "");
+    let banner = app.view().pick.unwrap().banner.expect("banner");
+    assert!(banner.contains("does not list its episodes"), "{banner}");
+    assert!(
+        banner.contains("Suggested episodes — check the ticks and order before ripping"),
+        "{banner}"
+    );
+    assert!(
+        app.log.iter().any(|l| l.text == banner),
+        "the banner is logged"
+    );
+    // The ticks are the confirmation: exactly the ticked titles, as episodes in run order.
+    let unticked = (app.tree.arena.iter())
+        .position(|n| n.type_s == "Title" && n.title_idx == 3)
+        .unwrap();
+    app.tree.toggle(unticked);
+    let ticked = app.tree.ticked_titles();
+    assert_eq!(ticked, vec![1, 0, 2]);
+    let naming = app.naming_request(&ticked).expect("episodes");
+    assert_eq!(naming.roster, vec![1, 0, 2]);
+    assert!(naming.api_key.is_empty() && !naming.organize);
+    assert_eq!(
+        naming.operator.kind,
+        Some(freemkv_engine::metadata::MediaKind::Tv)
+    );
+    assert_eq!(naming.operator.title, "", "an unedited name is the label");
+    // "Main film only" is no episode pick.
+    app.pick_titles("Main film only");
+    assert!(app.naming_request(&app.tree.ticked_titles()).is_none());
+}
+
+#[test]
+fn several_episode_sets_tick_nothing_and_are_marked() {
+    let minutes = [44.0, 15.0, 44.5, 15.2, 45.0, 14.8];
+    let titles: Vec<_> = (minutes.iter().enumerate())
+        .map(|(n, &m)| dvd_title(n as u16 + 1, m, 10_000 * (n as u32 + 1)))
+        .collect();
+    let mut app = opened(scan_of(&titles, "SHOW"));
+    app.set_detail_kind(2);
+    assert!(app.tree.ticked_titles().is_empty());
+    assert_eq!(title_notes(&app, 0), "Set 1");
+    assert_eq!(title_notes(&app, 1), "Set 2");
+    let banner = app.tree.review.as_ref().unwrap().banner();
+    assert!(banner.contains("Possible episode sets"), "{banner}");
+}
+
+#[test]
+fn a_disc_that_is_not_tv_keeps_todays_selection() {
+    let sc = samurai("SAMURAI_CHAMPLOO_VOL1");
+    let prefs = LangPrefs::default();
+    for kind in [None, Some(freemkv_engine::metadata::MediaKind::Movie)] {
+        for mode in PICK_TITLES {
+            let tree = Tree::from_scan_as(&sc, mode, 120.0, &prefs, kind);
+            assert_eq!(
+                tree.ticked_titles(),
+                Tree::from_scan(&sc, mode, 120.0, &prefs).ticked_titles(),
+                "{mode} {kind:?}"
+            );
+        }
+    }
+    let main = sc
+        .selection_model
+        .main_or_episodes(&freemkv_engine::StreamFilter::All, None)
+        .unwrap();
+    let tree = Tree::from_scan_as(&sc, "Main film / episodes", 120.0, &prefs, None);
+    assert_eq!(tree.ticked_titles(), main);
+    assert!(tree.review.is_none());
+    assert!(title_notes(&opened(sc), 1).is_empty());
+}
+
+// A selection the disc cannot prove says why instead of ticking nothing silently.
+#[test]
+fn a_review_reason_is_shown_not_swallowed() {
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+    app.pick_titles("Episodes");
+    assert!(app.tree.ticked_titles().is_empty());
+    let review = app.tree.review.clone().expect("review");
+    assert_eq!(
+        review.reason,
+        freemkv_engine::SelectionReviewReason::MissingEpisodeRoster
+    );
+    let banner = app.view().pick.unwrap().banner.expect("banner");
+    assert!(banner.contains("Tick the titles to rip"), "{banner}");
+    assert!(app.log.iter().any(|l| l.text == banner));
+}
+
+#[test]
+fn the_details_row_feeds_naming_and_refuses_a_bad_number() {
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+    app.set_detail(DetailField::Name, "サムライチャンプルー");
+    app.set_detail(DetailField::Year, "2004");
+    app.set_detail(DetailField::Disc, "2");
+    app.set_detail_kind(2);
+    let naming = app.naming_request(&app.tree.ticked_titles()).unwrap();
+    assert_eq!(naming.operator.title, "サムライチャンプルー");
+    assert_eq!(
+        (naming.operator.year, naming.operator.disc),
+        (2004, Some(2))
+    );
+    app.output_dir = std::env::temp_dir().to_string_lossy().into_owned();
+    app.set_detail(DetailField::FirstEpisode, "0");
+    app.dispatch(Cmd::Run);
+    assert!(app.run.is_none(), "a bad number starts nothing");
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.text.contains("First episode") && l.text.contains("“0”"))
+    );
+    // A Movie greys the numbering.
+    app.set_detail_kind(1);
+    assert!(!app.view().details.unwrap().numbering);
+}
+
+#[test]
+fn the_library_layout_is_opt_in_and_rides_the_naming_request() {
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+    let ticked = app.tree.ticked_titles();
+    assert!(
+        app.naming_request(&ticked).is_none(),
+        "off, a movie: template names"
+    );
+    app.settings.organize_library = true;
+    let naming = app.naming_request(&ticked).expect("layout");
+    assert!(naming.organize && naming.roster.is_empty());
+    app.dispatch(Cmd::SetFormat("Whole disc → ISO image"));
+    assert!(app.effective_format().starts_with("Whole disc"));
+    assert!(app.naming_request(&ticked).is_none(), "a whole-disc copy");
 }

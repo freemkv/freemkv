@@ -60,6 +60,9 @@ const ID_TREE_HEAD: u16 = 1015;
 const ID_PICK_TITLES: u16 = 1016;
 const ID_PICK_AUDIO: u16 = 1017;
 const ID_PICK_SUBS: u16 = 1018;
+/// The disc details row's Movie / TV choice, and its first text box (the rest follow).
+const ID_DETAILS_KIND: u16 = 1019;
+const ID_DETAILS_EDIT: u16 = 1020;
 
 // Menu command ids. `cmd_for` maps these to core commands, so the enable/
 // disable rule lives in `ui::blocked_while_running` and cannot disagree with
@@ -539,6 +542,8 @@ struct Memo {
     menu_running: Option<bool>,
     /// The selection bar as last filled in; the menus are built from it.
     pick: Option<crate::ui::PickView>,
+    /// The disc details row as last filled in.
+    details: Option<crate::ui::DetailsView>,
     /// The free-space line last shown.
     free_line: Option<String>,
 }
@@ -652,6 +657,12 @@ struct Shell {
     cmb_pick_titles: gui::ComboBox,
     btn_pick_audio: gui::Button,
     btn_pick_subs: gui::Button,
+    /// Why the ticks need checking, at the end of the selection bar.
+    lbl_pick_banner: gui::Label,
+    /// The disc details row: six labels, the text boxes, and the Movie / TV choice.
+    lbl_details: Vec<gui::Label>,
+    edit_details: Vec<(crate::ui::DetailField, gui::Edit)>,
+    cmb_details_kind: gui::ComboBox,
     lbl_out: gui::Label,
     cmb_format: gui::ComboBox,
     edit_out: gui::Edit,
@@ -865,6 +876,58 @@ impl Shell {
         };
         let btn_pick_audio = mk_pick_btn(ID_PICK_AUDIO);
         let btn_pick_subs = mk_pick_btn(ID_PICK_SUBS);
+        let lbl_pick_banner = gui::Label::new(
+            &wnd,
+            gui::LabelOpts {
+                text: "",
+                size: (s.px(300), s.px(16)),
+                ..Default::default()
+            },
+        );
+        // ── disc details row ──
+        let lbl_details: Vec<gui::Label> = crate::ui::details_labels()
+            .iter()
+            .map(|t| {
+                gui::Label::new(
+                    &wnd,
+                    gui::LabelOpts {
+                        text: &format!("{t}:"),
+                        size: (s.px(80), s.px(16)),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let edit_details: Vec<(crate::ui::DetailField, gui::Edit)> = [
+            crate::ui::DetailField::Name,
+            crate::ui::DetailField::Year,
+            crate::ui::DetailField::Season,
+            crate::ui::DetailField::Disc,
+            crate::ui::DetailField::FirstEpisode,
+        ]
+        .into_iter()
+        .zip(0u16..)
+        .map(|(field, k)| {
+            let edit = gui::Edit::new(
+                &wnd,
+                gui::EditOpts {
+                    width: s.px(60),
+                    height: s.px(23),
+                    ctrl_id: ID_DETAILS_EDIT + k,
+                    ..Default::default()
+                },
+            );
+            (field, edit)
+        })
+        .collect();
+        let cmb_details_kind = gui::ComboBox::new(
+            &wnd,
+            gui::ComboBoxOpts {
+                width: s.px(lay::DETAILS_W[2]),
+                ctrl_id: ID_DETAILS_KIND,
+                ..Default::default()
+            },
+        );
         let tree = gui::TreeView::new(
             &wnd,
             gui::TreeViewOpts {
@@ -1125,6 +1188,10 @@ impl Shell {
             cmb_pick_titles,
             btn_pick_audio,
             btn_pick_subs,
+            lbl_pick_banner,
+            lbl_details,
+            edit_details,
+            cmb_details_kind,
             lbl_out,
             cmb_format,
             edit_out,
@@ -1305,6 +1372,14 @@ impl Shell {
                 text_width(l.hwnd(), &text)
             })
         };
+        let details_w = |i: usize| {
+            self.lbl_details.get(i).map_or(0, |l| {
+                let text = l.hwnd().GetWindowText().unwrap_or_default();
+                text_width(l.hwnd(), &text)
+            })
+        };
+        let details_labels = (v.page == crate::ui::Page::Titles && v.details.is_some())
+            .then(|| std::array::from_fn(details_w));
         let l = lay::main_layout(
             dpi,
             cw,
@@ -1315,6 +1390,7 @@ impl Shell {
                 log_hidden: hidden,
                 info_rows: self.lbl_keys.len(),
                 pick_labels: [label_w(0), label_w(1), label_w(2)],
+                details_labels,
             },
         );
 
@@ -1341,6 +1417,21 @@ impl Shell {
         put(&self.cmb_pick_titles, l.pick_titles);
         put(&self.btn_pick_audio, l.pick_audio);
         put(&self.btn_pick_subs, l.pick_subs);
+        put(&self.lbl_pick_banner, l.pick_banner);
+        // Row order: Name, Year, Kind, Season, Disc, First episode; Kind is the combo.
+        for (k, (lbl, ctl)) in l.details.iter().enumerate() {
+            if let Some(label) = self.lbl_details.get(k) {
+                put(label, *lbl);
+            }
+            match k {
+                2 => put(&self.cmb_details_kind, *ctl),
+                _ => {
+                    if let Some((_, edit)) = self.edit_details.get(if k < 2 { k } else { k - 1 }) {
+                        put(edit, *ctl);
+                    }
+                }
+            }
+        }
         put(&self.btn_eject, l.btn_eject);
         let (head, tree) = lay::split_tree_header(l.tree, dpi);
         put(&self.tree_head, head);
@@ -1894,6 +1985,15 @@ impl Shell {
         for c in [&self.btn_pick_audio, &self.btn_pick_subs] {
             show(c, picking);
         }
+        show(&self.lbl_pick_banner, picking);
+        let detailing = p == Page::Titles && v.details.is_some();
+        for c in &self.lbl_details {
+            show(c, detailing);
+        }
+        for (_, c) in &self.edit_details {
+            show(c, detailing);
+        }
+        show(&self.cmb_details_kind, detailing);
         for c in [&self.lbl_out, &self.lbl_free] {
             show(c, p == Page::Titles);
         }
@@ -1946,6 +2046,11 @@ impl Shell {
         if self.memo.borrow().pick != v.pick {
             self.fill_pick_bar(v.pick.as_ref());
             self.memo.borrow_mut().pick = v.pick.clone();
+        }
+        // ── details row: likewise; a box is written only when the core holds other text ──
+        if self.memo.borrow().details != v.details {
+            self.fill_details(v.details.as_ref());
+            self.memo.borrow_mut().details = v.details.clone();
         }
 
         // ── output row ──
@@ -2042,6 +2147,10 @@ impl Shell {
     // closed text of Audio and Subtitles (their menus are built when opened).
     fn fill_pick_bar(&self, pick: Option<&crate::ui::PickView>) {
         let Some(v) = pick else { return };
+        let _ = self
+            .lbl_pick_banner
+            .hwnd()
+            .SetWindowText(v.banner.as_deref().unwrap_or(""));
         let labels: Vec<String> = v.titles.iter().map(|(_, l)| l.clone()).collect();
         // Only a new list is rebuilt: rebuilding would dismiss the list mid-pick.
         if combo_items(&self.cmb_pick_titles) != labels {
@@ -2064,6 +2173,32 @@ impl Shell {
             .select(Some(v.title_index() as u32));
         let _ = self.btn_pick_audio.hwnd().SetWindowText(&v.audio_summary);
         let _ = self.btn_pick_subs.hwnd().SetWindowText(&v.subs_summary);
+    }
+
+    // Fill the disc details row from the view. Typing is never overwritten: a box is set
+    // only when its text differs from the core's, which every keystroke already updated.
+    fn fill_details(&self, details: Option<&crate::ui::DetailsView>) {
+        let Some(v) = details else { return };
+        for (field, edit) in &self.edit_details {
+            let want = v.get(*field);
+            if edit.text().unwrap_or_default() != want {
+                let _ = edit.set_text(want);
+            }
+            let numbering = !matches!(
+                field,
+                crate::ui::DetailField::Name | crate::ui::DetailField::Year
+            );
+            if numbering {
+                edit.hwnd().EnableWindow(v.numbering);
+            }
+        }
+        if combo_items(&self.cmb_details_kind) != v.kinds {
+            self.cmb_details_kind.items().delete_all();
+            let _ = self.cmb_details_kind.items().add(&v.kinds);
+        }
+        self.cmb_details_kind
+            .items()
+            .select(Some(v.kind_index as u32));
     }
 
     // A Titles entry was chosen: the core re-ticks the tree for it.
@@ -2813,6 +2948,27 @@ impl Shell {
             });
         }
 
+        // Each details box reaches the core on every keystroke, so Start never misses one.
+        for (field, edit) in &self.edit_details {
+            let (me, field, edit2) = (self.clone(), *field, edit.clone());
+            edit.on().en_change(move || {
+                let t = edit2.text().unwrap_or_default();
+                if me.app.borrow().details.get(field) != t {
+                    let fx = me.app_mut(|a| a.set_detail(field, &t));
+                    me.perform(fx);
+                }
+                Ok(())
+            });
+        }
+        let me = self.clone();
+        self.cmb_details_kind.on().cbn_sel_change(move || {
+            if let Some(at) = me.cmb_details_kind.items().selected_index() {
+                let fx = me.app_mut(|a| a.set_detail_kind(at as usize));
+                me.perform(fx);
+            }
+            Ok(())
+        });
+
         // A typed-in output folder must reach the model, or Run writes somewhere
         // other than what the field says.
         let me = self.clone();
@@ -3385,6 +3541,13 @@ impl Prefs {
             "filename_template",
             r.field(&g("gui.set.filename_template"), &st.filename_template, 240),
         ));
+        checks.push((
+            "organize_library",
+            r.check(&crate::strings::get_or(
+                "gui.set.organize_library",
+                "Organize into Movies/TV folders",
+            )),
+        ));
         r.gap();
         checks.push(("keep_iso", r.check(&g("gui.set.keep_iso"))));
         checks.push(("auto_eject", r.check(&g("gui.set.auto_eject"))));
@@ -3421,14 +3584,6 @@ impl Prefs {
         fields.push((
             "min_title_secs",
             r.field(&g("gui.set.min_length"), &st.min_title_secs, 90),
-        ));
-        fields.push((
-            "tv_season",
-            r.field(&g("gui.set.tv_season"), &st.tv_season, 90),
-        ));
-        fields.push((
-            "tv_first_episode",
-            r.field(&g("gui.set.tv_first_episode"), &st.tv_first_episode, 90),
         ));
         r.note(&g("gui.set.min_length_note"));
         r.gap();

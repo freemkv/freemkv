@@ -2321,8 +2321,9 @@ pub struct RipRequest {
     /// the disc/volume label, `{n}` the title number. Empty or placeholder-free
     /// falls back to `<label>_t<n>`.
     pub filename_template: String,
-    /// Optional names for a proven disc-authored TV roster. The scan's title
-    /// identities are verified again before these ordinal numbers are used.
+    /// The disc details and episode roster that name (and, opted in, place) each title's
+    /// file. `None`: every title takes the filename template. The scan's title identities
+    /// are verified again before the roster's ordinal numbers are used.
     pub tv_naming: Option<TvNamingRequest>,
     /// AACS decrypt thread count (the `decrypt_threads` setting). `0` = auto
     /// (the library sizes its pool itself); `>0` pins the pool to that many.
@@ -2354,12 +2355,19 @@ pub struct RipRequest {
     pub vid_from: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct TvNamingRequest {
+    /// TMDB key; empty names without TMDB. TMDB only adds episode names, the title and
+    /// year when none was typed, and the kind when the operator left it unknown.
     pub api_key: String,
+    /// The episode titles in episode order; empty: this rip is not episodes.
     pub roster: Vec<usize>,
-    pub season: Option<u16>,
-    pub first_episode: Option<u16>,
+    /// The disc details row: a typed name (empty when left at the label), year, kind,
+    /// season, disc and first episode. Outranks TMDB and the label.
+    pub operator: freemkv_engine::metadata::MediaMetadata,
+    /// "Organize into Movies/TV folders": each title's file goes under
+    /// `Title (Year)/` or `Show (Year)/Season NN/` in the destination.
+    pub organize: bool,
 }
 
 /// Run the real rip on a worker thread: engine title loop + per-title mux.
@@ -2948,6 +2956,7 @@ fn mux_selected_titles(
         // naming) for separate track files.
         let (dest_url, target) = title_dest(req, kind, &label, idx, multi, &naming);
         if matches!(kind, OutKind::File(_)) {
+            make_parent(&target);
             *state
                 .output_target
                 .lock()
@@ -3860,6 +3869,7 @@ fn run_disc_scanning(
         let _bars = TitleBars::start(state, idx);
         let (dest_url, target) = title_dest(req, kind, &label, idx, multi, &naming);
         if matches!(kind, OutKind::File(_)) {
+            make_parent(&target);
             *state
                 .output_target
                 .lock()
@@ -4033,6 +4043,7 @@ fn mux_staged_titles(
     let dest = |idx: usize| {
         let (url, target) = title_dest(req, kind, label, idx, multi, &naming);
         if matches!(kind, OutKind::File(_)) {
+            make_parent(&target);
             *state
                 .output_target
                 .lock()
@@ -4118,104 +4129,199 @@ fn mux_staged_titles(
     )
 }
 
+/// Each title's output name below `dest_dir`, without extension: episode names for a TV
+/// roster, and with "Organize into Movies/TV folders" every title under its library
+/// folders (`/`-separated). A title missing from the map takes the filename template.
 fn tv_naming_plan(
     req: &RipRequest,
     disc: &libfreemkv::Disc,
     label: &str,
     sink: &UiSink,
 ) -> std::collections::HashMap<usize, String> {
-    use freemkv_engine::metadata::tmdb;
-    let Some(tv) = req
-        .tv_naming
-        .as_ref()
-        .filter(|tv| !tv.api_key.trim().is_empty())
-    else {
+    use freemkv_engine::metadata::{MediaKind, MediaMetadata, tmdb};
+    let Some(naming) = req.tv_naming.as_ref() else {
         return std::collections::HashMap::new();
     };
-    if !matches!(out_kind(&req.format), OutKind::File(_))
-        || tv.roster.is_empty()
-        || !req.titles.iter().any(|idx| tv.roster.contains(idx))
-        || tv.roster.iter().any(|&idx| {
-            req.title_ids.get(idx) != disc.titles.get(idx).map(TitleIdentity::of).as_ref()
-        })
-    {
-        return std::collections::HashMap::new();
-    }
-    let client = tmdb::Client::new(&tv.api_key, sink);
-    let Ok(Some(found)) = client.lookup(label) else {
-        fe::Sink::log(
-            sink,
-            fe::Level::Info,
-            "No TMDB show match; using the filename template",
-        );
-        return std::collections::HashMap::new();
-    };
-    if found.media_type != freemkv_engine::metadata::MediaKind::Tv
-        || !tmdb::is_confident_match(label, &found.title, found.year)
-    {
-        fe::Sink::log(
-            sink,
-            fe::Level::Info,
-            "TMDB match is uncertain or not a TV series; using the filename template",
-        );
-        return std::collections::HashMap::new();
-    }
-    let season = tv
-        .season
-        .or_else(|| tmdb::season_from_label(label))
-        .unwrap_or(1);
-    let Some(first) = tv_first_episode(tv, label) else {
-        fe::Sink::log(
-            sink,
-            fe::Level::Warn,
-            "TV episode number exceeds the supported range; using the filename template",
-        );
-        return std::collections::HashMap::new();
-    };
-    let episodes = client.season_episodes(found.tmdb_id, season);
-    let names = tv_names_from_roster(&tv.roster, &found.title, season, first, &episodes);
     let OutKind::File(ext) = out_kind(&req.format) else {
         return std::collections::HashMap::new();
     };
-    let names = tv_names_if_free(names, &req.dest_dir, ext);
-    if names.is_empty() {
+    // The roster's numbers must still mean the titles the tree showed.
+    let roster_holds = !naming.roster.is_empty()
+        && req.titles.iter().any(|idx| naming.roster.contains(idx))
+        && naming.roster.iter().all(|&idx| {
+            req.title_ids.get(idx) == disc.titles.get(idx).map(TitleIdentity::of).as_ref()
+        });
+    if !roster_holds && !naming.organize {
+        return std::collections::HashMap::new();
+    }
+    // TMDB is optional: a confident match adds names, a title, a year and an unknown kind.
+    let typed = naming.operator.title.trim();
+    let query = if typed.is_empty() { label } else { typed };
+    let client = tmdb::Client::new(&naming.api_key, sink);
+    let found = (!naming.api_key.trim().is_empty())
+        .then(|| client.lookup(query).ok().flatten())
+        .flatten()
+        .filter(|found| tmdb::is_confident_match(query, &found.title, found.year));
+    if !naming.api_key.trim().is_empty() && found.is_none() {
         fe::Sink::log(
             sink,
-            fe::Level::Warn,
-            "An episode file with that name already exists; using the filename template",
+            fe::Level::Info,
+            "No confident TMDB match; naming from the disc details",
         );
+    }
+    let matched = found.as_ref().map(MediaMetadata::from);
+    let mut meta = MediaMetadata::resolve(&naming.operator, matched.as_ref(), &[label]);
+    if meta.title.trim().is_empty() {
+        meta.title = label.to_string();
+    }
+    let mut names = std::collections::HashMap::new();
+    if roster_holds && meta.kind == Some(MediaKind::Tv) {
+        let season = meta.season.unwrap_or(1);
+        match freemkv_engine::metadata::episode_numbers(
+            naming.roster.len(),
+            meta.disc,
+            meta.episode_start,
+        ) {
+            Ok(first) => {
+                let episodes = match &found {
+                    Some(show) if show.media_type == MediaKind::Tv => {
+                        client.season_episodes(show.tmdb_id, season)
+                    }
+                    _ => Vec::new(),
+                };
+                let leaves =
+                    tv_names_from_roster(&naming.roster, &meta.title, season, first, &episodes);
+                let place = |leaf: String| match naming.organize {
+                    true => library_path(&meta, &leaf, false),
+                    false => leaf,
+                };
+                // The same episodes under any name: numbered only, or the old desktop's.
+                let mut also: Vec<String> =
+                    tv_names_from_roster(&naming.roster, &meta.title, season, first, &[])
+                        .into_values()
+                        .map(place)
+                        .collect();
+                also.extend(legacy_episode_stems(
+                    naming.roster.len(),
+                    &meta.title,
+                    season,
+                    first,
+                ));
+                names = leaves
+                    .into_iter()
+                    .map(|(idx, leaf)| (idx, place(leaf)))
+                    .collect();
+                names = tv_names_if_free(names, &req.dest_dir, ext, &also);
+                if names.is_empty() {
+                    fe::Sink::log(
+                        sink,
+                        fe::Level::Warn,
+                        "An episode file with that name already exists; using the filename template",
+                    );
+                    return names;
+                }
+            }
+            Err(_) => fe::Sink::log(
+                sink,
+                fe::Level::Warn,
+                "TV episode number exceeds the supported range; using the filename template",
+            ),
+        }
+    }
+    if naming.organize {
+        // Every other title keeps its template name inside the library folders. A movie
+        // ripped alone is the folder's `Title (Year)` file.
+        let single = req.titles.len() == 1;
+        for &idx in &req.titles {
+            names.entry(idx).or_insert_with(|| {
+                let leaf = title_basename(&req.filename_template, label, idx + 1);
+                library_path(&meta, &leaf, single)
+            });
+        }
     }
     names
 }
 
-// This disc's first episode: the override, else even-split disc order.
-fn tv_first_episode(tv: &TvNamingRequest, label: &str) -> Option<u16> {
-    let disc_number = freemkv_engine::metadata::tmdb::disc_from_label(label)
-        .unwrap_or(1)
-        .max(1);
-    let first = tv.first_episode.or_else(|| {
-        usize::from(disc_number - 1)
-            .checked_mul(tv.roster.len())
-            .and_then(|n| n.checked_add(1))
-            .and_then(|n| u16::try_from(n).ok())
-    });
-    first.filter(|first| {
-        *first > 0 && usize::from(*first) + tv.roster.len() - 1 <= usize::from(u16::MAX)
+/// The delivered episode name: the engine's `Show S01E01 - Name` / `Show S01E01` format
+/// (`metadata::episode_leaf`), made safe by [`sanitize_label`] instead of the engine's
+/// ASCII-only sanitizer, so a non-Latin show or episode name survives.
+fn episode_file_leaf(show: &str, season: u16, episode: u16, name: &str) -> String {
+    let (show, name) = (show.trim(), name.trim());
+    sanitize_label(&match name.is_empty() {
+        true => format!("{show} S{season:02}E{episode:02}"),
+        false => format!("{show} S{season:02}E{episode:02} - {name}"),
     })
+}
+
+/// `layout::relative_path`'s library layout under the destination, each component made
+/// safe by [`sanitize_label`] (non-Latin letters kept), without extension and
+/// `/`-separated: TV is `Show (Year)/Season NN/leaf`; a movie or unknown kind is
+/// `Title (Year)/Title (Year)` when `single`, else `Title (Year)/leaf`.
+fn library_path(
+    meta: &freemkv_engine::metadata::MediaMetadata,
+    leaf: &str,
+    single: bool,
+) -> String {
+    let title = meta.title.trim();
+    let folder = sanitize_label(&match meta.year {
+        0 => title.to_string(),
+        year => format!("{title} ({year})"),
+    });
+    match meta.kind {
+        Some(freemkv_engine::metadata::MediaKind::Tv) => format!(
+            "{folder}/Season {:02}/{}",
+            meta.season.unwrap_or(1),
+            sanitize_label(leaf)
+        ),
+        _ if single => format!("{folder}/{folder}"),
+        _ => format!("{folder}/{}", sanitize_label(leaf)),
+    }
+}
+
+// The old desktop's episode names, `Show_S01E01[ - Name]`: a re-rip must not duplicate them.
+fn legacy_episode_stems(count: usize, show: &str, season: u16, first: u16) -> Vec<String> {
+    (0..count)
+        .map(|i| {
+            let episode = first.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
+            sanitize_label(&format!("{}_S{season:02}E{episode:02}", show.trim()))
+        })
+        .collect()
 }
 
 // Disc-order numbering is a guess: if any target is taken (an uneven split or an
 // unnumbered disc landing on an earlier disc's episodes), drop it all for the
-// label-keyed template rather than truncate that file.
+// label-keyed template rather than truncate that file. `also` are the same episodes'
+// other names below `dest_dir` (numbered only, the old desktop's `Show_S01E01`): a file
+// `{stem}.{ext}` or `{stem} - *.{ext}` of any of them is taken too, so a re-rip never
+// lands a duplicate beside it.
 fn tv_names_if_free(
     names: std::collections::HashMap<usize, String>,
     dest_dir: &str,
     ext: &str,
+    also: &[String],
 ) -> std::collections::HashMap<usize, String> {
-    let taken = names.values().any(|base| {
-        let path = std::path::Path::new(dest_dir).join(format!("{base}.{ext}"));
+    let dest = std::path::Path::new(dest_dir);
+    let exists = |stem: &str| {
+        let path = dest.join(format!("{stem}.{ext}"));
         !matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
-    });
+    };
+    // Whether `stem`'s folder holds `{leaf} - *.{ext}`.
+    let named = |stem: &str| {
+        let (dir, leaf) = match stem.rsplit_once('/') {
+            Some((dir, leaf)) => (dest.join(dir), leaf),
+            None => (dest.to_path_buf(), stem),
+        };
+        let (prefix, suffix) = (format!("{leaf} - "), format!(".{ext}"));
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(&prefix) && name.ends_with(&suffix)
+            })
+        })
+    };
+    let taken = names.values().any(|stem| exists(stem))
+        || also.iter().any(|stem| exists(stem) || named(stem));
     if taken {
         std::collections::HashMap::new()
     } else {
@@ -4237,15 +4343,20 @@ fn tv_names_from_roster(
         .copied()
         .zip(assignments)
         .map(|(idx, assignment)| {
-            let base = format!("{show}_S{season:02}E{:02}", assignment.episode);
-            let base = if assignment.name.trim().is_empty() {
-                base
-            } else {
-                format!("{base} - {}", assignment.name)
-            };
-            (idx, sanitize_label(&base))
+            (
+                idx,
+                episode_file_leaf(show, season, assignment.episode, &assignment.name),
+            )
         })
         .collect()
+}
+
+// An organized title's library folders, made before its file is opened. A failure
+// surfaces as that title's own output error.
+fn make_parent(target: &str) {
+    if let Some(dir) = std::path::Path::new(target).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
 }
 
 /// Title `idx`'s sink URL and the path the log names, for a file or demux output.

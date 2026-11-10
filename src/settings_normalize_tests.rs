@@ -425,14 +425,24 @@ fn optional_metadata_key_round_trips_without_entering_debug_output() {
     assert!(settings.tmdb_api_key.is_empty());
     let selection = settings.selection.clone();
     settings.set("tmdb_api_key", "metadata-private-test-value".into());
-    settings.set("tv_season", "2".into());
-    settings.set("tv_first_episode", "7".into());
     assert_eq!(settings.get("tmdb_api_key"), "metadata-private-test-value");
     let saved = serde_json::to_string(&settings).unwrap();
-    assert!(!saved.contains("tv_season") && !saved.contains("tv_first_episode"));
     let loaded: Settings = serde_json::from_str(&saved).unwrap();
     assert_eq!(loaded.tmdb_api_key, settings.tmdb_api_key);
     assert_eq!(loaded.selection, selection);
-    assert!(loaded.tv_season.is_empty() && loaded.tv_first_episode.is_empty());
     assert!(!format!("{loaded:?}").contains("metadata-private-test-value"));
+}
+
+// "Organize into Movies/TV folders" is opt-in and saved like any switch. A file from before
+// it, or from before the per-source numbering left Settings, loads with it off.
+#[test]
+fn the_library_layout_switch_defaults_off_and_round_trips() {
+    let old: Settings = serde_json::from_str(r#"{"dest_dir":"/x","tv_season":"2"}"#).unwrap();
+    assert!(!old.organize_library);
+    assert!(!Settings::default().get_bool("organize_library"));
+    let mut settings = Settings::default();
+    settings.set_bool("organize_library", true);
+    let saved = serde_json::to_string(&settings).unwrap();
+    let loaded: Settings = serde_json::from_str(&saved).unwrap();
+    assert!(loaded.organize_library && loaded.get_bool("organize_library"));
 }

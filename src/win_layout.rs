@@ -37,6 +37,10 @@ pub const PICK_H: i32 = 30;
 pub const PICK_TITLES_W: i32 = 190;
 pub const PICK_MENU_W: i32 = 170;
 pub const PICK_GAP: i32 = 18;
+/// The disc details row over the selection bar, and its controls' widths in row order:
+/// Name, Year, Kind, Season, Disc, First episode.
+pub const DETAILS_H: i32 = 30;
+pub const DETAILS_W: [i32; 6] = [240, 52, 150, 40, 40, 48];
 /// The output area under the tree: the "Output" label, the folder / browse /
 /// format / Run row, and the free-space line under it.
 pub const BAR_H: i32 = 70;
@@ -116,7 +120,7 @@ impl Scale {
 }
 
 /// One control's rectangle, in physical pixels relative to the client area.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -176,6 +180,11 @@ pub struct MainLayout {
     pub pick_audio: Rect,
     pub pick_subs_lbl: Rect,
     pub pick_subs: Rect,
+    /// Why the ticks need checking: the rest of the selection bar, short of Eject.
+    pub pick_banner: Rect,
+    /// The disc details row, `(label, control)` in [`DETAILS_W`] order; empty rectangles
+    /// while it is hidden.
+    pub details: [(Rect, Rect); 6],
     /// Eject, at the right end of the selection bar.
     pub btn_eject: Rect,
     /// The tree with its header strip, over the full width.
@@ -219,6 +228,9 @@ pub struct MainState {
     pub info_rows: usize,
     /// How wide the selection bar's three labels draw, in physical pixels.
     pub pick_labels: [i32; 3],
+    /// How wide the disc details row's six labels draw, in physical pixels; `None` while
+    /// the row is hidden (it then takes no height).
+    pub details_labels: Option<[i32; 6]>,
 }
 
 /// Lay the main window out.
@@ -281,8 +293,24 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
     let home_prefer = Rect::new(cw / 2 + s.px(125), home_y + s.px(38), s.px(200), s.px(30));
 
     // ── titles page ──
+    // The details row: label, control, gap, for each of the six.
+    let mut details = [(Rect::default(), Rect::default()); 6];
+    let details_h = match st.details_labels {
+        Some(labels) => {
+            let mut x = pad;
+            for (k, slot) in details.iter_mut().enumerate() {
+                let lbl = Rect::new(x, top_y + s.px(7), labels[k], s.px(16));
+                x += labels[k] + s.px(4);
+                let c = Rect::new(x, top_y + s.px(3), s.px(DETAILS_W[k]), s.px(24));
+                x += s.px(DETAILS_W[k]) + s.px(PICK_GAP);
+                *slot = (lbl, c);
+            }
+            s.px(DETAILS_H)
+        }
+        None => 0,
+    };
     // The selection bar: label, chooser, gap, for each of the three.
-    let pick_y = top_y;
+    let pick_y = top_y + details_h;
     let mut x = pad;
     let mut chooser = |label_w: i32, w: i32| {
         let lbl = Rect::new(x, pick_y + s.px(7), label_w, s.px(16));
@@ -295,14 +323,20 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
     let (pick_audio_lbl, pick_audio) = chooser(st.pick_labels[1], PICK_MENU_W);
     let (pick_subs_lbl, pick_subs) = chooser(st.pick_labels[2], PICK_MENU_W);
     let btn_eject = Rect::new(cw - pad - s.px(110), pick_y + s.px(2), s.px(110), s.px(26));
+    let pick_banner = Rect::new(
+        x,
+        pick_y + s.px(7),
+        (btn_eject.x - pad - x).max(0),
+        s.px(16),
+    );
 
     let bar_h = s.px(BAR_H);
-    let tree_y = top_y + s.px(PICK_H);
+    let tree_y = pick_y + s.px(PICK_H);
     let tree = Rect::new(
         pad,
         tree_y,
         cw - pad * 2,
-        (top_h - s.px(PICK_H) - pad - bar_h).max(s.px(40)),
+        (top_h - details_h - s.px(PICK_H) - pad - bar_h).max(s.px(40)),
     );
 
     // The output area: folder (flexible), browse, format and Run on one row.
@@ -388,6 +422,8 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
         pick_audio,
         pick_subs_lbl,
         pick_subs,
+        pick_banner,
+        details,
         btn_eject,
         tree,
         lbl_out,

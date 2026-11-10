@@ -294,6 +294,14 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     f.combo(&o1, "container", &g("gui.set.default_output"));
     f.path(shell, &o1, "dest_dir", &g("gui.set.default_dest"), true);
     f.entry(&o1, "filename_template", &g("gui.set.filename_template"));
+    f.switch(
+        &o1,
+        "organize_library",
+        &crate::strings::get_or(
+            "gui.set.organize_library",
+            "Organize into Movies/TV folders",
+        ),
+    );
     f.secret(&o1, "tmdb_api_key", &g("gui.set.tmdb_api_key"));
     f.combo(&o1, "startup_mode", &g("gui.set.startup_mode"));
     f.entry(&o1, "preferred_drive", &g("gui.set.preferred_drive"));
@@ -314,8 +322,6 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
     let s1 = group("gui.set.group_titles", Some(&g("gui.set.min_length_note")));
     f.combo(&s1, "selection", &g("gui.set.default_selection"));
     f.entry(&s1, "min_title_secs", &g("gui.set.min_length"));
-    f.entry(&s1, "tv_season", &g("gui.set.tv_season"));
-    f.entry(&s1, "tv_first_episode", &g("gui.set.tv_first_episode"));
     let s2 = group(
         "gui.set.group_languages",
         Some(&g("gui.set.lang_prefs_note")),

@@ -228,7 +228,8 @@ fn open_picks(settings: &crate::settings::Settings) -> (String, LangPrefs, f64) 
 // checks (none ticked: the main title).
 fn open_preflight_titles(sc: &Scanned, settings: &crate::settings::Settings) -> Vec<usize> {
     let (mode, prefs, min_secs) = open_picks(settings);
-    Tree::from_scan(sc, &mode, min_secs, &prefs).ticked_titles()
+    let kind = DiscDetails::default().resolved_kind(&sc.volume_id);
+    Tree::from_scan_as(sc, &mode, min_secs, &prefs, kind).ticked_titles()
 }
 
 // What an open keys under `settings`: the titles its tree will tick.
@@ -373,7 +374,89 @@ pub struct Tree {
     pub roots: Vec<usize>,
     // Preserve the model's authored episode order without reordering display rows.
     episode_order: Vec<usize>,
+    /// Why the title choice could not tick a proven selection by itself, if it could not.
+    pub review: Option<TreeReview>,
 }
+
+/// A title choice the disc does not prove: the reason, and (for a TV disc's episodes) the
+/// engine's suggestion. The operator's ticks are the confirmation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeReview {
+    pub reason: freemkv_engine::SelectionReviewReason,
+    /// A suggested episode set, in suggested episode order. `suggested` is ticked; with
+    /// none and several `clusters`, nothing is.
+    pub suggestion: Option<(Vec<usize>, Vec<Vec<usize>>)>,
+}
+
+impl TreeReview {
+    /// The banner over the tree, naming the reason.
+    pub fn banner(&self) -> String {
+        use freemkv_engine::SelectionReviewReason as R;
+        let reason = match self.reason {
+            R::MissingEpisodeRoster => crate::strings::get_or(
+                "gui.review.missing",
+                "This disc does not list its episodes.",
+            ),
+            R::IncompleteEpisodeRoster => crate::strings::get_or(
+                "gui.review.incomplete",
+                "This disc's episode list is incomplete.",
+            ),
+            R::ConflictingEpisodeRoster => crate::strings::get_or(
+                "gui.review.conflicting",
+                "This disc's episode list contradicts itself.",
+            ),
+            R::InvalidEpisodeRoster => {
+                crate::strings::get_or("gui.review.invalid", "This disc's episode list is invalid.")
+            }
+        };
+        let advice = match &self.suggestion {
+            Some((suggested, _)) if !suggested.is_empty() => crate::strings::get_or(
+                "gui.review.suggested",
+                "Suggested episodes — check the ticks and order before ripping",
+            ),
+            Some((_, clusters)) if !clusters.is_empty() => crate::strings::get_or(
+                "gui.review.clusters",
+                "Possible episode sets are marked in Notes — tick the episodes to rip",
+            ),
+            _ => crate::strings::get_or("gui.review.tick", "Tick the titles to rip"),
+        };
+        format!("{reason} {advice}")
+    }
+}
+
+// The Notes marks of a suggestion: each suggested title's episode position, else each
+// cluster's set number, and each alternate's original.
+fn suggestion_marks(
+    suggested: &[usize],
+    clusters: &[Vec<usize>],
+    alternates: &[freemkv_engine::Alternate],
+) -> std::collections::HashMap<usize, String> {
+    let mut marks = std::collections::HashMap::new();
+    if suggested.is_empty() {
+        for (set, members) in clusters.iter().enumerate() {
+            for &title in members {
+                let mark = crate::strings::get_or("gui.review.set", "Set {set}")
+                    .replace("{set}", &(set + 1).to_string());
+                marks.insert(title, mark);
+            }
+        }
+    } else {
+        for (k, &title) in suggested.iter().enumerate() {
+            let mark = crate::strings::get_or("gui.review.episode", "Suggested episode {n}")
+                .replace("{n}", &(k + 1).to_string());
+            marks.insert(title, mark);
+        }
+    }
+    for alt in alternates {
+        let mark = crate::strings::get_or("gui.review.alternate", "Alternate of {title}")
+            .replace("{title}", &crate::engine::title_item(alt.of));
+        marks.entry(alt.index).or_insert(mark);
+    }
+    marks
+}
+
+/// The least a suggested episode runs: a desktop minimum title length, floored here.
+pub const EPISODE_MIN_SECS: f64 = 600.0;
 
 // Does the minimum-title-length filter keep this title? ONE predicate shared by row display and
 // "Default selection" ticking, so they can't disagree.
@@ -389,25 +472,24 @@ impl Tree {
     /// aggressively the list is empty. `prefs` ranks equivalent language presentations and
     /// narrows checked stream rows; a category matching nothing retains available streams
     /// rather than producing silent output — see `preferred_pids`.
+    // The shells always know a kind; the binary's copy of this module leaves this unused.
+    #[allow(dead_code)]
     pub fn from_scan(sc: &Scanned, sel_mode: &str, min_secs: f64, prefs: &LangPrefs) -> Self {
-        // Titles present in the scan, with durations, for the filter + defaults.
-        let titles: Vec<(usize, f64)> = sc
-            .rows
-            .iter()
-            .filter(|r| r.depth == 1 && r.type_s == "Title")
-            .map(|r| (r.title, r.duration_secs))
-            .collect();
-        // Never hide every title: if none clear the bar, disable the filter.
-        let min_eff = if titles.iter().any(|(_, d)| *d >= min_secs) {
-            min_secs
-        } else {
-            0.0
-        };
-        let visible: std::collections::HashSet<usize> = titles
-            .iter()
-            .filter(|(_, d)| title_visible(*d, min_eff))
-            .map(|(i, _)| *i)
-            .collect();
+        Self::from_scan_as(sc, sel_mode, min_secs, prefs, None)
+    }
+
+    /// [`Tree::from_scan`] for a disc of `kind`. For TV, "Main film / episodes" and
+    /// "Episodes" take the engine's episode resolution: a proven roster is ticked as before;
+    /// without one, the suggested set is ticked in its order (or, with several, nothing,
+    /// the sets marked in Notes) and [`Tree::review`] says to check it. Any other kind
+    /// keeps the disc-proven selection exactly.
+    pub fn from_scan_as(
+        sc: &Scanned,
+        sel_mode: &str,
+        min_secs: f64,
+        prefs: &LangPrefs,
+        kind: Option<freemkv_engine::metadata::MediaKind>,
+    ) -> Self {
         let selection = match sel_mode {
             "All titles" => freemkv_engine::Selection::All,
             "No titles" => freemkv_engine::Selection::Titles(Vec::new()),
@@ -418,23 +500,95 @@ impl Tree {
         // Select against the full evidence snapshot before applying visibility. Hiding the
         // main feature must not promote an unrelated title. Review candidates remain
         // available for manual ticking, but never become automatic executable choices.
-        let automatic = if sel_mode == "Main film / episodes" {
-            sc.selection_model
-                .main_or_episodes(
-                    &lang_filter(&prefs.audio),
-                    prefs.presentation_language.as_deref(),
-                )
-                .unwrap_or_default()
+        let audio = lang_filter(&prefs.audio);
+        let presentation = prefs.presentation_language.as_deref();
+        let episodes_mode = sel_mode == "Main film / episodes"
+            || matches!(selection, freemkv_engine::Selection::Episodes);
+        let mut review = None;
+        let automatic = if episodes_mode && kind == Some(freemkv_engine::metadata::MediaKind::Tv) {
+            match sc.selection_model.resolve_episodes(
+                &audio,
+                presentation,
+                min_secs.max(EPISODE_MIN_SECS),
+            ) {
+                freemkv_engine::Resolved::Run { titles, .. } => titles,
+                freemkv_engine::Resolved::Confirm {
+                    suggested,
+                    clusters,
+                    alternates,
+                    reason,
+                } => {
+                    let marks = suggestion_marks(&suggested, &clusters, &alternates);
+                    // Several sets tick nothing; their titles still run in play order.
+                    let order = if suggested.is_empty() {
+                        clusters.concat()
+                    } else {
+                        suggested.clone()
+                    };
+                    let review = Some(TreeReview {
+                        reason,
+                        suggestion: Some((suggested.clone(), clusters)),
+                    });
+                    return Self::build(sc, min_secs, prefs, suggested, order, review, marks);
+                }
+            }
         } else {
-            automatic_titles(&sc.selection_model, &selection, prefs)
+            let picked = if sel_mode == "Main film / episodes" {
+                sc.selection_model.main_or_episodes(&audio, presentation)
+            } else {
+                sc.selection_model.select(&selection, &audio, presentation)
+            };
+            picked.unwrap_or_else(|r| {
+                review = Some(TreeReview {
+                    reason: r.reason,
+                    suggestion: None,
+                });
+                Vec::new()
+            })
         };
-        let episode_order = if sel_mode == "Main film / episodes"
-            || matches!(selection, freemkv_engine::Selection::Episodes)
-        {
+        let order = if episodes_mode {
             automatic.clone()
         } else {
             Vec::new()
         };
+        Self::build(
+            sc,
+            min_secs,
+            prefs,
+            automatic,
+            order,
+            review,
+            Default::default(),
+        )
+    }
+
+    // The tree of `sc`'s rows with `automatic` ticked (where shown) and every title row's
+    // Notes led by its `marks`.
+    fn build(
+        sc: &Scanned,
+        min_secs: f64,
+        prefs: &LangPrefs,
+        automatic: Vec<usize>,
+        episode_order: Vec<usize>,
+        review: Option<TreeReview>,
+        marks: std::collections::HashMap<usize, String>,
+    ) -> Self {
+        let titles: Vec<(usize, f64)> = sc
+            .rows
+            .iter()
+            .filter(|r| r.depth == 1 && r.type_s == "Title")
+            .map(|r| (r.title, r.duration_secs))
+            .collect();
+        let min_eff = if titles.iter().any(|(_, d)| *d >= min_secs) {
+            min_secs
+        } else {
+            0.0
+        };
+        let visible: std::collections::HashSet<usize> = titles
+            .iter()
+            .filter(|(_, d)| title_visible(*d, min_eff))
+            .map(|(i, _)| *i)
+            .collect();
         let selected: std::collections::HashSet<usize> = automatic
             .into_iter()
             .filter(|i| visible.contains(i))
@@ -485,6 +639,11 @@ impl Tree {
             let (length, size) = title_cells(r);
             // Every painted cell passes one sanitizer: disc bytes never reorder, hide or forge text.
             let cell = crate::strings::sanitize_display;
+            let notes = match marks.get(&r.title) {
+                Some(mark) if r.depth == 1 && r.notes.is_empty() => mark.clone(),
+                Some(mark) if r.depth == 1 => format!("{mark} · {}", r.notes),
+                _ => r.notes.clone(),
+            };
             arena.push(Node {
                 type_s: r.type_s.clone(),
                 desc: cell(&r.desc),
@@ -500,7 +659,7 @@ impl Tree {
                 lang: stream_language(&r.lang),
                 item: cell(&r.item),
                 format: cell(&r.format),
-                notes: cell(&r.notes),
+                notes: cell(&notes),
             });
             match r.depth {
                 0 => roots.push(idx),
@@ -545,6 +704,7 @@ impl Tree {
             arena,
             roots,
             episode_order,
+            review,
         }
     }
 
@@ -2255,6 +2415,9 @@ pub struct App {
     /// can name the file that will actually appear. It goes nowhere near a
     /// path without `sanitize_label`, which `title_basename` applies.
     pub disc_label: String,
+    /// The disc details row: this source's name, year, kind and numbering. Session state,
+    /// reset by every new scan; never saved.
+    pub details: DiscDetails,
     /// The selection bar: the title choice and the language lists that decide what starts
     /// ticked. From Settings at open; the bar changes them and re-ticks the tree.
     pub pick_mode: String,
@@ -2649,6 +2812,7 @@ impl App {
             capacity_bytes: 0,
             title_ids: Vec::new(),
             disc_label: String::new(),
+            details: DiscDetails::default(),
             pick_mode: String::new(),
             pick_prefs: LangPrefs::default(),
             pick_scan: None,
@@ -2940,8 +3104,6 @@ impl App {
         let prior = self.settings.clone();
         let merged = self.commit_settings(&before, edited);
         read.presentation_language = merged.presentation_language;
-        read.tv_season = merged.tv_season;
-        read.tv_first_episode = merged.tv_first_episode;
         self.settings_form = read;
         // A one-off folder pick survives an edit elsewhere in the form.
         if new_dest {
@@ -3320,8 +3482,7 @@ impl App {
     // Forget the open source's model without touching an open or probe that may be in flight.
     fn clear_source(&mut self) {
         self.tree = Tree::default();
-        self.settings.tv_season.clear();
-        self.settings.tv_first_episode.clear();
+        self.details = DiscDetails::default();
         self.source.clear();
         self.disc_present = None;
         self.disc_label.clear();
@@ -3583,6 +3744,59 @@ impl App {
         })
     }
 
+    /// A typed details box. Nothing re-ticks: only the kind and the disc label decide which
+    /// titles are episodes.
+    pub fn set_detail(&mut self, field: DetailField, value: &str) -> Vec<Effect> {
+        let slot = self.details.slot(field);
+        if slot == value {
+            return Vec::new();
+        }
+        *slot = value.to_string();
+        vec![Effect::Redraw]
+    }
+
+    /// The details row's Movie / TV choice: its index in [`DetailsView::kinds`]. Re-ticks
+    /// the tree for the kind (TV resolves episodes).
+    pub fn set_detail_kind(&mut self, index: usize) -> Vec<Effect> {
+        let Some(&kind) = DETAIL_KINDS.get(index) else {
+            return Vec::new();
+        };
+        if self.details.kind == kind || self.running() {
+            return vec![Effect::Redraw];
+        }
+        self.details.kind = kind;
+        self.repick()
+    }
+
+    fn details_view(&self) -> Option<DetailsView> {
+        let sc = self.pick_scan.as_ref()?;
+        if sc.title_count == 0 || is_container(&self.source) {
+            return None;
+        }
+        let d = &self.details;
+        let auto = match DiscDetails::default().resolved_kind(&self.disc_label) {
+            Some(freemkv_engine::metadata::MediaKind::Tv) => {
+                crate::strings::get_or("gui.details.auto_tv", "Auto (TV series)")
+            }
+            _ => crate::strings::get_or("gui.details.auto", "Auto"),
+        };
+        Some(DetailsView {
+            name: d.name.clone(),
+            year: d.year.clone(),
+            season: d.season.clone(),
+            disc: d.disc.clone(),
+            first_episode: d.first_episode.clone(),
+            kinds: vec![
+                auto,
+                crate::strings::get_or("gui.details.movie", "Movie"),
+                crate::strings::get_or("gui.details.tv", "TV series"),
+            ],
+            kind_index: DETAIL_KINDS.iter().position(|k| *k == d.kind).unwrap_or(0),
+            numbering: d.resolved_kind(&self.disc_label)
+                != Some(freemkv_engine::metadata::MediaKind::Movie),
+        })
+    }
+
     // Re-tick for a bar pick; with "Remember audio and subtitle choices" on, also record it
     // in Settings and save (off, it stays in `pick_prefs`, out of any later save). Title
     // mode is never remembered: it is disc-driven.
@@ -3601,9 +3815,7 @@ impl App {
 
     /// Apply a committed Settings form to `self.settings` (no save: `Cmd::CommitSettings`
     /// saves). The form may predate bar picks, so each remembered-stream field it did not
-    /// change (`edited` equal to `before`) keeps the App's current value. Unchanged
-    /// source numbering also keeps the current value, so a stale form cannot restore
-    /// overrides cleared by a new Open or Close. Changed subtitle
+    /// change (`edited` equal to `before`) keeps the App's current value. Changed subtitle
     /// languages end a bar "None"/"Forced only" mode, which no form control shows. Returns
     /// the merged settings.
     pub fn commit_settings(
@@ -3630,12 +3842,6 @@ impl App {
                 cur.subtitle_mode.clone()
             };
         }
-        if edited.tv_season == before.tv_season {
-            edited.tv_season = cur.tv_season.clone();
-        }
-        if edited.tv_first_episode == before.tv_first_episode {
-            edited.tv_first_episode = cur.tv_first_episode.clone();
-        }
         if !valid_presentation_language(&edited.presentation_language) {
             let tag = std::mem::replace(
                 &mut edited.presentation_language,
@@ -3656,7 +3862,18 @@ impl App {
             return vec![];
         }
         if let Some(sc) = &self.pick_scan {
-            self.tree = Tree::from_scan(sc, &self.pick_mode, self.pick_min_secs, &self.pick_prefs);
+            let before = self.tree.review.as_ref().map(TreeReview::banner);
+            self.tree = Tree::from_scan_as(
+                sc,
+                &self.pick_mode,
+                self.pick_min_secs,
+                &self.pick_prefs,
+                self.details.resolved_kind(&self.disc_label),
+            );
+            let after = self.tree.review.as_ref().map(TreeReview::banner);
+            if let Some(banner) = after.filter(|after| before.as_ref() != Some(after)) {
+                self.say(LogKind::Notice, &banner);
+            }
         }
         vec![Effect::Redraw]
     }
@@ -3729,10 +3946,6 @@ impl App {
         let disc = crate::engine::is_disc_source(path);
         match scanned {
             Ok(sc) => {
-                // A fresh scan adopts a new source even when its path is unchanged
-                // (for example, another disc in the same drive).
-                self.settings.tv_season.clear();
-                self.settings.tv_first_episode.clear();
                 if disc {
                     self.disc_present = Some(true);
                 }
@@ -3768,6 +3981,9 @@ impl App {
                 // can carry it to the engine's own (later) scan.
                 self.title_ids = sc.title_ids.clone();
                 self.disc_label = sc.volume_id.clone();
+                // A fresh scan adopts a new source even when its path is unchanged (for
+                // example, another disc in the same drive): its details start over.
+                self.details = DiscDetails::for_label(&sc.volume_id);
                 // KU §2.5: Open's key set seeds the rip; E7034 arms the insert-the-disc Retry
                 // (KU §4.2), so Start scans a drive instead of asking again without the VID.
                 self.seed = sc.keys.clone();
@@ -3782,7 +3998,16 @@ impl App {
                 self.pick_mode = mode;
                 self.pick_prefs = prefs;
                 self.pick_min_secs = min_secs;
-                self.tree = Tree::from_scan(&sc, &self.pick_mode, min_secs, &self.pick_prefs);
+                self.tree = Tree::from_scan_as(
+                    &sc,
+                    &self.pick_mode,
+                    min_secs,
+                    &self.pick_prefs,
+                    self.details.resolved_kind(&self.disc_label),
+                );
+                if let Some(review) = &self.tree.review {
+                    self.say(LogKind::Notice, &review.banner());
+                }
                 self.pick_scan = Some(sc.clone());
                 self.source = path.to_string();
                 self.page = Page::Titles;
@@ -3963,30 +4188,14 @@ impl App {
             );
             return vec![Effect::Redraw];
         }
-        if !self.settings.tmdb_api_key.trim().is_empty() {
-            for (key, value, allow_zero) in [
-                ("gui.set.tv_season", self.settings.tv_season.clone(), true),
-                (
-                    "gui.set.tv_first_episode",
-                    self.settings.tv_first_episode.clone(),
-                    false,
-                ),
-            ] {
-                if !value.trim().is_empty()
-                    && !value
-                        .trim()
-                        .parse::<u16>()
-                        .is_ok_and(|n| allow_zero || n > 0)
-                {
-                    let label = crate::strings::get(key);
-                    self.say(LogKind::Notice, &crate::strings::fmt_or(
-                        "gui.log.bad_number_setting",
-                        "“{name}” must be a whole number, not “{value}”. Fix it in Settings, then start again.",
-                        &[("name", &label), ("value", &value)],
-                    ));
-                    return vec![Effect::Redraw];
-                }
-            }
+        if let Some((field, value)) = self.details.bad_number() {
+            let label = detail_label(field);
+            self.say(LogKind::Notice, &crate::strings::fmt_or(
+                "gui.log.bad_number_detail",
+                "“{name}” must be a whole number, not “{value}”. Fix it in the disc details, then start again.",
+                &[("name", &label), ("value", &value.escape_debug().to_string())],
+            ));
+            return vec![Effect::Redraw];
         }
         let titles = self.tree.ticked_titles();
         // A disc/ISO scan has title rows; if all are unchecked, refuse rather than
@@ -4087,26 +4296,7 @@ impl App {
         let typed_passes: u32 = self.settings.max_passes.trim().parse().unwrap_or(0);
         let multipass = wants_multipass(&self.settings.rip_mode, typed_passes);
         let max_passes = effective_max_passes(&self.settings.rip_mode, typed_passes);
-        let tv_naming = if !self.settings.tmdb_api_key.trim().is_empty()
-            && matches!(self.pick_mode.as_str(), "Episodes" | "Main film / episodes")
-            && !self.effective_format().starts_with("Whole disc")
-        {
-            self.pick_scan.as_ref().and_then(|sc| {
-                let roster = automatic_titles(
-                    &sc.selection_model,
-                    &freemkv_engine::Selection::Episodes,
-                    &self.pick_prefs,
-                );
-                (!roster.is_empty()).then(|| crate::engine::TvNamingRequest {
-                    api_key: self.settings.tmdb_api_key.clone(),
-                    roster,
-                    season: self.settings.tv_season.trim().parse().ok(),
-                    first_episode: self.settings.tv_first_episode.trim().parse().ok(),
-                })
-            })
-        } else {
-            None
-        };
+        let tv_naming = self.naming_request(&titles);
         crate::engine::start_rip(
             RipRequest {
                 source: self.source.clone(),
@@ -4143,6 +4333,43 @@ impl App {
             state,
         );
         vec![Effect::Redraw, Effect::StartTicking]
+    }
+
+    // What names this rip's files: the details row, the TMDB key (optional), the opt-in
+    // library layout, and the episodes. Episodes are the disc-proven roster, or, for a TV
+    // disc whose episodes the operator confirmed by ticking a suggestion, exactly the
+    // ticked titles in run order. `None` for whole-disc output or when nothing applies.
+    fn naming_request(&self, ticked: &[usize]) -> Option<crate::engine::TvNamingRequest> {
+        if self.effective_format().starts_with("Whole disc") {
+            return None;
+        }
+        let tv = self.details.resolved_kind(&self.disc_label)
+            == Some(freemkv_engine::metadata::MediaKind::Tv);
+        let confirmed = tv
+            && self
+                .tree
+                .review
+                .as_ref()
+                .is_some_and(|r| r.suggestion.is_some());
+        let roster = match self.pick_scan.as_ref() {
+            Some(_) if !matches!(self.pick_mode.as_str(), "Episodes" | "Main film / episodes") => {
+                Vec::new()
+            }
+            Some(_) if confirmed => ticked.to_vec(),
+            Some(sc) => automatic_titles(
+                &sc.selection_model,
+                &freemkv_engine::Selection::Episodes,
+                &self.pick_prefs,
+            ),
+            None => Vec::new(),
+        };
+        let organize = self.settings.organize_library;
+        (!roster.is_empty() || organize).then(|| crate::engine::TvNamingRequest {
+            api_key: self.settings.tmdb_api_key.trim().to_string(),
+            roster,
+            operator: self.details.operator(&self.disc_label),
+            organize,
+        })
     }
 
     // Collect the launch probe's result if it has finished. Runs on the UI
@@ -4386,8 +4613,10 @@ impl App {
                 (c, on)
             })
             .collect();
-        let has_episodes =
-            !automatic_titles(&sc.selection_model, &freemkv_engine::Selection::Episodes, p)
+        // Episodes: a disc that proves its roster, or one the operator or label calls TV.
+        let has_episodes = self.details.resolved_kind(&self.disc_label)
+            == Some(freemkv_engine::metadata::MediaKind::Tv)
+            || !automatic_titles(&sc.selection_model, &freemkv_engine::Selection::Episodes, p)
                 .is_empty();
         let titles = PICK_TITLES
             .iter()
@@ -4409,6 +4638,7 @@ impl App {
                 .join(", ")
         };
         Some(PickView {
+            banner: self.tree.review.as_ref().map(TreeReview::banner),
             titles,
             title: self.pick_mode.clone(),
             audio_summary: if audio_all {
@@ -4471,6 +4701,7 @@ impl App {
             startup_mode: self.settings.startup_mode.clone(),
             title_rows: self.rows(),
             pick: self.pick_view(),
+            details: self.details_view(),
             info: self
                 .info
                 .as_ref()
@@ -4584,6 +4815,9 @@ impl Default for App {
 /// The selection bar as the shells draw it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PickView {
+    /// Why the ticks need checking, shown beside the choosers: a selection the disc does not
+    /// prove, or suggested episodes. `None`: nothing to say.
+    pub banner: Option<String>,
     /// The title choices this disc offers, (mode, label), and the chosen mode.
     pub titles: Vec<(&'static str, String)>,
     pub title: String,
@@ -4598,6 +4832,171 @@ pub struct PickView {
     /// What each dropdown shows closed: "eng, deu", "All", "None".
     pub audio_summary: String,
     pub subs_summary: String,
+}
+
+/// One text box of the disc details row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailField {
+    Name,
+    Year,
+    Season,
+    Disc,
+    FirstEpisode,
+}
+
+/// The disc details row's values: what this source is, typed by the operator. They outrank
+/// TMDB and the disc label in naming (`MediaMetadata::resolve`). Text as typed; numbers are
+/// checked at Start.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiscDetails {
+    /// Starts as the disc label; only a changed name counts as typed.
+    pub name: String,
+    pub year: String,
+    /// The operator's Movie / TV choice; `None` ("Auto") lets the label, then a confident
+    /// TMDB match, decide.
+    pub kind: Option<freemkv_engine::metadata::MediaKind>,
+    pub season: String,
+    pub disc: String,
+    pub first_episode: String,
+}
+
+/// The kind choices, in order: Auto, Movie, TV.
+const DETAIL_KINDS: [Option<freemkv_engine::metadata::MediaKind>; 3] = [
+    None,
+    Some(freemkv_engine::metadata::MediaKind::Movie),
+    Some(freemkv_engine::metadata::MediaKind::Tv),
+];
+
+impl DiscDetails {
+    /// A newly opened source's details: its label as the name, nothing else.
+    pub fn for_label(label: &str) -> Self {
+        DiscDetails {
+            name: label.to_string(),
+            ..Self::default()
+        }
+    }
+
+    pub fn get(&self, field: DetailField) -> &str {
+        match field {
+            DetailField::Name => &self.name,
+            DetailField::Year => &self.year,
+            DetailField::Season => &self.season,
+            DetailField::Disc => &self.disc,
+            DetailField::FirstEpisode => &self.first_episode,
+        }
+    }
+
+    fn slot(&mut self, field: DetailField) -> &mut String {
+        match field {
+            DetailField::Name => &mut self.name,
+            DetailField::Year => &mut self.year,
+            DetailField::Season => &mut self.season,
+            DetailField::Disc => &mut self.disc,
+            DetailField::FirstEpisode => &mut self.first_episode,
+        }
+    }
+
+    /// The kind the title tree acts on: the operator's, else TV when `label` names a season.
+    pub fn resolved_kind(&self, label: &str) -> Option<freemkv_engine::metadata::MediaKind> {
+        freemkv_engine::metadata::MediaMetadata::resolve(
+            &freemkv_engine::metadata::MediaMetadata {
+                kind: self.kind,
+                ..Default::default()
+            },
+            None,
+            &[label],
+        )
+        .kind
+    }
+
+    /// The operator's metadata for naming: the name only when changed from `label`, and
+    /// each number that parses (Start refuses one that does not, see [`DiscDetails::bad_number`]).
+    pub fn operator(&self, label: &str) -> freemkv_engine::metadata::MediaMetadata {
+        let number = |s: &str| s.trim().parse::<u16>().ok();
+        let name = self.name.trim();
+        freemkv_engine::metadata::MediaMetadata {
+            title: if name == label.trim() {
+                String::new()
+            } else {
+                name.to_string()
+            },
+            year: number(&self.year).unwrap_or(0),
+            tmdb_id: 0,
+            season: number(&self.season),
+            disc: number(&self.disc).filter(|n| *n > 0),
+            episode_start: number(&self.first_episode).filter(|n| *n > 0),
+            kind: self.kind,
+        }
+    }
+
+    /// The first number field holding something that is not a number it allows: Year and
+    /// Season may be 0, Disc and First episode may not. `(field, text)`.
+    pub fn bad_number(&self) -> Option<(DetailField, String)> {
+        [
+            (DetailField::Year, true),
+            (DetailField::Season, true),
+            (DetailField::Disc, false),
+            (DetailField::FirstEpisode, false),
+        ]
+        .into_iter()
+        .map(|(field, zero)| (field, self.get(field).trim(), zero))
+        .find(|(_, text, zero)| {
+            !text.is_empty() && !text.parse::<u16>().is_ok_and(|n| *zero || n > 0)
+        })
+        .map(|(field, text, _)| (field, text.to_string()))
+    }
+}
+
+/// The disc details row's labels: Name, Year, Kind, Season, Disc, First episode.
+pub fn details_labels() -> [String; 6] {
+    [
+        crate::strings::get_or("gui.details.name", "Name"),
+        crate::strings::get_or("gui.details.year", "Year"),
+        crate::strings::get_or("gui.details.kind", "Kind"),
+        crate::strings::get_or("gui.details.season", "Season"),
+        crate::strings::get_or("gui.details.disc", "Disc"),
+        crate::strings::get_or("gui.details.first_episode", "First episode"),
+    ]
+}
+
+// One details field's label, for a refused number.
+fn detail_label(field: DetailField) -> String {
+    let [name, year, _, season, disc, first] = details_labels();
+    match field {
+        DetailField::Name => name,
+        DetailField::Year => year,
+        DetailField::Season => season,
+        DetailField::Disc => disc,
+        DetailField::FirstEpisode => first,
+    }
+}
+
+/// What the disc details row shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetailsView {
+    pub name: String,
+    pub year: String,
+    pub season: String,
+    pub disc: String,
+    pub first_episode: String,
+    /// The Movie / TV choices (Auto first, naming what the label says) and the chosen one.
+    pub kinds: Vec<String>,
+    pub kind_index: usize,
+    /// Season, Disc and First episode apply: the kind is not Movie.
+    pub numbering: bool,
+}
+
+impl DetailsView {
+    /// One text box's value.
+    pub fn get(&self, field: DetailField) -> &str {
+        match field {
+            DetailField::Name => &self.name,
+            DetailField::Year => &self.year,
+            DetailField::Season => &self.season,
+            DetailField::Disc => &self.disc,
+            DetailField::FirstEpisode => &self.first_episode,
+        }
+    }
 }
 
 /// One column of the title tree, after the shell's own tick column.
@@ -5003,6 +5402,8 @@ pub struct View {
     pub title_rows: Vec<Row>,
     /// The selection bar, while a source is open.
     pub pick: Option<PickView>,
+    /// The disc details row, while a disc or image with titles is open.
+    pub details: Option<DetailsView>,
     pub info: Option<[String; 7]>,
     pub bar_current: f64,
     pub bar_overall: f64,
