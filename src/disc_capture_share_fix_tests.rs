@@ -31,6 +31,7 @@ fn bare_disc(encrypted: bool, aacs_error: Option<Error>) -> Disc {
         encrypted,
         aacs_error,
         css_error: None,
+        layer_map: None,
         content_format: libfreemkv::ContentFormat::BdTs,
     }
 }

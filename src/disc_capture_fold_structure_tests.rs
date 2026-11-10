@@ -52,6 +52,7 @@ fn capture_fails_with_its_reason_when_there_is_no_structure_or_no_directory() {
         encrypted: false,
         aacs_error: None,
         css_error: None,
+        layer_map: None,
         content_format: libfreemkv::ContentFormat::BdTs,
     };
     let base = std::env::temp_dir().join(format!("fmkv-capfail-{}", std::process::id()));

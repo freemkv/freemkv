@@ -106,6 +106,7 @@ fn dvd(css: Option<libfreemkv::css::CssState>, uncracked: bool) -> libfreemkv::D
         aacs: None,
         css,
         css_error: uncracked.then_some(libfreemkv::Error::CssNoDiscKey),
+        layer_map: None,
         content_format: libfreemkv::ContentFormat::MpegPs,
         ..bd_image(&[None], 1).disc
     }

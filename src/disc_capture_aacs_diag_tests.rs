@@ -23,6 +23,7 @@ fn disc_with(aacs: Option<AacsState>) -> Disc {
         encrypted: true,
         aacs_error: None,
         css_error: None,
+        layer_map: None,
         content_format: libfreemkv::ContentFormat::BdTs,
     }
 }

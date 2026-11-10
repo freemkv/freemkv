@@ -152,6 +152,37 @@ pub fn format_name(f: &libfreemkv::DiscFormat) -> String {
     }
 }
 
+/// Where `disc.layers` came from: READ DISC STRUCTURE, or the capacity estimate.
+pub fn layer_source(disc: &libfreemkv::Disc) -> &'static str {
+    if disc.layer_map.is_some() {
+        "drive-reported"
+    } else {
+        "estimated"
+    }
+}
+
+/// The `Layers:` line, plus `Layer break:` when the drive reported one (DVD family).
+pub fn layer_lines(disc: &libfreemkv::Disc) -> Vec<String> {
+    let mut v = vec![format!("Layers: {} ({})", disc.layers, layer_source(disc))];
+    if let Some(b) = disc.layer_map.as_ref().and_then(|m| m.layer_break) {
+        v.push(format!("Layer break: {}", group_thousands(u64::from(b))));
+    }
+    v
+}
+
+/// `2084960` as `2,084,960`.
+pub fn group_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn fmt_gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
 }
@@ -670,8 +701,13 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str) -> Vec<String> {
     d.push(format!("Type: {}", format_name(&disc.format)));
     if disc.capacity_bytes > 0 {
         let gb = disc.capacity_bytes as f64 / 1_000_000_000.0;
-        d.push(format!("Capacity: {gb:.1} GB, {} layer(s)", disc.layers));
+        d.push(format!(
+            "Capacity: {gb:.1} GB, {} layer(s) ({})",
+            disc.layers,
+            layer_source(disc)
+        ));
     }
+    d.extend(layer_lines(disc).into_iter().skip(1));
     match &disc.region {
         libfreemkv::disc::DiscRegion::Free => d.push("Region: free".to_string()),
         libfreemkv::disc::DiscRegion::Unknown => d.push("Region: unknown".to_string()),

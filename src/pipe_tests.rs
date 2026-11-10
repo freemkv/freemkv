@@ -63,6 +63,7 @@ fn the_rip_path_picks_the_main_title_with_the_presentation_language() {
             encrypted: false,
             aacs_error: None,
             css_error: None,
+            layer_map: None,
             content_format: libfreemkv::ContentFormat::BdTs,
         }
     }

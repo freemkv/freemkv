@@ -54,6 +54,7 @@ fn a_staged_image_muxes_only_titles_its_scope_holds() {
         encrypted: false,
         aacs_error: None,
         css_error: None,
+        layer_map: None,
         content_format: libfreemkv::ContentFormat::BdTs,
     };
     let out = Output::new(false, true);

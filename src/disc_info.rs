@@ -252,6 +252,9 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
             gb
         ),
     );
+    for line in freemkv::engine::layer_lines(&disc) {
+        out.raw(Normal, &line);
+    }
     emit_encryption_line(&out, &disc);
 
     // Report the unlocker that actually handled this rip. Keep the matrix as the

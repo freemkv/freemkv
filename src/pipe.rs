@@ -2298,7 +2298,26 @@ pub(crate) fn whole_disc(
             path,
             names,
             ..
-        }) => render_copy(&copy, disc.as_deref(), &path, names.as_ref(), start, out),
+        }) => {
+            let code = render_copy(&copy, disc.as_deref(), &path, names.as_ref(), start, out);
+            let kept = !matches!(
+                copy_verdict(&copy),
+                CopyVerdict::Interrupted | CopyVerdict::NoData
+            );
+            let live = matches!(
+                libfreemkv::parse_url(&plan.source),
+                libfreemkv::StreamUrl::Disc { .. }
+            );
+            // Only a kept image from a live drive: an `iso://` source has no layer map.
+            if kept
+                && live
+                && matches!(output, freemkv_engine::Output::Image { null: false, .. })
+                && let Some(d) = disc.as_deref()
+            {
+                write_layer_break_file(d, &path, out);
+            }
+            code
+        }
         Ok(freemkv_engine::Report::Tree { extract }) => match render_extract(&extract, out) {
             true => 0,
             false => 1,
@@ -2325,6 +2344,52 @@ pub(crate) fn whole_disc(
             out.raw(Always, &text);
             1
         }
+    }
+}
+
+/// ImgBurn's layer-break side file for a disc -> ISO copy: `<stem>.dvd` beside the
+/// image, naming it. Dual-layer DVD with a drive-reported break only; BD and HD DVD
+/// burners take no `.dvd` file.
+pub(crate) fn layer_break_file(
+    disc: &libfreemkv::Disc,
+    iso: &std::path::Path,
+) -> Option<(std::path::PathBuf, String)> {
+    if disc.format != libfreemkv::DiscFormat::Dvd {
+        return None;
+    }
+    let map = disc.layer_map.as_ref().filter(|m| m.layers == 2)?;
+    let layer_break = map.layer_break?;
+    let name = iso.file_name()?.to_str()?;
+    let side = iso.with_extension("dvd");
+    // An image itself named `*.dvd` would be overwritten.
+    if side == iso {
+        return None;
+    }
+    Some((side, libfreemkv::imgburn_dvd_descriptor(layer_break, name)))
+}
+
+fn write_layer_break_file(disc: &libfreemkv::Disc, iso: &std::path::Path, out: &Output) {
+    let Some((side, body)) = layer_break_file(disc, iso) else {
+        return;
+    };
+    let shown = side.display().to_string();
+    match std::fs::write(&side, body) {
+        Ok(()) => out.raw(
+            Normal,
+            &strings::fmt_or(
+                "rip.layer_break_file",
+                "Layer break file: {path}",
+                &[("path", &shown)],
+            ),
+        ),
+        Err(e) => out.raw(
+            Always,
+            &strings::fmt_or(
+                "rip.layer_break_file_failed",
+                "Could not write the layer break file {path}: {error}",
+                &[("path", &shown), ("error", &e.to_string())],
+            ),
+        ),
     }
 }
 
@@ -2913,6 +2978,10 @@ mod staged_image_tests;
 #[cfg(test)]
 #[path = "pipe_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pipe_layer_break_tests.rs"]
+mod layer_break_tests;
 
 #[cfg(test)]
 #[path = "pipe_verdict_tests.rs"]

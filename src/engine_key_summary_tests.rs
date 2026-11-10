@@ -15,6 +15,7 @@ pub(super) fn disc(encrypted: bool) -> libfreemkv::Disc {
         encrypted,
         aacs_error: None,
         css_error: None,
+        layer_map: None,
         content_format: libfreemkv::ContentFormat::BdTs,
     }
 }

@@ -147,3 +147,57 @@ fn the_detail_block_never_renders_the_vuk_or_any_unit_key() {
     }
     assert!(!text.contains("VUK") && !text.contains("CPS"), "{text}");
 }
+
+fn dvd9(layer_break: Option<u32>) -> libfreemkv::Disc {
+    let mut d = disc(false);
+    d.format = libfreemkv::DiscFormat::Dvd;
+    d.layers = 2;
+    d.layer_map = Some(libfreemkv::LayerMap {
+        layers: 2,
+        layer_break,
+        track_path: Some(libfreemkv::TrackPath::Opposite),
+    });
+    d
+}
+
+#[test]
+fn layer_lines_name_the_source_and_the_break() {
+    assert_eq!(
+        super::layer_lines(&dvd9(Some(2_084_960))),
+        vec!["Layers: 2 (drive-reported)", "Layer break: 2,084,960"]
+    );
+    assert_eq!(
+        super::layer_lines(&dvd9(None)),
+        vec!["Layers: 2 (drive-reported)"]
+    );
+    // No drive answer (or an image): the capacity estimate, no break.
+    assert_eq!(
+        super::layer_lines(&disc(false)),
+        vec!["Layers: 1 (estimated)"]
+    );
+}
+
+#[test]
+fn disc_details_carry_the_layer_source_and_break() {
+    let lines = disc_details(&dvd9(Some(2_084_960)), "x");
+    assert!(
+        lines.contains(&"Capacity: 0.0 GB, 2 layer(s) (drive-reported)".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"Layer break: 2,084,960".to_string()),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn group_thousands_inserts_commas() {
+    for (n, s) in [
+        (0, "0"),
+        (999, "999"),
+        (1_000, "1,000"),
+        (2_084_960, "2,084,960"),
+    ] {
+        assert_eq!(super::group_thousands(n), s);
+    }
+}
