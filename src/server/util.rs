@@ -216,20 +216,8 @@ pub fn disc_variant_name(base: &str, variant: u32) -> String {
 /// Same path-segment safety guarantee as [`sanitize_path_compact`]: the
 /// result is never empty, `.`, `..`, or all-dots (see `ensure_safe_segment`).
 pub fn sanitize_path_display(name: &str) -> String {
-    let filtered = name
-        .chars()
-        .filter(|c| {
-            c.is_ascii_alphanumeric()
-                || *c == ' '
-                || *c == '-'
-                || *c == '_'
-                || *c == '.'
-                || *c == '\''
-        })
-        .collect::<String>()
-        .trim()
-        .to_string();
-    ensure_safe_segment(filtered)
+    // One rule with the desktop and the engine's library layout.
+    freemkv_engine::metadata::sanitize_display(name)
 }
 
 /// Format a number of seconds as `Xh YYm`. Used by the rip card and the

@@ -1,5 +1,5 @@
 use crate::server::config::Config;
-use crate::server::planner::MediaKind;
+use crate::server::planner::{MediaKind, MediaMetadata};
 use crate::server::tmdb;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -2611,8 +2611,9 @@ fn mover_marker_value(st: &crate::server::ripper::staging::DiscState) -> serde_j
 }
 
 // The TV-episode leaf name for a staging `filename`, or None when this is
-// not a TV episode output. Names as "Show S{NN}E{MM}[ - Episode Name].ext";
-// build_destination folders it under "Show (Year)/Season NN/".
+// not a TV episode output. Names as "Show S{NN}E{MM}[ - Episode Name].ext"
+// (the engine's `episode_leaf`, shared with the desktop); build_destination folders it
+// under "Show (Year)/Season NN/".
 pub(crate) fn tv_episode_leaf(
     tmdb: &Option<tmdb::TmdbResult>,
     outputs: &[crate::server::ripper::staging::Output],
@@ -2625,23 +2626,19 @@ pub(crate) fn tv_episode_leaf(
     }
     let out = outputs.iter().find(|o| o.filename == filename)?;
     let episode = out.episode?;
-    let season = season.unwrap_or(1);
     let ext = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("mkv");
-    let safe_title = crate::server::util::sanitize_path_display(&result.title);
-    if out.episode_name.is_empty() {
-        Some(format!("{safe_title} S{season:02}E{episode:02}.{ext}"))
-    } else {
-        // Sanitize the episode name too: it comes from TMDB and can carry path
-        // separators / reserved chars (e.g. "Part 1/2", ":") that would escape
-        // the season folder or break the write, just like the title.
-        let safe_episode = crate::server::util::sanitize_path_display(&out.episode_name);
-        Some(format!(
-            "{safe_title} S{season:02}E{episode:02} - {safe_episode}.{ext}"
-        ))
-    }
+    // Both the title and the TMDB episode name are sanitized: a name can carry path
+    // separators / reserved chars (e.g. "Part 1/2", ":") that would escape the season folder.
+    let leaf = freemkv_engine::metadata::episode_leaf(
+        &result.title,
+        season.unwrap_or(1),
+        episode,
+        &out.episode_name,
+    );
+    Some(format!("{leaf}.{ext}"))
 }
 
 pub(crate) fn build_destination(
@@ -2650,89 +2647,48 @@ pub(crate) fn build_destination(
     filename: &str,
     season: Option<u16>,
 ) -> String {
+    use freemkv_engine::metadata::layout;
+    let meta = tmdb.as_ref().map(|result| MediaMetadata {
+        season,
+        ..MediaMetadata::from(result)
+    });
     // Kept/output disc images archive to their own FLAT folder when `iso_dir` is configured,
     // sibling to the library, not beside the muxed title — one file per title, no per-title
     // subfolder. Empty `iso_dir` falls through below.
     if is_iso_file(filename) && !cfg.iso_dir.is_empty() {
         let root = resolve_media_root(&cfg.output_dir, &cfg.iso_dir);
-        let leaf = match tmdb {
-            Some(result) => {
-                let safe_title = crate::server::util::sanitize_path_display(&result.title);
-                let year_str = if result.year > 0 {
-                    format!(" ({})", result.year)
-                } else {
-                    String::new()
-                };
-                format!("{safe_title}{year_str}.iso")
-            }
+        let leaf = match &meta {
+            Some(meta) => format!("{}.iso", layout::title_with_year(meta)),
             // No TMDB match: keep the (sanitized) source filename, mirroring the
             // no-tmdb fall-through the movie/tv branches use.
             None => crate::server::util::sanitize_path_display(filename),
         };
         return join_path(&root, &leaf);
     }
-    // Source extension wins. Pre-0.25.7 this hardcoded ".mkv", which collided when
-    // keep_iso=true left the mux output and source ISO both planning to the same path,
-    // alternately overwriting each other (2026-05-20).
-    let src_ext = Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("mkv");
-    if let Some(result) = tmdb {
-        let safe_title = crate::server::util::sanitize_path_display(&result.title);
-        match result.media_type {
-            MediaKind::Movie if !cfg.movie_dir.is_empty() => {
-                let year_str = if result.year > 0 {
-                    format!(" ({})", result.year)
-                } else {
-                    String::new()
-                };
-                // The movie root is `movie_dir` resolved UNDER `output_dir`: relative joins
-                // onto output_dir, absolute wins (back-compat). Pre-fix a relative "movies"
-                // resolved against container root / — the 2026-06 "Mercy" incident.
-                let root = resolve_media_root(&cfg.output_dir, &cfg.movie_dir);
-                let dir = join_path(&root, &format!("{safe_title}{year_str}"));
-                // Filename carries the year too, matching the folder and the Plex/Jellyfin
-                // `Title (Year)/Title (Year).ext` convention (pre-fix the file was bare
-                // `Title.ext`).
-                let name = format!("{safe_title}{year_str}.{src_ext}");
-                join_path(&dir, &name)
-            }
-            MediaKind::Tv if !cfg.tv_dir.is_empty() => {
-                // Same join fix as the movie branch: `tv_dir` resolved under
-                // `output_dir` (relative joins, absolute wins).
-                let root = resolve_media_root(&cfg.output_dir, &cfg.tv_dir);
-                // Jellyfin/Plex TV layout: `Show (Year)/Season NN/`, zero-padded. Season is
-                // parsed from the disc label at rip time; when absent, default to 1 rather
-                // than dumping loose under the show.
-                let year_str = if result.year > 0 {
-                    format!(" ({})", result.year)
-                } else {
-                    String::new()
-                };
-                let show_dir = join_path(&root, &format!("{safe_title}{year_str}"));
-                let dir = join_path(&show_dir, &format!("Season {:02}", season.unwrap_or(1)));
-                // Sanitize the leaf too: the movie branch derives its leaf from a sanitized
-                // title, but this branch used the RAW source filename, so a path separator or
-                // traversal sequence could escape tv_dir.
-                let safe_filename = crate::server::util::sanitize_path_display(filename);
-                join_path(&dir, &safe_filename)
-            }
-            _ => {
-                // Sanitize the leaf for consistency with the movie/tv
-                // branches (they sanitize; this fallback used the raw leaf,
-                // so e.g. "..mkv" would reach output_dir verbatim).
-                join_path(
-                    &cfg.output_dir,
-                    &crate::server::util::sanitize_path_display(filename),
-                )
-            }
+    // The movie/TV roots resolve UNDER `output_dir`: relative joins onto output_dir, absolute
+    // wins (back-compat; pre-fix a relative "movies" resolved against / — the 2026-06 "Mercy"
+    // incident). Below a root the layout is the engine's, shared with the desktop:
+    // `Title (Year)/Title (Year).ext` (source extension wins, so a kept ISO and its mux never
+    // share a path) and Jellyfin/Plex `Show (Year)/Season NN/leaf` (season 1 when unknown),
+    // every segment sanitized so nothing escapes the root.
+    let root = match meta.as_ref().map(|meta| meta.kind) {
+        Some(Some(MediaKind::Movie)) if !cfg.movie_dir.is_empty() => Some(&cfg.movie_dir),
+        Some(Some(MediaKind::Tv)) if !cfg.tv_dir.is_empty() => Some(&cfg.tv_dir),
+        _ => None,
+    };
+    match (root, &meta) {
+        (Some(root), Some(meta)) => {
+            let root = resolve_media_root(&cfg.output_dir, root);
+            join_path(
+                &root,
+                &layout::relative_path(meta, filename).to_string_lossy(),
+            )
         }
-    } else {
-        join_path(
+        // No library root for the kind (or no match): the sanitized leaf under output_dir.
+        _ => join_path(
             &cfg.output_dir,
             &crate::server::util::sanitize_path_display(filename),
-        )
+        ),
     }
 }
 

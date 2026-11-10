@@ -1863,6 +1863,64 @@ fn check_and_move_files_only_outputs_for_a_tv_dir() {
     );
 }
 
+// R5: a disc that is TV only by its label (no TMDB match) is handed off with the RESOLVED
+// kind, season and disc, so with `movie_dir` set its episodes still file as distinct
+// `Show S01E0n` episodes under the TV root, never as one `Title/Title.mkv` each.
+#[test]
+fn a_label_only_tv_disc_delivers_distinct_episodes_to_the_tv_root() {
+    use crate::server::planner::{MediaKind, MediaMetadata};
+    let _guard = errors_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let staging = tmp.path().join("staging");
+    let output_dir = tmp.path().join("output");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::create_dir_all(output_dir.join("TV")).unwrap();
+    std::fs::create_dir_all(output_dir.join("Movies")).unwrap();
+    let cfg = Config {
+        staging_dir: staging.to_string_lossy().to_string(),
+        output_dir: output_dir.to_string_lossy().to_string(),
+        movie_dir: "Movies".to_string(),
+        tv_dir: "TV".to_string(),
+        ..Config::default()
+    };
+    let disc_dir = staging.join("Show");
+    std::fs::create_dir_all(&disc_dir).unwrap();
+    let mut st = crate::server::ripper::staging::DiscState::new(
+        crate::server::ripper::staging::StagingState::Done,
+    );
+    st.title = "Show".to_string();
+    st.disc_name = "SHOW_S1_D1".to_string();
+    // As the hand-off stamps it: no TMDB match, the label names a season.
+    let resolved = MediaMetadata::resolve(&MediaMetadata::default(), None, &["SHOW_S1_D1"]);
+    st.stamp_resolved(&resolved);
+    assert_eq!(st.media_type, MediaKind::Tv);
+    assert_eq!((st.season, st.disc_number), (Some(1), Some(1)));
+    st.outputs = (1..=4)
+        .map(|n| ep_output(&format!("Show_S01E{n:02}.mkv"), Some(n), ""))
+        .collect();
+    crate::server::ripper::staging::write_state(&disc_dir, &st);
+    for n in 1..=4u8 {
+        std::fs::write(disc_dir.join(format!("Show_S01E{n:02}.mkv")), vec![n; 4096]).unwrap();
+    }
+
+    check_and_move(&cfg);
+
+    let season_dir = output_dir.join("TV").join("Show").join("Season 01");
+    for n in 1..=4u8 {
+        let delivered = season_dir.join(format!("Show S01E{n:02}.mkv"));
+        assert_eq!(
+            std::fs::read(&delivered).ok(),
+            Some(vec![n; 4096]),
+            "episode {n} filed as its own file at {}",
+            delivered.display()
+        );
+    }
+    assert!(
+        walkdir_files(&output_dir.join("Movies")).is_empty(),
+        "nothing files under the movie root"
+    );
+}
+
 // Regression: the TV outputs[] filter never listed the intermediate.iso, so a keep_iso=true
 // TV rip's ISO was dropped then destroyed by teardown.
 #[test]
