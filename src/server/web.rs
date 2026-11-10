@@ -103,6 +103,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("web/assets/ripper.js"),
     ),
     (
+        "titles.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/titles.js"),
+    ),
+    (
         "settings.js",
         "text/javascript; charset=utf-8",
         include_bytes!("web/assets/settings.js"),

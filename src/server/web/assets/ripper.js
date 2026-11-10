@@ -8,6 +8,7 @@
 import { esc, escLinks, $, put, fill, api, act, toast, twoStep, terminal, modal, bytes, plural, ICON } from './ui.js';
 import { subscribe } from './bus.js';
 import { connections, subscribeConnections, driveState, busyDriveCount } from './connection.js';
+import { openTitlesDialog, driveTitles } from './titles.js';
 
 const ACTIVE = ['ripping', 'scanning', 'detecting'];
 const ownerUrl = (owner, path) => owner ? '/api/peers/' + owner + path : path;
@@ -178,6 +179,11 @@ function bannersHtml(s) {
     h += '<div class="banner bad">⚠ <span>' + escLinks(s.last_error) + '</span></div>';
   }
   if (s.notice) h += '<div class="banner warn">ⓘ <span>' + esc(s.notice) + '</span></div>';
+  // An episode set the disc does not prove: the operator confirms it before the rip runs.
+  if (s.confirm && s.job_id && !ACTIVE.includes(s.status)) {
+    h += '<div class="banner warn">ⓘ <span>Check which titles are the episodes, and their order, before ripping.</span>'
+      + '<button class="btn btn-primary btn-sm" data-titles>Confirm episodes…</button></div>';
+  }
   if (s.status === 'ripping' && s.current_batch > 0 && s.preferred_batch > 0 && s.current_batch < s.preferred_batch) {
     h += '<div class="banner info">↺ Reading a damaged area slowly (' + s.current_batch + ' / ' + s.preferred_batch + ' sectors at a time)</div>';
   }
@@ -225,8 +231,10 @@ function actionsHtml(dev, s) {
   const btns = actionsFor(dev, s).map(([label, url, kind, two]) =>
     '<button class="btn btn-' + kind + ' btn-sm" data-url="' + esc(url) + '" data-label="' + esc(label) + '"' + (two ? ' data-two' : '') + '>' + esc(label) + '</button>').join('');
   const edit = s.job_id && ['idle', 'ripping', 'error'].includes(s.status) && (s.tmdb_title || s.disc_name) ? '<button class="btn btn-ghost btn-sm" data-title>Change title</button>' : '';
+  // Titles can be chosen any time before the rip starts.
+  const titles = s.job_id && ['idle', 'error'].includes(s.status) && (s.tmdb_title || s.disc_name) && !lossAborted(s) ? '<button class="btn btn-ghost btn-sm" data-titles>Titles…</button>' : '';
   const elapsed = ACTIVE.includes(s.status) ? '<span class="elapsed" data-started="' + (s.started_epoch_secs || 0) + '"></span>' : '';
-  return btns + edit + elapsed;
+  return btns + edit + titles + elapsed;
 }
 
 // ── A drive card, updated in place ────────────────────────────────────────
@@ -328,7 +336,7 @@ function moveHtml(state, sys, empty = true) {
 function reviewHtml(items) {
   return items.map(it => '<div class="pipe-row"><span class="dot dot-teal"></span><div class="grow"><div class="name">' + esc(it.title || it.dir) + (it.year ? ' (' + it.year + ')' : '') + '</div>'
     + '<div class="sub">' + esc(it.reason || '') + '</div><div class="sub mono">' + esc(it.file || '') + '</div></div>'
-    + '<button class="btn btn-secondary btn-sm" data-review="' + esc(it.dir) + '">Review…</button></div>').join('');
+    + '<button class="btn btn-secondary btn-sm" data-review="' + esc(it.dir) + '">' + (it.episode_confirm ? 'Confirm episodes…' : 'Review…') + '</button></div>').join('');
 }
 
 // ── Dialogs ────────────────────────────────────────────────────────────────
@@ -441,17 +449,41 @@ function changeTitle(dev, s) {
   });
 }
 
+// A held rip: an episode set to confirm opens on its titles (the name stays one click away);
+// anything else asks which title it is.
 function reviewDialog(it, reload, owner = '') {
+  if (it.episode_confirm) return reviewEpisodes(it, reload, owner);
+  return reviewPicker(it, reload, owner);
+}
+
+/* Confirm a held capture's episodes from its saved image: only titles its sweep read. */
+function reviewEpisodes(it, reload, owner = '') {
+  return openTitlesDialog({
+    heading: 'Confirm episodes · ' + (it.title || it.dir),
+    saveLabel: 'Confirm episodes',
+    canClear: false,
+    load: () => api('GET', ownerUrl(owner, '/api/review/titles?dir=' + encodeURIComponent(it.dir))),
+    save: (data, ids) => api('POST', ownerUrl(owner, '/api/review/resolve'), { dir: it.dir, action: 'episodes', revision: data.revision, titles: ids }),
+    onSaved: reload,
+    extraFoot: '<button class="btn btn-ghost btn-sm" data-rv-name>Change name…</button>',
+    onExtra: (m) => { m.el.querySelector('[data-rv-name]').onclick = () => { m.close(); reviewPicker(it, reload, owner); }; },
+  });
+}
+
+function reviewPicker(it, reload, owner = '') {
   titlePicker({
     owner,
     heading: 'Which title is this? ' + (it.title || it.dir) + (it.year ? ' (' + it.year + ')' : ''),
     initial: it.title || '',
     mediaType: it.media_type, episodeStart: it.episode_start, season: it.season, disc: it.disc,
     sub: esc(it.reason || '') + (it.file ? '<br><span class="mono">' + esc(it.file) + '</span>' : ''),
-    extraFoot: '<button class="btn btn-ghost btn-sm" id="rv-cancel">Delete this rip</button><button class="btn btn-secondary btn-sm" id="rv-proceed">Keep this name</button>',
+    extraFoot: (it.media_type === 'tv' ? '<button class="btn btn-ghost btn-sm" id="rv-episodes">Episodes…</button>' : '')
+      + '<button class="btn btn-ghost btn-sm" id="rv-cancel">Delete this rip</button><button class="btn btn-secondary btn-sm" id="rv-proceed">Keep this name</button>',
     onPick: async (c, btn) => resolve(btn, { ...c, action: 'retitle', year: c.year || 0 }),
     onExtra: (m, selection) => {
       m.el.querySelector('#rv-proceed').onclick = async (e) => { const c = selection({ action: 'proceed' }); if (c && await resolve(e.currentTarget, c)) m.close(); };
+      const episodes = m.el.querySelector('#rv-episodes');
+      if (episodes) episodes.onclick = () => { m.close(); reviewEpisodes(it, reload, owner); };
       const cb = m.el.querySelector('#rv-cancel');
       cb.onclick = (e) => twoStep(e.currentTarget, async (b) => { if (await resolve(b, { action: 'cancel' })) m.close(); }, 'Confirm delete');
       void cb;
@@ -569,7 +601,7 @@ export default {
         <section class="card"><div class="card-head"><h2>Moving to your library</h2></div><div id="move"></div></section>
       </div>
       <section class="card" id="review-card" style="margin-top:1.25rem" hidden><div class="card-head"><h2>Waiting for a title <span class="count" id="review-n"></span></h2></div>
-        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips are done, but the movie's name wasn't certain. Pick the right one to file them.</p><div id="review"></div></section></div>`;
+        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips are done, but their name or their episodes need a check. Confirm them to file them.</p><div id="review"></div></section></div>`;
     const root = $('#rp', view);
     const cards = new Map();
     let state = {};
@@ -652,6 +684,7 @@ export default {
       const dev = card.dataset.dev;
       if (e.target.closest('[data-console]')) { openDeviceTerminal(dev, !!connections.get(deviceOwner(dev))?.value.sys.debug_enabled, () => state, state[dev]?._owner || ''); return; }
       if (e.target.closest('[data-title]')) { changeTitle(dev, state[dev] || {}); return; }
+      if (e.target.closest('[data-titles]')) { driveTitles(dev, state[dev] || {}); return; }
       const b = e.target.closest('button[data-url]');
       if (!b) return;
       const go = (btn) => driveAction(btn, dev, b.dataset.label, b.dataset.url);

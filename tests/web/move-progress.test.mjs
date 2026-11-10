@@ -11,6 +11,7 @@ async function render(moves, sys = {}) {
     const names = specifier === './ui.js'
       ? ['esc', 'escLinks', '$', 'put', 'fill', 'api', 'act', 'toast', 'twoStep', 'terminal', 'modal', 'bytes', 'plural', 'ICON']
       : specifier === './bus.js' ? ['subscribe']
+      : specifier === './titles.js' ? ['openTitlesDialog', 'driveTitles']
       : ['connections', 'subscribeConnections', 'driveState', 'busyDriveCount'];
     return new vm.SyntheticModule(names, function () {
       for (const name of names) this.setExport(name, name === 'esc' ? String : () => {});
@@ -66,6 +67,7 @@ async function clearedToast(kind, response) {
     const names = specifier === './ui.js'
       ? ['esc', 'escLinks', '$', 'put', 'fill', 'api', 'act', 'toast', 'twoStep', 'terminal', 'modal', 'bytes', 'plural', 'ICON']
       : specifier === './bus.js' ? ['subscribe']
+      : specifier === './titles.js' ? ['openTitlesDialog', 'driveTitles']
       : ['connections', 'subscribeConnections', 'driveState', 'busyDriveCount'];
     return new vm.SyntheticModule(names, function () {
       for (const name of names) this.setExport(name, name === 'esc' ? String : () => {});

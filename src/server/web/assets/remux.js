@@ -10,6 +10,7 @@ import { muxedHtml, openDetails, noteText, queueOne, outdated } from './details.
 import { dotHtml } from './library.js';
 import { openConsole, openTitleLog } from './console.js';
 import { folderBanner, queuedNote, stagedPill, stagedActions } from './folders.js';
+import { openTitlesDialog } from './titles.js';
 
 const can = r => r.kind === 'remux' || r.kind === 'iso_only';
 const active = r => r.job && (r.job.state === 'queued' || r.job.state === 'running');
@@ -52,6 +53,13 @@ function rowPills(r, hold) {
   return r.job && r.job.staged && r.job.state !== 'running' ? state + lead : lead + state;
 }
 
+// A remux held for an episode set the disc does not prove (E9086): the operator confirms it.
+function needsEpisodes(r) {
+  if (!r.iso || !r.result || r.result.outcome !== 'failed') return false;
+  const f = (r.job && r.job.failure) || r.result;
+  return f.code === 9086 || /\bE9086\b/.test(f.message || '');
+}
+
 function actHtml(r) {
   if (r.job && r.job.staged && r.job.state !== 'running') return stagedActions(r);
   if (r.job && r.job.state === 'queued') {
@@ -62,7 +70,33 @@ function actHtml(r) {
   const failed = r.result && r.result.outcome === 'failed';
   const label = failed ? 'Retry' : r.kind === 'iso_only' ? 'Create' : 'Remux';
   const tone = failed || r.needs_remux ? 'btn-primary' : 'btn-ghost';
+  if (needsEpisodes(r)) return '<button class="btn btn-ghost btn-sm" data-match>Change match</button><button class="btn btn-sm btn-primary" data-episodes>Confirm episodes</button>';
   return '<button class="btn btn-ghost btn-sm" data-match>Change match</button><button class="btn btn-sm ' + tone + '" data-remux>' + label + '</button>';
+}
+
+// Confirm a remux's episodes: the ticks save on its match (with the numbers shown) and requeue.
+function confirmEpisodes(row) {
+  return openTitlesDialog({
+    heading: 'Confirm episodes · ' + row.title,
+    saveLabel: 'Confirm and remux',
+    canClear: false,
+    numbers: true,
+    load: () => api('GET', '/api/library/titles?source=' + encodeURIComponent(row.iso)),
+    save: (data, ids, n) => api('POST', '/api/library/match/remux', {
+      source: row.iso, expected_revision: data.revision || 0,
+      media: { title: data.show || row.title, year: data.year || 0, tmdb_id: data.tmdb_id || 0, kind: data.kind,
+        season: data.kind === 'tv' ? n.season : null, disc: data.kind === 'tv' ? n.disc : null, episode_start: data.kind === 'tv' ? n.episode_start : null },
+      title_pick: ids,
+    }),
+    onSaved: refreshNow,
+  });
+}
+
+// A new match keeps the confirmed episodes while it stays TV and they still suit it.
+function keptPick(saved, kind, episodeStart) {
+  const pick = saved && saved.title_pick;
+  if (kind !== 'tv' || !pick || !pick.length || saved.media.kind !== 'tv') return undefined;
+  return pick.length > 1 || episodeStart ? pick : undefined;
 }
 
 async function changeMatch(row, button) {
@@ -144,9 +178,11 @@ async function changeMatch(row, button) {
     if (choice.media_type === 'tv' && (episodeInput.validity?.badInput || (episode_start !== null && (!Number.isInteger(episode_start) || episode_start < 1 || episode_start > 65535)))) {
       toast('First episode must be an integer between 1 and 65535, or blank', 'info'); return;
     }
+    const kept = keptPick(shown, choice.media_type, episode_start);
     const response = await act(pick, () => api('POST', '/api/library/match/remux', {
       source: row.iso, expected_revision: saved?.revision || 0,
       media: { title: choice.title, year: choice.year || 0, tmdb_id: choice.tmdb_id, kind: choice.media_type, season, disc, episode_start },
+      ...(kept ? { title_pick: kept } : {}),
     }), 'Save match');
     if (!response) { m.close(); refreshNow(); return; }
     saved = response.saved;
@@ -266,6 +302,7 @@ export default {
       if (!r) return;
       const match = e.target.closest('button[data-match]');
       if (match) { e.stopPropagation(); await changeMatch(r, match); return; }
+      if (e.target.closest('button[data-episodes]')) { e.stopPropagation(); confirmEpisodes(r); return; }
       const sr = e.target.closest('button[data-staged-retry]');
       if (sr) {
         e.stopPropagation();
