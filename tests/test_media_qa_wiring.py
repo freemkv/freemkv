@@ -508,6 +508,14 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertIsNone(spec['on_demand'])
         self.assertEqual(calls, [])
 
+    def test_on_demand_only_skips_spot(self):
+        import copy
+        policy = copy.deepcopy(POLICY)
+        policy['launch']['linux']['on_demand_only'] = True
+        spec, _ = self.spec(policy=policy)
+        self.assertEqual([(m['name'], m['template']) for m in spec['markets']], [('on-demand', False)])
+        self.assertNotIn('InstanceMarketOptions', spec['on_demand']['input'])
+
     def test_perf_legs_override_the_functional_template(self):
         policy = self.perf_policy()
         self.assertEqual(mg.legs(policy), ['linux', 'linux-perf'])

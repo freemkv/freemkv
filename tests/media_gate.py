@@ -1525,6 +1525,10 @@ def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1, refere
             'InstanceInterruptionBehavior': 'terminate'}}}]
         if cfg.get('on_demand_fallback'):
             markets.append({'name': 'on-demand', 'options': None, 'template': False})
+    # A reclaimed spot instance kills the leg mid-suite ('runner lost communication'), and the
+    # fallback above only covers a spot LAUNCH failing: `on_demand_only` skips spot entirely.
+    if cfg.get('on_demand_only'):
+        markets = [{'name': 'on-demand', 'options': None, 'template': False}]
     need_mappings = perf and policy['perf'].get('root_volume_gib')
     on_demand = any(not m['template'] for m in markets)
     data = {}
