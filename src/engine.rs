@@ -4288,12 +4288,9 @@ fn legacy_episode_stems(count: usize, show: &str, season: u16, first: u16) -> Ve
         .collect()
 }
 
-// Disc-order numbering is a guess: if any target is taken (an uneven split or an
-// unnumbered disc landing on an earlier disc's episodes), drop it all for the
-// label-keyed template rather than truncate that file. `also` are the same episodes'
-// other names below `dest_dir` (numbered only, the old desktop's `Show_S01E01`): a file
-// `{stem}.{ext}` or `{stem} - *.{ext}` of any of them is taken too, so a re-rip never
-// lands a duplicate beside it.
+// Disc-order numbering is a guess: if any target (or an `also` legacy name such as
+// `Show_S01E01`, as `{stem}.{ext}` or `{stem} - *.{ext}`) is taken, drop it all for the
+// label-keyed template rather than truncate or duplicate a file.
 fn tv_names_if_free(
     names: std::collections::HashMap<usize, String>,
     dest_dir: &str,

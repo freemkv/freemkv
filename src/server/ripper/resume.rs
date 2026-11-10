@@ -844,11 +844,9 @@ pub(super) fn review_status(reason: &str, held: &std::io::Result<()>) -> String 
     }
 }
 
-// A plan only the operator can settle (E9086, numbering): hold it in Review with the
-// ISO and outputs kept, so the mux worker stops re-dispatching it until a correction.
-// A resume whose selection the operator must settle: an episode set to confirm (limited to
-// what the capture swept) is kept with the job; a saved pick that no longer matches is
-// cleared, so the next resume selects again.
+// Hold a resume whose selection only the operator can settle in Review: an episode set to
+// confirm (limited to what the capture swept) is kept with the job; a saved pick that no
+// longer matches is cleared, so the next resume selects again.
 fn hold_resume_selection(
     device: &str,
     paths: (&Path, &Path, &Path),

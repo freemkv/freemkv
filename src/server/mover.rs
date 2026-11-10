@@ -2610,10 +2610,8 @@ fn mover_marker_value(st: &crate::server::ripper::staging::DiscState) -> serde_j
     })
 }
 
-// The TV-episode leaf name for a staging `filename`, or None when this is
-// not a TV episode output. Names as "Show S{NN}E{MM}[ - Episode Name].ext"
-// (the engine's `episode_leaf`, shared with the desktop); build_destination folders it
-// under "Show (Year)/Season NN/".
+// The TV-episode leaf for a staging `filename` ("Show S{NN}E{MM}[ - Name].ext", the engine's
+// `episode_leaf`), or None when it is not a TV episode output.
 pub(crate) fn tv_episode_leaf(
     tmdb: &Option<tmdb::TmdbResult>,
     outputs: &[crate::server::ripper::staging::Output],
@@ -2665,11 +2663,8 @@ pub(crate) fn build_destination(
         };
         return join_path(&root, &leaf);
     }
-    // The movie/TV roots resolve UNDER `output_dir`: relative joins onto output_dir, absolute
-    // wins (back-compat; pre-fix a relative "movies" resolved against / — the 2026-06 "Mercy"
-    // incident). Below a root the layout is the engine's, shared with the desktop:
-    // `Title (Year)/Title (Year).ext` (source extension wins, so a kept ISO and its mux never
-    // share a path) and Jellyfin/Plex `Show (Year)/Season NN/leaf` (season 1 when unknown),
+    // Movie/TV roots resolve under `output_dir` (an absolute root wins). Below a root the
+    // layout is the engine's: `Title (Year)/Title (Year).ext` or `Show (Year)/Season NN/leaf`,
     // every segment sanitized so nothing escapes the root.
     let root = match meta.as_ref().map(|meta| meta.kind) {
         Some(Some(MediaKind::Movie)) if !cfg.movie_dir.is_empty() => Some(&cfg.movie_dir),

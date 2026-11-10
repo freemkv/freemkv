@@ -3331,10 +3331,9 @@ fn rip_disc_inner(
         return;
     }
 
-    // Missing authored episode evidence must not turn a TV capture into one
-    // movie-style output: it holds with a suggestion for the operator to confirm. Whole-disc
-    // ISO capture does not select mux titles. The title is the operator's pick, the first
-    // episode, or the main movie picked by the engine exactly as the CLI and GUI pick it.
+    // An unproven TV episode set holds with a suggestion, never one movie-style output. The
+    // title is the operator's pick, the first episode, or the engine's main movie (whole-disc
+    // ISO selects none).
     let main_idx = match capture_title_index(&disc.titles, &cfg_read, &request) {
         Ok(index) => index,
         Err(error) => {
@@ -5626,10 +5625,9 @@ fn handoff_marker_name(title_confident: bool) -> &'static str {
     if title_confident { ".done" } else { ".review" }
 }
 
-// A capture's titles under the one policy (`planner::resolve_titles`): a whole-disc ISO
-// commits to none, a single pass muxes one title and never fans out (1.8.3), and a multipass
-// capture runs the operator's pick, a proven episode set, or the main film. The rip checks it
-// through `capture_title_index`, which holds on the same errors.
+// A capture's titles under `planner::resolve_titles`: whole-disc ISO commits to none, a single
+// pass muxes one title, a multipass capture runs the pick, a proven episode set or the main
+// film. The rip checks it through `capture_title_index`.
 #[cfg(test)]
 fn check_capture_selection(
     titles: &[libfreemkv::DiscTitle],

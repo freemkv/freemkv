@@ -394,20 +394,21 @@ impl TreeReview {
         use freemkv_engine::SelectionReviewReason as R;
         let reason = match self.reason {
             R::MissingEpisodeRoster => crate::strings::get_or(
-                "gui.review.missing",
+                "gui.review.missing_roster",
                 "This disc does not list its episodes.",
             ),
             R::IncompleteEpisodeRoster => crate::strings::get_or(
-                "gui.review.incomplete",
+                "gui.review.incomplete_roster",
                 "This disc's episode list is incomplete.",
             ),
             R::ConflictingEpisodeRoster => crate::strings::get_or(
-                "gui.review.conflicting",
+                "gui.review.conflicting_roster",
                 "This disc's episode list contradicts itself.",
             ),
-            R::InvalidEpisodeRoster => {
-                crate::strings::get_or("gui.review.invalid", "This disc's episode list is invalid.")
-            }
+            R::InvalidEpisodeRoster => crate::strings::get_or(
+                "gui.review.invalid_roster",
+                "This disc's episode list is invalid.",
+            ),
         };
         let advice = match &self.suggestion {
             Some((suggested, _)) if !suggested.is_empty() => crate::strings::get_or(
@@ -4335,10 +4336,9 @@ impl App {
         vec![Effect::Redraw, Effect::StartTicking]
     }
 
-    // What names this rip's files: the details row, the TMDB key (optional), the opt-in
-    // library layout, and the episodes. Episodes are the disc-proven roster, or, for a TV
-    // disc whose episodes the operator confirmed by ticking a suggestion, exactly the
-    // ticked titles in run order. `None` for whole-disc output or when nothing applies.
+    // What names this rip's files: the details row, TMDB (optional), the opt-in layout, and the
+    // episodes (the proven roster, or a confirmed TV disc's ticked titles in run order). `None`
+    // for whole-disc output or when nothing applies.
     fn naming_request(&self, ticked: &[usize]) -> Option<crate::engine::TvNamingRequest> {
         if self.effective_format().starts_with("Whole disc") {
             return None;
