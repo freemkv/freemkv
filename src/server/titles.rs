@@ -133,7 +133,7 @@ pub fn parse_pick(value: &serde_json::Value) -> Result<Option<Vec<TitleIdentity>
     use crate::strings::get_or;
     let invalid = || {
         get_or(
-            "error.titles.invalid",
+            "error.titles.not_a_list",
             "titles must be a list of titles as the title list gave them",
         )
     };
