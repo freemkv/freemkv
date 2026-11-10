@@ -130,13 +130,7 @@ const MAX_PICK: usize = 999;
 /// The pick a request body's `titles` names: an array of identities as the list sent them.
 /// An empty array clears the pick (`None`, back to automatic).
 pub fn parse_pick(value: &serde_json::Value) -> Result<Option<Vec<TitleIdentity>>, String> {
-    use crate::strings::get_or;
-    let invalid = || {
-        get_or(
-            "error.titles.not_a_list",
-            "titles must be a list of titles as the title list gave them",
-        )
-    };
+    let invalid = not_a_list;
     let items = value.as_array().ok_or_else(invalid)?;
     if items.len() > MAX_PICK {
         return Err(invalid());
@@ -145,6 +139,13 @@ pub fn parse_pick(value: &serde_json::Value) -> Result<Option<Vec<TitleIdentity>
         .map(|item| serde_json::from_value(item.clone()).map_err(|_| invalid()))
         .collect::<Result<Vec<TitleIdentity>, _>>()?;
     Ok((!pick.is_empty()).then_some(pick))
+}
+
+fn not_a_list() -> String {
+    crate::strings::get_or(
+        "error.titles.not_a_list",
+        "titles must be a list of titles as the title list gave them",
+    )
 }
 
 /// Whether `count` chosen titles suit `kind`: a Movie is exactly one feature; TV is one or

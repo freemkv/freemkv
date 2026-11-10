@@ -764,32 +764,54 @@ fn capture_tv_number(
     media_type: MediaKind,
     which: TvNumber,
 ) -> Result<Option<u16>, String> {
-    use crate::strings::get_or;
     if value.is_null() {
         return Ok(None);
     }
-    let (key, field) = match which {
-        TvNumber::FirstEpisode => ("first_episode", "First episode"),
-        TvNumber::Season => ("season", "Season"),
-        TvNumber::Disc => ("disc", "Disc"),
-    };
     if !media_type.is_tv() {
-        return Err(get_or(
-            &format!("error.title.{key}_movie"),
-            &format!("{field} applies to TV only; clear it or choose TV"),
-        ));
+        return Err(tv_number_movie_error(which));
     }
     value
         .as_u64()
         .and_then(|n| u16::try_from(n).ok())
         .filter(|n| *n > 0)
         .map(Some)
-        .ok_or_else(|| {
-            get_or(
-                &format!("error.title.{key}_range"),
-                &format!("{field} must be an integer between 1 and 65535"),
-            )
-        })
+        .ok_or_else(|| tv_number_range_error(which))
+}
+
+fn tv_number_movie_error(which: TvNumber) -> String {
+    use crate::strings::get_or;
+    match which {
+        TvNumber::FirstEpisode => get_or(
+            "error.title.first_episode_movie",
+            "First episode applies to TV only; clear it or choose TV",
+        ),
+        TvNumber::Season => get_or(
+            "error.title.season_movie",
+            "Season applies to TV only; clear it or choose TV",
+        ),
+        TvNumber::Disc => get_or(
+            "error.title.disc_movie",
+            "Disc applies to TV only; clear it or choose TV",
+        ),
+    }
+}
+
+fn tv_number_range_error(which: TvNumber) -> String {
+    use crate::strings::get_or;
+    match which {
+        TvNumber::FirstEpisode => get_or(
+            "error.title.first_episode_range",
+            "First episode must be an integer between 1 and 65535",
+        ),
+        TvNumber::Season => get_or(
+            "error.title.season_range",
+            "Season must be an integer between 1 and 65535",
+        ),
+        TvNumber::Disc => get_or(
+            "error.title.disc_range",
+            "Disc must be an integer between 1 and 65535",
+        ),
+    }
 }
 
 /// `GET /api/titles/<dev>`: every title of the drive's scanned disc, for the Titles and
