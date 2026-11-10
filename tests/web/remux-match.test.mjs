@@ -7,7 +7,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
   const source = await readFile(new URL('../../src/server/web/assets/remux.js', import.meta.url), 'utf8');
   const context = vm.createContext({});
   const calls = [], nodes = {};
-  for (const key of ['results', 'kind', 'search', 'query', 'season', 'disc', 'episode-start']) nodes[key] = { value: '' };
+  for (const key of ['results', 'kind', 'search', 'query', 'season', 'disc', 'episode-start', 'exact-movie', 'exact-tv']) nodes[key] = { value: '' };
   nodes.query.value = 'Cast Away'; nodes.season.value = '1';
   let closed = false, refreshed = 0, body = '', closeHook;
   const toasts = [];
@@ -245,4 +245,29 @@ test('a match saved for an earlier disc at the path fills nothing but its revisi
   const post = h.calls.find(c => c.method === 'POST');
   assert.equal(post.payload.expected_revision, 7);
   assert.equal(post.payload.media.season, null);
+});
+
+// An exact name with no TMDB entry: the typed title (a trailing "(YYYY)" is the year), the
+// chosen kind, tmdb_id 0, and TV numbers only for TV.
+for (const kind of ['movie', 'tv']) test(`an exact name remuxes as ${kind} without a TMDB entry`, async () => {
+  const h = await harness(kind);
+  await h.ui.changeMatch({ iso: '/iso/source.iso', title: 'Old' }, {});
+  h.nodes.query.value = 'Samurai Champloo (2004)';
+  h.nodes.season.value = '1'; h.nodes.disc.value = '2';
+  await h.nodes['exact-' + kind].onclick();
+  const post = h.calls.find(c => c.method === 'POST');
+  assert.deepEqual(JSON.parse(JSON.stringify(post.payload.media)), {
+    title: 'Samurai Champloo', year: 2004, tmdb_id: 0, kind,
+    season: kind === 'tv' ? 1 : null, disc: kind === 'tv' ? 2 : null, episode_start: null,
+  });
+  assert.equal(h.calls.some(c => c.url.startsWith('/api/tmdb/search')), false);
+});
+
+test('an exact name needs a name', async () => {
+  const h = await harness('tv');
+  await h.ui.changeMatch({ iso: '/iso/source.iso', title: 'Old' }, {});
+  h.nodes.query.value = '  ';
+  await h.nodes['exact-tv'].onclick();
+  assert.equal(h.calls.filter(c => c.method === 'POST').length, 0);
+  assert.deepEqual(h.toasts, [['Type a name first', 'info']]);
 });

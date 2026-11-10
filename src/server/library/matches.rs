@@ -129,7 +129,7 @@ fn validate(source: &Path, media: &MediaMetadata) -> io::Result<()> {
         || media.title.trim().is_empty()
         || media.title.len() > 512
         || media.title.chars().any(char::is_control)
-        || media.tmdb_id == 0
+        // An exact name the operator typed has no TMDB id (`tmdb_id == 0`); it needs a title.
         || media.kind.is_none()
         || media.season == Some(0)
         || media.disc == Some(0)
@@ -173,6 +173,25 @@ mod tests {
         assert_eq!(reopened.get(&iso), Some(second));
         let third = reopened.save(&iso, 2, media(MediaKind::Tv)).unwrap();
         assert_eq!(MatchStore::open(dir.path()).unwrap().get(&iso), Some(third));
+    }
+
+    // Remux under an exact name typed without a TMDB match: the title is what it needs.
+    #[test]
+    fn an_exact_name_without_a_tmdb_id_is_a_valid_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("samurai.iso");
+        let store = MatchStore::open(dir.path()).unwrap();
+        let mut typed = media(MediaKind::Tv);
+        typed.title = "Samurai Champloo".into();
+        typed.tmdb_id = 0;
+        typed.season = Some(1);
+        let saved = store.save(&iso, 0, typed.clone()).unwrap();
+        assert_eq!(saved.media, typed);
+        typed.title = "  ".into();
+        assert!(
+            store.save(&iso, 1, typed).is_err(),
+            "a title is still required"
+        );
     }
 
     #[test]
@@ -298,9 +317,6 @@ mod tests {
         }
         let mut value = media(MediaKind::Movie);
         value.kind = None;
-        cases.push(value);
-        let mut value = media(MediaKind::Movie);
-        value.tmdb_id = 0;
         cases.push(value);
         for kind in [MediaKind::Movie, MediaKind::Tv] {
             let mut value = media(kind);

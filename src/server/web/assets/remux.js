@@ -78,7 +78,8 @@ async function changeMatch(row, button) {
       + (current.unchecked ? '<p class="small muted">Couldn\'t check the share, so this list is from the saved links and may include files that are already gone.</p>' : '')
       + (linked.length ? '<p>Made from this ISO (replaced or removed):</p><ul>' + linked.map(path => '<li class="mono small">' + esc(path) + '</li>').join('') + '</ul>' : '<p>No existing MKVs are recorded as made from this ISO.</p>')
       + '<p>Other MKVs are never changed or removed. If one already has a new file\'s name, the remux stops before writing anything and shows it as Failed.</p>'
-      + '<div class="hook"><input class="txt" data-query aria-label="Search TMDB" value="' + esc(shown?.media.title || row.title) + '"><button class="btn btn-secondary" data-search>Search TMDB</button></div>'
+      + '<div class="hook"><input class="txt" data-query aria-label="Search TMDB, or the exact name" value="' + esc(shown?.media.title || row.title) + '"><button class="btn btn-secondary" data-search>Search TMDB</button></div>'
+      + '<div class="hook"><span class="small muted">Or use the name above exactly ("(YYYY)" at the end is the year):</span><button class="btn btn-ghost btn-sm" data-exact-movie>Remux as a movie</button><button class="btn btn-ghost btn-sm" data-exact-tv>Remux as TV</button></div>'
       + '<label>Show <select data-kind><option value="">Movies and TV</option><option value="movie">Movies</option><option value="tv">TV</option></select></label>'
       + '<div data-results class="stack"></div>'
       + '<div class="hook"><label>TV season (optional) <input type="number" min="1" max="65535" data-season value="' + esc(shown?.media.season ?? '') + '"></label>'
@@ -107,12 +108,31 @@ async function changeMatch(row, button) {
   };
   m.el.querySelector('[data-search]').onclick = search;
   m.el.querySelector('[data-query]').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); search(); } };
-  results.onclick = async e => {
+  // An exact name: no TMDB entry (tmdb_id 0), the kind the operator chose.
+  const exactName = kind => {
+    const raw = m.el.querySelector('[data-query]').value.trim();
+    const parsed = raw.match(/^(.*?)\s*\((\d{4})\)\s*$/);
+    const title = (parsed ? parsed[1] : raw).trim();
+    return title ? { title, year: parsed ? Number(parsed[2]) : 0, tmdb_id: 0, media_type: kind } : null;
+  };
+  for (const kind of ['movie', 'tv']) {
+    const button = m.el.querySelector('[data-exact-' + kind + ']');
+    button.onclick = () => {
+      const choice = exactName(kind);
+      if (!choice) { toast('Type a name first', 'info'); return; }
+      return save(choice, button);
+    };
+  }
+  results.onclick = e => {
     if (closed) return;
     const pick = e.target.closest('[data-pick]');
     if (!pick) return;
     const choice = found[Number(pick.dataset.pick)];
     if (!choice) return;
+    return save(choice, pick);
+  };
+  async function save(choice, pick) {
+    if (closed) return;
     const seasonValue = m.el.querySelector('[data-season]').value;
     const season = choice.media_type === 'tv' && seasonValue ? Number(seasonValue) : null;
     const discValue = m.el.querySelector('[data-disc]').value;
@@ -138,7 +158,7 @@ async function changeMatch(row, button) {
     }
     toast('Queued remux as ' + choice.title, 'ok');
     m.close(); refreshNow();
-  };
+  }
 }
 
 // The activity strip's two lines while the queue holds: a folder it waits for, or its own

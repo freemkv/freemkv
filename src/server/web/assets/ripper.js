@@ -342,31 +342,54 @@ function parseName(raw, fallbackYear) {
   return title ? { title, year: m ? parseInt(m[2], 10) : (fallbackYear || 0) } : null;
 }
 
-/** Search TMDB or type a name. `onPick({title, year, ...})` files it. */
-function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, owner = '', mediaType = '', episodeStart = null }) {
+/** Search TMDB or type a name. `onPick({title, year, media_type, ...})` files it.
+ *  The Movie/TV toggle starts at the resolved kind; TV shows Season, Disc and First episode.
+ *  A TMDB pick carries its own kind; a typed name takes the toggle's. Numbers are sent only
+ *  for TV, and numbers typed for a Movie are refused here rather than dropped. */
+function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, owner = '', mediaType = '', episodeStart = null, season = null, disc = null }) {
+  const num = (id, label, value) => '<label>' + label + ' <input class="txt" id="' + id + '" type="number" min="1" max="65535" step="1" value="' + esc(value ?? '') + '"></label>';
   const m = modal({
     title: esc(heading), wide: true,
     body: (sub ? '<p class="small muted" style="margin:0 0 .9rem">' + sub + '</p>' : '')
       + '<div class="hook"><input class="txt" id="tp-q" placeholder="Type an exact name, or a search term" value="' + esc(initial || '') + '">'
       + '<button class="btn btn-secondary btn-sm" id="tp-search">Search TMDB</button></div>'
-      + '<label>First episode (TV only, optional)<input class="txt" id="tp-episode" type="number" min="1" max="65535" step="1" value="' + esc(episodeStart ?? '') + '"></label>'
+      + '<div class="hook"><label>This disc is <select id="tp-kind"><option value="movie">a movie</option><option value="tv">a TV series</option></select></label></div>'
+      + '<div class="hook" id="tp-tv">' + num('tp-season', 'Season', season) + num('tp-disc', 'Disc', disc) + num('tp-episode', 'First episode', episodeStart) + '</div>'
       + '<div id="tp-res" class="stack" style="margin-top:.5rem"></div>',
     foot: extraFoot + '<button class="btn btn-primary btn-sm" id="tp-manual">Use this exact name</button>',
   });
   const qi = m.el.querySelector('#tp-q');
   const res = m.el.querySelector('#tp-res');
+  const kind = m.el.querySelector('#tp-kind');
+  const tvFields = m.el.querySelector('#tp-tv');
+  kind.value = mediaType === 'tv' ? 'tv' : 'movie';
+  const showTv = () => { tvFields.style.display = kind.value === 'tv' ? '' : 'none'; };
+  kind.onchange = showTv;
+  showTv();
   let found = [];
   let searchRevision = 0;
+  const fields = [['tp-season', 'season', 'Season'], ['tp-disc', 'disc', 'Disc'], ['tp-episode', 'episode_start', 'First episode']];
   const selection = (c) => {
-    const media_type = c.media_type || mediaType;
-    const episodeInput = m.el.querySelector('#tp-episode');
-    const raw = episodeInput.value.trim();
-    const start = raw === '' ? null : Number(raw);
-    if (media_type === 'tv' && (episodeInput.validity?.badInput || (start !== null && (!Number.isInteger(start) || start < 1 || start > 65535)))) {
-      toast('First episode must be an integer between 1 and 65535, or blank', 'info');
-      return null;
+    // A TMDB result's own kind wins; a typed name (or Keep this name) takes the toggle's.
+    const media_type = c.media_type === 'tv' || c.media_type === 'movie' ? c.media_type : kind.value;
+    const numbers = {};
+    for (const [id, key, label] of fields) {
+      const input = m.el.querySelector('#' + id);
+      const raw = input.value.trim();
+      const value = raw === '' ? null : Number(raw);
+      if (input.validity?.badInput || (value !== null && (!Number.isInteger(value) || value < 1 || value > 65535))) {
+        toast(label + ' must be an integer between 1 and 65535, or blank', 'info');
+        return null;
+      }
+      // Hidden TV fields do not apply to a movie chosen with the toggle; a movie result
+      // picked while TV numbers are filled in is refused, never silently filed without them.
+      if (media_type !== 'tv' && value !== null && kind.value === 'tv') {
+        toast(label + ' applies to TV only: this is a movie on TMDB. Clear it, or pick a TV entry.', 'info');
+        return null;
+      }
+      numbers[key] = media_type === 'tv' ? value : null;
     }
-    return { ...c, media_type, episode_start: media_type === 'tv' ? start : null };
+    return { ...c, media_type, ...numbers };
   };
   const search = async (btn) => {
     const q = qi.value.trim();
@@ -406,7 +429,8 @@ function changeTitle(dev, s) {
     heading: 'Title for the disc in ' + (s._owner ? s._owner + ' · ' : '') + ownDevice(dev),
     owner: deviceOwner(dev),
     initial: s.tmdb_title || s.disc_name,
-    mediaType: s.tmdb_media_type || s.media_type, episodeStart: s.episode_start,
+    // The resolved kind (a disc that is TV by its label is TV), then TMDB's.
+    mediaType: s.media_kind || s.tmdb_media_type, episodeStart: s.episode_start, season: s.season, disc: s.disc,
     sub: 'Pick a TMDB match or type a name; "(YYYY)" at the end is the year. The correction is saved with this disc, including across interrupted rips. Capture files stay in place.',
     onPick: async (c, btn) => {
       const r = await act(btn, () => api('POST', '/api/title/' + dev, { ...c, year: c.year || 0, job_id: s.job_id }), 'Change title');
@@ -422,7 +446,7 @@ function reviewDialog(it, reload, owner = '') {
     owner,
     heading: 'Which title is this? ' + (it.title || it.dir) + (it.year ? ' (' + it.year + ')' : ''),
     initial: it.title || '',
-    mediaType: it.media_type, episodeStart: it.episode_start,
+    mediaType: it.media_type, episodeStart: it.episode_start, season: it.season, disc: it.disc,
     sub: esc(it.reason || '') + (it.file ? '<br><span class="mono">' + esc(it.file) + '</span>' : ''),
     extraFoot: '<button class="btn btn-ghost btn-sm" id="rv-cancel">Delete this rip</button><button class="btn btn-secondary btn-sm" id="rv-proceed">Keep this name</button>',
     onPick: async (c, btn) => resolve(btn, { ...c, action: 'retitle', year: c.year || 0 }),
