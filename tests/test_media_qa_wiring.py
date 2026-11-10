@@ -208,7 +208,9 @@ class StructureTests(unittest.TestCase):
         for name in ('release-tests', 'windows-build', 'cli-integration', 'gui-gate', 'freemkv-key-drift'):
             with self.subTest(job=name):
                 self.assertIn(name, jobs)
-                self.assertNotIn('if', jobs[name], 'runs on every push, dev included')
+                guard = jobs[name].get('if')
+                if guard is not None:  # only a release version-bump commit may skip it
+                    self.assertIn("'bump version'", guard, 'runs on every push, dev included')
         gate = jobs['gui-gate']
         oses = [i['os'] for i in gate['strategy']['matrix']['include']]
         self.assertEqual(oses, ['linux', 'windows'])
