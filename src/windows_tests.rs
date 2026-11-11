@@ -702,11 +702,17 @@ fn set_timer_failure_is_reported_source_inspection_only() {
 fn language_switch_reports_a_failed_save_source_inspection_only() {
     let src = own_source();
     let prod = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
-    let save = format!("{}{}", "settings.save", "()");
-    assert!(
-        !prod.contains(&save),
-        "windows.rs saves Settings itself again — the core's save-and-report is bypassed"
-    );
+    // Any `.save()` (`settings.save()`, `.settings.borrow().save()`, `s.save()`) or
+    // `Settings::save(`: windows.rs has no other save.
+    for save in [
+        format!("{}{}", ".save", "()"),
+        format!("{}{}", "::save", "("),
+    ] {
+        assert!(
+            !prod.contains(&save),
+            "windows.rs saves Settings itself again — the core's save-and-report is bypassed"
+        );
+    }
     assert!(
         prod.contains("sh.act(Cmd::CommitSettings(Box::new(edited)));"),
         "Prefs::commit no longer hands the form to the core"
