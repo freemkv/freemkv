@@ -762,6 +762,24 @@ fn stop_exit_code_is_75_only_for_an_unvetoed_reboot() {
     assert_eq!(stop_exit_code(), 0, "a stop signal vetoes the relaunch");
 }
 
+// A stop the web listener's failure caused exits non-zero, so a supervisor that restarts
+// only failures (launchd SuccessfulExit=false, systemd on-failure) starts it again.
+#[test]
+fn a_failed_web_listener_stops_with_a_failure_code() {
+    if !in_child("a_failed_web_listener_stops_with_a_failure_code") {
+        return;
+    }
+    SHUTDOWN.store(true, Ordering::Release);
+    crate::server::WEB_FAILED.store(true, Ordering::Release);
+    assert_eq!(stop_exit_code(), 1);
+    REBOOT.store(true, Ordering::Release);
+    assert_eq!(
+        stop_exit_code(),
+        RESTART_EXIT_CODE,
+        "a reboot still relaunches"
+    );
+}
+
 // End to end on Linux: exec keeps the pid and closes the CLOEXEC listener, so the
 // new image can bind the same port.
 #[cfg(target_os = "linux")]

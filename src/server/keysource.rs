@@ -184,7 +184,8 @@ impl std::fmt::Display for KeydbError {
 }
 
 /// Download the keydb at `url` through the address guard (resolve once, pin the connection,
-/// no redirects, `limit` end to end: the caller's own budget) and save it to the
+/// each of at most `MAX_REDIRECTS` hops guarded the same way, `limit` end to end: the
+/// caller's own budget) and save it to the
 /// service-canonical path. The one fetch behind boot, the daily refresh and the HTTP update.
 /// (The app's `keydb_fetch` is not reused: it has no end-to-end ceiling and a smaller cap.)
 pub fn refresh_keydb(

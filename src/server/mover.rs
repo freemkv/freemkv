@@ -162,7 +162,7 @@ pub struct MoverError {
 fn retry_delay(attempts: u32) -> Option<std::time::Duration> {
     match attempts {
         1 => Some(std::time::Duration::from_secs(30)),
-        2 => Some(std::time::Duration::from_secs(120)),
+        2 => Some(LONGEST_BACKOFF),
         _ => None,
     }
 }
@@ -714,8 +714,7 @@ pub(crate) enum MoveError {
     /// sound. Likely a truncated cp.
     M2tsBadSync,
     /// Could not open the destination for read (NFS gone away, perm,
-    /// etc.). Treat as a serious post-copy condition that warrants
-    /// quarantine.
+    /// etc.). The candidate is not published; the source is kept.
     Unreadable(String),
 }
 
@@ -1152,9 +1151,9 @@ fn structural_check(dst: &Path) -> Option<StructuralCheck> {
 // Format-aware post-cp validation: the structural check (when the format has one), then a
 // fresh-FD size compare.
 pub(crate) fn check_post_copy(src: &Path, dst: &Path) -> Result<(), MoveError> {
-    // Structural checks only inspect a fixed head/tail window, so a cp
-    // truncated beyond it still passes (DATA-LOSS: move_file then unlinks
-    // the source). Always pair with the fresh-FD size compare too.
+    // Structural checks only inspect a fixed head/tail window, so a cp truncated beyond it
+    // still passes (DATA-LOSS: it would be published, and its source later retired).
+    // Always pair with the fresh-FD size compare too.
     if let Some(check) = structural_check(dst) {
         check(dst)?;
     }
@@ -3159,7 +3158,7 @@ fn move_file(
 
     // In-process copy on a worker thread (`copy_counting`), counting bytes
     // for live progress — not NFS stat(), which lags and would pin the bar
-    // at 0%. Post-copy validation runs before unlink; src stays intact on failure.
+    // at 0%. Post-copy validation runs before publication; src stays intact on failure.
     let src_owned = src.to_path_buf();
     let dest_owned = dest.to_path_buf();
     #[cfg(test)]

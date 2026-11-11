@@ -306,6 +306,10 @@ pub fn run(argv: Vec<String>) {
     if relaunch_requested() {
         relaunch(&relaunch_info);
     }
+    if crate::server::WEB_FAILED.load(Ordering::Acquire) {
+        observe::flush_before_exit();
+        std::process::exit(stop_exit_code());
+    }
 }
 
 struct Bounds {
@@ -516,6 +520,8 @@ fn relaunch(relaunch: &Relaunch) -> ! {
 fn stop_exit_code() -> i32 {
     if relaunch_requested() {
         RESTART_EXIT_CODE
+    } else if crate::server::WEB_FAILED.load(Ordering::Acquire) {
+        1
     } else {
         0
     }

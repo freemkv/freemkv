@@ -35,6 +35,10 @@ pub static TERMINATE: AtomicBool = AtomicBool::new(false);
 /// elsewhere.
 pub static REBOOT: AtomicBool = AtomicBool::new(false);
 
+/// Set when the web listener fails to bind or stops accepting: the stop then exits
+/// non-zero, so a supervisor that restarts only on failure starts the server again.
+pub static WEB_FAILED: AtomicBool = AtomicBool::new(false);
+
 /// Full build label: package version + git short hash (e.g. `1.1.1 (g2014a41)`),
 /// the same shape libfreemkv stamps into every MKV. Surfaced in `--version`,
 /// the UI footer, `/api/version`, and the startup log so the running build is

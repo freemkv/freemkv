@@ -72,6 +72,19 @@ pub(super) struct RetryState {
     pub hint: String,
 }
 
+// A lock set being taken: whatever it holds when dropped is deleted, not just released.
+struct Held(Vec<libfreemkv::io::ArtifactLock>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        for lock in self.0.drain(..) {
+            if let Err(e) = lock.delete() {
+                tracing::warn!(error = %e, "delivery lock sidecar retained");
+            }
+        }
+    }
+}
+
 impl Manifest {
     pub fn load(dir: &Path) -> io::Result<Option<Self>> {
         let path = dir.join(FILE);
@@ -388,6 +401,17 @@ impl Manifest {
                 return Ok(super::MoveOutcome::Skipped);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound && !entry.completed => {}
+            // Delivered, then moved or deleted: its staged copy is all that is left, so kept.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!(
+                        "the delivered file is no longer there: {}; its staged copy is kept. \
+                         Put the file back, or remove this staging job by hand",
+                        entry.destination.display()
+                    ),
+                ));
+            }
             Err(e) => return Err(e),
         }
         entry.source_identity.verify(&entry.source)?;
@@ -473,23 +497,28 @@ impl Manifest {
         for _ in 0..10 {
             let (waiting_halt, owned) = (halt.clone(), targets.clone());
             let acquired = crate::server::health::bounded(&key, wait, move || {
-                owned
-                    .into_iter()
-                    .map(|target| {
+                // Taken sidecars are deleted on drop, so neither a failed set nor one
+                // finished after the caller gave up leaves a `<destination>.lock` behind.
+                let mut held = Held(Vec::new());
+                for target in owned {
+                    held.0.push(
                         libfreemkv::io::ArtifactLock::acquire(&target, &[], &waiting_halt)
-                            .map_err(io::Error::other)
-                    })
-                    .collect::<io::Result<Vec<_>>>()
+                            .map_err(io::Error::other)?,
+                    );
+                }
+                Ok(held)
             });
             match acquired {
-                crate::server::health::Bounded::Done(result) => return result,
+                crate::server::health::Bounded::Done(result) => {
+                    return result.map(|mut held| std::mem::take(&mut held.0));
+                }
                 crate::server::health::Bounded::Busy => {
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }
                 crate::server::health::Bounded::TimedOut => break,
             }
         }
-        // The abandoned acquire releases any partial lock set once cancelled.
+        // The abandoned acquire deletes any partial lock set once cancelled.
         halt.cancel();
         Err(io::Error::new(
             io::ErrorKind::ResourceBusy,

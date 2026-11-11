@@ -168,6 +168,7 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
                 error = %e,
                 "web bind failed; signalling shutdown so the container restart policy recovers us"
             );
+            crate::server::WEB_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
             crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
             return;
         }
@@ -199,6 +200,7 @@ fn serve(
                     "FATAL: web server stopped accepting connections: {e} — signalling shutdown"
                 ));
                 tracing::error!(error = %e, "web listener stopped receiving requests; signalling shutdown");
+                crate::server::WEB_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
                 crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
                 break;
             }

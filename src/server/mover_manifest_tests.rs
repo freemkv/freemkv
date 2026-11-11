@@ -291,15 +291,67 @@ fn cleanup_preserves_replaced_or_new_staging_files_and_journal() {
 
 #[test]
 fn unreadable_manifest_never_becomes_a_new_delivery() {
-    let (_temp, dir, _cfg, manifest) = fixture();
+    let _guard = super::super::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_temp, dir, cfg, manifest) = fixture();
     std::fs::write(dir.join(FILE), b"broken").unwrap();
     assert!(Manifest::load(&dir).is_err());
+    super::super::forget_process_state();
+    super::super::check_and_move(&cfg);
     assert!(
         manifest
             .entries
             .iter()
             .all(|e| e.source.exists() && !e.destination.exists())
     );
+    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"broken");
+    super::super::forget_process_state();
+}
+
+// A delivered file later moved away is named as such, with its staged copy kept: Retry
+// cannot bring it back, so the hint must not say the destination is broken.
+#[test]
+fn a_delivered_file_gone_from_its_destination_says_so() {
+    let (_temp, dir, _cfg, manifest) = fixture();
+    Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap();
+    let destination = &manifest.entries[0].destination;
+    std::fs::remove_file(destination).unwrap();
+    let error = Manifest::deliver(&dir, 0, &|_, _, _, _| {}).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&destination.display().to_string())
+            && error.to_string().contains("no longer there"),
+        "{error}"
+    );
+    assert!(Manifest::load(&dir).unwrap().unwrap().entries[0].completed);
+}
+
+// A lock set that cannot be completed deletes the sidecars it did take: none is left
+// beside the library's files.
+#[test]
+fn an_incomplete_lock_set_leaves_no_sidecar() {
+    let (_temp, _dir, _cfg, manifest) = fixture();
+    let mut targets: Vec<_> = manifest
+        .entries
+        .iter()
+        .map(|e| e.destination.clone())
+        .collect();
+    targets.sort();
+    let held =
+        libfreemkv::io::ArtifactLock::acquire(&targets[1], &[], &libfreemkv::Halt::new()).unwrap();
+    let error = manifest
+        .lock_targets_within(std::time::Duration::from_millis(200))
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::ResourceBusy);
+    let first = PathBuf::from(format!("{}.lock", targets[0].display()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while first.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!first.exists(), "{} was left behind", first.display());
+    held.delete().unwrap();
 }
 
 #[test]
@@ -469,15 +521,21 @@ fn target_lock_set_excludes_a_cooperating_writer_until_released() {
     let (_temp, dir, _cfg, manifest) = fixture();
     let locks = manifest.lock_targets().unwrap();
     let target = manifest.entries[0].destination.clone();
+    let (entered_tx, entered) = std::sync::mpsc::channel();
     let (tx, rx) = std::sync::mpsc::channel();
     let other = std::thread::spawn(move || {
+        entered_tx.send(()).unwrap();
         let lock =
             libfreemkv::io::ArtifactLock::acquire(&target, &[], &libfreemkv::Halt::new()).unwrap();
         tx.send(()).unwrap();
         lock
     });
+    // Timed from inside the writer's acquire, so a slow thread start cannot pass for a wait.
+    entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
     assert!(
-        rx.recv_timeout(std::time::Duration::from_millis(100))
+        rx.recv_timeout(std::time::Duration::from_millis(300))
             .is_err()
     );
     assert!(dir.join(FILE).exists());

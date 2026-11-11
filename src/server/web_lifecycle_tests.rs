@@ -119,6 +119,10 @@ fn dead_listener_signals_shutdown() {
     let cfg = Arc::new(RwLock::new(Config::default()));
     serve(&cfg, |_| Err(std::io::Error::other("Too many open files")));
     assert!(crate::server::SHUTDOWN.load(Ordering::Acquire));
+    assert!(
+        crate::server::WEB_FAILED.load(Ordering::Acquire),
+        "the stop must exit as a failure"
+    );
 }
 
 // #137: an SSE client that stops reading (half-open) cannot pin the handler thread: its
