@@ -1711,3 +1711,44 @@ fn a_movie_correction_drops_the_cards_episode_set() {
         "one title stays the feature"
     );
 }
+
+// A new scan names its job afresh: a disc with the previous disc's label (or none yet)
+// never inherits that disc's job, identity or correction, even if the scan then fails.
+#[test]
+fn a_new_scan_never_inherits_the_previous_discs_job() {
+    let device = "a_new_scan_never_inherits_the_previous_discs_job";
+    update_state(
+        device,
+        RipState {
+            device: device.into(),
+            status: "done".into(),
+            disc_present: true,
+            disc_label: "DVD_VIDEO".into(),
+            job_id: "disc-a".into(),
+            disc_identity: "identity-a".into(),
+            ..Default::default()
+        },
+    );
+    update_state_with(device, |s| {
+        s.publish_user_metadata("disc-a", 1, scan_metadata("Disc A"))
+    });
+    assert_eq!(begin_scan(device).as_deref(), Some("disc-a"));
+    for label in ["", "DVD_VIDEO"] {
+        update_state(
+            device,
+            RipState {
+                device: device.into(),
+                status: "scanning".into(),
+                disc_present: true,
+                disc_label: label.into(),
+                ..Default::default()
+            },
+        );
+    }
+    let row = STATE.lock().unwrap().get(device).cloned().unwrap();
+    assert_eq!(row.job_id, "");
+    assert_eq!(row.disc_identity, "");
+    assert!(row.user_metadata.is_none());
+    assert_ne!(row.tmdb_title, "Disc A");
+    STATE.lock().unwrap().remove(device);
+}

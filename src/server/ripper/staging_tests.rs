@@ -3056,3 +3056,50 @@ fn a_movie_correction_drops_an_episode_set_but_keeps_one_title() {
         );
     }
 }
+
+// A lifecycle write from a state read before the operator's pick committed keeps the pick:
+// it would else land on the pick's revision with the old titles.
+#[test]
+fn a_stale_lifecycle_write_keeps_the_operators_title_pick() {
+    let titles = crate::server::titles::tests::play_all_disc();
+    let pick = Some(vec![crate::title_identity::TitleIdentity::of(&titles[1])]);
+    let dir = tempfile::tempdir().unwrap();
+    try_write_state(dir.path(), &DiscState::new(StagingState::Stopped)).unwrap();
+    let stale = read_state(dir.path()).unwrap();
+    let device = PickOrigin::Device {
+        identity: "disc",
+        label: "SHOW_S1",
+        device: "sg0",
+    };
+    save_title_pick(dir.path(), pick.clone(), device, Some(0), |_| Ok(())).unwrap();
+    try_write_state(dir.path(), &stale).unwrap();
+    let saved = read_state(dir.path()).unwrap();
+    assert_eq!(saved.metadata_revision, 1);
+    assert_eq!(saved.title_pick, pick);
+}
+
+// Start over keeps the operator's titles as it keeps their title correction: both are one
+// revisioned choice, and the new capture rips what the card shows.
+#[test]
+fn start_over_keeps_the_operators_title_pick() {
+    let titles = crate::server::titles::tests::play_all_disc();
+    let pick = Some(vec![crate::title_identity::TitleIdentity::of(&titles[1])]);
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("disc-abc");
+    fs::create_dir(&dir).unwrap();
+    let mut old = DiscState::new(StagingState::Stopped);
+    old.disc_identity = "abc".into();
+    try_write_state(&dir, &old).unwrap();
+    let device = PickOrigin::Device {
+        identity: "abc",
+        label: "SHOW_S1",
+        device: "sg0",
+    };
+    save_title_pick(&dir, pick.clone(), device, Some(0), |_| Ok(())).unwrap();
+    let lease = job_lease(&dir);
+    let _owner = lease.lock().unwrap();
+    reset_capture_preserving_metadata(&dir, "abc").unwrap();
+    let st = begin_capture(&dir, 3, "abc").unwrap();
+    assert_eq!(st.metadata_revision, 1);
+    assert_eq!(st.title_pick, pick);
+}

@@ -228,7 +228,8 @@ impl ScanWatchdog {
         let active_w = active.clone();
         let phase_w = phase.clone();
         let device = device.to_string();
-        let _ = std::thread::Builder::new()
+        let owner = device.clone();
+        let spawned = std::thread::Builder::new()
             .name("scan-watchdog".into())
             .spawn(move || {
                 let start = std::time::Instant::now();
@@ -273,6 +274,15 @@ impl ScanWatchdog {
                     );
                 }
             });
+        if let Err(e) = spawned {
+            tracing::warn!(device = %owner, error = %e, "scan watchdog could not start");
+            crate::server::log::device_log(
+                &owner,
+                &format!(
+                    "The scan watchdog could not start ({e}); a stuck scan will not be reported"
+                ),
+            );
+        }
         Self { active, phase }
     }
 
@@ -1792,6 +1802,10 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
         }
     };
 
+    // The scan names the disc's job afresh. An unverified job it leaves holding nothing goes.
+    if let Some(previous) = state::begin_scan(device) {
+        drop_empty_unverified_job(std::path::Path::new(&cfg_read.staging_dir), &previous);
+    }
     update_state(
         device,
         RipState {
@@ -1854,33 +1868,19 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
 
     crate::server::log::device_log(device, &format!("Disc: {}", id_name));
 
-    // Resolve identity before lookup so a saved operator choice wins on restart.
-    let tmdb: Option<crate::server::tmdb::TmdbResult> = None;
-    let display_name = id_name.clone();
-
-    // Show identify results immediately — no format badge until full scan confirms UHD vs BD
+    // Show identify results immediately — no format badge until full scan confirms UHD vs BD.
+    // TMDB is looked up after the staging job resolves, so a saved operator choice wins.
     update_state(
         device,
         RipState {
             device: device.to_string(),
             status: "scanning".to_string(),
             disc_present: true,
-            disc_name: display_name.clone(),
+            disc_name: id_name.clone(),
             // The raw volume label, carried alongside the TMDB title from the
             // first state push onward: it is the only thing that distinguishes
             // the discs of a boxset, which all resolve to one title.
             disc_label: id_name.clone(),
-            disc_format: String::new(),
-            tmdb_title: tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default(),
-            tmdb_year: tmdb.as_ref().map(|t| t.year).unwrap_or(0),
-            tmdb_poster: tmdb
-                .as_ref()
-                .map(|t| t.poster_url.clone())
-                .unwrap_or_default(),
-            tmdb_overview: tmdb
-                .as_ref()
-                .map(|t| t.overview.clone())
-                .unwrap_or_default(),
             ..Default::default()
         },
     );
@@ -2217,6 +2217,30 @@ fn scan_staging_job(
     }
 }
 
+/// Where a mux writes `output_path`: the network target for a network output, else the
+/// container's scheme (mkv/m2ts), NOT the file's extension (a 3D `.mk3d` muxes via `mkv://`).
+pub(super) fn destination_url(
+    output_format: &str,
+    network_target: &str,
+    output_path: &str,
+) -> String {
+    if staging::is_network_output(output_format, network_target) {
+        format!("network://{network_target}")
+    } else {
+        format!("{}://{}", output_scheme_for(output_format), output_path)
+    }
+}
+
+// An isolated unverified job allocated for an earlier scan: removed if it holds nothing
+// (a non-recursive rmdir), so rescans of an unverifiable disc do not pile up empty jobs.
+fn drop_empty_unverified_job(staging_root: &std::path::Path, job: &str) {
+    if job.starts_with(staging::UNVERIFIED_JOB_PREFIX)
+        && let Ok(dir) = jobs::path(staging_root, job)
+    {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
 // ─── Rip ───────────────────────────────────────────────────────────────────
 
 /// Entry point for `/api/rip[?resume=yes|no]`. Scans the disc to
@@ -2540,15 +2564,10 @@ fn disc_staging_hold(
         Ok(_) => {}
         // A cold-cache lookup can miss an existing dir: confirm with the retrying listing.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return match list_staging_basenames(root) {
-                Some(names) if !names.contains(&job) => None,
-                None if std::fs::symlink_metadata(root)
-                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
-                {
-                    None
-                }
-                _ => Some(StagingHold::Unreadable),
-            };
+            return missing_dir_hold(read_staging_listing(root), &job, || {
+                std::fs::symlink_metadata(root)
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            });
         }
         Err(_) => return Some(StagingHold::Unreadable),
     }
@@ -2584,6 +2603,20 @@ fn disc_staging_hold(
         };
     }
     snapshot_hold(&snap).or_else(|| job_busy(&dir).then_some(StagingHold::JobBusy))
+}
+
+// A job dir a stat did not find: gone only if a complete listing (or a missing root) agrees.
+// A listing whose every pass hit an entry error may hide it, so it holds as unreadable.
+fn missing_dir_hold(
+    listing: Option<StagingListing>,
+    job: &str,
+    root_missing: impl FnOnce() -> bool,
+) -> Option<StagingHold> {
+    match listing {
+        Some(l) if l.complete && !l.names.iter().any(|n| n == job) => None,
+        None if root_missing() => None,
+        _ => Some(StagingHold::Unreadable),
+    }
 }
 
 // Why a rip stands down over a job someone else holds (see [`job_busy`]).
@@ -2747,6 +2780,7 @@ fn staging_hold_lifted(device: &str, cfg: &Config, now: u64) -> bool {
 
 // List the immediate-child basenames of the staging root with the same NFS cold-cache
 // discipline as staging::snapshot_staging_disc; retries read_dir on error and unions results.
+#[cfg(test)]
 fn list_staging_basenames(staging_dir: &std::path::Path) -> Option<Vec<String>> {
     read_staging_listing(staging_dir).map(|listing| listing.names)
 }
@@ -3770,13 +3804,7 @@ fn rip_disc_inner(
             );
         }
     }
-    let dest_url = if staging::is_network_output(&output_format, &cfg_read.network_target) {
-        format!("network://{}", cfg_read.network_target)
-    } else {
-        // Scheme is the container (mkv/m2ts), NOT the filename extension: a 3D rip
-        // writes `Title.mk3d` but must still mux through `mkv://` (no `mk3d://` scheme).
-        format!("{}://{}", output_scheme_for(&output_format), output_path)
-    };
+    let dest_url = destination_url(&output_format, &cfg_read.network_target, &output_path);
 
     // The file this rip delivers: an ISO output's deliverable is the image itself.
     let delivered_file = delivered_file_name(&output_format, &filename, &iso_filename).to_string();

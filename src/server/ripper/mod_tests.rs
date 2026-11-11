@@ -4701,3 +4701,53 @@ fn a_held_capture_records_its_suggestion_and_clears_a_stale_pick() {
         row.last_error
     );
 }
+
+// A job dir a stat missed is gone only by a complete listing or a missing root: a listing
+// whose every pass hit an entry error may be hiding it, so the rip holds.
+#[test]
+fn a_missing_job_dir_is_gone_only_by_a_complete_listing() {
+    use super::{StagingHold, StagingListing, missing_dir_hold};
+    let listing = |complete, names: &[&str]| {
+        Some(StagingListing {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            complete,
+        })
+    };
+    let never = || panic!("the root is not checked");
+    assert_eq!(
+        missing_dir_hold(listing(true, &["other"]), "job", never),
+        None
+    );
+    assert_eq!(
+        missing_dir_hold(listing(false, &["other"]), "job", never),
+        Some(StagingHold::Unreadable)
+    );
+    assert_eq!(
+        missing_dir_hold(listing(true, &["job"]), "job", never),
+        Some(StagingHold::Unreadable)
+    );
+    assert_eq!(missing_dir_hold(None, "job", || true), None);
+    assert_eq!(
+        missing_dir_hold(None, "job", || false),
+        Some(StagingHold::Unreadable)
+    );
+}
+
+// A rescan drops the empty unverified job its last scan allocated, never one holding files
+// or any verified job.
+#[test]
+fn a_rescan_drops_only_an_empty_unverified_job() {
+    let root = tempfile::tempdir().unwrap();
+    let empty = format!("{}1", staging::UNVERIFIED_JOB_PREFIX);
+    let used = format!("{}2", staging::UNVERIFIED_JOB_PREFIX);
+    for job in [&empty, &used, &"disc-abc".to_string()] {
+        std::fs::create_dir(root.path().join(job)).unwrap();
+    }
+    std::fs::write(root.path().join(&used).join("state.json"), b"{}").unwrap();
+    for job in [&empty, &used, &"disc-abc".to_string()] {
+        super::drop_empty_unverified_job(root.path(), job);
+    }
+    assert!(!root.path().join(&empty).exists());
+    assert!(root.path().join(&used).exists());
+    assert!(root.path().join("disc-abc").exists());
+}

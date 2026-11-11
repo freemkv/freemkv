@@ -1117,16 +1117,7 @@ fn resume_config(mut cfg: Config, saved: Option<&staging::DiscState>) -> Result<
 }
 
 fn resume_destination(cfg: &Config, output_path: &str) -> String {
-    if staging::is_network_output(&cfg.output_format, &cfg.network_target) {
-        format!("network://{}", cfg.network_target)
-    } else {
-        // `.mk3d` is a filename convention; the container scheme remains mkv.
-        format!(
-            "{}://{}",
-            super::output_scheme_for(&cfg.output_format),
-            output_path
-        )
-    }
+    super::destination_url(&cfg.output_format, &cfg.network_target, output_path)
 }
 
 pub(super) fn check_resume_selection(

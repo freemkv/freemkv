@@ -77,45 +77,6 @@ fn watchdog_exit_after_counter(
     active.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire)
 }
 
-#[cfg(test)]
-#[test]
-fn reboot_during_watchdog_counter_wait_suppresses_exit() {
-    use std::sync::{Arc, Barrier};
-    for completed in [false, true] {
-        let active = Arc::new(AtomicBool::new(true));
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let entered = Arc::new(Barrier::new(2));
-        let release = Arc::new(Barrier::new(2));
-        let worker = std::thread::spawn({
-            let (active, shutdown, entered, release) = (
-                active.clone(),
-                shutdown.clone(),
-                entered.clone(),
-                release.clone(),
-            );
-            move || {
-                watchdog_exit_after_counter(&active, &shutdown, || {
-                    entered.wait();
-                    release.wait();
-                })
-            }
-        });
-        entered.wait();
-        if completed {
-            active.store(false, Ordering::Release);
-        } else {
-            shutdown.store(true, Ordering::Release);
-        }
-        release.wait();
-        assert!(!worker.join().unwrap());
-    }
-    assert!(watchdog_exit_after_counter(
-        &AtomicBool::new(true),
-        &AtomicBool::new(false),
-        || {}
-    ));
-}
-
 /// Run `op` on a named helper thread and wait at most `deadline` for it.
 /// Returns `true` if it finished in time; `false` on timeout or spawn failure.
 pub fn bounded_call(name: &str, deadline: Duration, op: impl FnOnce() + Send + 'static) -> bool {

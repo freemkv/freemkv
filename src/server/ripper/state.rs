@@ -684,6 +684,16 @@ pub fn update_state(device: &str, mut state: RipState) {
     s.insert(device.to_string(), state);
 }
 
+/// A scan of `device` starts: it names the disc's job afresh, so until it does the row
+/// holds none, and a disc carrying the last one's label never inherits its job. Returns
+/// the job the row held.
+pub(super) fn begin_scan(device: &str) -> Option<String> {
+    let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let row = s.get_mut(device)?;
+    row.disc_identity.clear();
+    Some(std::mem::take(&mut row.job_id)).filter(|job| !job.is_empty())
+}
+
 fn is_active_status(s: &str) -> bool {
     matches!(s, "scanning" | "ripping")
 }

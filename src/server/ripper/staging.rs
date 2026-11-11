@@ -632,6 +632,8 @@ fn try_write_state_inner(staging_disc_dir: &Path, st: &DiscState) -> io::Result<
                 st.output_format = saved.output_format;
             }
             st.user_metadata = saved.user_metadata;
+            st.title_pick = saved.title_pick;
+            st.episode_confirm = saved.episode_confirm;
             st.metadata_revision = saved.metadata_revision;
             st.replan_required = saved.replan_required;
             st.title_identity_review = saved.title_identity_review;
@@ -2953,6 +2955,8 @@ fn reset_capture_with(
     fresh.title_confident = old.title_confident;
     fresh.tmdb_confident = old.tmdb_confident;
     fresh.user_metadata = old.user_metadata;
+    // The operator's titles share the correction's revision: kept with it.
+    fresh.title_pick = old.title_pick;
     fresh.metadata_revision = old.metadata_revision;
     // Legacy adoption may know identity only through the soon-to-be-deleted map.
     // Preserve the scan's verified identity before removing that recovery link.

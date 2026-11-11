@@ -131,6 +131,17 @@ where
     };
     let handle = std::thread::Builder::new().name(name).spawn(wrapped)?;
     match register_rip_thread(device, handle) {
+        // A stop that began meanwhile may already have looked for threads to join.
+        Ok(()) if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) => {
+            drop(go_tx);
+            if let Some(handle) = take_rip_thread(device) {
+                let _ = handle.join();
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "the server is stopping",
+            ))
+        }
         Ok(()) => {
             // Release the worker. A send error is impossible in practice (the
             // receiver cannot be dropped before its `recv` returns) and would

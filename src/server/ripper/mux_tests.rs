@@ -1043,3 +1043,41 @@ fn a_failed_watchdog_spawn_is_reported() {
         "{log:?}"
     );
 }
+
+#[test]
+fn reboot_during_watchdog_counter_wait_suppresses_exit() {
+    use std::sync::{Arc, Barrier};
+    for completed in [false, true] {
+        let active = Arc::new(AtomicBool::new(true));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker = std::thread::spawn({
+            let (active, shutdown, entered, release) = (
+                active.clone(),
+                shutdown.clone(),
+                entered.clone(),
+                release.clone(),
+            );
+            move || {
+                watchdog_exit_after_counter(&active, &shutdown, || {
+                    entered.wait();
+                    release.wait();
+                })
+            }
+        });
+        entered.wait();
+        if completed {
+            active.store(false, Ordering::Release);
+        } else {
+            shutdown.store(true, Ordering::Release);
+        }
+        release.wait();
+        assert!(!worker.join().unwrap());
+    }
+    assert!(watchdog_exit_after_counter(
+        &AtomicBool::new(true),
+        &AtomicBool::new(false),
+        || {}
+    ));
+}

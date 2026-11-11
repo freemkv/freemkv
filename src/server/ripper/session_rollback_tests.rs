@@ -373,15 +373,10 @@ fn join_rip_thread_called_on_its_own_thread_returns_at_once() {
 fn no_rip_thread_starts_once_the_daemon_is_stopping() {
     const CHILD: &str = "FREEMKV_TEST_RIP_AFTER_SHUTDOWN_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "server::ripper::session::rollback_tests::no_rip_thread_starts_once_the_daemon_is_stopping",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .status()
-            .unwrap();
+        let status = crate::server::util::child_test(
+            "server::ripper::session::rollback_tests::no_rip_thread_starts_once_the_daemon_is_stopping",
+            CHILD,
+        );
         assert!(status.success(), "{status}");
         return;
     }

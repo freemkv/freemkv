@@ -35,7 +35,10 @@ fn a_refused_replan_is_held_for_review_and_not_redispatched() {
     let _g = crate::server::mover::TEST_STATE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let dir = scratch("refused");
+    // Its own staging root: the shared scratch folder keeps earlier runs' held jobs.
+    let root = scratch("refused");
+    let dir = root.join("job");
+    std::fs::create_dir(&dir).unwrap();
     let (iso, map) = corrected_job(&dir);
     let reason =
         super::super::selection_review_message(&crate::server::planner::PlanError::EpisodeRange);
@@ -53,8 +56,9 @@ fn a_refused_replan_is_held_for_review_and_not_redispatched() {
         crate::server::muxer::MuxVerdict::Dispatch
     ));
     // It is listed in Review, where the operator corrects it.
-    let held = crate::server::review::list_held(&dir.parent().unwrap().to_string_lossy());
-    assert!(held.iter().any(|h| h.reason == reason));
+    let held = crate::server::review::list_held(&root.to_string_lossy());
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].reason, reason);
 }
 
 #[test]
