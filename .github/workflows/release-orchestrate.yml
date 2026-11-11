@@ -2062,9 +2062,9 @@ jobs:
                 runs="$(gh api "repos/$GIT_ORG/$r/actions/runs?branch=v$VERSION&per_page=100" \
                   -q '.workflow_runs[] | "\(.status)|\(.conclusion)|\(.name)"')" \
                   || die "cannot read $r's v$VERSION runs — the release is out; re-dispatch to announce"
-                pending+="$(printf '%s\n' "$runs" | awk -F'|' -v r="$r" '$1!="completed"{printf " %s:%s", r, $3}')"
+                pending+="$(printf '%s\n' "$runs" | awk -F'|' -v r="$r" 'NF && $1!="completed"{printf " %s:%s", r, $3}')"
                 failed+="$(printf '%s\n' "$runs" | awk -F'|' -v r="$r" \
-                  '$1=="completed" && $2!="success" && $2!="skipped" && $2!="neutral"{printf " %s:%s(%s)", r, $3, $2}')"
+                  'NF && $1=="completed" && $2!="success" && $2!="skipped" && $2!="neutral"{printf " %s:%s(%s)", r, $3, $2}')"
               done
               runs="$(gh api "repos/$GIT_ORG/marketing/actions/workflows/pages.yml/runs?head_sha=$site_sha&per_page=5" \
                 -q '.workflow_runs[0] | "\(.status)|\(.conclusion)"')" || runs=""

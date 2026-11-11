@@ -500,3 +500,61 @@ fn repackaged_assets_are_exactly_the_verified_debs() {
     }
     assert_eq!(repackaged(), want);
 }
+
+/// The awk filters `announce_on_discord_last` runs over one repo's tag runs.
+fn announce_filters() -> Vec<String> {
+    let yml = workflow("release-orchestrate.yml");
+    let body = &yml[yml
+        .find("announce_on_discord_last() {")
+        .expect("no announce function")..];
+    let body = &body[..body.find("\n          }\n").expect("announce function end")];
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("awk -F'|' -v r=\"$r\"") {
+        rest = &rest[at..];
+        let open = rest.find(" '").expect("awk program") + 2;
+        let close = open + rest[open..].find('\'').expect("awk program end");
+        out.push(rest[open..close].to_string());
+        rest = &rest[close..];
+    }
+    out
+}
+
+fn run_awk(program: &str, input: &str) -> Option<String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("awk")
+        .args(["-F|", "-v", "r=repo", program])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+    Some(String::from_utf8(child.wait_with_output().ok()?.stdout).unwrap())
+}
+
+// A repo with no runs on the tag (a lib whose tag builds nothing) is neither pending nor
+// failed; 1.8.9's announce waited out its 90 minutes on exactly that.
+#[test]
+fn announce_treats_a_repo_without_tag_runs_as_done() {
+    let filters = announce_filters();
+    assert_eq!(filters.len(), 2, "pending + failed filters: {filters:?}");
+    let Some(_) = run_awk("BEGIN{}", "") else {
+        eprintln!("awk unavailable; skipped");
+        return;
+    };
+    for f in &filters {
+        assert_eq!(
+            run_awk(f, "\n").unwrap(),
+            "",
+            "empty run list flagged by `{f}`"
+        );
+    }
+    assert_eq!(
+        run_awk(&filters[0], "in_progress||Release\n").unwrap(),
+        " repo:Release"
+    );
+    assert_eq!(
+        run_awk(&filters[1], "completed|failure|Release\n").unwrap(),
+        " repo:Release(failure)"
+    );
+}
