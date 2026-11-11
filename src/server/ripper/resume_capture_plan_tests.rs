@@ -184,3 +184,79 @@ fn resume_remaps_the_operator_pick() {
         Err(crate::server::planner::PlanError::PickMismatch)
     );
 }
+
+// A resume that holds for its episodes keeps the suggestion, limited to what the capture
+// swept, with the job and on the card; a stale pick is cleared so the next resume selects again.
+#[test]
+fn a_held_resume_keeps_its_swept_suggestion_and_clears_a_stale_pick() {
+    use crate::server::planner::{EpisodeConfirm, PlanError};
+    use freemkv_engine::{Mapfile, SectorStatus, mapfile_path_for};
+    let dir = scratch("held-resume");
+    let fx = crate::ku_fixtures::bd_image(&[None, None, None], 1);
+    let iso = fx.write(&dir, "Show.iso");
+    let len = fx.img.image.len() as u64;
+    let (start, sectors) = fx.clip(2);
+    let (gap_start, gap_end) = (u64::from(start) * 2048, u64::from(start + sectors) * 2048);
+    let map_path = mapfile_path_for(&iso);
+    let mut map = Mapfile::create(&map_path, len, "t").unwrap();
+    map.record(0, gap_start, SectorStatus::Finished).unwrap();
+    map.record(gap_end, len - gap_end, SectorStatus::Finished)
+        .unwrap();
+    map.flush().unwrap();
+    let mut st = staging::DiscState::new(staging::StagingState::Ripped);
+    st.title = "Show".into();
+    st.iso_path = "Show.iso".into();
+    st.title_pick = Some(vec![crate::title_identity::TitleIdentity::of(
+        &fx.disc.titles[0],
+    )]);
+    staging::try_write_state(&dir, &st).unwrap();
+    let device = "a_held_resume_keeps_its_swept_suggestion";
+    super::super::update_state(
+        device,
+        super::super::RipState {
+            device: device.into(),
+            ..Default::default()
+        },
+    );
+    let confirm = EpisodeConfirm {
+        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+        suggested: vec![0, 1, 2],
+        clusters: vec![vec![0, 1, 2]],
+        alternates: Vec::new(),
+    };
+    let paths = (dir.as_path(), iso.as_path(), map_path.as_path());
+    let selection = PlanError::Selection(confirm);
+    hold_resume_selection(device, paths, "Show", (&fx.disc, &selection));
+    let held = staging::read_state(&dir).unwrap();
+    assert_eq!(held.state, staging::StagingState::Review);
+    let swept = held
+        .episode_confirm
+        .expect("the suggestion is kept with the job");
+    assert_eq!(
+        (swept.suggested, swept.clusters),
+        (vec![0, 1], vec![vec![0, 1]])
+    );
+    assert!(
+        held.title_pick.is_some(),
+        "a hold to confirm keeps the pick"
+    );
+    let row = super::super::STATE
+        .lock()
+        .unwrap()
+        .get(device)
+        .cloned()
+        .unwrap();
+    assert_eq!(row.plan.confirm.map(|c| c.suggested), Some(vec![0, 1]));
+
+    hold_resume_selection(device, paths, "Show", (&fx.disc, &PlanError::PickMismatch));
+    let held = staging::read_state(&dir).unwrap();
+    assert!(held.title_pick.is_none(), "a stale pick is cleared");
+    assert!(held.episode_confirm.is_none());
+    let row = super::super::STATE.lock().unwrap().remove(device).unwrap();
+    assert!(
+        row.last_error.contains("not on this disc"),
+        "{}",
+        row.last_error
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -214,7 +214,7 @@ pub fn disc_variant_name(base: &str, variant: u32) -> String {
 /// kept (filesystems handle them, omitting them mangles "What's Up Doc").
 ///
 /// Same path-segment safety guarantee as [`sanitize_path_compact`]: the
-/// result is never empty, `.`, `..`, or all-dots (see `ensure_safe_segment`).
+/// result is never empty, `.`, `..`, or all-dots (see the engine's `sanitize_display`).
 pub fn sanitize_path_display(name: &str) -> String {
     // One rule with the desktop and the engine's library layout.
     freemkv_engine::metadata::sanitize_display(name)

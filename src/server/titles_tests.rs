@@ -172,3 +172,71 @@ fn picks_round_trip_by_identity_and_refuse_anything_else() {
     assert!(remap(&titles, &[TitleIdentity::of(&foreign)]).is_err());
     assert!(remap(&titles, &[ids[0].clone(), ids[0].clone()]).is_err());
 }
+
+// The list shows what the plan does without a pick: a saved (or stale) pick changes nothing in
+// `automatic` or the suggestion. Rows describe every track and never echo raw disc metadata.
+#[test]
+fn the_list_ignores_the_pick_and_describes_each_title_safely() {
+    let mut titles = play_all_disc();
+    titles[5].playlist = "00805\u{1b}[2J.mpls".into();
+    titles[3]
+        .streams
+        .push(Stream::Subtitle(libfreemkv::SubtitleStream {
+            pid: 0x1200,
+            codec: Codec::Pgs,
+            language: "eng".into(),
+            forced: false,
+            qualifier: libfreemkv::LabelQualifier::None,
+            codec_data: None,
+        }));
+    titles.push(bd(806, 44.0, &[("00010", 0, 44)]));
+    let plain = list(&Config::default(), &titles, &tv(), ScopeMode::Mux);
+    for (pick, pick_mismatch) in [(Some(vec![2]), false), (None, true)] {
+        let picked = TitleRequest {
+            pick,
+            pick_mismatch,
+            ..tv()
+        };
+        let listed = list(&Config::default(), &titles, &picked, ScopeMode::Mux);
+        assert_eq!(listed, plain, "{pick_mismatch}");
+    }
+    assert!(plain.automatic.is_empty() && plain.confirm.is_some());
+    assert!(
+        !plain.titles[5].playlist.contains('\u{1b}'),
+        "{}",
+        plain.titles[5].playlist
+    );
+    assert!(
+        plain.titles[2].tracks.ends_with("1 audio · 0 subtitles"),
+        "{}",
+        plain.titles[2].tracks
+    );
+    assert!(
+        plain.titles[3].tracks.ends_with("1 audio · 1 subtitles"),
+        "{}",
+        plain.titles[3].tracks
+    );
+    // The second playlist of episode one is its alternate, named by the title it repeats.
+    let alternate = (plain.titles.iter())
+        .find(|t| t.alternate_of.is_some())
+        .unwrap();
+    let of = alternate.alternate_of.unwrap();
+    assert_eq!((alternate.index.min(of), alternate.index.max(of)), (1, 6));
+    assert!(
+        plain
+            .titles
+            .iter()
+            .filter(|t| t.alternate_of.is_some())
+            .count()
+            == 1
+    );
+}
+
+// A pick names at most 999 titles; more is refused rather than remapped.
+#[test]
+fn a_pick_of_more_than_999_titles_is_refused() {
+    let id = serde_json::to_value(TitleIdentity::of(&play_all_disc()[1])).unwrap();
+    let pick = |n: usize| serde_json::Value::Array(vec![id.clone(); n]);
+    assert_eq!(parse_pick(&pick(999)).unwrap().unwrap().len(), 999);
+    assert!(parse_pick(&pick(1000)).is_err());
+}

@@ -258,3 +258,81 @@ fn a_saved_pick_is_remapped_by_identity_onto_a_rescan() {
         })
     );
 }
+
+// A single pass rips one title: a Movie pick names it (the first of several); an empty pick or
+// a TV pick leaves the main title.
+#[test]
+fn a_single_pass_rips_a_movie_pick_and_otherwise_the_main_title() {
+    let titles = samurai();
+    let cfg = Config::default();
+    let main = main_title(&cfg, &titles).unwrap();
+    let movie = media(Some(MediaKind::Movie));
+    let single =
+        |pick: &[usize]| resolve_titles(&cfg, &titles, &movie, Some(pick), ScopeMode::SinglePass);
+    assert_ne!(main, 2);
+    assert_eq!(single(&[2]), run(&[2], false));
+    assert_eq!(single(&[2, 0]), run(&[2], false));
+    assert_eq!(single(&[]), run(&[main], false));
+    assert_eq!(
+        resolve_titles(&cfg, &titles, &movie, Some(&[9]), ScopeMode::SinglePass),
+        run(&[main], false),
+        "a pick of no real title leaves the main title"
+    );
+}
+
+// A pick names each title once by identity; a scan listing one identity twice cannot say which
+// title was meant, and an empty pick names nothing.
+#[test]
+fn a_pick_remaps_only_onto_titles_the_scan_tells_apart() {
+    let mut titles = samurai();
+    let id = |t: &DiscTitle| crate::title_identity::TitleIdentity::of(t);
+    let pick = [id(&titles[1])];
+    assert_eq!(remap_pick(&titles, &pick), Some(vec![1]));
+    assert_eq!(remap_pick(&titles, &[]), None);
+    titles.push(titles[1].clone());
+    assert_eq!(remap_pick(&titles, &pick), None);
+    assert_eq!(remap_pick(&titles, &[id(&titles[2])]), Some(vec![2]));
+}
+
+// state.json keeps a hold's reason by key; each reads back as itself, and a reason a newer
+// binary wrote reads as the missing roster rather than failing the whole state.
+#[test]
+fn a_confirm_reason_round_trips_and_an_unknown_one_reads_as_missing() {
+    use freemkv_engine::SelectionReviewReason as R;
+    for reason in [
+        R::MissingEpisodeRoster,
+        R::IncompleteEpisodeRoster,
+        R::ConflictingEpisodeRoster,
+        R::InvalidEpisodeRoster,
+    ] {
+        let confirm = EpisodeConfirm {
+            reason,
+            suggested: vec![0, 1],
+            clusters: Vec::new(),
+            alternates: vec![ConfirmAlternate { index: 2, of: 1 }],
+        };
+        let json = serde_json::to_value(&confirm).unwrap();
+        assert_eq!(json["reason"], reason.key());
+        assert_eq!(
+            serde_json::from_value::<EpisodeConfirm>(json).unwrap(),
+            confirm
+        );
+    }
+    let future = serde_json::json!({"reason": "some-new-reason"});
+    let read: EpisodeConfirm = serde_json::from_value(future).unwrap();
+    assert_eq!(read.reason, R::MissingEpisodeRoster);
+    assert!(read.suggested.is_empty() && read.clusters.is_empty() && read.alternates.is_empty());
+}
+
+// A stale pick says so and asks for a new one; it carries no suggestion to confirm.
+#[test]
+fn a_stale_pick_holds_with_its_own_reason_and_advice() {
+    let error = PlanError::PickMismatch;
+    assert!(error.to_string().contains("not on this disc"), "{error}");
+    let held = error.with_action(error.to_string());
+    assert!(
+        held.ends_with("Choose the titles again for this disc."),
+        "{held}"
+    );
+    assert!(error.confirm().is_none());
+}

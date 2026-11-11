@@ -721,3 +721,31 @@ fn capture_revision_retains_matching_payload_for_later_older_republication() {
     assert_eq!(first(&cache, "job"), 30);
     work.finish();
 }
+
+// An operator pick replans the card from the same scan with exactly its titles, in order; an
+// older pick or another job's is ignored, and a later correction keeps the pick.
+#[test]
+fn a_pick_replans_the_card_with_its_titles_and_a_correction_keeps_them() {
+    let (cache, work) = cache();
+    publish_test(&cache, "job");
+    work.finish();
+    let rows = |cache: &Arc<Cache>| {
+        (cache.episodes("job").unwrap().iter())
+            .map(|r| (r.title_index, r.episode))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&cache), [(0, 4), (1, 5), (2, 6)]);
+    cache.repick("job", 1, Some(vec![2, 0]));
+    work.finish();
+    assert_eq!(rows(&cache), [(2, 4), (0, 5)]);
+    cache.repick("job", 1, Some(vec![1, 2]));
+    cache.repick("other", 9, Some(vec![1]));
+    work.finish();
+    assert_eq!(rows(&cache), [(2, 4), (0, 5)], "an older pick is ignored");
+    correct(&cache, "job", 2, 10);
+    work.finish();
+    assert_eq!(rows(&cache), [(2, 10), (0, 11)]);
+    cache.repick("job", 3, None);
+    work.finish();
+    assert_eq!(rows(&cache), [(0, 10), (1, 11), (2, 12)]);
+}

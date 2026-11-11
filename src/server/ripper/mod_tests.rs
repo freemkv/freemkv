@@ -4627,3 +4627,77 @@ fn a_kept_key_file_becomes_the_rips_notice() {
         logged.len()
     );
 }
+
+// The dialog's scans: the latest eight jobs, one entry per job, a rescan replacing its own.
+#[test]
+fn scanned_titles_keep_one_latest_scan_for_each_of_eight_jobs() {
+    let titles = crate::server::titles::tests::play_all_disc();
+    let mut scanned = Vec::new();
+    for job in 0..9 {
+        super::remember_in(&mut scanned, &job.to_string(), &titles[..1]);
+    }
+    let jobs = |scanned: &[std::sync::Arc<super::ScannedTitles>]| {
+        (scanned.iter()).map(|s| s.job.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(jobs(&scanned), ["1", "2", "3", "4", "5", "6", "7", "8"]);
+    super::remember_in(&mut scanned, "3", &titles);
+    assert_eq!(jobs(&scanned), ["1", "2", "4", "5", "6", "7", "8", "3"]);
+    assert_eq!(
+        scanned[7].titles.len(),
+        titles.len(),
+        "the rescan replaces the old one"
+    );
+}
+
+// A capture held before it reads anything keeps the suggestion with the job and on the card;
+// a pick the scan no longer has is cleared from both, so the next rip selects again.
+#[test]
+fn a_held_capture_records_its_suggestion_and_clears_a_stale_pick() {
+    use crate::server::planner::{EpisodeConfirm, MediaKind, PlanError, TitleRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let titles = crate::server::titles::tests::play_all_disc();
+    let mut st = staging::DiscState::new(staging::StagingState::Stopped);
+    st.title_pick = Some(vec![crate::title_identity::TitleIdentity::of(&titles[1])]);
+    staging::try_write_state(dir.path(), &st).unwrap();
+    let device = "a_held_capture_records_its_suggestion";
+    super::update_state(
+        device,
+        super::RipState {
+            device: device.into(),
+            status: "scanning".into(),
+            ..Default::default()
+        },
+    );
+    let mut request = TitleRequest {
+        pick: Some(vec![1]),
+        ..TitleRequest::default()
+    };
+    request.media.kind = Some(MediaKind::Tv);
+    let confirm = EpisodeConfirm {
+        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+        suggested: vec![1, 2],
+        clusters: vec![vec![1, 2]],
+        alternates: Vec::new(),
+    };
+    let selection = PlanError::Selection(confirm.clone());
+    super::hold_capture_selection(device, dir.path(), &request, &selection);
+    let held = staging::read_state(dir.path()).unwrap();
+    assert_eq!(held.episode_confirm, Some(confirm.clone()));
+    assert!(held.title_pick.is_some());
+    let row = super::STATE.lock().unwrap().get(device).cloned().unwrap();
+    assert_eq!(row.status, "error");
+    assert!(row.last_error.contains("E9086"), "{}", row.last_error);
+    assert_eq!(row.plan.confirm, Some(confirm));
+    assert_eq!(row.plan.media_kind, Some(MediaKind::Tv));
+
+    super::hold_capture_selection(device, dir.path(), &request, &PlanError::PickMismatch);
+    let held = staging::read_state(dir.path()).unwrap();
+    assert!(held.title_pick.is_none() && held.episode_confirm.is_none());
+    let row = super::STATE.lock().unwrap().remove(device).unwrap();
+    assert_eq!((row.plan.title_pick, row.plan.confirm), (None, None));
+    assert!(
+        row.last_error.contains("not on this disc"),
+        "{}",
+        row.last_error
+    );
+}

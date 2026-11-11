@@ -65,7 +65,14 @@ static SCANNED: std::sync::Mutex<Vec<Arc<ScannedTitles>>> = std::sync::Mutex::ne
 const SCANNED_KEEP: usize = 8;
 
 fn remember_titles(job: &str, titles: &[libfreemkv::DiscTitle]) {
-    let mut scanned = SCANNED.lock().unwrap_or_else(|e| e.into_inner());
+    remember_in(
+        &mut SCANNED.lock().unwrap_or_else(|e| e.into_inner()),
+        job,
+        titles,
+    );
+}
+
+fn remember_in(scanned: &mut Vec<Arc<ScannedTitles>>, job: &str, titles: &[libfreemkv::DiscTitle]) {
     scanned.retain(|s| s.job != job);
     scanned.push(Arc::new(ScannedTitles {
         job: job.to_string(),

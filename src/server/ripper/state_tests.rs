@@ -1567,6 +1567,128 @@ fn set_pass_progress_keeps_an_operator_correction_on_the_card() {
     assert_eq!(snap.tmdb_year, 2000);
 }
 
+// A title pick publishes onto its own job only, never behind a newer commit, and lifts only
+// the confirm hold it answers: an unrelated error, or a pick that still holds, stays shown.
+#[test]
+fn a_title_pick_publishes_on_its_job_in_order_and_lifts_only_its_hold() {
+    let confirm = crate::server::planner::EpisodeConfirm {
+        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+        suggested: vec![1, 2],
+        clusters: vec![vec![1, 2]],
+        alternates: Vec::new(),
+    };
+    let held = || {
+        let mut row = RipState {
+            job_id: "job".into(),
+            status: "error".into(),
+            last_error: "E9086 held".into(),
+            metadata_revision: 2,
+            ..Default::default()
+        };
+        row.plan.confirm = Some(confirm.clone());
+        row
+    };
+    for (job, revision) in [("other", 3), ("job", 2), ("job", 1)] {
+        let mut row = held();
+        row.publish_title_pick(job, revision, Some(vec![1]), None);
+        let shown = (row.status, row.metadata_revision, row.plan);
+        assert_eq!(
+            shown,
+            ("error".into(), 2, held().plan),
+            "{job} at {revision}"
+        );
+    }
+    let mut row = held();
+    row.publish_title_pick("job", 3, Some(vec![2, 1]), None);
+    assert_eq!((row.status.as_str(), row.last_error.as_str()), ("idle", ""));
+    assert_eq!(
+        (row.metadata_revision, row.plan.title_pick),
+        (3, Some(vec![2, 1]))
+    );
+    assert!(row.plan.confirm.is_none());
+    let mut row = held();
+    row.publish_title_pick("job", 3, None, Some(confirm.clone()));
+    assert_eq!(row.status, "error", "still waiting on its episodes");
+    assert_eq!(row.plan.confirm, Some(confirm.clone()));
+    let mut row = held();
+    row.plan.confirm = None;
+    row.last_error = "drive failed".into();
+    row.publish_title_pick("job", 3, Some(vec![1]), None);
+    assert_eq!(
+        (row.status.as_str(), row.last_error.as_str()),
+        ("error", "drive failed")
+    );
+}
+
+// A progress push for the same job keeps the plan the scan resolved; another job's does not.
+#[test]
+fn the_title_plan_rides_across_progress_pushes_for_its_job_only() {
+    let device = "the_title_plan_rides_across_progress_pushes";
+    let mut row = RipState {
+        job_id: "job".into(),
+        disc_present: true,
+        disc_name: "Show".into(),
+        ..Default::default()
+    };
+    row.plan.media_kind = Some(crate::server::planner::MediaKind::Tv);
+    row.plan.title_pick = Some(vec![3, 1]);
+    update_state(device, row);
+    let push = |job: &str| RipState {
+        job_id: job.into(),
+        disc_present: true,
+        disc_name: "Show".into(),
+        status: "ripping".into(),
+        ..Default::default()
+    };
+    update_state(device, push("job"));
+    let kept = STATE.lock().unwrap().get(device).unwrap().plan.clone();
+    assert_eq!(kept.title_pick, Some(vec![3, 1]));
+    assert_eq!(kept.media_kind, Some(crate::server::planner::MediaKind::Tv));
+    update_state(device, push("next"));
+    let row = STATE.lock().unwrap().remove(device).unwrap();
+    assert_eq!(row.plan, TitlePlanView::default());
+}
+
+// A correction shows the kind and numbers the plan will use: its own, else the disc label's;
+// a Movie drops the episode set the card waited on, TV keeps it.
+#[test]
+fn a_correction_shows_its_resolved_numbers_and_a_movie_drops_the_confirm() {
+    use crate::server::planner::MediaKind;
+    let confirm = crate::server::planner::EpisodeConfirm {
+        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+        suggested: vec![0, 1],
+        clusters: Vec::new(),
+        alternates: Vec::new(),
+    };
+    let held = || {
+        let mut row = RipState {
+            job_id: "job".into(),
+            disc_label: "SHOW_S2_D3".into(),
+            ..Default::default()
+        };
+        row.plan.confirm = Some(confirm.clone());
+        row
+    };
+    let mut tv = scan_metadata("Show");
+    tv.media_type = MediaKind::Tv;
+    let mut row = held();
+    row.publish_user_metadata("job", 1, tv.clone());
+    assert_eq!(row.plan.media_kind, Some(MediaKind::Tv));
+    assert_eq!((row.plan.season, row.plan.disc), (Some(2), Some(3)));
+    assert_eq!(row.plan.confirm, Some(confirm.clone()));
+    tv.season = Some(4);
+    let mut row = held();
+    row.publish_user_metadata("job", 1, tv);
+    assert_eq!((row.plan.season, row.plan.disc), (Some(4), Some(3)));
+    let mut row = held();
+    row.publish_user_metadata("job", 1, scan_metadata("Film"));
+    assert_eq!(row.plan.media_kind, Some(MediaKind::Movie));
+    assert_eq!(
+        (row.plan.season, row.plan.disc, row.plan.confirm),
+        (None, None, None)
+    );
+}
+
 // The card drops an episode set when a correction makes the disc a Movie, as the job does.
 #[test]
 fn a_movie_correction_drops_the_cards_episode_set() {

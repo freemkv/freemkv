@@ -2961,6 +2961,15 @@ mod http {
             code, 400,
             "a stale client's ownership confirmation is refused"
         );
+        // Confirm episodes: an ISO outside the library is not listed; one that cannot be scanned
+        // says why.
+        let titles = |source: &str| {
+            let url = format!("/api/library/titles?source={source}");
+            roundtrip(&cfg, "GET", &url, None, &[])
+        };
+        assert_eq!(titles("/elsewhere/x.iso").0, 404);
+        let (code, body) = titles(&iso);
+        assert_eq!(code, 409, "{body}");
         let (code, _) = roundtrip(&cfg, "GET", "/api/library/queue/all", None, &[]);
         assert_eq!(code, 404, "queue actions are POST only");
         let bad = r#"{"library_dir": "relative/path"}"#;
@@ -5197,6 +5206,284 @@ mod http {
         assert!(current.episode_confirm.is_none());
         assert_eq!(current.user_metadata.unwrap().title, "Show");
         assert_eq!(current.metadata_revision, 1);
+    }
+
+    // The titles list and pick refuse what they cannot answer: an unknown or malformed drive,
+    // a disc not identified or scanned yet, and a body that is not JSON.
+    #[test]
+    fn titles_endpoints_refuse_unknown_unscanned_and_malformed_requests() {
+        use crate::server::planner::MediaKind;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let pick = r#"{"job_id":"x","titles":[]}"#;
+        for method in ["GET", "POST"] {
+            let body = (method == "POST").then_some(pick);
+            let (status, reply) = roundtrip(&cfg, method, "/api/titles/sgtitlesnobody", body, &[]);
+            assert_eq!(status, 404, "{method}: {reply}");
+            let (status, _) = roundtrip(&cfg, method, "/api/titles/sg0%2f..", body, &[]);
+            assert_eq!(status, 400, "{method}");
+        }
+        let device = "sgtitlesunscanned";
+        let row = |job: &str| ripper::RipState {
+            device: device.to_string(),
+            disc_present: true,
+            job_id: job.into(),
+            ..Default::default()
+        };
+        ripper::update_state(device, row(""));
+        // A scan remembered without a job never answers for an unidentified disc.
+        ripper::remember_titles_for_test("", &crate::server::titles::tests::play_all_disc());
+        let (status, reply) = roundtrip(&cfg, "GET", &format!("/api/titles/{device}"), None, &[]);
+        assert_eq!(status, 409, "not identified: {reply}");
+        assert!(reply.contains("not known yet"), "{reply}");
+        ripper::update_state(device, row(device));
+        let (status, reply) = roundtrip(&cfg, "GET", &format!("/api/titles/{device}"), None, &[]);
+        assert_eq!(status, 409, "not scanned: {reply}");
+        let body = format!(r#"{{"job_id":"{device}","titles":[]}}"#);
+        let (status, reply) = roundtrip(
+            &cfg,
+            "POST",
+            &format!("/api/titles/{device}"),
+            Some(&body),
+            &[],
+        );
+        assert_eq!(status, 409, "not scanned: {reply}");
+        assert!(reply.contains("not known yet"), "{reply}");
+        let (status, _) = roundtrip(
+            &cfg,
+            "POST",
+            &format!("/api/titles/{device}"),
+            Some("{"),
+            &[],
+        );
+        assert_eq!(status, 400);
+        ripper::STATE.lock().unwrap().remove(device);
+
+        // A scanned Movie: one title runs on its own, nothing to confirm, named by its match.
+        let device = "sgtitleslistmovie";
+        let (_tmp, cfg, titles) = titled_drive(device, MediaKind::Movie, None);
+        ripper::update_state_with(device, |s| {
+            s.tmdb_title = "Film".into();
+            s.metadata_revision = 4;
+        });
+        let (status, listed) = roundtrip(&cfg, "GET", &format!("/api/titles/{device}"), None, &[]);
+        assert_eq!(status, 200, "{listed}");
+        let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+        let main = crate::server::planner::main_title(&Config::default(), &titles).unwrap();
+        assert_eq!(listed["job_id"], device);
+        assert_eq!(listed["revision"], 4);
+        assert_eq!(listed["show"], "Film");
+        assert_eq!(listed["kind"], "movie");
+        assert_eq!(listed["automatic"], serde_json::json!([main]));
+        assert!(listed["confirm"].is_null() && listed["pick"].is_null());
+        assert_eq!(listed["titles"][1]["id"], ids(&titles, &[1])[0]);
+        ripper::STATE.lock().unwrap().remove(device);
+    }
+
+    // The title override takes TV season and disc numbers for TV only, each 1..=65535, and an
+    // omitted kind keeps the one the plan resolved (a disc that is TV only by its label).
+    #[test]
+    fn title_override_checks_tv_numbers_and_keeps_the_resolved_kind() {
+        use crate::server::planner::MediaKind;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let device = "sgtitleovrnumbers";
+        let mut row = ripper::RipState {
+            device: device.to_string(),
+            disc_present: true,
+            job_id: "job".into(),
+            disc_identity: "verified-disc".into(),
+            tmdb_media_type: Some(MediaKind::Movie),
+            ..Default::default()
+        };
+        row.plan.media_kind = Some(MediaKind::Tv);
+        ripper::update_state(device, row);
+        let post = |body: &str| {
+            roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/title/{device}"),
+                Some(body),
+                &[],
+            )
+        };
+        for field in ["season", "disc", "episode_start"] {
+            let body =
+                format!(r#"{{"job_id":"job","title":"X","media_type":"movie","{field}":2}}"#);
+            let (status, reply) = post(&body);
+            assert_eq!(status, 400, "{field}: {reply}");
+            assert!(reply.contains("TV only"), "{field}: {reply}");
+            for bad in ["0", "65536", "\"2\"", "1.5"] {
+                let body =
+                    format!(r#"{{"job_id":"job","title":"X","media_type":"tv","{field}":{bad}}}"#);
+                let (status, reply) = post(&body);
+                assert_eq!(status, 400, "{field}={bad}: {reply}");
+                assert!(
+                    reply.contains("between 1 and 65535"),
+                    "{field}={bad}: {reply}"
+                );
+            }
+        }
+        assert!(
+            ripper::staging::read_state(&tmp.path().join("job"))
+                .is_none_or(|s| s.user_metadata.is_none())
+        );
+        let (status, reply) = post(r#"{"job_id":"job","title":"Show","season":2,"disc":65535}"#);
+        assert_eq!(status, 200, "{reply}");
+        let stored = ripper::staging::read_state(&tmp.path().join("job"))
+            .unwrap()
+            .user_metadata
+            .unwrap();
+        assert_eq!(
+            stored.media_type,
+            MediaKind::Tv,
+            "the resolved kind, not TMDB's"
+        );
+        assert_eq!((stored.season, stored.disc), (Some(2), Some(65535)));
+        let row = ripper::STATE.lock().unwrap().remove(device).unwrap();
+        assert_eq!((row.plan.season, row.plan.disc), (Some(2), Some(65535)));
+    }
+
+    // A held rip's resolve keeps its saved TV numbers when the body omits them, and a switch to
+    // Movie drops them rather than refusing numbers the operator never sent.
+    #[test]
+    fn review_resolve_keeps_saved_tv_numbers_and_drops_them_for_a_movie() {
+        use crate::server::planner::MediaKind;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let dir = tmp.path().join("held-keep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = ripper::staging::DiscState::new(ripper::staging::StagingState::Review);
+        saved.title = "Show".into();
+        saved.disc_identity = "stable-disc".into();
+        saved.iso_path = dir.join("disc.iso").to_string_lossy().into_owned();
+        std::fs::write(&saved.iso_path, b"capture").unwrap();
+        ripper::staging::write_state(&dir, &saved);
+        // Each resolve releases the hold; hold it again (raw, as a restart reads it) for the next.
+        let resolve = |body: &str| {
+            let mut held = ripper::staging::read_state(&dir).unwrap();
+            held.state = ripper::staging::StagingState::Review;
+            held.replan_required = false;
+            std::fs::write(dir.join("state.json"), serde_json::to_vec(&held).unwrap()).unwrap();
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(body), &[])
+        };
+        let body = r#"{"dir":"held-keep","action":"proceed","media_type":"tv","season":2,"disc":3,"episode_start":5}"#;
+        assert_eq!(resolve(body).0, 200);
+        let (status, reply) =
+            resolve(r#"{"dir":"held-keep","action":"proceed","media_type":"tv"}"#);
+        assert_eq!(status, 200, "{reply}");
+        let current = ripper::staging::read_state(&dir).unwrap();
+        let operator = current.user_metadata.clone().unwrap();
+        let numbers = (operator.season, operator.disc, operator.episode_start);
+        assert_eq!(
+            numbers,
+            (Some(2), Some(3), Some(5)),
+            "omitted numbers are kept"
+        );
+        let (status, reply) =
+            resolve(r#"{"dir":"held-keep","action":"proceed","media_type":"movie"}"#);
+        assert_eq!(status, 200, "{reply}");
+        let current = ripper::staging::read_state(&dir).unwrap();
+        let operator = current.user_metadata.clone().unwrap();
+        assert_eq!(operator.media_type, MediaKind::Movie);
+        let numbers = (operator.season, operator.disc, operator.episode_start);
+        assert_eq!(numbers, (None, None, None));
+    }
+
+    // A held capture's title list needs a plain staging dir that holds a rip with its image.
+    #[test]
+    fn review_titles_refuses_bad_dirs_unheld_rips_and_a_missing_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let get = |dir: &str| {
+            let url = format!("/api/review/titles?dir={dir}");
+            roundtrip(&cfg, "GET", &url, None, &[])
+        };
+        for bad in ["", "..", "a%2Fb", "%2Etmp%2F..%2Fx"] {
+            assert_eq!(get(bad).0, 400, "{bad}");
+        }
+        let ripped = tmp.path().join("ripped");
+        std::fs::create_dir_all(&ripped).unwrap();
+        let st = ripper::staging::DiscState::new(ripper::staging::StagingState::Ripped);
+        ripper::staging::write_state(&ripped, &st);
+        let (status, reply) = get("ripped");
+        assert_eq!(status, 409, "{reply}");
+        assert!(reply.contains("not a held rip"), "{reply}");
+        assert_eq!(get("absent").0, 409);
+        let held = tmp.path().join("held-gone");
+        std::fs::create_dir_all(&held).unwrap();
+        let st = ripper::staging::DiscState::new(ripper::staging::StagingState::Review);
+        ripper::staging::write_state(&held, &st);
+        let (status, reply) = get("held-gone");
+        assert_eq!(status, 409, "{reply}");
+        assert!(reply.contains("no longer in staging"), "{reply}");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&held, tmp.path().join("linked")).unwrap();
+            assert_eq!(get("linked").0, 400, "a symlink is never followed");
+        }
+    }
+
+    // Confirming a held Movie capture takes exactly one of the titles its sweep read.
+    #[test]
+    fn review_episodes_holds_a_movie_to_one_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        }));
+        let dir = tmp.path().join("held-movie");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (iso, map) = (dir.join("Film.iso"), dir.join("Film.iso.mapfile"));
+        let k = crate::ku_fixture::K1;
+        let image = crate::ku_fixtures::bd_image(&[Some(k), Some(k)], 1)
+            .img
+            .image;
+        std::fs::write(&iso, &image).unwrap();
+        let (disc, _) =
+            freemkv_engine::scan_image(&freemkv_engine::ImageSource::Iso(iso.clone())).unwrap();
+        let mut mapfile =
+            freemkv_engine::Mapfile::create(&map, image.len() as u64, "test").unwrap();
+        let finished = freemkv_engine::SectorStatus::Finished;
+        mapfile.record(0, image.len() as u64, finished).unwrap();
+        drop(mapfile);
+        let mut saved = ripper::staging::DiscState::new(ripper::staging::StagingState::Review);
+        saved.title = "Film".into();
+        saved.media_type = crate::server::planner::MediaKind::Movie;
+        saved.iso_path = iso.to_string_lossy().into_owned();
+        saved.mapfile_path = map.to_string_lossy().into_owned();
+        ripper::staging::write_state(&dir, &saved);
+        let post = |pick: &[usize]| {
+            let body = serde_json::json!({"dir": "held-movie", "action": "episodes", "titles": ids(&disc.titles, pick)});
+            let body = body.to_string();
+            roundtrip(&cfg, "POST", "/api/review/resolve", Some(&body), &[])
+        };
+        let (status, reply) = post(&[0, 1]);
+        assert_eq!(status, 400, "{reply}");
+        assert!(reply.contains("exactly one"), "{reply}");
+        assert!(
+            ripper::staging::read_state(&dir)
+                .unwrap()
+                .title_pick
+                .is_none()
+        );
+        let (status, reply) = post(&[1]);
+        assert_eq!(status, 200, "{reply}");
+        let current = ripper::staging::read_state(&dir).unwrap();
+        let picked = crate::title_identity::TitleIdentity::of(&disc.titles[1]);
+        assert_eq!(current.title_pick, Some(vec![picked]));
     }
 }
 

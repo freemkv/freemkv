@@ -604,3 +604,36 @@ fn cancel_after_a_concurrent_confirmation_leaves_the_confirmed_job() {
     assert_eq!(after.state, StagingState::Ripped);
     assert_eq!(after.failure_reason, None);
 }
+
+// A held rip lists the TV numbers its plan resolved and the episode set it waits on, so the
+// picker and the Confirm episodes dialog open on them.
+#[test]
+fn list_held_carries_tv_numbers_and_the_episodes_to_confirm() {
+    use crate::server::ripper::staging::mutate_state_if_present;
+    let tmp = scratch("tv-numbers");
+    let held = tmp.join("Show S05");
+    write_review_state(&held, "tv");
+    let confirm = crate::server::planner::EpisodeConfirm {
+        reason: freemkv_engine::SelectionReviewReason::IncompleteEpisodeRoster,
+        suggested: vec![2, 0, 1],
+        clusters: vec![vec![0, 1, 2]],
+        alternates: vec![crate::server::planner::ConfirmAlternate { index: 3, of: 0 }],
+    };
+    mutate_state_if_present(&held, |s| {
+        s.disc_number = Some(2);
+        s.episode_confirm = Some(confirm.clone());
+    });
+    let list = list_held(tmp.to_str().unwrap());
+    assert_eq!(list.len(), 1);
+    assert_eq!((list[0].season, list[0].disc), (Some(5), Some(2)));
+    assert_eq!(list[0].episode_confirm, Some(confirm));
+    let json = serde_json::to_value(&list[0]).unwrap();
+    assert_eq!(
+        json["episode_confirm"]["reason"],
+        "incomplete-episode-roster"
+    );
+    mutate_state_if_present(&held, |s| s.episode_confirm = None);
+    let json = serde_json::to_value(&list_held(tmp.to_str().unwrap())[0]).unwrap();
+    assert!(json.get("episode_confirm").is_none(), "{json}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

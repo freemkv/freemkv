@@ -342,3 +342,56 @@ fn matched_and_plain_rows_are_refused_together_while_links_cannot_be_read() {
         "no row was queued, plain or matched"
     );
 }
+
+// The Confirm episodes list for a Library ISO: without a match it plans the disc as TV by its
+// labels; with one, the match's name, kind and pick are what it lists.
+#[test]
+fn the_library_title_list_plans_as_the_current_match_would() {
+    use crate::server::planner::MediaMetadata;
+    use crate::title_identity::TitleIdentity;
+    let (_t, lib, dirs) = library_with(&[]);
+    let iso = image_iso(&dirs, "Show");
+    assert!(lib.index_now(&dirs));
+    let cfg = no_key_tv_auto(&dirs);
+    let listed = source_titles(&lib, &cfg, &iso).unwrap();
+    let (disc, _) =
+        freemkv_engine::scan_image(&freemkv_engine::ImageSource::Iso(iso.clone())).unwrap();
+    assert_eq!(
+        listed["titles"].as_array().unwrap().len(),
+        disc.titles.len()
+    );
+    assert_eq!(listed["kind"], "tv");
+    assert_eq!(listed["show"], "Show");
+    assert_eq!(listed["revision"], 0);
+    assert!(listed["saved"].is_null() && listed["pick"].is_null());
+
+    let last = disc.titles.len() - 1;
+    let film = MediaMetadata {
+        title: "Film".into(),
+        year: 2001,
+        kind: Some(MediaKind::Movie),
+        ..MediaMetadata::default()
+    };
+    let pick = vec![TitleIdentity::of(&disc.titles[last])];
+    let store = lib.match_store().unwrap();
+    let stamp = links::iso_stamp(&iso);
+    store
+        .save_with_pick(&iso, 0, film.clone(), Some(pick.clone()), stamp)
+        .unwrap();
+    let listed = source_titles(&lib, &cfg, &iso).unwrap();
+    assert_eq!(
+        (listed["kind"].as_str(), listed["show"].as_str()),
+        (Some("movie"), Some("Film"))
+    );
+    assert_eq!(
+        (listed["year"].as_u64(), listed["revision"].as_u64()),
+        (Some(2001), Some(1))
+    );
+    assert_eq!(listed["pick"], serde_json::json!([last]));
+    assert_eq!(
+        listed["saved"]["title_pick"],
+        serde_json::to_value(&pick).unwrap()
+    );
+
+    assert!(source_titles(&lib, &cfg, &dirs.library.join("absent.iso")).is_err());
+}

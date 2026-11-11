@@ -2815,6 +2815,203 @@ fn a_title_pick_replans_a_planned_job_and_needs_its_image() {
     assert!(save_title_pick(single.path(), pick, origin, None, |_| Ok(())).is_err());
 }
 
+fn device_origin() -> PickOrigin<'static> {
+    PickOrigin::Device {
+        identity: "disc",
+        label: "SHOW_S1",
+        device: "sg0",
+    }
+}
+
+// A pick is refused, changing nothing, once delivery started, mid-reset, for a dialog opened
+// before another correction, or for a held capture that is not held; a scanned drive job with
+// no state.json yet gets one, stamped with the disc it was picked for.
+#[test]
+fn a_title_pick_is_refused_where_it_cannot_apply_and_starts_a_scanned_job() {
+    let titles = crate::server::titles::tests::play_all_disc();
+    let pick = Some(vec![crate::title_identity::TitleIdentity::of(&titles[1])]);
+    let refuse = |st: DiscState, origin: PickOrigin, revision: Option<u64>, says: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        try_write_state(dir.path(), &st).unwrap();
+        let error = save_title_pick(dir.path(), pick.clone(), origin, revision, |_| Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(says), "{error}");
+        assert_eq!(read_state(dir.path()).unwrap(), {
+            let mut same = st.clone();
+            same.schema = read_state(dir.path()).unwrap().schema;
+            same
+        });
+    };
+    for state in [StagingState::Done, StagingState::Completed] {
+        refuse(
+            DiscState::new(state),
+            device_origin(),
+            None,
+            "delivery has started",
+        );
+    }
+    let mut resetting = DiscState::new(StagingState::Stopped);
+    resetting.reset_in_progress = true;
+    refuse(resetting, device_origin(), None, "Start over");
+    let mut corrected = DiscState::new(StagingState::Stopped);
+    corrected.metadata_revision = 3;
+    refuse(corrected, device_origin(), Some(2), "changed meanwhile");
+    refuse(
+        DiscState::new(StagingState::Ripped),
+        PickOrigin::Review,
+        None,
+        "not a held rip",
+    );
+
+    let absent = tempfile::tempdir().unwrap();
+    assert!(
+        save_title_pick(
+            absent.path(),
+            pick.clone(),
+            PickOrigin::Review,
+            None,
+            |_| Ok(())
+        )
+        .is_err(),
+        "a held capture needs its state"
+    );
+    assert!(read_state(absent.path()).is_none());
+    let revision = save_title_pick(
+        absent.path(),
+        pick.clone(),
+        device_origin(),
+        Some(0),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let saved = read_state(absent.path()).unwrap();
+    assert_eq!((revision, saved.state), (1, StagingState::Stopped));
+    assert_eq!(saved.title_pick, pick);
+    assert!(!saved.replan_required, "nothing planned yet");
+    let stamped = (saved.disc_identity.as_str(), saved.disc_label.as_str());
+    assert_eq!(
+        (stamped, saved.origin_device.as_str()),
+        (("disc", "SHOW_S1"), "sg0")
+    );
+}
+
+// The suggestion a hold waits on is written only when it changes, and never creates a state.
+#[test]
+fn an_episode_confirm_is_recorded_only_on_a_change_to_an_existing_state() {
+    let confirm = crate::server::planner::EpisodeConfirm {
+        reason: freemkv_engine::SelectionReviewReason::MissingEpisodeRoster,
+        suggested: vec![0, 1],
+        clusters: vec![vec![0, 1]],
+        alternates: Vec::new(),
+    };
+    let absent = tempfile::tempdir().unwrap();
+    record_episode_confirm(absent.path(), Some(&confirm));
+    assert!(read_state(absent.path()).is_none());
+    let dir = tempfile::tempdir().unwrap();
+    try_write_state(dir.path(), &DiscState::new(StagingState::Review)).unwrap();
+    record_episode_confirm(dir.path(), Some(&confirm));
+    assert_eq!(
+        read_state(dir.path()).unwrap().episode_confirm,
+        Some(confirm.clone())
+    );
+    let modified = || {
+        fs::metadata(state_path(dir.path()))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let before = modified();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    record_episode_confirm(dir.path(), Some(&confirm));
+    assert_eq!(
+        modified(),
+        before,
+        "an unchanged suggestion is not rewritten"
+    );
+    record_episode_confirm(dir.path(), None);
+    assert!(read_state(dir.path()).unwrap().episode_confirm.is_none());
+}
+
+// An operator season and disc: TV only (a Movie correction drops them), each at least 1, and
+// a new one replans a planned TV job as a new First episode does.
+#[test]
+fn a_corrections_season_and_disc_are_tv_numbers_that_replan_the_episodes() {
+    use crate::server::planner::MediaKind;
+    let correction = |kind: MediaKind, season: Option<u16>, disc: Option<u16>| UserMetadata {
+        season,
+        disc,
+        episode_start: None,
+        title: "Show".into(),
+        year: 2004,
+        media_type: kind,
+        tmdb_id: 0,
+        poster_url: String::new(),
+        overview: String::new(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("Show.iso");
+    fs::write(&iso, b"iso").unwrap();
+    let mut st = DiscState::new(StagingState::Ripped);
+    st.media_type = MediaKind::Tv;
+    st.season = Some(1);
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.outputs = vec![Output {
+        filename: "Show S01E01.mkv".into(),
+        title_index: 0,
+        title_identity: None,
+        episode: Some(1),
+        episode_name: String::new(),
+        moved: false,
+    }];
+    try_write_state(dir.path(), &st).unwrap();
+    for (season, disc) in [(Some(0), None), (None, Some(0))] {
+        let error = save_user_metadata(dir.path(), correction(MediaKind::Tv, season, disc));
+        assert!(error.unwrap_err().to_string().contains("Season and disc"));
+    }
+    assert_eq!(read_state(dir.path()).unwrap().metadata_revision, 0);
+    save_user_metadata(dir.path(), correction(MediaKind::Tv, Some(1), None)).unwrap();
+    assert!(
+        !read_state(dir.path()).unwrap().replan_required,
+        "the same season"
+    );
+    save_user_metadata(dir.path(), correction(MediaKind::Tv, Some(1), Some(2))).unwrap();
+    let saved = read_state(dir.path()).unwrap();
+    assert!(saved.replan_required, "disc 2 numbers other episodes");
+    assert_eq!((saved.season, saved.disc_number), (Some(1), Some(2)));
+    save_user_metadata(dir.path(), correction(MediaKind::Movie, Some(3), Some(4))).unwrap();
+    let saved = read_state(dir.path()).unwrap();
+    let operator = saved.user_metadata.unwrap();
+    assert_eq!((operator.season, operator.disc), (None, None));
+    assert_eq!((saved.season, saved.disc_number), (None, None));
+}
+
+// A job's saved First episode numbers its TV plan when no correction names one; a Movie has
+// none, and a correction's own number wins.
+#[test]
+fn resolved_media_keeps_a_saved_first_episode_for_tv_only() {
+    use crate::server::planner::MediaKind;
+    let mut st = DiscState::new(StagingState::Ripped);
+    st.media_type = MediaKind::Tv;
+    st.episode_start = Some(7);
+    assert_eq!(st.resolved_media().episode_start, Some(7));
+    st.media_type = MediaKind::Movie;
+    assert_eq!(st.resolved_media().episode_start, None);
+    st.media_type = MediaKind::Tv;
+    st.user_metadata = Some(UserMetadata {
+        season: None,
+        disc: None,
+        episode_start: Some(3),
+        title: "Show".into(),
+        year: 0,
+        media_type: MediaKind::Tv,
+        tmdb_id: 0,
+        poster_url: String::new(),
+        overview: String::new(),
+    });
+    assert_eq!(st.resolved_media().episode_start, Some(3));
+}
+
 // Correcting a TV disc to Movie drops an episode set (it names no one feature), so the rip
 // plans the main title instead of filing the first picked episode as the movie; a single
 // picked title stays the feature, and a TV correction keeps the set.
