@@ -98,8 +98,10 @@ impl std::fmt::Debug for Settings {
                     "<redacted>"
                 },
             )
-            .field("keep_iso", &self.keep_iso)
             .field("organize_library", &self.organize_library)
+            .field("startup_mode", &self.startup_mode)
+            .field("preferred_drive", &self.preferred_drive)
+            .field("keep_iso", &self.keep_iso)
             .field("auto_eject", &self.auto_eject)
             .field("notify_when_rip_finished", &self.notify_when_rip_finished)
             .field("selection", &self.selection)

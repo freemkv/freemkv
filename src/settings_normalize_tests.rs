@@ -446,3 +446,22 @@ fn the_library_layout_switch_defaults_off_and_round_trips() {
     let loaded: Settings = serde_json::from_str(&saved).unwrap();
     assert!(loaded.organize_library && loaded.get_bool("organize_library"));
 }
+
+// A `{:?}` dump shows every plain field, the startup choice included, and no secret.
+#[test]
+fn debug_shows_the_startup_choice_and_hides_the_secrets() {
+    let s = Settings {
+        startup_mode: "Open preferred drive".into(),
+        preferred_drive: "Drive E".into(),
+        keyserver_token: "tok-secret".into(),
+        tmdb_api_key: "tmdb-secret".into(),
+        ..Default::default()
+    };
+    let d = format!("{s:?}");
+    assert!(d.contains("Open preferred drive"), "{d}");
+    assert!(d.contains("Drive E"), "{d}");
+    assert!(
+        !d.contains("tok-secret") && !d.contains("tmdb-secret"),
+        "{d}"
+    );
+}
