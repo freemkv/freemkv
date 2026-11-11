@@ -230,7 +230,11 @@ class StructureTests(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertIn("needs.plan-media.outputs.run == 'true'", self.jobs[name]['if'])
                 self.assertNotIn('inputs.run_media', self.jobs[name]['if'])
-        self.assertEqual(self.jobs['media-verdict']['if'], 'always() && inputs.record_baseline != true')
+        verdict = self.jobs['media-verdict']['if']
+        self.assertIn('always() && inputs.record_baseline != true', verdict)
+        # A release's own bump commit has no plan; its verdict skips like plan-media does.
+        self.assertIn("contains(github.event.head_commit.message, ': bump version')", verdict)
+        self.assertIn('github.event.commits[1] == null', verdict)
 
     def test_reference_epoch_is_explicit_dev_only_and_cannot_publish_candidate_evidence(self):
         self.assertIn('record_baseline:', self.text)

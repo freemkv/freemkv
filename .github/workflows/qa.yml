@@ -793,7 +793,7 @@ jobs:
   # The one media answer (I-1): green only if evidence was reused or written by this run.
   media-verdict:
     needs: [plan-media, launch, cli-matrix, record-media-evidence, publish-media-history]
-    if: always() && inputs.record_baseline != true
+    if: "${{ always() && inputs.record_baseline != true && !(github.event_name == 'push' && github.ref_type == 'branch' && github.event.commits[0] != null && github.event.commits[1] == null && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, ': bump version')) }}"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
