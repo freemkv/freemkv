@@ -291,7 +291,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     reveal.add_css_class("pill");
     let me = shell.clone();
     reveal.connect_clicked(move |_| {
-        let d = me.app.borrow().output_dir.clone();
+        let d = me.app.borrow().result_dir().to_string();
         me.perform(vec![Effect::Reveal(d)]);
     });
     let done = gtk::Button::with_label(&g("gui.btn.done"));
@@ -401,16 +401,12 @@ impl MainView {
             }
             for (index, drive) in v.home_drives.iter().enumerate() {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                let status = match drive.present {
-                    Some(true) => crate::strings::get_or("gui.home.loaded", "Disc inserted"),
-                    Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
-                    None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
-                };
-                let label = gtk::Label::new(Some(&format!("{} — {status}", drive.display)));
+                let label = gtk::Label::new(Some(&crate::ui::home_drive_label(drive)));
                 label.set_xalign(0.0);
                 label.set_hexpand(true);
                 row.append(&label);
-                let open = gtk::Button::with_label(&crate::strings::get("gui.btn.open_disc"));
+                let open =
+                    gtk::Button::with_label(&crate::strings::get_or("gui.home.open", "Open"));
                 let shell = self.shell.clone();
                 open.connect_clicked(move |_| {
                     if let Some(shell) = shell.upgrade() {

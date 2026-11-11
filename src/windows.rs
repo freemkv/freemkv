@@ -1894,9 +1894,13 @@ impl Shell {
     fn render(&self) {
         // The 200 ms tick renders too: moving or re-selecting an open combo closes its
         // list, so wait until the user closes it. The next render redraws everything.
-        if [&self.cmb_pick_titles, &self.cmb_format]
-            .iter()
-            .any(|c| unsafe { c.hwnd().SendMessage(msg::CbGetDroppedState {}) })
+        if [
+            &self.cmb_pick_titles,
+            &self.cmb_format,
+            &self.cmb_details_kind,
+        ]
+        .iter()
+        .any(|c| unsafe { c.hwnd().SendMessage(msg::CbGetDroppedState {}) })
         {
             return;
         }
@@ -1930,14 +1934,7 @@ impl Shell {
             let labels: Vec<String> = v
                 .home_drives
                 .iter()
-                .map(|d| {
-                    let status = match d.present {
-                        Some(true) => crate::strings::get_or("gui.home.loaded", "Disc inserted"),
-                        Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
-                        None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
-                    };
-                    format!("{} — {status}", d.display)
-                })
+                .map(crate::ui::home_drive_label)
                 .collect();
             let _ = self.home_list.items().add(&labels);
             if let Some(i) = keep {
@@ -2892,7 +2889,7 @@ impl Shell {
         });
         let me = self.clone();
         self.btn_reveal.on().bn_clicked(move || {
-            let d = me.app.borrow().output_dir.clone();
+            let d = me.app.borrow().result_dir().to_string();
             me.perform(vec![Effect::Reveal(d)]);
             Ok(())
         });
@@ -2940,7 +2937,11 @@ impl Shell {
         });
         // A pick made in the open list is applied while it is still dropped, when `render`
         // waits; with no tick running (an open file) nothing else would redraw it.
-        for c in [&self.cmb_pick_titles, &self.cmb_format] {
+        for c in [
+            &self.cmb_pick_titles,
+            &self.cmb_format,
+            &self.cmb_details_kind,
+        ] {
             let me = self.clone();
             c.on().cbn_close_up(move || {
                 me.render();

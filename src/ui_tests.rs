@@ -2959,6 +2959,38 @@ fn a_rip_that_ejected_its_disc_keeps_its_result_until_done() {
     assert_eq!(app.page, Page::Empty);
 }
 
+// Close on that Result page, the disc already gone, leaves it like Done does.
+#[test]
+fn close_on_a_result_whose_disc_left_returns_to_the_start_screen() {
+    let mut app = idle_disc(Page::Progress, disc_gone);
+    let st = Arc::new(RunState::default());
+    st.finished.store(true, Ordering::Release);
+    app.run = Some(st);
+    app.tick();
+    tick_until_watched(&mut app);
+    assert_eq!(app.page, Page::Result);
+    assert!(app.source.is_empty());
+    app.dispatch(Cmd::Close);
+    assert_eq!(app.page, Page::Empty);
+}
+
+// Reveal on the Result page opens the folder the rip wrote, even if Settings moved the
+// destination meanwhile.
+#[test]
+fn reveal_names_the_folder_the_rip_wrote() {
+    let mut app = App::new();
+    app.output_dir = "/A".into();
+    assert_eq!(app.result_dir(), "/A", "no rip yet: the chosen folder");
+    let mut form = opened_form(&mut app);
+    app.run_dest = "/A".into();
+    app.run = Some(Arc::default());
+    form.dest_dir = "/B".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
+    assert_eq!(app.output_dir, "/B", "the next rip follows the new default");
+    assert_eq!(app.result_dir(), "/A");
+}
+
 static PRESENCE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 fn counted_gone(_: &str) -> Option<bool> {
@@ -3227,6 +3259,26 @@ fn a_settings_commit_saves_and_follows_only_a_new_default_folder() {
     app.dispatch(Cmd::CommitSettings(Box::new(form)));
     assert_eq!(app.output_dir, "/Volumes/Media/Rips");
     assert_eq!(app.settings.dest_dir, "/Volumes/Media/Rips");
+}
+
+#[test]
+fn a_settings_commit_keeps_a_startup_drive_chosen_while_the_form_was_open() {
+    let mut app = App::new();
+    app.home_drives = vec![HomeDrive {
+        device: "/dev/rdisk9".into(),
+        display: "Drive E".into(),
+        legacy_label: "Drive E".into(),
+        present: Some(true),
+    }];
+    let mut form = opened_form(&mut app);
+    app.prefer_home_drive(0);
+    settle_workers(&mut app);
+    form.filename_template = "{title}".into();
+    app.dispatch(Cmd::CommitSettings(Box::new(form)));
+    settle_workers(&mut app);
+    assert_eq!(app.settings.filename_template, "{title}");
+    assert_eq!(app.settings.startup_mode, "Open preferred drive");
+    assert_eq!(app.settings.preferred_drive, "Drive E");
 }
 
 #[test]
@@ -4682,4 +4734,21 @@ fn a_movie_rip_without_the_layout_names_nothing() {
     assert_eq!(app.naming_request(&ticked).unwrap().roster, ticked);
     app.set_detail_kind(1);
     assert!(app.naming_request(&app.tree.ticked_titles()).is_none());
+}
+
+// Whichever worker takes the write lock first, an older Settings write never lands
+// after a newer one.
+#[test]
+fn an_older_settings_write_never_lands_after_a_newer_one() {
+    static WRITES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    fn record(s: &Settings) -> Result<(), String> {
+        WRITES.lock().unwrap().push(s.dest_dir.clone());
+        Ok(())
+    }
+    let (mut older, mut newer) = (Settings::default(), Settings::default());
+    (older.dest_dir, newer.dest_dir) = ("/older".into(), "/newer".into());
+    let order = Mutex::new(0);
+    ordered_write(&order, 2, record, &newer).unwrap();
+    ordered_write(&order, 1, record, &older).unwrap();
+    assert_eq!(*WRITES.lock().unwrap(), vec!["/newer".to_string()]);
 }

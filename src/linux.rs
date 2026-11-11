@@ -602,8 +602,6 @@ impl Shell {
         self.window.add_controller(drop);
     }
 
-    /// Closing mid-rip must not silently tear the rip down. "Stop & Quit" has
-    /// the core cancel and WAIT (bounded) for the worker to put the file down,
     /// The Keyboard Shortcuts window (Ctrl+?), rebuilt each time so it is in the
     /// current language.
     fn show_shortcuts(self: &Rc<Self>) {
@@ -614,6 +612,8 @@ impl Shell {
         }
     }
 
+    /// Closing mid-rip must not silently tear the rip down. "Stop & Quit" has
+    /// the core cancel and WAIT (bounded) for the worker to put the file down,
     /// then closes; anything else keeps ripping.
     fn confirm_quit(self: &Rc<Self>) {
         let g = crate::strings::get;

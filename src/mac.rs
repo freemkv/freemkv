@@ -1278,7 +1278,7 @@ define_class!(
 
         #[unsafe(method(onReveal:))]
         fn on_reveal(&self, _s: Option<&AnyObject>) {
-            let d = self.ivars().app.borrow().output_dir.clone();
+            let d = self.ivars().app.borrow().result_dir().to_string();
             self.perform(vec![crate::ui::Effect::Reveal(d)]);
         }
 
@@ -1624,14 +1624,9 @@ impl Controller {
                 ));
                 for (index, drive) in v.home_drives.iter().enumerate() {
                     let y = rows.frame().size.height - (index as f64 + 1.0) * 38.0;
-                    let status = match drive.present {
-                        Some(true) => crate::strings::get_or("gui.home.loaded", "Disc inserted"),
-                        Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
-                        None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
-                    };
                     let label = text(
                         mtm,
-                        &format!("{} — {status}", drive.display),
+                        &crate::ui::home_drive_label(drive),
                         r(0.0, y, 360.0, 26.0),
                         false,
                         false,
@@ -2682,6 +2677,11 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         let home_rows = NSView::initWithFrame(NSView::alloc(mtm), r(0.0, 0.0, 700.0, 180.0));
         home_scroll.setDocumentView(Some(&home_rows));
         page_empty.addSubview(&home_scroll);
+        mask(
+            &home_scroll,
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewMaxXMargin,
+        );
         *c.ivars().home_rows.borrow_mut() = Some(home_rows);
 
         // `relayout` resizes `page_empty`, but a subview keeps its build-time

@@ -2310,14 +2310,20 @@ const QUIT_NOTICE: fn(&str) = |line| eprintln!("{line}");
 #[cfg(test)]
 const QUIT_NOTICE: fn(&str) = tests::quit_notice;
 
-// One Settings write at a time, in the order asked (`order` is the App's): a later write
-// waits for an earlier one still running, so the newest settings land last.
+// One Settings write at a time (`order` is the App's, holding the last write's `seq`): a
+// write older than one already made is skipped, so the newest settings land last whichever
+// worker takes the lock first.
 fn ordered_write(
-    order: &Mutex<()>,
+    order: &Mutex<u64>,
+    seq: u64,
     save: fn(&Settings) -> Result<(), String>,
     settings: &Settings,
 ) -> Result<(), String> {
-    let _order = order.lock().unwrap_or_else(|e| e.into_inner());
+    let mut last = order.lock().unwrap_or_else(|e| e.into_inner());
+    if *last > seq {
+        return Ok(());
+    }
+    *last = seq;
     save(settings)
 }
 
@@ -2489,8 +2495,10 @@ pub struct App {
     save_queued: Option<bool>,
     /// The last Settings write failed: committing the form again retries it.
     settings_unsaved: bool,
-    /// Held by the Settings write running, so writes land in the order asked.
-    write_order: Arc<Mutex<()>>,
+    /// Held by the Settings write running, with the `seq` of the last one made.
+    write_order: Arc<Mutex<u64>>,
+    /// The last Settings write's sequence number, so writes land in the order asked.
+    write_seq: u64,
     /// An open preflight checked again for changed ticks: its source, Stop and verdict.
     recheck: Option<(String, libfreemkv::Halt, std::sync::mpsc::Receiver<Recheck>)>,
     /// The operator chose "Stop & Quit": the close that follows is not asked again.
@@ -2517,6 +2525,16 @@ pub struct HomeDrive {
     /// The pre-1.8.7 `vendor model` label, still honoured as a saved preferred drive.
     pub legacy_label: String,
     pub present: Option<bool>,
+}
+
+/// A ready-screen drive row's text: the drive and whether it holds a disc.
+pub fn home_drive_label(drive: &HomeDrive) -> String {
+    let status = match drive.present {
+        Some(true) => crate::strings::get_or("gui.home.loaded", "Disc inserted"),
+        Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
+        None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
+    };
+    format!("{} — {status}", drive.display)
 }
 
 #[cfg(not(test))]
@@ -2850,6 +2868,7 @@ impl App {
             save_queued: None,
             settings_unsaved: false,
             write_order: Arc::default(),
+            write_seq: 0,
             recheck: None,
             quit_confirmed: false,
             save_fn: SAVE_SETTINGS,
@@ -2966,6 +2985,10 @@ impl App {
             Cmd::SetOutput => vec![Effect::PickOutputDir],
             Cmd::Close => {
                 if self.source.is_empty() && self.probe.is_none() && !self.opening() {
+                    // A Result whose disc already left closes like Done.
+                    if self.page == Page::Result {
+                        return self.dismiss_result();
+                    }
                     return vec![Effect::Redraw];
                 }
                 self.opening = None;
@@ -3084,6 +3107,15 @@ impl App {
         self.flush_settings();
     }
 
+    /// The folder the Result page's "Show in Folder" opens: the one the last rip wrote,
+    /// which a Settings commit during the rip does not move.
+    pub fn result_dir(&self) -> &str {
+        match self.run_dest.is_empty() {
+            true => &self.output_dir,
+            false => &self.run_dest,
+        }
+    }
+
     /// What the shell fills the Settings form from and reads it back onto.
     pub fn settings_form(&self) -> &Settings {
         &self.settings_form
@@ -3127,8 +3159,10 @@ impl App {
         }
         let (save, settings) = (self.save_fn, self.settings.clone());
         let order = self.write_order.clone();
+        self.write_seq += 1;
+        let seq = self.write_seq;
         match spawn_worker("settings-save", move || {
-            ordered_write(&order, save, &settings)
+            ordered_write(&order, seq, save, &settings)
         }) {
             Ok(rx) => {
                 self.saving = Some((rx, announce));
@@ -3190,11 +3224,13 @@ impl App {
         }
         let (save, settings) = (self.save_fn, self.settings.clone());
         let order = self.write_order.clone();
+        self.write_seq += 1;
+        let seq = self.write_seq;
         let r = match spawn_worker("settings-save", move || {
-            ordered_write(&order, save, &settings)
+            ordered_write(&order, seq, save, &settings)
         }) {
             Ok(rx) => awaited_write(rx.recv_timeout(BOUND)),
-            Err(_) => ordered_write(&self.write_order, self.save_fn, &self.settings),
+            Err(_) => ordered_write(&self.write_order, seq, self.save_fn, &self.settings),
         };
         self.written_at_quit(r, false);
     }
@@ -3823,10 +3859,10 @@ impl App {
     }
 
     /// Apply a committed Settings form to `self.settings` (no save: `Cmd::CommitSettings`
-    /// saves). The form may predate bar picks, so each remembered-stream field it did not
-    /// change (`edited` equal to `before`) keeps the App's current value. Changed subtitle
-    /// languages end a bar "None"/"Forced only" mode, which no form control shows. Returns
-    /// the merged settings.
+    /// saves). The form may predate bar picks and a ready-screen startup drive, so each
+    /// such field it did not change (`edited` equal to `before`) keeps the App's current
+    /// value. Changed subtitle languages end a bar "None"/"Forced only" mode, which no
+    /// form control shows. Returns the merged settings.
     pub fn commit_settings(
         &mut self,
         before: &crate::settings::Settings,
@@ -3837,6 +3873,13 @@ impl App {
             || edited.forced_sub_langs != before.forced_sub_langs;
         if edited.audio_langs == before.audio_langs {
             edited.audio_langs = cur.audio_langs.clone();
+        }
+        // The ready screen's "Use at startup" may also have changed these meanwhile.
+        if edited.startup_mode == before.startup_mode {
+            edited.startup_mode = cur.startup_mode.clone();
+        }
+        if edited.preferred_drive == before.preferred_drive {
+            edited.preferred_drive = cur.preferred_drive.clone();
         }
         if edited.sub_langs == before.sub_langs {
             edited.sub_langs = cur.sub_langs.clone();
