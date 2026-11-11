@@ -1310,8 +1310,10 @@ fn probe_not_cancelled_during_long_recovery_read() {
 }
 
 static FROZEN_SAW_STOP: AtomicBool = AtomicBool::new(false);
+static FROZEN_STOPPED_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 fn frozen_probe(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     let stopped = stopped_within(tok, std::time::Duration::from_secs(3));
+    *FROZEN_STOPPED_AT.lock().unwrap() = Some(std::time::Instant::now());
     FROZEN_SAW_STOP.store(stopped, Ordering::SeqCst);
     Err(String::new())
 }
@@ -1323,13 +1325,23 @@ fn probe_frozen_30s_is_cancelled_and_releases() {
     let mut app = App::new();
     (app.probe_scan, app.probe_window) = (frozen_probe, T29);
     let before = app.log.len();
+    let opened = std::time::Instant::now();
     app.open_probe(PROBE_SOURCE);
-    let took = settle(&mut app);
+    settle(&mut app);
     assert!(
         FROZEN_SAW_STOP.load(Ordering::SeqCst),
         "the probe's token was never cancelled"
     );
-    assert!(took <= T29 + std::time::Duration::from_secs(1), "{took:?}");
+    // The bound is on the cancel firing, not on the worker's exit and collection after it.
+    let fired = FROZEN_STOPPED_AT
+        .lock()
+        .unwrap()
+        .expect("the probe saw the stop")
+        - opened;
+    assert!(
+        fired <= T29 + std::time::Duration::from_secs(1),
+        "{fired:?}"
+    );
     assert_eq!(
         app.log.len(),
         before,
@@ -1345,9 +1357,13 @@ fn holding_probe(_: &str, _: &KeyConfig, tok: &OpenToken, _: OpenTicks) -> Resul
     *HOLD_RELEASED.lock().unwrap() = Some(std::time::Instant::now());
     Err("stopped".to_string())
 }
+// FT15c's alone: no other test may stamp it.
 static OTHER_OPENED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 fn other_open(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     *OTHER_OPENED.lock().unwrap() = Some(std::time::Instant::now());
+    Ok(probe_scan())
+}
+fn plain_open(_: &str, _: &KeyConfig, _: &OpenToken, _: OpenTicks) -> Result<Scanned, String> {
     Ok(probe_scan())
 }
 
@@ -1416,7 +1432,7 @@ fn adopted_probe_is_never_cancelled_by_t29() {
     assert_eq!(app.source, PROBE_SOURCE, "the probe's result is adopted");
 
     let mut app = App::new();
-    (app.probe_scan, app.probe_window, app.scan) = (idle_probe, T29, other_open);
+    (app.probe_scan, app.probe_window, app.scan) = (idle_probe, T29, plain_open);
     app.open_probe(PROBE_SOURCE);
     let probe = app.probe.clone().expect("probe out");
     app.open(PROBE_SOURCE);
