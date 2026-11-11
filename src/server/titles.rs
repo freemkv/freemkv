@@ -107,20 +107,28 @@ fn tracks(title: &DiscTitle) -> String {
                 libfreemkv::Stream::Video(_) => false,
             })
             .count()
-            .to_string()
     };
     let mut parts = vec![crate::server::ripper::format_codecs(title)];
     parts.retain(|p| !p.is_empty());
     parts.push(fmt_or(
         "server.titles.audio_tracks",
         "{n} audio",
-        &[("n", &count(true))],
+        &[("n", &count(true).to_string())],
     ));
-    parts.push(fmt_or(
-        "server.titles.subtitle_tracks",
-        "{n} subtitles",
-        &[("n", &count(false))],
-    ));
+    let subtitles = count(false);
+    parts.push(if subtitles == 1 {
+        fmt_or(
+            "server.titles.subtitle_track",
+            "{n} subtitle",
+            &[("n", "1")],
+        )
+    } else {
+        fmt_or(
+            "server.titles.subtitle_tracks",
+            "{n} subtitles",
+            &[("n", &subtitles.to_string())],
+        )
+    });
     parts.join(" · ")
 }
 

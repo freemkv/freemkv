@@ -212,7 +212,7 @@ fn the_list_ignores_the_pick_and_describes_each_title_safely() {
         plain.titles[2].tracks
     );
     assert!(
-        plain.titles[3].tracks.ends_with("1 audio · 1 subtitles"),
+        plain.titles[3].tracks.ends_with("1 audio · 1 subtitle"),
         "{}",
         plain.titles[3].tracks
     );
