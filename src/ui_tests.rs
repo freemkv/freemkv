@@ -4446,3 +4446,29 @@ fn the_library_layout_is_opt_in_and_rides_the_naming_request() {
     assert!(app.effective_format().starts_with("Whole disc"));
     assert!(app.naming_request(&ticked).is_none(), "a whole-disc copy");
 }
+
+// "Episodes" is offered only while the disc is TV: leaving TV leaves no stale choice behind.
+#[test]
+fn the_episodes_choice_does_not_outlive_the_tv_kind() {
+    for leave in [0, 1] {
+        let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+        app.set_detail_kind(2);
+        app.pick_titles("Episodes");
+        assert_eq!(app.tree.ticked_titles(), vec![1, 3, 0, 2]);
+        app.set_detail_kind(leave);
+        let pick = app.view().pick.unwrap();
+        let offered: Vec<&str> = pick.titles.iter().map(|t| t.0).collect();
+        assert!(
+            offered.contains(&pick.title.as_str()),
+            "{leave}: {} not in {offered:?}",
+            pick.title
+        );
+        assert_eq!(pick.title, "Main film only");
+        assert_eq!(app.tree.ticked_titles(), vec![0]);
+    }
+    // A disc that proves no roster keeps Episodes while it stays TV.
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_S1"));
+    app.pick_titles("Episodes");
+    app.set_detail_kind(2);
+    assert_eq!(app.pick_mode, "Episodes");
+}

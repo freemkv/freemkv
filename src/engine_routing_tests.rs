@@ -1938,3 +1938,41 @@ fn the_library_layout_is_opt_in() {
     assert!(dir.join("Show (2004)/Season 02").is_dir());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn show_2004_s2() -> freemkv_engine::metadata::MediaMetadata {
+    let mut show = tv_meta("Show");
+    (show.year, show.season) = (2004, Some(2));
+    show
+}
+
+// Organized, an episode already in the season folder under any name (numbered, or with an
+// episode name) drops every episode name; the titles keep their template names in the folder.
+#[test]
+fn an_organized_episode_already_on_disk_keeps_the_library_folders() {
+    for existing in ["Show S02E01.mkv", "Show S02E02 - An Old Name.mkv"] {
+        let dir = scratch_dir("organized-taken");
+        let season = dir.join("Show (2004)/Season 02");
+        std::fs::create_dir_all(&season).unwrap();
+        std::fs::write(season.join(existing), "old").unwrap();
+        let names = plan(&dir, "SHOW", show_2004_s2(), &[0, 1], &[0, 1], true);
+        assert_eq!(
+            named(&names, 0),
+            "Show (2004)/Season 02/SHOW_t1",
+            "{existing}"
+        );
+        assert_eq!(
+            named(&names, 1),
+            "Show (2004)/Season 02/SHOW_t2",
+            "{existing}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // Episode names in another season's folder are no duplicate.
+    let dir = scratch_dir("organized-free");
+    let other = dir.join("Show (2004)/Season 01");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("Show S02E01 - Elsewhere.mkv"), "old").unwrap();
+    let names = plan(&dir, "SHOW", show_2004_s2(), &[0, 1], &[0, 1], true);
+    assert_eq!(named(&names, 0), "Show (2004)/Season 02/Show S02E01");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -4218,7 +4218,6 @@ fn tv_naming_plan(
                         fe::Level::Warn,
                         "An episode file with that name already exists; using the filename template",
                     );
-                    return names;
                 }
             }
             Err(_) => fe::Sink::log(

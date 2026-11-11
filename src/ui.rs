@@ -156,8 +156,8 @@ pub enum SubPick {
     Lang(String),
 }
 
-/// Stored title modes. "Episodes" is offered only when the shared selection
-/// model returns an executable episode selection, not review-only candidates.
+/// Stored title modes. "Episodes" is offered when the shared selection model returns an
+/// executable episode selection, or when the operator or the label calls the disc TV.
 pub const PICK_TITLES: &[&str] = &[
     "Main film / episodes",
     "Main film only",
@@ -3766,6 +3766,14 @@ impl App {
             return vec![Effect::Redraw];
         }
         self.details.kind = kind;
+        // Episodes is not offered once the disc is no longer TV: leave no stale choice.
+        if self.pick_mode == "Episodes"
+            && !self
+                .pick_view()
+                .is_some_and(|v| v.titles.iter().any(|t| t.0 == "Episodes"))
+        {
+            self.pick_mode = "Main film only".to_string();
+        }
         self.repick()
     }
 
