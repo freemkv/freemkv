@@ -809,6 +809,10 @@ fn save_user_metadata_inner(
         st.disc_label = label.to_string();
         st.origin_device = device.to_string();
     }
+    // An episode set names no one feature: a Movie plans its main title, not the first episode.
+    if !metadata.media_type.is_tv() && st.title_pick.as_ref().is_some_and(|p| p.len() > 1) {
+        st.title_pick = None;
+    }
     st.user_metadata = Some(metadata);
     // Apply the NEW correction and its Review -> Done/Ripped transition before
     // the sole durable write, never in a preliminary transaction using old data.

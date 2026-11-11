@@ -2814,3 +2814,48 @@ fn a_title_pick_replans_a_planned_job_and_needs_its_image() {
     };
     assert!(save_title_pick(single.path(), pick, origin, None, |_| Ok(())).is_err());
 }
+
+// Correcting a TV disc to Movie drops an episode set (it names no one feature), so the rip
+// plans the main title instead of filing the first picked episode as the movie; a single
+// picked title stays the feature, and a TV correction keeps the set.
+#[test]
+fn a_movie_correction_drops_an_episode_set_but_keeps_one_title() {
+    use crate::server::planner::MediaKind;
+    let titles = crate::server::titles::tests::play_all_disc();
+    let ids = |pick: &[usize]| {
+        Some(
+            (pick.iter())
+                .map(|&i| crate::title_identity::TitleIdentity::of(&titles[i]))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let correction = |kind: MediaKind| UserMetadata {
+        season: None,
+        disc: None,
+        episode_start: None,
+        title: "Show".into(),
+        year: 0,
+        media_type: kind,
+        tmdb_id: 0,
+        poster_url: String::new(),
+        overview: String::new(),
+    };
+    for (pick, kind, kept) in [
+        (&[3, 1, 2][..], MediaKind::Tv, true),
+        (&[3, 1, 2][..], MediaKind::Movie, false),
+        (&[2][..], MediaKind::Movie, true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = DiscState::new(StagingState::Stopped);
+        st.media_type = MediaKind::Tv;
+        st.title_pick = ids(pick);
+        try_write_state(dir.path(), &st).unwrap();
+        save_user_metadata(dir.path(), correction(kind)).unwrap();
+        let saved = read_state(dir.path()).unwrap().title_pick;
+        assert_eq!(
+            saved,
+            if kept { ids(pick) } else { None },
+            "{pick:?} {kind:?}"
+        );
+    }
+}

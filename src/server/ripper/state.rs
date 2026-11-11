@@ -347,6 +347,9 @@ impl RipState {
         self.plan.disc = resolved.disc;
         if !m.media_type.is_tv() {
             self.plan.confirm = None;
+            if self.plan.title_pick.as_ref().is_some_and(|p| p.len() > 1) {
+                self.plan.title_pick = None;
+            }
         }
     }
 }

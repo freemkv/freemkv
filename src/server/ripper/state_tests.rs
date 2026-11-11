@@ -1566,3 +1566,26 @@ fn set_pass_progress_keeps_an_operator_correction_on_the_card() {
     assert_eq!(snap.tmdb_title, "Cast Away");
     assert_eq!(snap.tmdb_year, 2000);
 }
+
+// The card drops an episode set when a correction makes the disc a Movie, as the job does.
+#[test]
+fn a_movie_correction_drops_the_cards_episode_set() {
+    let mut row = RipState {
+        job_id: "job".into(),
+        ..Default::default()
+    };
+    row.plan.title_pick = Some(vec![3, 1, 2]);
+    let mut tv = scan_metadata("Show");
+    tv.media_type = crate::server::planner::MediaKind::Tv;
+    row.publish_user_metadata("job", 1, tv);
+    assert_eq!(row.plan.title_pick, Some(vec![3, 1, 2]));
+    row.publish_user_metadata("job", 2, scan_metadata("Film"));
+    assert_eq!(row.plan.title_pick, None);
+    row.plan.title_pick = Some(vec![2]);
+    row.publish_user_metadata("job", 3, scan_metadata("Film"));
+    assert_eq!(
+        row.plan.title_pick,
+        Some(vec![2]),
+        "one title stays the feature"
+    );
+}
