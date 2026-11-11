@@ -209,8 +209,9 @@ class StructureTests(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertIn(name, jobs)
                 guard = jobs[name].get('if')
-                if guard is not None:  # only a release version-bump commit may skip it
-                    self.assertIn("'bump version'", guard, 'runs on every push, dev included')
+                if guard is not None:  # only a push of one release version-bump commit may skip it
+                    self.assertIn("': bump version'", guard, 'runs on every push, dev included')
+                    self.assertIn('github.event.commits[1] == null', guard, 'a mixed push still runs')
         gate = jobs['gui-gate']
         oses = [i['os'] for i in gate['strategy']['matrix']['include']]
         self.assertEqual(oses, ['linux', 'windows'])
