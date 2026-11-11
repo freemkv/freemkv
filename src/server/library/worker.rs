@@ -559,9 +559,27 @@ pub(crate) fn source_titles(
         .find(|iso| iso.path == source)
         .map(|iso| iso.title.clone())
         .unwrap_or_default();
-    let (disc, _reader) =
-        freemkv_engine::scan_image(&freemkv_engine::ImageSource::from_path(source))
-            .map_err(planning_scan_error)?;
+    // Off the request thread, bounded: a hung share must not hold a connection forever.
+    let image = source.to_path_buf();
+    let disc = match health::bounded(source, health::HANG_AFTER, move || {
+        freemkv_engine::scan_image(&freemkv_engine::ImageSource::from_path(&image))
+            .map(|(disc, _reader)| disc)
+    }) {
+        health::Bounded::Done(scan) => scan.map_err(planning_scan_error)?,
+        health::Bounded::TimedOut | health::Bounded::Busy => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                crate::strings::fmt_or(
+                    "server.library.iso_unresponsive",
+                    "The source ISO folder {path} is not responding — the network share may be down or hung.",
+                    &[(
+                        "path",
+                        &source.parent().unwrap_or(source).display().to_string(),
+                    )],
+                ),
+            ));
+        }
+    };
     let operator = current.map_or_else(
         || MediaMetadata {
             title: crate::server::tmdb::clean_title(&iso_title),
@@ -715,8 +733,19 @@ fn corrected_request_plan(
     // Named as the ripper names a single output; a later disc takes the mover's `_N`.
     let disc = u32::from(media.disc.unwrap_or(1));
     let name = crate::server::util::disc_variant_name(&media.title, disc);
+    // A Movie files under the Library folder when one is set: the root a remux may write.
+    let library;
+    let root = if kind == MediaKind::Movie && !cfg.library_dir.is_empty() {
+        library = Config {
+            movie_dir: cfg.library_dir.clone(),
+            ..cfg.clone()
+        };
+        &library
+    } else {
+        cfg
+    };
     let target = std::path::PathBuf::from(crate::server::mover::build_destination(
-        cfg,
+        root,
         &metadata,
         &crate::server::ripper::staged_output_name(&name, "mkv"),
         media.season,
@@ -2415,11 +2444,12 @@ impl JobSink<'_> {
         self.lib.console(self.job_id, kind, text);
     }
 
-    // The image is open: the CLI's "Title N (...)", "Opening iso://...OK" and stream block.
+    // The image is open: the CLI's "Title N (...)", "Opening iso://...OK" and stream block,
+    // again for each later title the engine hands over.
     fn print_opened(&self, idx: usize) {
         let title = {
             let mut t = self.term();
-            if t.opened {
+            if t.opened && t.title.is_none() {
                 return;
             }
             t.opened = true;

@@ -88,6 +88,7 @@ impl MatchStore {
     /// Compare-and-save prevents an old dialog overwriting a newer correction.
     /// Publish only after durable persistence succeeds; never erase corrupt state.
     /// `iso_stamp` is the disc the match is confirmed for.
+    #[cfg(test)]
     pub fn save_for(
         &self,
         source: &Path,
@@ -98,7 +99,8 @@ impl MatchStore {
         self.save_with_pick(source, expected_revision, media, None, iso_stamp)
     }
 
-    /// [`Self::save_for`] with the operator's titles (`None` = automatic selection).
+    /// Compare-and-save a match with the operator's titles (`None` = automatic selection);
+    /// published only after the durable write. `iso_stamp`: the disc it is confirmed for.
     pub fn save_with_pick(
         &self,
         source: &Path,

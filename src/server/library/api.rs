@@ -473,13 +473,13 @@ fn discard_kept(
             "the kept file is not in the remux staging folder; nothing was deleted".into(),
         ));
     }
-    match lib.queue.take_staged(target, abandoned) {
-        Ok(path) if path == kept => {}
+    match lib.queue.take_staged(target, abandoned, &kept) {
+        Ok(_) => {}
         // A kept remux whose job was deliberately re-queued is no failure however far the
         // copy-in got: waiting, already claimed, or already finished.
         Err(Untaken::Waiting) => return Ok(false),
         Err(Untaken::Copying | Untaken::Gone) if abandoned => return Ok(false),
-        Ok(_) | Err(Untaken::Gone) => {
+        Err(Untaken::Gone) => {
             return Err((409, "the kept file changed; reload and try again".into()));
         }
         Err(Untaken::Copying) => {

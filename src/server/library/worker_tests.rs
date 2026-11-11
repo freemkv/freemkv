@@ -90,7 +90,9 @@ fn explicit_remux_match_is_not_skipped_by_disabled_auto_lookup() {
     for kind in [MediaKind::Movie, MediaKind::Tv] {
         let t = tempfile::tempdir().unwrap();
         let lib = Library::open(t.path(), &t.path().join("logs"));
-        let iso = t.path().join("missing.iso");
+        // A real image, so the plan (or its refusal) says which branch made it.
+        let iso = t.path().join("source.iso");
+        std::fs::write(&iso, &crate::ku_fixture::bd_image().img.image).unwrap();
         lib.match_store()
             .unwrap()
             .save(
@@ -113,15 +115,21 @@ fn explicit_remux_match_is_not_skipped_by_disabled_auto_lookup() {
         }]);
         let mut job = lib.queue.claim_next().unwrap();
         let cfg = Config {
+            output_dir: t.path().join("output").to_string_lossy().into_owned(),
             tv_auto: false,
             tmdb_api_key: String::new(),
             ..Default::default()
         };
-        assert!(
-            maybe_attach_tv_plan(&lib, &cfg, &mut job).is_err(),
-            "an explicit correction must attempt source planning, not silently use the old job"
-        );
-        assert!(job.plan.is_none());
+        match maybe_attach_tv_plan(&lib, &cfg, &mut job) {
+            Ok(()) => {
+                let plan = job.plan.as_ref().expect("a frozen plan");
+                assert_eq!(plan.media.title, "Corrected", "{kind:?}");
+            }
+            Err(e) => assert!(
+                e.to_string().contains("Corrected match needs review"),
+                "{kind:?}: not the correction's plan: {e}"
+            ),
+        }
         assert!(!job.target.exists());
     }
 }
@@ -138,7 +146,11 @@ fn unreadable_remux_matches_block_automatic_fallback() {
         replace: false,
     }]);
     let mut job = lib.queue.claim_next().unwrap();
-    assert!(maybe_attach_tv_plan(&lib, &Config::default(), &mut job).is_err());
+    let error = maybe_attach_tv_plan(&lib, &Config::default(), &mut job).unwrap_err();
+    assert!(
+        error.to_string().contains("library-matches.json"),
+        "refused by the automatic path, not the unreadable matches: {error}"
+    );
     assert!(!job.target.exists());
 }
 
@@ -450,7 +462,8 @@ fn a_rip_that_starts_mid_remux_is_not_blocked_and_stops_the_remux() {
         std::thread::sleep(Duration::from_millis(50));
         let t = Instant::now();
         let slot = arbiter.rip();
-        assert!(t.elapsed() < Duration::from_millis(50), "the rip waited");
+        // A rip that waited would wait for the remux it cancels: seconds, not scheduling.
+        assert!(t.elapsed() < Duration::from_secs(2), "the rip waited");
         drop(slot);
         remux.join().unwrap();
     });
@@ -561,6 +574,35 @@ fn a_failure_prints_its_error_once() {
     let f = lib.queue.snapshot().jobs[0].failure.clone().unwrap();
     assert_eq!(f.code, Some(7013));
     assert!(f.message.starts_with("E7013"), "{f:?}");
+}
+
+// Each output of a planned job prints its own title line, as the CLI does for each title.
+#[test]
+fn every_planned_output_prints_its_title_line() {
+    let (_t, lib, _dirs) = library_with(&[]);
+    let arbiter = Arbiter::new();
+    let sink = test_sink(&lib, &arbiter);
+    let mut title = libfreemkv::DiscTitle::empty();
+    title.duration_secs = 2700.0;
+    for idx in [0, 1] {
+        sink.title_opened(&title);
+        sink.event(&Event::TitleStart {
+            idx,
+            dest: &format!("/m/E{idx}.mkv"),
+        });
+    }
+    let lines: Vec<String> = lib.console_since(0).into_iter().map(|l| l.text).collect();
+    for num in ["1", "2"] {
+        let header = crate::strings::fmt(
+            "rip.title_info",
+            &[
+                ("num", num),
+                ("duration", &title.duration_display()),
+                ("size", &format!("{:.1}", title.size_gb())),
+            ],
+        );
+        assert!(lines.contains(&header), "no {header:?} in {lines:?}");
+    }
 }
 
 #[test]
@@ -1689,6 +1731,36 @@ fn a_wrong_title_iso_corrected_to_tv_honours_tv_auto_and_takes_the_shows_name() 
         assert!(target.starts_with(tv_root.join("Right Show (2004)/Season 01")));
         planned_target_ok(&on, &plan, target).unwrap();
     }
+}
+
+// A Movie correction lands in the configured Library folder: the only movie root a
+// remux may write into, so it is never refused as outside the library.
+#[test]
+fn a_movie_correction_lands_under_the_configured_library_folder() {
+    use crate::server::planner::{MediaKind, MediaMetadata};
+    let t = tempfile::tempdir().unwrap();
+    let library = t.path().join("library");
+    std::fs::create_dir_all(library.join("Other")).unwrap();
+    let cfg = Config {
+        output_dir: t.path().join("output").to_string_lossy().into_owned(),
+        movie_dir: "movies".into(),
+        library_dir: library.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let media = MediaMetadata {
+        title: "Right Movie".into(),
+        year: 2004,
+        tmdb_id: 7,
+        kind: Some(MediaKind::Movie),
+        ..Default::default()
+    };
+    let titles = &episodes_disc()[..1];
+    let (plan, targets) = corrected_plan(&cfg, titles, &media).unwrap();
+    assert_eq!(
+        targets,
+        vec![library.join("Right Movie (2004)/Right Movie (2004).mkv")]
+    );
+    planned_target_ok(&cfg, &plan, &targets[0]).unwrap();
 }
 
 // A saved match's titles plan the remux (design §4.4): an unproven disc that holds for its

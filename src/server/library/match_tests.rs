@@ -301,7 +301,6 @@ fn only_a_change_match_may_retire_old_files() {
     let job = serde_json::to_value(&lib.queue.snapshot().jobs[0]).unwrap();
     assert_eq!(job["retire"], true, "{job}");
     assert_eq!(job["replace"], false, "{job}");
-    assert!(job.get("replacement").is_none(), "{job}");
 }
 
 #[test]
@@ -320,7 +319,6 @@ fn remux_of_an_iso_with_a_saved_match_replans_but_never_retires() {
     let job = serde_json::to_value(&lib.queue.snapshot().jobs[0]).unwrap();
     assert_eq!(job["iso"], serde_json::json!(sources[1]), "{job}");
     assert!(job.get("retire").is_none(), "{job}");
-    assert!(job.get("replacement").is_none(), "{job}");
     assert!(job.get("plan").is_none(), "planned afresh at claim: {job}");
 }
 

@@ -378,6 +378,29 @@ fn saving_a_match_refuses_active_and_retained_source_jobs() {
     );
 }
 
+// The match save is a durable write to the config folder: readers that need only the
+// queue's state (the listing, events, the worker's peek) never wait on it.
+#[test]
+fn a_slow_match_save_never_blocks_queue_readers() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let t = tempfile::tempdir().unwrap();
+    let q = std::sync::Arc::new(Queue::open(t.path()));
+    let read = q
+        .with_idle_source(&t.path().join("idle.iso"), || {
+            let (done, finished) = mpsc::channel();
+            let reader = q.clone();
+            std::thread::spawn(move || {
+                let _ = reader.snapshot();
+                let _ = reader.has_work();
+                done.send(()).unwrap();
+            });
+            Ok(finished.recv_timeout(Duration::from_secs(5)).is_ok())
+        })
+        .unwrap();
+    assert!(read, "a queue read waited for the match save");
+}
+
 #[test]
 fn cleanup_holds_ownership_until_unlink_before_a_new_claim_creates_its_partial() {
     use std::sync::{TryLockError, mpsc};
@@ -876,11 +899,13 @@ fn stop_all_and_unqueue_keep_a_kept_file_offered() {
     assert!(q.retry_staged_now(&a.target));
     assert_eq!(q.remove_queued(&a.target, None), 1);
     assert_eq!(q.snapshot().jobs.len(), 1, "unqueued, still listed");
-    assert_eq!(
-        q.take_staged(&a.target, false),
-        Ok("/stage/a.staged.mkv".into())
-    );
-    assert_eq!(q.take_staged(&a.target, false), Err(Untaken::Gone));
+    // A caller that saw another kept file detaches nothing: it would be left untracked.
+    let other = Path::new("/stage/other.staged.mkv");
+    assert_eq!(q.take_staged(&a.target, false, other), Err(Untaken::Gone));
+    assert_eq!(q.staged_total().0, 1, "still kept");
+    let kept = Path::new("/stage/a.staged.mkv");
+    assert_eq!(q.take_staged(&a.target, false, kept), Ok(kept.into()));
+    assert_eq!(q.take_staged(&a.target, false, kept), Err(Untaken::Gone));
     assert_eq!(q.staged_total(), (0, 0));
 }
 

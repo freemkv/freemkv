@@ -208,6 +208,7 @@ pub(crate) enum TargetStamp {
 }
 
 impl TargetStamp {
+    #[cfg(test)]
     pub(crate) fn of(path: &Path) -> Self {
         match std::fs::symlink_metadata(path) {
             Ok(m) => Self::present(&m),
@@ -1476,7 +1477,13 @@ pub(crate) fn remux_via_stage(
 ) -> io::Result<freemkv_engine::RemuxReport> {
     // Refused before anything is read, as a direct remux refuses it.
     refuse_existing(&request.target, request.replace)?;
-    let target_before = TargetStamp::of(&request.target);
+    // A target that cannot be examined now fails here: muxed first, the unknown start state
+    // would refuse the landing and discard the finished file.
+    let target_before = match std::fs::symlink_metadata(&request.target) {
+        Ok(m) => TargetStamp::present(&m),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => TargetStamp::Absent,
+        Err(e) => return Err(e),
+    };
     std::fs::create_dir_all(stage)?;
     let local = stage_file(stage, job_id);
     remove_if_present(&local)?;

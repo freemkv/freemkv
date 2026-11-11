@@ -667,21 +667,16 @@ impl Queue {
         source: &Path,
         save: impl FnOnce() -> std::io::Result<T>,
     ) -> std::io::Result<T> {
+        // The gate excludes every mutation and claim; readers stay free during the save.
         let _gate = self.saved.lock().unwrap_or_else(|e| e.into_inner());
-        let state = self.lock();
-        if state
-            .jobs
-            .iter()
-            .any(|j| j.iso == source && j.holds_source())
-        {
+        let busy = (self.lock().jobs.iter()).any(|j| j.iso == source && j.holds_source());
+        if busy {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "source has active or retained output; stop or resolve that job first",
             ));
         }
-        let result = save();
-        drop(state);
-        result
+        save()
     }
 
     fn append(
@@ -1171,8 +1166,14 @@ impl Queue {
     /// Detach the kept file of `target`'s job so it can be deleted: a queued job leaves the
     /// queue, a failed one keeps its failure. Refused while that job runs, when there is no
     /// kept file (or the queue file could not be loaded), or with `abandoned` when its job
-    /// is neither failed nor finished.
-    pub fn take_staged(&self, target: &Path, abandoned: bool) -> Result<PathBuf, Untaken> {
+    /// is neither failed nor finished. A kept file other than `expected` is left in place
+    /// (`Gone`): the caller would delete a file it never saw, or leave this one untracked.
+    pub fn take_staged(
+        &self,
+        target: &Path,
+        abandoned: bool,
+        expected: &Path,
+    ) -> Result<PathBuf, Untaken> {
         self.mutate_or(Err(Untaken::Gone), |f| {
             let pos = f
                 .jobs
@@ -1186,6 +1187,9 @@ impl Queue {
                 return Err(Untaken::Waiting);
             }
             let path = f.jobs[pos].staged.clone().ok_or(Untaken::Gone)?;
+            if path != expected {
+                return Err(Untaken::Gone);
+            }
             for output in &mut f.jobs[pos].outputs {
                 if output.staged.as_ref() == Some(&path) {
                     output.staged = None;

@@ -825,3 +825,48 @@ fn the_copy_pins_an_even_second_source_time_that_survives_landing() {
         std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000)
     );
 }
+
+// A replace whose target cannot be examined before the mux fails then, with nothing muxed:
+// after hours of muxing that unknown start state would refuse the landing and lose the file.
+#[cfg(unix)]
+#[test]
+fn a_replace_whose_target_cannot_be_examined_fails_before_muxing() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root examines the closed folder anyway
+    }
+    let t = tempfile::tempdir().unwrap();
+    let folder = t.path().join("lib");
+    std::fs::create_dir_all(&folder).unwrap();
+    let target = folder.join("A.mkv");
+    std::fs::write(&target, b"old").unwrap();
+    let open = |mode| std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode));
+    open(0o000).unwrap();
+    let request = freemkv_engine::RemuxJob {
+        iso: freemkv_engine::ImageSource::from_path(t.path().join("A.iso")),
+        title: Some(0),
+        streams: Default::default(),
+        target: target.clone(),
+        replace: true,
+    };
+    let muxed = AtomicBool::new(false);
+    let result = remux_via_stage(
+        &request,
+        &Events::default(),
+        &t.path().join("stage"),
+        1,
+        &|| None,
+        |_, _| {
+            muxed.store(true, Ordering::SeqCst);
+            Err(io::Error::other("muxed"))
+        },
+    );
+    open(0o755).unwrap();
+    assert!(result.is_err());
+    assert!(
+        !muxed.load(Ordering::SeqCst),
+        "the mux ran on an unknown target"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"old");
+}
