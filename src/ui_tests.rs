@@ -4436,15 +4436,16 @@ fn several_episode_sets_tick_nothing_and_are_marked() {
 fn a_disc_that_is_not_tv_keeps_todays_selection() {
     let sc = samurai("SAMURAI_CHAMPLOO_VOL1");
     let prefs = LangPrefs::default();
-    for kind in [None, Some(freemkv_engine::metadata::MediaKind::Movie)] {
-        for mode in PICK_TITLES {
-            let tree = Tree::from_scan_as(&sc, mode, 120.0, &prefs, kind);
-            assert_eq!(
-                tree.ticked_titles(),
-                Tree::from_scan(&sc, mode, 120.0, &prefs).ticked_titles(),
-                "{mode} {kind:?}"
-            );
-        }
+    // `from_scan` is the unknown kind; a Movie picks the same. The unknown kind's own
+    // pick is checked against the engine below.
+    let movie = Some(freemkv_engine::metadata::MediaKind::Movie);
+    for mode in PICK_TITLES {
+        let tree = Tree::from_scan_as(&sc, mode, 120.0, &prefs, movie);
+        assert_eq!(
+            tree.ticked_titles(),
+            Tree::from_scan(&sc, mode, 120.0, &prefs).ticked_titles(),
+            "{mode}"
+        );
     }
     let main = sc
         .selection_model
