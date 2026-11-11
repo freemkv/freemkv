@@ -700,3 +700,29 @@ fn the_details_row_moves_the_bar_and_fits_the_minimum_window() {
         shown.btn_eject.x - PAD
     );
 }
+
+/// At every DPI the details row fits the minimum window in one line, left to right without
+/// overlap, over the selection bar; the banner never takes a negative width.
+#[test]
+fn the_details_row_fits_the_minimum_window_at_every_dpi() {
+    for dpi in DPIS {
+        let s = Scale::new(dpi);
+        let (w, h) = min_size(dpi);
+        let st = MainState {
+            pick_labels: LABELS.map(|v| s.px(v)),
+            details_labels: Some([40, 32, 32, 48, 32, 90].map(|v| s.px(v))),
+            ..titles(0)
+        };
+        let l = main_layout(dpi, w, h, st);
+        let mut right = 0;
+        for (k, (lbl, ctl)) in l.details.iter().enumerate() {
+            assert!(lbl.x >= right && ctl.x >= lbl.x + lbl.w, "dpi {dpi} #{k}");
+            assert_eq!(ctl.w, s.px(DETAILS_W[k]), "dpi {dpi} #{k}");
+            assert!(ctl.y + ctl.h <= l.pick_titles.y, "dpi {dpi} #{k}");
+            right = ctl.x + ctl.w;
+        }
+        assert!(right <= w - s.px(PAD), "dpi {dpi}: {right} in {w}");
+        assert!(l.pick_banner.w >= 0 && l.pick_banner.x >= l.pick_subs.x + l.pick_subs.w);
+        assert!(l.tree.h >= s.px(40), "dpi {dpi}");
+    }
+}

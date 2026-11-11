@@ -1976,3 +1976,90 @@ fn an_organized_episode_already_on_disk_keeps_the_library_folders() {
     assert_eq!(named(&names, 0), "Show (2004)/Season 02/Show S02E01");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// Episode numbers past E65535 name no episodes; organized, the titles still take the folders.
+#[test]
+fn an_episode_range_overflow_falls_back_to_the_template() {
+    let dir = scratch_dir("overflow");
+    let mut show = show_2004_s2();
+    show.episode_start = Some(u16::MAX);
+    assert!(plan(&dir, "SHOW", show.clone(), &[0, 1], &[0, 1], false).is_empty());
+    let names = plan(&dir, "SHOW", show.clone(), &[0, 1], &[0, 1], true);
+    assert_eq!(named(&names, 0), "Show (2004)/Season 02/SHOW_t1");
+    // The last supported number still names: a one-episode roster at E65535.
+    let names = plan(&dir, "SHOW", show, &[0], &[0], false);
+    assert_eq!(named(&names, 0), "Show S02E65535");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A roster whose numbers no longer mean the scanned titles names no episodes.
+#[test]
+fn a_roster_from_another_scan_names_no_episodes() {
+    let dir = scratch_dir("stale-roster");
+    let disc = disc_of(4);
+    let mut r = req();
+    r.dest_dir = dir.to_string_lossy().into_owned();
+    r.titles = vec![0, 1];
+    r.title_ids = disc.titles.iter().map(TitleIdentity::of).collect();
+    // Title 1 is now another title; title 0 still matches.
+    r.title_ids[1] = r.title_ids[3].clone();
+    let naming = |organize| TvNamingRequest {
+        roster: vec![0, 1],
+        operator: tv_meta("Show"),
+        organize,
+        ..Default::default()
+    };
+    let state = Arc::new(RunState::default());
+    r.tv_naming = Some(naming(false));
+    assert!(tv_naming_plan(&r, &disc, "SHOW", &UiSink(state.clone())).is_empty());
+    r.tv_naming = Some(naming(true));
+    let names = tv_naming_plan(&r, &disc, "SHOW", &UiSink(state));
+    assert_eq!(named(&names, 1), "Show/Season 01/SHOW_t2");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A typed name or template is one folder or file name: it never climbs out of the destination.
+#[test]
+fn the_library_path_stays_inside_the_destination() {
+    let meta = freemkv_engine::metadata::MediaMetadata {
+        title: "../../etc".into(),
+        kind: Some(freemkv_engine::metadata::MediaKind::Tv),
+        ..Default::default()
+    };
+    assert_eq!(
+        library_path(&meta, "../x", false),
+        ".._.._etc/Season 01/.._x"
+    );
+    let dots = freemkv_engine::metadata::MediaMetadata {
+        title: "..".into(),
+        ..Default::default()
+    };
+    assert_eq!(library_path(&dots, "a", true), "disc/disc");
+    let con = freemkv_engine::metadata::MediaMetadata {
+        title: "con".into(),
+        ..Default::default()
+    };
+    assert_eq!(library_path(&con, "a", false), "_con/a");
+}
+
+// Track files go to a folder per title, never a library name: that plan stays empty.
+#[test]
+fn naming_applies_to_file_output_only() {
+    let dir = scratch_dir("demux");
+    let disc = disc_of(4);
+    let mut r = req();
+    r.dest_dir = dir.to_string_lossy().into_owned();
+    r.titles = vec![0];
+    r.title_ids = disc.titles.iter().map(TitleIdentity::of).collect();
+    r.format = "Selected titles → separate track files".into();
+    assert!(!matches!(out_kind(&r.format), OutKind::File(_)));
+    r.tv_naming = Some(TvNamingRequest {
+        roster: vec![0],
+        operator: tv_meta("Show"),
+        organize: true,
+        ..Default::default()
+    });
+    let state = Arc::new(RunState::default());
+    assert!(tv_naming_plan(&r, &disc, "SHOW", &UiSink(state)).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

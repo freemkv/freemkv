@@ -2300,18 +2300,7 @@ pub(crate) fn whole_disc(
             ..
         }) => {
             let code = render_copy(&copy, disc.as_deref(), &path, names.as_ref(), start, out);
-            let kept = !matches!(
-                copy_verdict(&copy),
-                CopyVerdict::Interrupted | CopyVerdict::NoData
-            );
-            let live = matches!(
-                libfreemkv::parse_url(&plan.source),
-                libfreemkv::StreamUrl::Disc { .. }
-            );
-            // Only a kept image from a live drive: an `iso://` source has no layer map.
-            if kept
-                && live
-                && matches!(output, freemkv_engine::Output::Image { null: false, .. })
+            if layer_break_file_wanted(&copy, &plan.source, &output)
                 && let Some(d) = disc.as_deref()
             {
                 write_layer_break_file(d, &path, out);
@@ -2345,6 +2334,23 @@ pub(crate) fn whole_disc(
             1
         }
     }
+}
+
+// Only a kept image from a live drive: an `iso://` source has no layer map.
+fn layer_break_file_wanted(
+    copy: &freemkv_engine::CopyResult,
+    source: &str,
+    output: &freemkv_engine::Output,
+) -> bool {
+    let kept = !matches!(
+        copy_verdict(copy),
+        CopyVerdict::Interrupted | CopyVerdict::NoData
+    );
+    let live = matches!(
+        libfreemkv::parse_url(source),
+        libfreemkv::StreamUrl::Disc { .. }
+    );
+    kept && live && matches!(output, freemkv_engine::Output::Image { null: false, .. })
 }
 
 /// ImgBurn's layer-break side file for a disc -> ISO copy: `<stem>.dvd` beside the

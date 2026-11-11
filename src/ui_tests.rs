@@ -4472,3 +4472,198 @@ fn the_episodes_choice_does_not_outlive_the_tv_kind() {
     app.set_detail_kind(2);
     assert_eq!(app.pick_mode, "Episodes");
 }
+
+#[test]
+fn detail_edits_redraw_only_on_change_and_the_kind_is_bounded() {
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+    assert!(
+        app.set_detail(DetailField::Name, "SAMURAI_CHAMPLOO_VOL1")
+            .is_empty()
+    );
+    assert!(matches!(
+        app.set_detail(DetailField::Year, "2004").as_slice(),
+        [Effect::Redraw]
+    ));
+    assert_eq!(app.details.get(DetailField::Year), "2004");
+    // Past the three kinds: nothing changes.
+    assert!(app.set_detail_kind(DETAIL_KINDS.len()).is_empty());
+    assert_eq!(app.details.kind, None);
+    // While a rip runs, the kind (and so the ticks) stays.
+    app.run = Some(Arc::default());
+    app.set_detail_kind(2);
+    assert_eq!(app.details.kind, None);
+    assert_eq!(app.tree.ticked_titles(), vec![0]);
+    app.run = None;
+}
+
+#[test]
+fn a_bad_number_is_named_by_its_field_and_rule() {
+    let with = |field, text: &str| {
+        let mut d = DiscDetails::for_label("L");
+        *d.slot(field) = text.to_string();
+        d.bad_number()
+    };
+    for field in [
+        DetailField::Year,
+        DetailField::Season,
+        DetailField::Disc,
+        DetailField::FirstEpisode,
+    ] {
+        assert_eq!(with(field, ""), None, "{field:?}: empty is unset");
+        assert_eq!(with(field, " 7 "), None, "{field:?}: spaces are trimmed");
+        assert_eq!(with(field, "65535"), None, "{field:?}");
+        for bad in ["65536", "-1", "2x", "1.5"] {
+            assert_eq!(
+                with(field, bad),
+                Some((field, bad.to_string())),
+                "{field:?}"
+            );
+        }
+    }
+    // Year and Season may be 0 (specials); Disc and First episode may not.
+    assert_eq!(with(DetailField::Year, "0"), None);
+    assert_eq!(with(DetailField::Season, "0"), None);
+    assert_eq!(
+        with(DetailField::Disc, "0"),
+        Some((DetailField::Disc, "0".into()))
+    );
+    assert_eq!(
+        with(DetailField::FirstEpisode, "0"),
+        Some((DetailField::FirstEpisode, "0".into()))
+    );
+    // The name is text, never a number.
+    assert_eq!(with(DetailField::Name, "x"), None);
+    // The first bad field in row order is the one named.
+    let mut d = DiscDetails::for_label("L");
+    (d.season, d.first_episode) = ("s".into(), "e".into());
+    assert_eq!(d.bad_number(), Some((DetailField::Season, "s".into())));
+}
+
+#[test]
+fn the_operator_metadata_counts_only_what_was_typed() {
+    let mut d = DiscDetails::for_label("SHOW_S1");
+    d.name = "  SHOW_S1 ".into();
+    let m = d.operator("SHOW_S1");
+    assert_eq!(m.title, "", "the unedited label is no typed name");
+    assert_eq!(
+        (m.year, m.season, m.disc, m.episode_start),
+        (0, None, None, None)
+    );
+    d.name = " Show ".into();
+    (d.year, d.season, d.disc, d.first_episode) =
+        (" 2004 ".into(), "0".into(), "0".into(), "0".into());
+    let m = d.operator("SHOW_S1");
+    assert_eq!(m.title, "Show");
+    assert_eq!((m.year, m.season), (2004, Some(0)));
+    assert_eq!((m.disc, m.episode_start), (None, None));
+    d.year = "soon".into();
+    assert_eq!(d.operator("SHOW_S1").year, 0);
+    d.kind = Some(freemkv_engine::metadata::MediaKind::Movie);
+    assert_eq!(d.operator("SHOW_S1").kind, d.kind);
+}
+
+#[test]
+fn the_details_row_shows_for_a_disc_or_image_with_titles_only() {
+    // A container file has no disc to describe.
+    let mut app = App::new();
+    app.apply_scan("/media/a.mkv", Ok(probe_scan()), false);
+    assert!(app.view().pick.is_some());
+    assert!(app.view().details.is_none());
+    // A disc without titles neither.
+    let empty = scan_of(&[], "EMPTY");
+    let app = opened(empty);
+    assert!(app.view().details.is_none());
+    // Auto names what the label says.
+    let app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+    let d = app.view().details.unwrap();
+    assert_eq!(d.kinds, ["Auto", "Movie", "TV series"]);
+    assert!(d.numbering, "unknown kind: numbering applies");
+    let app = opened(samurai("SAMURAI_CHAMPLOO_S1"));
+    assert_eq!(app.view().details.unwrap().kinds[0], "Auto (TV series)");
+}
+
+#[test]
+fn each_review_reason_has_its_own_banner() {
+    use freemkv_engine::SelectionReviewReason as R;
+    let banner = |reason, suggestion| TreeReview { reason, suggestion }.banner();
+    let reasons = [
+        (R::MissingEpisodeRoster, "does not list its episodes"),
+        (R::IncompleteEpisodeRoster, "episode list is incomplete"),
+        (R::ConflictingEpisodeRoster, "contradicts itself"),
+        (R::InvalidEpisodeRoster, "episode list is invalid"),
+    ];
+    for (reason, text) in reasons {
+        let b = banner(reason, None);
+        assert!(
+            b.contains(text) && b.ends_with("Tick the titles to rip"),
+            "{b}"
+        );
+    }
+    let none = banner(R::MissingEpisodeRoster, Some((vec![], vec![])));
+    assert!(none.ends_with("Tick the titles to rip"), "{none}");
+    let sets = banner(R::MissingEpisodeRoster, Some((vec![], vec![vec![0, 1]])));
+    assert!(sets.contains("Possible episode sets"), "{sets}");
+    let picked = banner(R::MissingEpisodeRoster, Some((vec![0], vec![vec![0]])));
+    assert!(picked.contains("check the ticks and order"), "{picked}");
+}
+
+#[test]
+fn suggestion_marks_lead_a_titles_notes() {
+    let alt = |index, of| freemkv_engine::Alternate { index, of };
+    let marks = suggestion_marks(&[4, 2], &[vec![4, 2]], &[alt(2, 4), alt(7, 4)]);
+    assert_eq!(marks[&4], "Suggested episode 1");
+    assert_eq!(
+        marks[&2], "Suggested episode 2",
+        "an episode is not also an alternate"
+    );
+    assert_eq!(marks[&7], "Alternate of Title 5");
+    let sets = suggestion_marks(&[], &[vec![0, 2], vec![1]], &[]);
+    assert_eq!((sets[&0].as_str(), sets[&2].as_str()), ("Set 1", "Set 1"));
+    assert_eq!(sets[&1], "Set 2");
+    // A mark leads the disc's own note; stream rows keep theirs alone.
+    let mut sc = samurai("SAMURAI_CHAMPLOO_VOL1");
+    sc.rows[1].notes = "Hidden".into();
+    let mut app = opened(sc);
+    app.set_detail_kind(2);
+    assert_eq!(title_notes(&app, 1), "Suggested episode 1 · Hidden");
+}
+
+// A re-pick logs the banner when it changes, not again on every pick.
+#[test]
+fn an_unchanged_banner_is_logged_once() {
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
+    app.set_detail_kind(2);
+    let banner = app.tree.review.as_ref().unwrap().banner();
+    let logged = |app: &App| app.log.iter().filter(|l| l.text == banner).count();
+    assert_eq!(logged(&app), 1);
+    app.repick();
+    app.pick_audio(None);
+    assert_eq!(logged(&app), 1);
+}
+
+// The open preflight keys exactly what the opened tree will tick, a season label included.
+#[test]
+fn the_open_preflight_follows_a_season_label() {
+    let settings = crate::settings::Settings {
+        selection: "Main film / episodes".into(),
+        min_title_secs: "120".into(),
+        ..Default::default()
+    };
+    let tv = samurai("SAMURAI_CHAMPLOO_S1");
+    assert_eq!(open_preflight_titles(&tv, &settings), vec![1, 3, 0, 2]);
+    assert_eq!(
+        open_preflight_titles(&tv, &settings),
+        opened(tv).tree.ticked_titles()
+    );
+    let film = samurai("SAMURAI_CHAMPLOO_VOL1");
+    assert_eq!(open_preflight_titles(&film, &settings), vec![0]);
+}
+
+#[test]
+fn a_movie_rip_without_the_layout_names_nothing() {
+    let mut app = opened(samurai("SAMURAI_CHAMPLOO_S1"));
+    let ticked = app.tree.ticked_titles();
+    assert_eq!(app.naming_request(&ticked).unwrap().roster, ticked);
+    app.set_detail_kind(1);
+    assert!(app.naming_request(&app.tree.ticked_titles()).is_none());
+}
