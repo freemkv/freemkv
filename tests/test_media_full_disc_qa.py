@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import traceback
 import types
 import unittest
 from unittest.mock import patch
@@ -80,8 +81,11 @@ class RedactTests(unittest.TestCase):
                     patch.object(qa.Path, 'is_file', lambda self: True), \
                     patch.object(qa, 'check_family', lambda *a, **k: qa.run(
                         Path('b'), 'src', 'dst', root / 'l.log')):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(RuntimeError) as raised:
                     qa.main()
+            shown = ''.join(traceback.format_exception(raised.exception))
+            self.assertNotIn('keys.example.net', shown)
+            self.assertNotIn('secret-auth', shown)
             report = (root / 'full-disc-qa.json').read_text()
             self.assertNotIn('keys.example.net', report)
             self.assertNotIn('secret-auth', report)

@@ -226,7 +226,8 @@ def main():
                   flush=True)
     except Exception as error:
         report['error'] = redact(str(error), args.key_url, args.key_auth)
-        raise
+        # The raw message (a log tail) can name the key service: only the redacted one is shown.
+        raise RuntimeError(report['error']) from None
     finally:
         (args.out / 'full-disc-qa.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
 
