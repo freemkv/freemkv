@@ -2609,7 +2609,9 @@ fn move_file_copy_failure_with_no_dest_records_no_partial_error() {
         assert!(
             recorded
                 .as_ref()
-                .is_some_and(|e| e.reason.starts_with("publication failed: ")),
+                .is_some_and(|e| e.reason.starts_with("publication failed: ")
+                    && !e.reason.contains("partial")
+                    && !e.hint.contains("partial")),
             "a failed copy that created no destination must not claim a \
                  partial copy needs hand-deleting, got: {recorded:?}"
         );
@@ -2735,7 +2737,9 @@ fn move_file_copy_failure_removes_this_attempts_dest() {
         assert!(
             recorded
                 .as_ref()
-                .is_some_and(|e| e.reason.starts_with("publication failed: ")),
+                .is_some_and(|e| e.reason.starts_with("publication failed: ")
+                    && !e.reason.contains("partial")
+                    && !e.hint.contains("partial")),
             "a failed copy that created no destination must not claim a \
                  partial copy needs hand-deleting, got: {recorded:?}"
         );

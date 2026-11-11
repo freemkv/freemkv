@@ -756,8 +756,11 @@ fn a_stall_backoff_runs_from_the_workers_return() {
         r.attempts = 1;
         r.retry_after = None;
         r.retry_held = true;
-        // Committed at the stall, ten minutes before the worker returned.
-        let stall = std::time::Instant::now() - Duration::from_secs(600);
+        // Committed at the stall, a minute before the worker returned (a fresh host's
+        // monotonic clock may be younger than any longer span).
+        let stall = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("host up for a minute");
         r.stall_resume = Some(Some(stall + Duration::from_secs(30)));
     }
     finish_stall(&key);
@@ -897,7 +900,8 @@ fn concurrent_journal_updates_are_not_lost() {
     let tmp = tempfile::tempdir().unwrap();
     let (_cfg, job, _dest) = journaled(tmp.path(), "Racing");
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (writer_job, writer_stop) = (job.clone(), stop.clone());
+    let written = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let (writer_job, writer_stop, count) = (job.clone(), stop.clone(), written.clone());
     let writer = std::thread::spawn(move || {
         let mut attempts = 0;
         while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -912,11 +916,21 @@ fn concurrent_journal_updates_are_not_lost() {
                 }),
             )
             .unwrap();
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     });
-    std::thread::sleep(Duration::from_millis(20));
+    // Writes before and after the update, counted rather than slept for.
+    let wrote = |n| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while written.load(std::sync::atomic::Ordering::Relaxed) < n {
+            assert!(std::time::Instant::now() < deadline, "the writer stalled");
+            std::thread::yield_now();
+        }
+    };
+    wrote(1);
     super::manifest::Manifest::mark_announced(&job).unwrap();
-    std::thread::sleep(Duration::from_millis(20));
+    let after = written.load(std::sync::atomic::Ordering::Relaxed);
+    wrote(after + 2);
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     writer.join().unwrap();
     let journal = super::manifest::Manifest::load(&job).unwrap().unwrap();

@@ -1996,9 +1996,21 @@ fn validate_fetch_url_allows_lan_and_rejects_invalid_and_bad_scheme() {
 fn the_keydb_fetch_rejects_invalid_address_and_scheme_before_connecting() {
     // The fetch runs the address guard FIRST: an unreachable literal is refused with no
     // socket opened (LAN literals pass the guard, so they would connect).
-    assert!(validate_fetch_url("http://0.0.0.0/keydb.zip").is_err());
-    assert!(validate_fetch_url("http://[ff02::1]:9000/keydb.zip").is_err());
-    assert!(validate_fetch_url("file:///etc/passwd").is_err());
+    let cfg = std::sync::RwLock::new(crate::server::config::Config::default());
+    for url in [
+        "http://0.0.0.0/keydb.zip",
+        "http://[ff02::1]:9000/keydb.zip",
+        "file:///etc/passwd",
+    ] {
+        let refused = crate::server::keysource::refresh_keydb(&cfg, url, KEYDB_FETCH_TIMEOUT);
+        assert!(
+            matches!(
+                refused,
+                Err(crate::server::keysource::KeydbError::UrlRejected(_))
+            ),
+            "{url} reached a connection"
+        );
+    }
 }
 
 // A KEYDB body that is SLOW but PROGRESSING must finish. ureq 3.4.1 (#1194) made
@@ -2237,15 +2249,19 @@ fn guarded_agent_connects_to_the_pinned_address_not_dns() {
 }
 
 // Secret-leak guard: refresh_keydb error strings must never embed the full
-// request URL (path/query may hold a token). Uses a public IP with
-// nothing listening to reach ureq's Transport error arm, not the SSRF guard.
+// request URL (path/query may hold a token). A closed loopback port reaches
+// ureq's Transport error arm (loopback passes the guard) with no network.
 #[test]
 fn refresh_keydb_ureq_error_does_not_embed_url() {
-    // Port 1 on a public IP: passes SSRF guard (it's public) but the
-    // connection will be refused immediately (nothing listens on port 1).
+    // A port just freed: the guard passes it and the connection is refused at once.
     // The URL has a fake token in the path that must not appear in the error.
+    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let token = "supersecret_api_token_12345";
-    let url = format!("http://8.8.8.8:1/keydb/{token}.zip");
+    let url = format!("http://127.0.0.1:{port}/keydb/{token}.zip");
     let cfg = std::sync::RwLock::new(crate::server::config::Config::default());
     let err = crate::server::keysource::refresh_keydb(&cfg, &url, KEYDB_FETCH_TIMEOUT)
         .unwrap_err()
@@ -4562,8 +4578,14 @@ mod http {
             Some(label) => child.env("XPC_SERVICE_NAME", label),
             None => child.env_remove("XPC_SERVICE_NAME"),
         };
-        let status = child.status().unwrap();
-        assert!(status.success(), "{name}: {status}");
+        let out = child.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // As util::child_test: a renamed test would else match nothing and pass.
+        assert!(
+            stdout.contains("running 1 test\n") && stdout.contains("test result: ok. 1 passed"),
+            "{name}: the child did not run and pass exactly this test:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         false
     }
 

@@ -181,7 +181,8 @@ fn progressing_copy_does_not_hit_a_total_duration_deadline() {
     let worker_written = written.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        for count in 1..=10 {
+        // Four stall windows long, with a byte every 10 ms: only a total deadline fails it.
+        for count in 1..=120 {
             worker_written.store(count, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -196,7 +197,7 @@ fn progressing_copy_does_not_hit_a_total_duration_deadline() {
         halt: &halt,
         progress: &|_, _, _, _| {},
         source_size: 10,
-        stall_window: Duration::from_millis(50),
+        stall_window: Duration::from_millis(300),
         poll_interval: Duration::from_millis(2),
     }
     .wait(rx, worker);
@@ -216,7 +217,7 @@ fn a_flush_reporting_progress_without_new_bytes_is_not_a_stall() {
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         // All bytes written; the durable flush keeps reporting progress.
-        for _ in 0..20 {
+        for _ in 0..120 {
             worker_activity.beat();
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -231,10 +232,64 @@ fn a_flush_reporting_progress_without_new_bytes_is_not_a_stall() {
         halt: &halt,
         progress: &|_, _, _, _| {},
         source_size: 10,
-        stall_window: Duration::from_millis(50),
+        stall_window: Duration::from_millis(300),
         poll_interval: Duration::from_millis(2),
     }
     .wait(rx, worker);
     assert_eq!(result.unwrap(), 10);
     assert!(!halt.is_cancelled());
+}
+
+// A worker that ends without a result after a stall (a panic) still frees its row: Retry
+// and cleanup are held only while the worker is in the filesystem call.
+#[test]
+fn a_worker_that_dies_after_a_stall_releases_its_hold() {
+    let _guard = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let job = temp.path().join("job");
+    std::fs::create_dir(&job).unwrap();
+    let key = job.to_string_lossy().into_owned();
+    crate::server::mover::clear_move_error(&key);
+    let written = Arc::new(AtomicU64::new(0));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (tx, rx) = std::sync::mpsc::channel::<io::Result<u64>>();
+    let worker = std::thread::spawn(move || {
+        let _result = tx;
+        let _ = release_rx.recv();
+    });
+    let watched = key.clone();
+    let releaser = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !MOVE_ERRORS
+            .lock()
+            .unwrap()
+            .get(&watched)
+            .is_some_and(|e| e.worker_active)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        release_tx.send(()).unwrap();
+    });
+    let halt = libfreemkv::Halt::new();
+    let result = Monitor {
+        job: &job,
+        destination: &job,
+        written: &written,
+        activity: &Activity::default(),
+        halt: &halt,
+        progress: &|_, _, _, _| {},
+        source_size: 10,
+        stall_window: Duration::from_millis(30),
+        poll_interval: Duration::from_millis(2),
+    }
+    .wait(rx, worker);
+    releaser.join().unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    let row = MOVE_ERRORS.lock().unwrap().get(&key).cloned().unwrap();
+    assert!(!row.worker_active, "the gone worker still holds the row");
+    crate::server::mover::clear_move_error(&key);
+    crate::server::mover::clear_all_move_errors();
 }
