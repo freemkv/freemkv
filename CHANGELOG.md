@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.8.9] — UNRELEASED
+
+### Added
+
+- Titles... dialog on the drive card, the held-rip review and the Library remux row: it lists every title with its flags (play-all, alternate, in the disc's episode roster), and you pick a Movie (one title) or tick TV episodes in order with Season, Disc and First episode, with the `Show S01E01` names previewed. A held rip that waits on its episodes opens a **Confirm episodes** banner with the suggested set pre-ticked, and a Library remux held for confirmation gets a Confirm episodes action. (server only: the web Library UI; the CLI and app have their own pickers)
+- The name picker has a Movie / TV toggle with Season, Disc and First episode for typed names, and a Library remux can run under a typed name with no TMDB entry. (server only: the Library's Change match / Change name)
+- `freemkv info` prints the layer count's source (`Layers: 2 (drive-reported)` or `(estimated)`) and, for a DVD whose drive reported it, the layer break; the app's detail block names the source on its Capacity line and adds the break. A `disc://` to `iso://` copy of a dual-layer DVD with a known break writes an ImgBurn `.dvd` layer-break file beside the ISO (#81). (CLI for `info` and the `.dvd` file; app for the detail block)
+- A disc details row over the title tree: name (the disc label until edited), year, Auto / Movie / TV series, season, disc and first episode. TV episode naming works without a TMDB key (`Show S01E01 - Name`, with TMDB adding only names, title and year), and Settings has an opt-in "Organize into Movies/TV folders" library layout. (app only: the desktop's disc and naming controls)
+
+### Changed
+
+- One title policy for the server: a whole-disc ISO or single-pass copy never splits or holds, an operator's pick runs exactly its titles in order, and a TV disc whose episodes are not proven holds for **Confirm episodes** with a suggestion instead of ripping a guess. Episodes file as `Show/Season 01/Show S01E01 - Name` under the TV folder, and a disc that is TV only by its label files as TV even with a movie folder set. (server only: the Library's planner and mover)
+- Drive names are formatted by freemkv from the drive's vendor, model and firmware, in the same form as before (`E:  HL-DT-ST BD-RE BU40N (rev 1.04)`). (CLI, app, server)
+- Settings ▸ Debug dump shows the startup mode and the preferred drive. (app only: the desktop's Settings)
+
+### Fixed
+
+- Library corrections file under the Library folder: with a Library folder set, a Movie correction was refused as "not under the library folder". (server only: the Library's corrections)
+- A Movie correction drops a multi-episode pick instead of filing its first episode as the film; the job falls back to the main title. (server only: the Library's corrections)
+- A new scan no longer inherits the previous disc's job, identity and correction, so a title pick for the disc in the drive cannot land in the old disc's job; Start over and a stale write keep the operator's title pick. (server only: the drive card)
+- A replace remux whose target cannot be examined fails before the mux instead of after hours of work, a slow config share no longer freezes the Library listing and event stream while a match saves, and discarding a kept remux detaches only the file it checked. (server only: the Library's remux queue)
+- A web listener that fails to bind, or whose accept thread dies, exits with status 1 so launchd and systemd restart the server; before it exited 0 and stayed down. A lock set that cannot be completed deletes the `<destination>.lock` sidecars it took, and a delivered file later moved away says it is gone and keeps its staged copy. (server only: the server process and delivery)
+- A rip admitted just before a stop began no longer registers after the stop and runs unjoined. (server only: the drive card's stop)
+- A title with one subtitle track reads "1 sub" in the Library pills and "1 subtitle" in the server's title list, not "1 subs" or "1 subtitles". (server only: the Library UI and title list)
+- The Titles dialog keeps focus while you type a Season, Disc or First episode; a movie remux opens instead of hanging on "Loading the titles..."; an invalid number (0, 1.5, 65536) says why and keeps Save disabled instead of saving blank. (server only: the web Titles dialog)
+- With "Organize into Movies/TV folders" on, an episode already in the season folder no longer drops every title to the flat destination; choosing Movie or Auto on a disc that is no longer TV leaves Episodes for "Main film only". TV episode names check only the titles this rip writes, so an earlier rip of some episodes no longer drops the names of the rest. (app only: the desktop's naming and Titles chooser)
+- A Settings save keeps a startup drive chosen on the ready screen; Close on a Result whose disc already left returns to the ready screen like Done; Show in Folder opens the folder the rip wrote, not a destination changed mid-rip; an older settings write never lands after a newer one; the Linux drive row button reads Open like the other shells, the macOS drive list stays centred and the Windows Kind list stays open. (app only: desktop window controls)
+- Uses libfreemkv 1.8.9: DVD key verification no longer accepts a wrong key, a decrypted DVD copy with menu VOBs that carry no crib or unreadable key samples no longer stops, the DTS channel count in MKVs is right (#82), and the drive's reported layer count replaces the estimate (#81). (CLI, app, server)
+
 ## [1.8.8] — 2026-11-01
 
 ### Fixed
