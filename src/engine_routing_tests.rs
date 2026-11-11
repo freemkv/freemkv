@@ -1054,7 +1054,7 @@ fn guarded_tv_paths(dir: &std::path::Path, label: &str, roster: &[usize]) -> Vec
     let names = tv_names_from_roster(roster, "Show", 1, first, &[]);
     let mut r = req();
     r.dest_dir = dir.to_string_lossy().into_owned();
-    let names = tv_names_if_free(names, &r.dest_dir, "mkv", &[]);
+    let names = tv_names_if_free(names, roster, &r.dest_dir, "mkv", &[]);
     roster
         .iter()
         .map(|&idx| title_dest(&r, OutKind::File("mkv"), label, idx, true, &names).1)
@@ -1879,6 +1879,24 @@ fn an_episode_under_a_legacy_or_other_name_is_taken() {
     let names = plan(&dir, "SHOW", tv_meta("Show"), &[0, 1], &[0, 1], false);
     assert_eq!(named(&names, 1), "Show S01E02");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Only this rip's titles are targets: an earlier rip's episodes of the same disc leave
+// the rest of the roster its names.
+#[test]
+fn an_episode_ripped_earlier_leaves_the_rest_their_names() {
+    for existing in [
+        "Show S01E01.mkv",
+        "Show S01E01 - A TMDB Name.mkv",
+        "Show_S01E01.mkv",
+    ] {
+        let dir = scratch_dir("partial");
+        std::fs::write(dir.join(existing), "old").unwrap();
+        let names = plan(&dir, "SHOW", tv_meta("Show"), &[0, 1, 2], &[1, 2], false);
+        assert_eq!(named(&names, 1), "Show S01E02", "{existing}");
+        assert_eq!(named(&names, 2), "Show S01E03", "{existing}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[test]

@@ -4195,23 +4195,28 @@ fn tv_naming_plan(
                     true => library_path(&meta, &leaf, false),
                     false => leaf,
                 };
-                // The same episodes under any name: numbered only, or the old desktop's.
+                // This rip's episodes under any name: numbered only, or the old desktop's.
+                let ticked = |idx: &usize| req.titles.contains(idx);
                 let mut also: Vec<String> =
                     tv_names_from_roster(&naming.roster, &meta.title, season, first, &[])
-                        .into_values()
-                        .map(place)
+                        .into_iter()
+                        .filter(|(idx, _)| ticked(idx))
+                        .map(|(_, leaf)| place(leaf))
                         .collect();
-                also.extend(legacy_episode_stems(
-                    naming.roster.len(),
-                    &meta.title,
-                    season,
-                    first,
-                ));
+                let legacy = legacy_episode_stems(naming.roster.len(), &meta.title, season, first);
+                also.extend(
+                    naming
+                        .roster
+                        .iter()
+                        .zip(legacy)
+                        .filter(|(idx, _)| ticked(idx))
+                        .map(|(_, stem)| stem),
+                );
                 names = leaves
                     .into_iter()
                     .map(|(idx, leaf)| (idx, place(leaf)))
                     .collect();
-                names = tv_names_if_free(names, &req.dest_dir, ext, &also);
+                names = tv_names_if_free(names, &req.titles, &req.dest_dir, ext, &also);
                 if names.is_empty() {
                     fe::Sink::log(
                         sink,
@@ -4287,11 +4292,12 @@ fn legacy_episode_stems(count: usize, show: &str, season: u16, first: u16) -> Ve
         .collect()
 }
 
-// Disc-order numbering is a guess: if any target (or an `also` legacy name such as
-// `Show_S01E01`, as `{stem}.{ext}` or `{stem} - *.{ext}`) is taken, drop it all for the
-// label-keyed template rather than truncate or duplicate a file.
+// Disc-order numbering is a guess: if any target (a `wanted` title's name, or an `also`
+// name such as `Show_S01E01`, as `{stem}.{ext}` or `{stem} - *.{ext}`) is taken, drop it
+// all for the label-keyed template rather than truncate or duplicate a file.
 fn tv_names_if_free(
     names: std::collections::HashMap<usize, String>,
+    wanted: &[usize],
     dest_dir: &str,
     ext: &str,
     also: &[String],
@@ -4316,7 +4322,9 @@ fn tv_names_if_free(
             })
         })
     };
-    let taken = names.values().any(|stem| exists(stem))
+    let taken = names
+        .iter()
+        .any(|(idx, stem)| wanted.contains(idx) && exists(stem))
         || also.iter().any(|stem| exists(stem) || named(stem));
     if taken {
         std::collections::HashMap::new()
