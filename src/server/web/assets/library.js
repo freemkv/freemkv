@@ -39,7 +39,7 @@ export function trackPills(r) {
   const out = videoLabel(a.video).map(v => '<span class="pill strong">' + esc(v) + '</span>');
   const counts = [];
   if (a.audio.length) counts.push(a.audio.length + ' audio');
-  if (a.subtitles.length) counts.push(a.subtitles.length + ' subs');
+  if (a.subtitles.length) counts.push(plural(a.subtitles.length, 'sub'));
   if (counts.length) out.push('<span class="pill text">' + esc(counts.join(' · ')) + '</span>');
   a.issues.filter(i => i.kind !== 'no_cues').forEach(i => out.push('<span class="pill bad" title="' + esc(issueText(i)) + '">'
     + esc(i.kind === 'runtime_mismatch' ? 'truncated?' : i.kind.replace(/_/g, ' ')) + '</span>'));
