@@ -27,7 +27,7 @@ env:
 
 jobs:
   packaging-tests:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, 'bump version')) }}
+    if: "${{ !(github.event_name == 'push' && github.ref_type == 'branch' && github.event.commits[0] != null && github.event.commits[1] == null && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, ': bump version')) }}"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,7 +36,7 @@ jobs:
 
   # Secrets cannot appear in a job-level `if`, so their presence is surfaced here.
   secrets:
-    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, 'bump version')) }}
+    if: "${{ !(github.event_name == 'push' && github.ref_type == 'branch' && github.event.commits[0] != null && github.event.commits[1] == null && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, ': bump version')) }}"
     runs-on: ubuntu-24.04
     outputs:
       store: ${{ steps.check.outputs.store }}
