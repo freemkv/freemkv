@@ -400,6 +400,9 @@ struct ParsedFlags {
     /// `-a`/`-s`: which audio + subtitle streams to keep, as one bundle (video
     /// is always kept). Default keeps everything (archival).
     streams: freemkv_engine::StreamChoice,
+    /// `--source-names`: name per-title outputs after the title's own source
+    /// (its playlist, `00024.mpls` → `00024.mkv`) instead of `<name>_t<N>.<ext>`.
+    source_names: bool,
 }
 
 fn parse_stream_spec(spec: &str) -> freemkv_engine::StreamFilter {
@@ -496,6 +499,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             "--raw" => f.raw = true,
             "--multipass" => f.multipass = true,
             "--force" => f.force = true,
+            "--source-names" => f.source_names = true,
             "-t" | "--title" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
@@ -688,6 +692,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         mut title_nums,
         all_titles,
         streams,
+        source_names,
     } = flags;
     // Stream selection is active when the user narrowed either class; the
     // default (All/All) short-circuits to a no-op so the output is byte-
@@ -819,6 +824,16 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         };
         (title_nums, identities)
     };
+    // `--source-names`: each scanned title's own source name (`00024.mpls`),
+    // index-aligned with the title numbers, for per-title output naming.
+    let playlists = disc_scan
+        .as_ref()
+        .map(|(disc, _, _)| disc.titles.iter().map(|t| t.playlist.clone()).collect())
+        .or_else(|| {
+            iso_disc
+                .as_ref()
+                .map(|(disc, _)| disc.titles.iter().map(|t| t.playlist.clone()).collect())
+        });
     let jobs = match build_jobs(
         &titles,
         is_disc,
@@ -827,6 +842,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         dest,
         &parsed_dest,
         &out,
+        source_names,
+        &playlists,
     ) {
         Some(j) => j,
         None => return 1,
@@ -1332,6 +1349,7 @@ fn resolve_disc_all_titles(
     Some((disc_title_nums(true, requested, ids.len()), ids))
 }
 
+#[allow(clippy::too_many_arguments)] // one cohesive per-title job planner
 fn build_jobs(
     titles: &Option<Vec<libfreemkv::DiscTitle>>,
     is_disc: bool,
@@ -1340,7 +1358,32 @@ fn build_jobs(
     dest: &str,
     parsed_dest: &libfreemkv::StreamUrl,
     out: &Output,
+    source_names: bool,
+    playlists: &Option<Vec<String>>,
 ) -> Option<Vec<(Option<usize>, String)>> {
+    // `--source-names`: a filename stem per title, from the title's own source
+    // (`00024.mpls` → `00024`). Index-aligned with the title numbers; a title
+    // with no source name, and a DUPLICATE source name (two titles from one
+    // playlist), keeps the default `<name>_t<N>` naming so no job overwrites
+    // another's output.
+    let src_names: std::collections::HashMap<usize, String> = if source_names {
+        let mut used = std::collections::HashSet::new();
+        let mut map = std::collections::HashMap::new();
+        if let Some(playlists) = playlists {
+            for (i, playlist) in playlists.iter().enumerate() {
+                if playlist.trim().is_empty() {
+                    continue;
+                }
+                let stem = sanitize_name(playlist.split('.').next().unwrap_or(""));
+                if used.insert(stem.clone()) {
+                    map.insert(i, stem);
+                }
+            }
+        }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
     // Lay out one file per selected title under a directory destination.
     // `disc_name` seeds the filename stem; falls back to "disc".
     let dir_jobs = |indices: &[usize], disc_name: &str| -> Option<Vec<(Option<usize>, String)>> {
@@ -1366,7 +1409,10 @@ fn build_jobs(
             indices
                 .iter()
                 .map(|&idx| {
-                    let filename = format!("{}_t{}.{}", disc_name, idx + 1, ext);
+                    let filename = match src_names.get(&idx) {
+                        Some(stem) => format!("{stem}.{ext}"),
+                        None => format!("{}_t{}.{}", disc_name, idx + 1, ext),
+                    };
                     let url = format!("{}://{}", ext, dest_dir.join(filename).display());
                     (Some(idx), url)
                 })
@@ -1391,7 +1437,10 @@ fn build_jobs(
         indices
             .iter()
             .map(|&idx| {
-                let file = parent.join(format!("{stem}_t{}.{ext}", idx + 1));
+                let file = match src_names.get(&idx) {
+                    Some(stem) => parent.join(format!("{stem}.{ext}")),
+                    None => parent.join(format!("{stem}_t{}.{ext}", idx + 1)),
+                };
                 (
                     Some(idx),
                     format!("{}://{}", parsed_dest.scheme(), file.display()),
