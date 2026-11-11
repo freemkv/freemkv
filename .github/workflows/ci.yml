@@ -70,12 +70,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: node --experimental-vm-modules --test tests/web/*.test.mjs
 
-  # CI owns the changelog: main may never carry a released version without a
-  # CHANGELOG.md entry for it. The release orchestrator dates an existing
-  # `## [X.Y.Z]` heading — it does NOT invent one — so a version bump that
-  # forgot its changelog entry must fail here rather than ship a blank release.
-  # Hard-fails on main (and PRs targeting main); warns elsewhere so an
-  # in-progress dev/qa branch whose entry isn't written yet is not blocked.
   media-harness-tests:
     if: "${{ !(github.event_name == 'push' && github.ref_type == 'branch' && github.event.commits[0] != null && github.event.commits[1] == null && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, ': bump version')) }}"
     runs-on: ubuntu-24.04
@@ -89,6 +83,12 @@ jobs:
       # The GUI gate's driver and disc fixture (the gui-gate job).
       - run: python3 -m unittest discover -s tests -p 'test_gui*.py' -v
 
+  # CI owns the changelog: main may never carry a released version without a
+  # CHANGELOG.md entry for it. The release orchestrator dates an existing
+  # `## [X.Y.Z]` heading — it does NOT invent one — so a version bump that
+  # forgot its changelog entry must fail here rather than ship a blank release.
+  # Hard-fails only on PRs targeting main (pushes to main no longer run this
+  # workflow); warns on dev pushes so an unwritten entry doesn't block work.
   changelog:
     if: "${{ !(github.event_name == 'push' && github.ref_type == 'branch' && github.event.commits[0] != null && github.event.commits[1] == null && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, ': bump version')) }}"
     runs-on: ubuntu-24.04
