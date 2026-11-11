@@ -46,11 +46,25 @@ function episodeNames(show, season, disc, start, count) {
   return Array.from({ length: count }, (_, i) => (show || 'Show') + ' S' + pad2(season || 1) + 'E' + pad2(first + i));
 }
 
-/* Why the choice cannot be saved yet, or null. */
-function pickProblem(pick, kind, episodeStart) {
+/* A typed Season, Disc or First episode: null when blank, undefined when not 1..65535. */
+function typedNumber(raw, badInput) {
+  const text = String(raw ?? '').trim();
+  if (badInput) return undefined;
+  if (text === '') return null;
+  const n = Number(text);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : undefined;
+}
+
+const NUMBERS = [['season', 'Season'], ['disc', 'Disc'], ['episode_start', 'First episode']];
+
+/* Why the choice cannot be saved yet, or null. `where`: the dialog that sets First episode,
+   when this one cannot. */
+function pickProblem(pick, kind, episodeStart, where = '') {
   if (kind === 'movie') return pick.length === 1 ? null : 'Choose the one title that is the movie.';
   if (!pick.length) return 'Tick at least one episode.';
-  if (pick.length === 1 && !episodeStart) return 'One episode needs its First episode number.';
+  if (pick.length === 1 && !episodeStart) {
+    return 'One episode needs its First episode number' + (where ? ': set it with ' + where + ', then choose again.' : '.');
+  }
   return null;
 }
 
@@ -92,19 +106,20 @@ function confirmLead(confirm) {
 
 // ── The dialog ─────────────────────────────────────────────────────────────
 
-/** Open the dialog. `load()` answers a title list (`/api/titles/<dev>` and kin);
- *  `save(data, ids, numbers)` stores the choice (ids in order; [] = automatic) and answers
- *  truthy. `numbers` adds editable Season/Disc/First episode (a remux saves them with its
- *  match); otherwise they show as the plan has them. `canClear` offers Automatic. */
-export async function openTitlesDialog({ heading, load, save, canClear = true, numbers = false, saveLabel = 'Save titles', onSaved = () => {}, extraFoot = '', onExtra }) {
+/** Open the dialog. `load()` answers a title list (`/api/titles/<dev>` and kin); `save(data,
+ *  ids, numbers)` stores the choice (ids in order; [] = automatic). `numbers` makes Season/Disc/
+ *  First episode editable (a remux saves them with its match). `canClear` offers Automatic;
+ *  `onExtra(m)` wires `extraFoot`, even when the list fails to load. `rename`: where to rename. */
+export async function openTitlesDialog({ heading, load, save, canClear = true, numbers = false, saveLabel = 'Save titles', onSaved = () => {}, extraFoot = '', onExtra, rename = 'Change title' }) {
   const m = modal({
     title: esc(heading), wide: true,
     body: '<div data-tl-body><div class="muted small">Loading the titles…</div></div>',
-    foot: extraFoot + (canClear ? '<button class="btn btn-ghost btn-sm" data-tl-auto>Automatic</button>' : '')
+    foot: extraFoot + (canClear ? '<button class="btn btn-ghost btn-sm" data-tl-auto disabled>Automatic</button>' : '')
       + '<button class="btn btn-primary btn-sm" data-tl-save disabled>' + esc(saveLabel) + '</button>',
   });
   const body = m.el.querySelector('[data-tl-body]');
   const saveBtn = m.el.querySelector('[data-tl-save]');
+  if (onExtra) onExtra(m);
   let data;
   try { data = await load(); } catch (e) {
     body.innerHTML = '<div class="banner bad">⚠ <span>Could not load the titles: ' + esc(e.message) + '</span></div>';
@@ -114,20 +129,27 @@ export async function openTitlesDialog({ heading, load, save, canClear = true, n
   const kind = data.kind === 'movie' ? 'movie' : 'tv';
   const byIndex = new Map((data.titles || []).map(t => [t.index, t]));
   const num = (key, label) => '<label>' + label + ' <input class="txt" type="number" min="1" max="65535" step="1" data-tl-num="' + key + '" value="' + esc(data[key] ?? '') + '"></label>';
-  const value = key => {
-    if (!numbers) return data[key] ?? null;
-    const raw = m.el.querySelector('[data-tl-num="' + key + '"]').value.trim();
-    const n = raw === '' ? null : Number(raw);
-    return n !== null && Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+  // A Movie shows no number inputs: its numbers stay as the list has them.
+  const typed = key => {
+    const input = numbers && m.el.querySelector('[data-tl-num="' + key + '"]');
+    return input ? typedNumber(input.value, input.validity?.badInput) : data[key] ?? null;
+  };
+  const value = key => typed(key) ?? null;
+  const numberProblem = () => {
+    const bad = NUMBERS.find(([key]) => typed(key) === undefined);
+    return bad ? bad[1] + ' must be an integer between 1 and 65535, or blank.' : null;
   };
   const uncaptured = (data.titles || []).some(t => t.swept === false);
   const head = (data.confirm ? '<p class="small" style="margin:0 0 .6rem">' + esc(confirmLead(data.confirm)) + '</p>' : '')
     + '<p class="small muted" style="margin:0 0 .6rem">' + (kind === 'movie'
       ? 'This disc is filed as a movie: choose the one title that is the feature.'
       : 'This disc is filed as TV: tick the episodes and put them in order. Each one is filed under the name shown.')
-      + ' To change the name or Movie/TV, use Change title.</p>'
+      + ' To change the name or Movie/TV, use ' + esc(rename) + '.</p>'
     + (uncaptured ? '<p class="small muted" style="margin:0 0 .6rem">Only titles this capture read can be chosen here. To rip the others, insert the disc and choose them on its drive.</p>' : '')
     + (numbers && kind === 'tv' ? '<div class="hook">' + num('season', 'Season') + num('disc', 'Disc') + num('episode_start', 'First episode') + '</div>' : '');
+  // The numbers and the lead stay put; only the list repaints, so typing keeps its focus.
+  body.innerHTML = head + '<div data-tl-list></div>';
+  const list = body.querySelector('[data-tl-list]');
   const flags = t => [
     t.in_roster ? '<span class="badge badge-ok">Episode on the disc\'s list</span>' : '',
     t.play_all ? '<span class="badge badge-warn">Play all</span>' : '',
@@ -154,31 +176,25 @@ export async function openTitlesDialog({ heading, load, save, canClear = true, n
     const chosen = pick.map((i, at) => byIndex.get(i) ? rowHtml(byIndex.get(i), at, names[at]) : '').join('');
     const groups = titleGroups(data, pick).map(g => (g.label ? '<div class="small muted" style="margin-top:.8rem;font-weight:700">' + esc(g.label) + '</div>' : '')
       + g.rows.map(t => rowHtml(t, null, '')).join('')).join('');
-    const problem = pickProblem(pick, kind, start);
-    body.innerHTML = head
+    const problem = numberProblem() || pickProblem(pick, kind, start, numbers ? '' : rename);
+    list.innerHTML = (byIndex.size ? '' : '<p class="small muted">This disc has no titles to choose from.</p>')
       + (pick.length ? '<div class="small muted" style="font-weight:700">' + (kind === 'movie' ? 'The movie' : 'Episodes, in order') + '</div>' + chosen : '')
       + groups
       + (problem ? '<p class="small" style="color:var(--warn);margin:.6rem 0 0">' + esc(problem) + '</p>' : '');
     saveBtn.disabled = !!problem;
   };
-  // Typed numbers survive repaints: keep them, repaint, and put them back.
-  const repaint = () => {
-    const typed = numbers ? [...m.el.querySelectorAll('[data-tl-num]')].map(i => [i.dataset.tlNum, i.value]) : [];
-    paint();
-    for (const [key, v] of typed) m.el.querySelector('[data-tl-num="' + key + '"]').value = v;
-  };
   body.addEventListener('change', e => {
     const tick = e.target.closest('[data-tl-tick]');
-    if (tick) { pick = togglePick(pick, +tick.dataset.tlTick, kind); repaint(); }
+    if (tick) { pick = togglePick(pick, +tick.dataset.tlTick, kind); paint(); }
   });
-  body.addEventListener('input', e => { if (e.target.closest('[data-tl-num]')) repaint(); });
+  body.addEventListener('input', e => { if (e.target.closest('[data-tl-num]')) paint(); });
   body.addEventListener('click', e => {
     const mv = e.target.closest('[data-tl-move]');
-    if (mv) { pick = movePick(pick, +mv.dataset.tlIndex, +mv.dataset.tlMove); repaint(); }
+    if (mv) { pick = movePick(pick, +mv.dataset.tlIndex, +mv.dataset.tlMove); paint(); }
   });
   const store = async (btn, ids) => {
     const nums = { season: value('season'), disc: value('disc'), episode_start: value('episode_start') };
-    const r = await act(btn, () => save(data, ids, nums), 'Save titles');
+    const r = await act(btn, () => save(data, ids, nums), saveLabel);
     if (r === undefined) return;
     toast(ids.length ? 'Titles saved' : 'Titles back to automatic', 'ok');
     m.close();
@@ -186,8 +202,7 @@ export async function openTitlesDialog({ heading, load, save, canClear = true, n
   };
   saveBtn.onclick = e => store(e.currentTarget, pick.map(i => byIndex.get(i).id));
   const auto = m.el.querySelector('[data-tl-auto]');
-  if (auto) auto.onclick = e => store(e.currentTarget, []);
-  if (onExtra) onExtra(m, data);
+  if (auto) { auto.disabled = false; auto.onclick = e => store(e.currentTarget, []); }
   paint();
   return m;
 }

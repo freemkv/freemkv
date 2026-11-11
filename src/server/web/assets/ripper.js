@@ -382,6 +382,8 @@ function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, o
     const media_type = c.media_type === 'tv' || c.media_type === 'movie' ? c.media_type : kind.value;
     const numbers = {};
     for (const [id, key, label] of fields) {
+      // Hidden TV fields do not apply to a movie chosen with the toggle.
+      if (media_type !== 'tv' && kind.value !== 'tv') { numbers[key] = null; continue; }
       const input = m.el.querySelector('#' + id);
       const raw = input.value.trim();
       const value = raw === '' ? null : Number(raw);
@@ -389,9 +391,8 @@ function titlePicker({ heading, initial, sub, extraFoot = '', onPick, onExtra, o
         toast(label + ' must be an integer between 1 and 65535, or blank', 'info');
         return null;
       }
-      // Hidden TV fields do not apply to a movie chosen with the toggle; a movie result
-      // picked while TV numbers are filled in is refused, never silently filed without them.
-      if (media_type !== 'tv' && value !== null && kind.value === 'tv') {
+      // A movie result picked while TV numbers are filled in is refused, never filed without them.
+      if (media_type !== 'tv' && value !== null) {
         toast(label + ' applies to TV only: this is a movie on TMDB. Clear it, or pick a TV entry.', 'info');
         return null;
       }
@@ -462,6 +463,7 @@ function reviewEpisodes(it, reload, owner = '') {
     heading: 'Confirm episodes · ' + (it.title || it.dir),
     saveLabel: 'Confirm episodes',
     canClear: false,
+    rename: 'Change name',
     load: () => api('GET', ownerUrl(owner, '/api/review/titles?dir=' + encodeURIComponent(it.dir))),
     save: (data, ids) => api('POST', ownerUrl(owner, '/api/review/resolve'), { dir: it.dir, action: 'episodes', revision: data.revision, titles: ids }),
     onSaved: reload,

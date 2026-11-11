@@ -81,6 +81,7 @@ function confirmEpisodes(row) {
     saveLabel: 'Confirm and remux',
     canClear: false,
     numbers: true,
+    rename: 'Change match',
     load: () => api('GET', '/api/library/titles?source=' + encodeURIComponent(row.iso)),
     save: (data, ids, n) => api('POST', '/api/library/match/remux', {
       source: row.iso, expected_revision: data.revision || 0,

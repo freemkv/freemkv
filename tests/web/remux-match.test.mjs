@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { title: 'Old', season: 1 }, linked = ['/tv/<old>.mkv'], stale = false) {
+async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { title: 'Old', season: 1 }, linked = ['/tv/<old>.mkv'], stale = false, titlePick = undefined) {
   const source = await readFile(new URL('../../src/server/web/assets/remux.js', import.meta.url), 'utf8');
   const context = vm.createContext({});
-  const calls = [], nodes = {};
+  const calls = [], nodes = {}, dialogs = [];
   for (const key of ['results', 'kind', 'search', 'query', 'season', 'disc', 'episode-start', 'exact-movie', 'exact-tv']) nodes[key] = { value: '' };
   nodes.query.value = 'Cast Away'; nodes.season.value = '1';
   let closed = false, refreshed = 0, body = '', closeHook;
@@ -21,7 +21,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
         ? { ok: true, queued }
         : { ok: true, queued, saved: { revision: payload.expected_revision + 1, media: payload.media } };
       if (url.startsWith('/api/tmdb/search')) return searchApi ? searchApi(url) : [choice];
-      return { saved: savedMedia === null ? null : { revision: 7, media: savedMedia }, linked, stale };
+      return { saved: savedMedia === null ? null : { revision: 7, media: savedMedia, title_pick: titlePick }, linked, stale };
     },
     modal: options => {
       body = options.body;
@@ -31,9 +31,10 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
       return { el: { querySelector: selector => nodes[selector.slice(6, -1)] },
         onClose: hook => { closeHook = hook; }, close: () => { closed = true; closeHook?.(); } };
     },
+    openTitlesDialog: options => { dialogs.push(options); },
     refreshNow: () => { refreshed++; }, toast: (text, kind) => { toasts.push([text, kind]); }, stagedActions: () => 'retained',
   };
-  const module = new vm.SourceTextModule(source + '\nexport { changeMatch, actHtml };', { context });
+  const module = new vm.SourceTextModule(source + '\nexport { changeMatch, actHtml, confirmEpisodes };', { context });
   const imports = new Map([...source.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)]
     .map(m => [m[2], m[1].split(',').map(s => s.trim())]));
   await module.link(async specifier => {
@@ -43,7 +44,7 @@ async function harness(kind = 'movie', searchApi, queued = 1, savedMedia = { tit
     }, { context });
   });
   await module.evaluate();
-  return { ui: module.namespace, nodes, calls, toasts, get body() { return body; }, get closed() { return closed; }, get refreshed() { return refreshed; } };
+  return { ui: module.namespace, nodes, calls, toasts, dialogs, get body() { return body; }, get closed() { return closed; }, get refreshed() { return refreshed; } };
 }
 
 for (const kind of ['movie', 'tv']) test(`change match submits explicit ${kind} identity and revision`, async () => {
@@ -270,4 +271,68 @@ test('an exact name needs a name', async () => {
   await h.nodes['exact-tv'].onclick();
   assert.equal(h.calls.filter(c => c.method === 'POST').length, 0);
   assert.deepEqual(h.toasts, [['Type a name first', 'info']]);
+});
+
+const held = (failure, extra = {}) => ({ kind: 'remux', iso: '/iso/show.iso', title: 'Show', target: '/tv/show.mkv',
+  result: { outcome: 'failed', code: null, message: '', ...failure }, ...extra });
+
+test('a remux held for its episodes offers Confirm episodes in place of Retry', async () => {
+  const h = await harness();
+  for (const row of [held({ code: 9086 }), held({ message: 'E9086 This disc does not list its episodes' }),
+    held({ code: 1 }, { job: { state: 'failed', failure: { code: 9086, message: '' } } })]) {
+    const html = h.ui.actHtml(row);
+    assert.match(html, /data-episodes>Confirm episodes</);
+    assert.match(html, /data-match>Change match</);
+    assert.doesNotMatch(html, /data-remux/);
+  }
+  for (const row of [held({ code: 4001, message: 'E4001 the share is gone' }), held({ code: 9086 }, { iso: null }),
+    held({ message: 'see E90861' }), { ...held({ code: 9086 }), result: { outcome: 'done' } }]) {
+    assert.doesNotMatch(h.ui.actHtml(row), /data-episodes/);
+  }
+});
+
+test('Confirm episodes saves the ticks and the numbers on the match and requeues it', async () => {
+  const h = await harness();
+  h.ui.confirmEpisodes({ iso: '/iso/<show>.iso', title: 'Row title' });
+  const d = h.dialogs[0];
+  assert.equal(d.heading, 'Confirm episodes · Row title');
+  assert.equal(d.numbers, true);
+  assert.equal(d.canClear, false);
+  assert.equal(d.rename, 'Change match');
+  await d.load();
+  assert.equal(h.calls[0].url, '/api/library/titles?source=' + encodeURIComponent('/iso/<show>.iso'));
+  const ids = [{ playlist: '00002' }, { playlist: '00001' }];
+  await d.save({ revision: 3, show: 'Show', year: 2004, tmdb_id: 42, kind: 'tv' }, ids, { season: 2, disc: 1, episode_start: 5 });
+  const post = h.calls[1];
+  assert.equal(post.url, '/api/library/match/remux');
+  assert.deepEqual(JSON.parse(JSON.stringify(post.payload)), { source: '/iso/<show>.iso', expected_revision: 3,
+    media: { title: 'Show', year: 2004, tmdb_id: 42, kind: 'tv', season: 2, disc: 1, episode_start: 5 }, title_pick: ids });
+  d.onSaved();
+  assert.equal(h.refreshed, 1);
+  // A first save (no match yet, revision 0) falls back to the row's title; a movie sends no TV numbers.
+  await d.save({ kind: 'movie' }, [ids[0]], { season: 2, disc: 1, episode_start: 5 });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls[2].payload.media)),
+    { title: 'Row title', year: 0, tmdb_id: 0, kind: 'movie', season: null, disc: null, episode_start: null });
+  assert.equal(h.calls[2].payload.expected_revision, 0);
+});
+
+// Change match keeps the confirmed episodes while the new match stays TV and they still suit it.
+const pick = [{ playlist: '00003' }, { playlist: '00001' }];
+for (const [name, savedKind, kind, savedPick, episode, stale, kept] of [
+  ['TV to TV keeps the set', 'tv', 'tv', pick, '', false, true],
+  ['TV to movie drops it', 'tv', 'movie', pick, '', false, false],
+  ['a movie match had no episodes to keep', 'movie', 'tv', pick, '', false, false],
+  ['one episode without its First episode drops it', 'tv', 'tv', pick.slice(0, 1), '', false, false],
+  ['one episode with its First episode keeps it', 'tv', 'tv', pick.slice(0, 1), '3', false, true],
+  ['a match for an earlier disc at the path keeps nothing', 'tv', 'tv', pick, '', true, false],
+  ['no saved pick sends none', 'tv', 'tv', undefined, '', false, false],
+]) test(`change match: ${name}`, async () => {
+  const h = await harness(kind, undefined, 1, { title: 'Show', kind: savedKind, season: 1 }, [], stale, savedPick);
+  await h.ui.changeMatch({ iso: '/iso/source.iso', title: 'Show' }, {});
+  h.nodes['episode-start'].value = episode;
+  await h.nodes.search.onclick();
+  await h.nodes.results.onclick({ target: { closest: () => ({ dataset: { pick: '0' } }) } });
+  const post = h.calls.find(c => c.method === 'POST');
+  if (kept) assert.deepEqual(JSON.parse(JSON.stringify(post.payload.title_pick)), savedPick);
+  else assert.equal('title_pick' in post.payload, false);
 });
