@@ -294,10 +294,13 @@ jobs:
           #       dev. The release re-pins the committed tags and bumps the version reqs.
           #
           #   This script:
+          #     0. before any tag, checks every lib's committed Cargo.lock already
+          #        holds the crates.io pins its regen will need (check_lib_locks_current);
           #     1. tags freemkv-unlock FIRST (the base — its tag must exist before the
           #        downstream path→git swaps resolve);
           #     2. tags libfreemkv (re-pin its freemkv-unlock git tag), then
-          #        keysources (re-pin libfreemkv git tag) — neither touches crates.io;
+          #        keysources (re-pin libfreemkv git tag) — neither touches crates.io.
+          #        Every lib commits a regenerated, verified Cargo.lock with its tag;
           #     3. confirms all three lib tags on the remote (a binary's Cargo.lock regen
           #        fetches them);
           #     4. for each binary: re-pins its [patch.crates-io] git tags (+ base version
@@ -305,7 +308,8 @@ jobs:
           #        (so the lock references the git tag, not a local path), verifies the
           #        lock, scans the source, commits, pushes, tags.
           #
-          # Lockfile invariant (binaries, committed lock):
+          # Lockfile invariant (every crate commits its lock; binaries shown, a lib
+          # holds the same for each sibling it declares):
           #   - exactly ONE libfreemkv entry, source =
           #     "git+https://github.com/freemkv/libfreemkv?tag=vX.Y.Z#<sha>"
           #   - (bdemu's tagged lock additionally references freemkv-unlock by git tag)
@@ -378,7 +382,7 @@ jobs:
           # libfreemkv depends on IT (the inversion — freemkv-unlock defines the trait
           # libfreemkv dispatches), and bdemu depends on it for drive emulation. So it is
           # tagged FIRST, before everything. NEVER published to crates.io (it carries drive
-          # firmware); consumed only by git tag. Its Cargo.lock is gitignored.
+          # firmware); consumed only by git tag. Its Cargo.lock is committed with the tag.
           FREEMKV_UNLOCK_DIR="$CANONICAL_ROOT/freemkv-unlock"
           # The dep name for the unlock layer: a version dep in libfreemkv + bdemu, git-tag
           # patched ([patch.crates-io]) in every crate whose graph reaches it.
@@ -993,9 +997,13 @@ jobs:
             bump_readme_version "$LIBFREEMKV_DIR" "libfreemkv" "$VERSION"
             date_changelog_heading "$LIBFREEMKV_DIR" "$VERSION"
             # No-op while run_security_gate is disabled (see there).
+            # Re-lock against the freemkv-unlock tag pushed in step 1; the lock ships with the tag.
+            wait_for_git_tag "$UNLOCK_DEP"
+            regenerate_lockfile "$LIBFREEMKV_DIR"
+            verify_lockfile_invariants "$LIBFREEMKV_DIR" "$UNLOCK_DEP" "$VERSION"
+            # No-op while run_security_gate is disabled (see there).
             run_security_gate "$LIBFREEMKV_DIR" "libfreemkv" source
-            # stage_lock=false: the lock is not regenerated for a lib tag.
-            git_commit_push_tag "$LIBFREEMKV_DIR" "libfreemkv" "v$VERSION: bump version" false
+            git_commit_push_tag "$LIBFREEMKV_DIR" "libfreemkv" "v$VERSION: bump version" true
           }
 
           # ────────────── step 2: confirm the lib git TAG is on the remote ──────────
@@ -1097,6 +1105,49 @@ jobs:
             ok "$name: re-locked the sibling tags in Cargo.lock, other pins kept (toolchain $TOOLCHAIN)"
           }
 
+          # check_lib_locks_current — run BEFORE any tag. Each lib re-locks against the
+          # sibling tags this cascade cuts, and regenerate_lockfile dies on a new crates.io
+          # pin; reaching that die after freemkv-unlock is tagged burns the version. So
+          # resolve every untagged lib now, its git-tag siblings path-patched to these qa
+          # checkouts (the trees the tags are cut from: same third-party graph), on a copy
+          # of the lock, and refuse while any pin would be added.
+          check_lib_locks_current() {
+            say "lib lockfiles: crates.io pins already cover the qa siblings (before any tag)"
+            local c dir lock saved before after drift p
+            local -a patch_args
+            for c in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n freemkv-engine; do
+              dir="$CANONICAL_ROOT/$c"
+              lock="$dir/Cargo.lock"
+              if git -C "$dir" ls-remote --exit-code --tags origin "v$VERSION" >/dev/null 2>&1; then
+                ok "$c: v$VERSION already tagged — lock check skipped (resume)"
+                continue
+              fi
+              patch_args=()
+              while read -r p; do
+                [ -n "$p" ] && patch_args+=(--config "patch.crates-io.$p.path=\"$CANONICAL_ROOT/$p\"")
+              done < <(sed -n -E "s|^([a-z0-9-]+) *= *\\{ *git *= *\"https://github.com/$GIT_ORG/[^\"]*\".*|\\1|p" "$dir/Cargo.toml")
+              if $DRY_RUN; then
+                printf '  [dry-run] cargo +%s metadata --manifest-path %s/Cargo.toml %s  (lock restored; no new crates.io pin allowed)\n' \
+                  "$TOOLCHAIN" "$dir" "${patch_args[*]+"${patch_args[*]}"}"
+                continue
+              fi
+              [ -f "$lock" ] || die "$c: no committed Cargo.lock"
+              saved=$(mktemp)
+              cp "$lock" "$saved"
+              before=$(registry_pins "$lock")
+              if ! cargo "+$TOOLCHAIN" ${patch_args[@]+"${patch_args[@]}"} metadata --format-version 1 \
+                     --manifest-path "$dir/Cargo.toml" >/dev/null; then
+                cp "$saved" "$lock"; rm -f "$saved"
+                die "$c: cannot resolve against the qa siblings — nothing tagged yet"
+              fi
+              after=$(registry_pins "$lock")
+              cp "$saved" "$lock"; rm -f "$saved"
+              drift=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+              [ -z "$drift" ] || die "$c: Cargo.lock lacks crates.io pins its release re-lock would add: $(echo "$drift" | paste -sd, -). Re-lock it on dev against the sibling tips, get qa green, then release. Nothing tagged yet."
+              ok "$c: committed lock covers the qa siblings"
+            done
+          }
+
           # verify_lockfile_invariants <crate-dir> <dep-name> <expected-version>
           # Aborts unless Cargo.lock has, for <dep-name>, EXACTLY ONE [[package]] block
           # whose:
@@ -1114,9 +1165,10 @@ jobs:
             local lock="$dir/Cargo.lock"
 
             # Skip cleanly if this crate doesn't declare <dep>. (bdemu has no
-            # freemkv-keysources dep.) We check the [dependencies]-style line, not the
-            # [patch] line, so we don't false-positive on the patch redirect.
-            grep -qE "^$dep *= *\"" "$dir/Cargo.toml" || { ok "$name: no $dep dependency — verify skipped"; return 0; }
+            # freemkv-keysources dep.) We check the [dependencies]-style line — `dep = "X.Y"`
+            # or `dep = { version = "X.Y", ... }` (libfreemkv's optional freemkv-unlock) —
+            # not the [patch] line, which carries no version, so the redirect can't match.
+            grep -qE "^$dep *= *(\"|\{[^}]*version *= *\")" "$dir/Cargo.toml" || { ok "$name: no $dep dependency — verify skipped"; return 0; }
 
             if $DRY_RUN; then
               printf '  [dry-run] verify %s/Cargo.lock has exactly one %s %s from the git tag v%s\n' \
@@ -1292,10 +1344,9 @@ jobs:
             git -C "$dir" add README.md 2>/dev/null || true
             # The AppStream entry dated by date_metainfo_release, likewise.
             git -C "$dir" add -- 'packaging/flatpak/*.metainfo.xml' 2>/dev/null || true
-            # Cargo.lock is committed for binary crates but gitignored for library crates
-            # (freemkv-keysources). `git add` of an ignored path errors under set -e, so
-            # guard it. CI/consumers don't need keysources's lock anyway.
-            [ "$stage_lock" = true ] && git -C "$dir" add Cargo.lock 2>/dev/null || true
+            # Cargo.lock is committed by every crate (libs too, since issue #15) and was
+            # regenerated + verified for this tag, so staging it must not fail silently.
+            if [ "$stage_lock" = true ]; then git -C "$dir" add Cargo.lock; fi
 
             local sha
             if git -C "$dir" diff --cached --quiet; then
@@ -1387,12 +1438,12 @@ jobs:
           # ──────────────── step 1: freemkv-unlock (the BASE crate) ─────────────────
           # Tagged FIRST — it is the base of the dependency graph (libfreemkv git-deps it,
           # bdemu deps it). A single crate now (no `ld` workspace member); it does NOT
-          # depend on libfreemkv (the inversion). NEVER published to crates.io. Its
-          # Cargo.lock is gitignored, so nothing lockfile-ish is staged/regenerated.
+          # depend on libfreemkv (the inversion). NEVER published to crates.io.
           #   1. bump root Cargo.toml [package] version
-          #   2. `cargo build --all-features` to prove it still compiles (covers bdemu's
+          #   2. re-lock (no siblings: only its own version entry moves)
+          #   3. `cargo build --all-features` to prove it still compiles (covers bdemu's
           #      `emulation` surface too)
-          #   3. source-scan, commit + push + tag vX.Y.Z
+          #   4. source-scan, commit (with Cargo.lock) + push + tag vX.Y.Z
           # Idempotent: an already-pushed tag short-circuits the whole step.
           release_unlock() {
             local name="freemkv-unlock"
@@ -1407,6 +1458,7 @@ jobs:
             bump_macos_plist_version "$dir" "$VERSION"
             bump_readme_version "$dir" "$name" "$VERSION"
             date_changelog_heading "$dir" "$VERSION"
+            regenerate_lockfile "$dir"
             if $DRY_RUN; then
               printf '  [dry-run] (cargo +%s build --all-features --manifest-path %s/Cargo.toml)\n' "$TOOLCHAIN" "$dir"
             else
@@ -1417,13 +1469,13 @@ jobs:
             # No-op while run_security_gate is disabled (see there).
             run_security_gate "$dir" "$name" source
             # Single [package]; the bump is in the root Cargo.toml git_commit_push_tag stages.
-            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" true
           }
 
           # ─────────────────── step 3: freemkv-i18n (a LEAF LIB) ────────────────────
           # A dependency-free string loader — nothing to re-pin, just bump + tag. Off
-          # crates.io; consumed by freemkv via a git-tag [patch.crates-io]. Its
-          # Cargo.lock is gitignored (nothing lockfile-ish to stage). Scan the source.
+          # crates.io; consumed by freemkv via a git-tag [patch.crates-io]. Its committed
+          # Cargo.lock is re-locked (own version entry only). Scan the source.
           release_i18n() {
             local name="freemkv-i18n"
             local dir="$CANONICAL_ROOT/$name"
@@ -1437,14 +1489,15 @@ jobs:
             bump_macos_plist_version "$dir" "$VERSION"
             bump_readme_version "$dir" "$name" "$VERSION"
             date_changelog_heading "$dir" "$VERSION"
+            regenerate_lockfile "$dir"
             run_security_gate "$dir" "$name" source
-            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" true
           }
 
           # ─────────────────── step 3: freemkv-keysources (a LIB) ───────────────────
           # OFF crates.io now (it deps git-only libfreemkv). It git-tag-pins libfreemkv via
-          # a committed [patch.crates-io] — re-pin that tag here. Its Cargo.lock is
-          # gitignored; nothing lockfile-ish to regen. Scan the source tree (no tarball).
+          # a committed [patch.crates-io] — re-pin that tag here, then re-lock against the
+          # sibling tags and verify, like a binary. Scan the source tree (no tarball).
           release_keysources() {
             local name="freemkv-keysources"
             local dir="$CANONICAL_ROOT/$name"
@@ -1461,8 +1514,12 @@ jobs:
             bump_macos_plist_version "$dir" "$VERSION"
             bump_readme_version "$dir" "$name" "$VERSION"
             date_changelog_heading "$dir" "$VERSION"
+            wait_for_git_tag "$UNLOCK_DEP"
+            wait_for_git_tag libfreemkv
+            regenerate_lockfile "$dir"
+            verify_lockfile_invariants "$dir" libfreemkv "$VERSION"
             run_security_gate "$dir" "$name" source
-            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" true
           }
 
           # freemkv-engine — the shared rip engine (new in 1.6.0). Owns the orchestration
@@ -1489,8 +1546,14 @@ jobs:
             bump_macos_plist_version "$dir" "$VERSION"
             bump_readme_version "$dir" "$name" "$VERSION"
             date_changelog_heading "$dir" "$VERSION"
+            wait_for_git_tag "$UNLOCK_DEP"
+            wait_for_git_tag libfreemkv
+            wait_for_git_tag freemkv-keysources
+            regenerate_lockfile "$dir"
+            verify_lockfile_invariants "$dir" libfreemkv "$VERSION"
+            verify_lockfile_invariants "$dir" freemkv-keysources "$VERSION"
             run_security_gate "$dir" "$name" source
-            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" true
           }
 
           # ─────────────────────── step 3: each BINARY crate ────────────────────────
@@ -2073,6 +2136,7 @@ jobs:
           if $SKIP_LIBS; then
             say "skipping steps 1-3 (--skip-libs); assuming freemkv-unlock + libfreemkv + keysources + freemkv-i18n + freemkv-engine tags v$VERSION already pushed"
           else
+            check_lib_locks_current  # before any tag: no lib re-lock may die mid-cascade
             release_unlock       # base crate — tagged first
             release_libfreemkv   # git-deps freemkv-unlock (path→git swap in the tag)
             release_keysources   # git-tag-pins libfreemkv
