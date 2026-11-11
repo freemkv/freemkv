@@ -1412,7 +1412,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
         tracing::info!(
             device = %device_key(&d.path),
             path = %d.path,
-            drive = %d.list_line(),
+            drive = %crate::strings::drive_list_line(d),
             vendor = %d.vendor,
             model = %d.model,
             firmware = %d.firmware,
@@ -1459,7 +1459,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                     tracing::info!(
                         device = %device_key(&d.path),
                         path = %d.path,
-                        drive = %d.list_line(),
+                        drive = %crate::strings::drive_list_line(d),
                         vendor = %d.vendor,
                         model = %d.model,
                         firmware = %d.firmware,

@@ -2520,7 +2520,7 @@ pub fn can_prefer_home_drive(startup_mode: &str, preferred_drive: &str, shown: &
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HomeDrive {
     pub device: String,
-    /// libfreemkv's `E:  VENDOR MODEL (rev FW)`: shown and saved as the preferred drive.
+    /// `strings::drive_display`, `E:  VENDOR MODEL (rev FW)`: shown and saved as the preferred drive.
     pub display: String,
     /// The pre-1.8.7 `vendor model` label, still honoured as a saved preferred drive.
     pub legacy_label: String,

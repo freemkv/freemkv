@@ -116,3 +116,41 @@ pub fn presentation_language_unknown(value: &str) -> String {
         &[("value", &sanitize_display(value))],
     )
 }
+
+/// A drive's `VENDOR MODEL (rev FW)`, control characters replaced. One form in every locale:
+/// the GUI saves [`drive_display`] as the preferred drive, so it must not change with language.
+// The GUI and server name drives; the CLI binary compiles this module but has none to show.
+#[allow(dead_code)]
+pub fn drive_label(d: &libfreemkv::DriveInfo) -> String {
+    let printable = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+            .collect()
+    };
+    format!(
+        "{} {} (rev {})",
+        printable(&d.vendor),
+        printable(&d.model),
+        printable(&d.firmware)
+    )
+}
+
+/// `"{name}  {label}"` (two spaces): the OS name and model, which tell identical drives apart.
+#[allow(dead_code)]
+pub fn drive_display(d: &libfreemkv::DriveInfo) -> String {
+    format!("{}  {}", d.name(), drive_label(d))
+}
+
+/// One listing line: [`drive_display`], plus the device path when it differs from the name.
+#[allow(dead_code)]
+pub fn drive_list_line(d: &libfreemkv::DriveInfo) -> String {
+    if d.name() == d.path {
+        drive_display(d)
+    } else {
+        format!("{}  {}", drive_display(d), d.path)
+    }
+}
+
+#[cfg(test)]
+#[path = "strings_drive_tests.rs"]
+mod drive_tests;

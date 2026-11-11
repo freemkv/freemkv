@@ -860,7 +860,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
 pub struct OpticalDrive {
     /// Platform device path (`/dev/diskN` on macOS) — becomes `disc://<path>`.
     pub device: String,
-    /// The libfreemkv standard name, `E:  HL-DT-ST BD-RE BU40N (rev 1.04)`; tells identical
+    /// The standard drive name, `E:  HL-DT-ST BD-RE BU40N (rev 1.04)`; tells identical
     /// drives apart. Sanitized for display.
     pub display: String,
     /// [`display`](Self::display) plus the device path when it differs from the OS name.
@@ -885,8 +885,8 @@ fn optical_drive(d: &libfreemkv::DriveInfo) -> OpticalDrive {
         .to_string();
     OpticalDrive {
         device: d.path.clone(),
-        display: crate::strings::sanitize_display(&d.display()),
-        list_line: crate::strings::sanitize_display(&d.list_line()),
+        display: crate::strings::sanitize_display(&crate::strings::drive_display(d)),
+        list_line: crate::strings::sanitize_display(&crate::strings::drive_list_line(d)),
         legacy_label: if legacy.is_empty() {
             "Optical drive".to_string()
         } else {
