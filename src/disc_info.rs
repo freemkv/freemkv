@@ -447,7 +447,7 @@ fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<Strin
             lines.push(String::new());
             let label = strings::get("disc.audio");
             for (ai, a) in audios.iter().enumerate() {
-                let line = format_audio(a, verbose);
+                let line = format!("{}. {}", ai + 1, format_audio(a, verbose));
                 if ai == 0 {
                     lines.push(format!("{}{}", label_prefix(&label, indent), line));
                 } else {
@@ -472,7 +472,7 @@ fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<Strin
             lines.push(String::new());
             let label = strings::get("disc.subtitle");
             for (si, s) in subs.iter().enumerate() {
-                let line = format_subtitle(s, verbose);
+                let line = format!("{}. {}", si + 1, format_subtitle(s, verbose));
                 if si == 0 {
                     lines.push(format!("{}{}", label_prefix(&label, indent), line));
                 } else {

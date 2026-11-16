@@ -719,7 +719,11 @@ fn title_lines_aligns_continuation_rows_for_multi_stream_groups() {
         joined.contains("English") && joined.contains("French"),
         "{joined}"
     );
-    assert!(joined.contains("Japanese"), "{joined}");
+    assert!(
+        joined.contains("1. English") && joined.contains("2. French"),
+        "{joined}"
+    );
+    assert!(joined.contains("2. Japanese"), "{joined}");
 }
 
 // `info -v` is pasted into bug reports: planted key bytes must never render,

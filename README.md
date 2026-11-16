@@ -218,6 +218,24 @@ Titles
                  Spanish
 ```
 
+## Select audio and subtitle tracks
+
+Use the one-based numbers shown by `freemkv info` to keep particular tracks:
+
+```sh
+freemkv iso://disc.iso mkv://movie.mkv -a 1,3 -s 2
+freemkv iso://disc.iso mkv://movie.mkv -a 2 -s eng
+```
+
+Audio and subtitles have separate numbering for each title. Subtitle numbering
+includes forced tracks. Lists may contain numbers or languages, but cannot mix
+them; ranges and zero are invalid. Duplicates are ignored and retained tracks
+stay in source order. `all`, `none`, and the default of keeping all still work.
+Numeric choices do not influence automatic title selection. For a batch, every
+requested number must exist on every selected title; an invalid choice stops
+before any media is written. This applies to scanned discs, ISO images and disc
+folders with outputs that support stream selection.
+
 ## Presentation language and retained audio
 
 Some discs carry the main movie more than once, for example a German and an English

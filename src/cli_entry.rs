@@ -502,6 +502,7 @@ fn collect_urls(args: &[String]) -> Vec<String> {
 // printing.
 fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
     let mut lines = Vec::with_capacity(streams.len());
+    let (mut audio_index, mut subtitle_index) = (0, 0);
     for s in streams {
         match s {
             libfreemkv::Stream::Video(v) => {
@@ -513,6 +514,7 @@ fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
                 lines.push(format!("  {} {}{}", v.codec, v.resolution, label));
             }
             libfreemkv::Stream::Audio(a) => {
+                audio_index += 1;
                 let mut tags: Vec<String> = Vec::new();
                 let purpose_key = match a.purpose {
                     libfreemkv::LabelPurpose::Commentary => Some("stream.purpose.commentary"),
@@ -536,7 +538,7 @@ fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
                     format!(" — {}", tags.join(", "))
                 };
                 lines.push(format!(
-                    "  {} {} {}{}",
+                    "  {audio_index}. {} {} {}{}",
                     a.codec,
                     a.channels,
                     crate::disc_info::sanitize(&a.language),
@@ -544,8 +546,9 @@ fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
                 ));
             }
             libfreemkv::Stream::Subtitle(s) => {
+                subtitle_index += 1;
                 lines.push(format!(
-                    "  {} {}",
+                    "  {subtitle_index}. {} {}",
                     s.codec,
                     crate::disc_info::sanitize(&s.language)
                 ));

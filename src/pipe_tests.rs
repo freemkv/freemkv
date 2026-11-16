@@ -461,16 +461,16 @@ fn subtitle_flag_sets_only_subtitles() {
 
 #[test]
 fn spec_keywords_all_and_none_are_case_insensitive() {
-    assert_eq!(parse_stream_spec("all"), StreamFilter::All);
-    assert_eq!(parse_stream_spec("ALL"), StreamFilter::All);
-    assert_eq!(parse_stream_spec("none"), StreamFilter::None);
-    assert_eq!(parse_stream_spec("None"), StreamFilter::None);
+    assert_eq!(parse_stream_spec("all").unwrap(), StreamFilter::All);
+    assert_eq!(parse_stream_spec("ALL").unwrap(), StreamFilter::All);
+    assert_eq!(parse_stream_spec("none").unwrap(), StreamFilter::None);
+    assert_eq!(parse_stream_spec("None").unwrap(), StreamFilter::None);
 }
 
 #[test]
 fn spec_trims_and_drops_empty_langs() {
     assert_eq!(
-        parse_stream_spec(" eng , , spa "),
+        parse_stream_spec(" eng , , spa ").unwrap(),
         StreamFilter::Langs(vec!["eng".into(), "spa".into()])
     );
 }
@@ -2499,4 +2499,89 @@ fn freemkv_engine_plan(
         key_auth: None,
     };
     super::cli_plan(source, dest, &keys, flags)
+}
+
+#[test]
+fn numbered_stream_specs_are_strict_and_independent() {
+    assert_eq!(
+        parse_stream_spec("3,1,1").unwrap(),
+        StreamFilter::Indices(vec![1, 3])
+    );
+    for spec in [
+        "0",
+        "1,0",
+        "1,",
+        "1,,2",
+        "eng,2",
+        "2,eng",
+        "1-3",
+        "1.5",
+        "+1",
+        "999999999999999999999999999999999",
+    ] {
+        assert!(parse_stream_spec(spec).is_err(), "{spec}");
+    }
+    let f = parse_flags(&["-a".into(), "2".into(), "-s".into(), "eng".into()]).unwrap();
+    assert_eq!(f.streams.audio, StreamFilter::Indices(vec![2]));
+    assert_eq!(
+        f.streams.subtitles,
+        StreamFilter::Langs(vec!["eng".into()]).into()
+    );
+}
+
+#[test]
+fn numeric_batch_rejects_later_title_before_starting_any_job() {
+    crate::strings::set_locale("en");
+    fn disc() -> libfreemkv::Disc {
+        let mut disc = libfreemkv::Disc {
+            volume_id: "VARIANT".into(),
+            meta_title: None,
+            format: libfreemkv::DiscFormat::BluRay,
+            capacity_sectors: 0,
+            capacity_bytes: 0,
+            layers: 1,
+            titles: crate::selection_test_fixtures::variant_titles(),
+            region: libfreemkv::disc::DiscRegion::Free,
+            aacs: None,
+            css: None,
+            encrypted: false,
+            aacs_error: None,
+            css_error: None,
+            layer_map: None,
+            content_format: libfreemkv::ContentFormat::BdTs,
+        };
+        disc.titles = crate::selection_test_fixtures::variant_titles();
+        disc.titles[1]
+            .streams
+            .retain(|s| !matches!(s, libfreemkv::Stream::Audio(_)));
+        disc
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("batch.iso");
+    std::fs::write(&iso, vec![0u8; 2048]).unwrap();
+    let source = format!("iso://{}", iso.display());
+    let dest = format!("mkv://{}/out/", dir.path().display());
+    super::TEST_SCAN.with(|t| *t.borrow_mut() = Some(disc));
+    super::RAN_TITLES.with(|r| r.borrow_mut().take());
+    let (code, output) = crate::output::capture(|| {
+        super::run(
+            &source,
+            &dest,
+            &["-t".into(), "all".into(), "-a".into(), "1".into()],
+        )
+    });
+    super::TEST_SCAN.with(|t| t.borrow_mut().take());
+    assert_eq!(code, 1);
+    assert!(
+        output.contains("Title 2:") && output.contains("track 1") && output.contains("tracks: 0"),
+        "{output}"
+    );
+    assert!(super::RAN_TITLES.with(|r| r.borrow_mut().take()).is_none());
+    assert!(
+        !dir.path().join("out").exists()
+            || std::fs::read_dir(dir.path().join("out"))
+                .unwrap()
+                .next()
+                .is_none()
+    );
 }

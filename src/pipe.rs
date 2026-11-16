@@ -328,6 +328,18 @@ fn render_stream_sel_error(
     title: &libfreemkv::DiscTitle,
 ) -> String {
     match e {
+        freemkv_engine::StreamSelError::IndexOutOfRange {
+            class,
+            requested,
+            count,
+        } => strings::fmt(
+            "error.stream_index_out_of_range",
+            &[
+                ("class", &strings::get(&format!("disc.{class}"))),
+                ("requested", &requested.to_string()),
+                ("count", &count.to_string()),
+            ],
+        ),
         freemkv_engine::StreamSelError::UnknownLanguage { tag } => {
             let mut langs: Vec<String> = title
                 .streams
@@ -402,26 +414,47 @@ struct ParsedFlags {
     streams: freemkv_engine::StreamChoice,
 }
 
-fn parse_stream_spec(spec: &str) -> freemkv_engine::StreamFilter {
+fn parse_stream_spec(spec: &str) -> Result<freemkv_engine::StreamFilter, String> {
     use freemkv_engine::StreamFilter;
     if spec.eq_ignore_ascii_case("all") {
-        return StreamFilter::All;
+        return Ok(StreamFilter::All);
     }
     if spec.eq_ignore_ascii_case("none") {
-        return StreamFilter::None;
+        return Ok(StreamFilter::None);
     }
-    let langs: Vec<String> = spec
-        .split(',')
-        .map(|s| s.trim())
+    let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+    // Any numeric-looking item makes this a numeric request: never quietly
+    // reinterpret malformed positions or a mixed list as languages.
+    if parts
+        .iter()
+        .any(|s| s.chars().any(|c| c.is_ascii_digit()) || s.starts_with(['+', '-']))
+    {
+        let invalid = || strings::fmt("error.invalid_stream_indices", &[("spec", spec)]);
+        let mut indices = Vec::new();
+        for part in parts {
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            let index = part.parse::<usize>().map_err(|_| invalid())?;
+            if index == 0 {
+                return Err(invalid());
+            }
+            indices.push(index);
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        return Ok(StreamFilter::Indices(indices));
+    }
+    let langs: Vec<String> = parts
+        .into_iter()
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(str::to_string)
         .collect();
-    if langs.is_empty() {
-        // `-a ,` or `-a ` → treat as keep-all rather than an empty selection.
+    Ok(if langs.is_empty() {
         StreamFilter::All
     } else {
         StreamFilter::Langs(langs)
-    }
+    })
 }
 
 /// Where the CLI looks up AACS keys for a disc, assembled from the key flags.
@@ -551,7 +584,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     // `--raw`. See `cli_entry::is_flag_token`.
                     Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
                         i += 1;
-                        f.streams.audio = parse_stream_spec(v);
+                        f.streams.audio = parse_stream_spec(v)?;
                     }
                     _ => {
                         return Err(strings::fmt(
@@ -569,7 +602,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     // `--raw`. See `cli_entry::is_flag_token`.
                     Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
                         i += 1;
-                        f.streams.subtitles = parse_stream_spec(v).into();
+                        f.streams.subtitles = parse_stream_spec(v)?.into();
                     }
                     _ => {
                         return Err(strings::fmt(
@@ -831,6 +864,28 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         Some(j) => j,
         None => return 1,
     };
+    // Validate every selected title before any output opens, including drive jobs.
+    if let Some(scanned) = scanned_titles {
+        for (idx, _) in &jobs {
+            if let Some(idx) = idx
+                && let Some(title) = scanned.get(*idx)
+                && let Err(e @ freemkv_engine::StreamSelError::IndexOutOfRange { .. }) =
+                    streams.resolve(title)
+            {
+                out.raw(
+                    Always,
+                    &strings::fmt(
+                        "error.title_stream_selection",
+                        &[
+                            ("title", &(idx + 1).to_string()),
+                            ("detail", &render_stream_sel_error(&e, title)),
+                        ],
+                    ),
+                );
+                return 1;
+            }
+        }
+    }
     #[cfg(test)]
     RAN_TITLES.with(|r| *r.borrow_mut() = Some(jobs.iter().map(|(t, _)| *t).collect()));
 
@@ -2772,6 +2827,7 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
         Normal,
         &format!("  {}: {}", strings::get("disc.streams"), meta.streams.len()),
     );
+    let (mut audio_index, mut subtitle_index) = (0, 0);
     for s in &meta.streams {
         match s {
             libfreemkv::Stream::Video(v) => {
@@ -2786,6 +2842,7 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
                 );
             }
             libfreemkv::Stream::Audio(a) => {
+                audio_index += 1;
                 let mut tags: Vec<String> = Vec::new();
                 if let Some(key) = audio_purpose_key(a.purpose) {
                     tags.push(strings::get(key));
@@ -2804,7 +2861,7 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
                 out.raw(
                     Normal,
                     &format!(
-                        "    {} {} {}{}",
+                        "    {audio_index}. {} {} {}{}",
                         a.codec,
                         a.channels,
                         sanitize(&a.language),
@@ -2813,9 +2870,14 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
                 );
             }
             libfreemkv::Stream::Subtitle(s) => {
+                subtitle_index += 1;
                 out.raw(
                     Normal,
-                    &format!("    {} {}", s.codec, sanitize(&s.language)),
+                    &format!(
+                        "    {subtitle_index}. {} {}",
+                        s.codec,
+                        sanitize(&s.language)
+                    ),
                 );
             }
         }
