@@ -5,7 +5,7 @@
 
 OUT_DIR gets BDMV/{index.bdmv, PLAYLIST, CLIPINF, STREAM}: two playlists (a 2:17:00 main
 title and a 12:30 extra) over one LPCM clip of real TS/PES packets, so the app's title tree
-shows two titles with a Length and a Size. No disc data: every byte is generated here, the
+shows two titles with a Length, a Size and 24 chapters each (enough to recycle rows). No disc data: every byte is generated here, the
 same layout as `src/ku_fixture.rs` (after freemkv-engine's `test_fixtures`), without AACS.
 """
 
@@ -30,7 +30,11 @@ def mpls(clip, secs):
     item += stn
     pl = bytes(6) + struct.pack(">H", 1) + bytes(2) + struct.pack(">H", len(item)) + item
     pl = struct.pack(">I", len(pl) - 4) + pl[4:]
-    return b"MPLS0200" + struct.pack(">I", 40) + bytes(28) + pl
+    marks = b"".join(struct.pack(">BBHIHI", 0, 1, 0,
+                                 45_000 * (1 + n * secs // 24), AUDIO_PID, 0)
+                     for n in range(24))
+    marks = struct.pack(">IH", len(marks) + 2, 24) + marks
+    return b"MPLS0200" + struct.pack(">II", 40, 40 + len(pl)) + bytes(24) + pl + marks
 
 
 def clpi(source_packets):

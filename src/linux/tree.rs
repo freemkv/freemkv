@@ -1,5 +1,5 @@
 //! The title tree: a `GtkColumnView` over a `GtkTreeListModel`, with a
-//! tri-state tick box in the expander column and then the core's `tree_columns`.
+//! one hierarchical Item cell (branches, expander, tick and label), plus metadata columns.
 //! Rows are the core's `View::title_rows`; a click only reports WHICH row — the
 //! cascade and direction are the core's.
 
@@ -17,12 +17,14 @@ type RowFn = Rc<dyn Fn(usize)>;
 
 /// The core's column widths are macOS points; GTK's larger UI font and cell padding need more.
 const WIDTH_SCALE: f64 = 1.2;
+const INDENT: i32 = 20;
 
 /// One tick box currently bound to a row, and the handler that reports it.
 struct Bound {
     idx: usize,
     check: glib::WeakRef<gtk::CheckButton>,
     handler: glib::SignalHandlerId,
+    expansion: Option<(gtk::TreeListRow, glib::SignalHandlerId)>,
 }
 
 pub(super) struct TitleTree {
@@ -31,6 +33,7 @@ pub(super) struct TitleTree {
     rows: Rc<RefCell<Vec<Row>>>,
     kids: Rc<RefCell<Vec<Vec<usize>>>>,
     bound: Rc<RefCell<Vec<Bound>>>,
+    branches: Rc<RefCell<Vec<Vec<bool>>>>,
     /// The row to bring into view after the next layout, of how many.
     scroll_to: Rc<Cell<Option<(usize, usize)>>>,
 }
@@ -87,12 +90,32 @@ fn text_column(rows: &Rc<RefCell<Vec<Row>>>, col: &crate::ui::Column) -> gtk::Co
     c
 }
 
+// Recover only widgets owned by this factory; bind/unbind always use the same layout.
+fn tree_cell(
+    li: &gtk::ListItem,
+) -> Option<(
+    gtk::Overlay,
+    gtk::TreeExpander,
+    gtk::CheckButton,
+    gtk::Label,
+    gtk::DrawingArea,
+)> {
+    let overlay = li.child()?.downcast::<gtk::Overlay>().ok()?;
+    let exp = overlay.child()?.downcast::<gtk::TreeExpander>().ok()?;
+    let content = exp.child()?;
+    let check = content.first_child()?.downcast::<gtk::CheckButton>().ok()?;
+    let label = content.last_child()?.downcast::<gtk::Label>().ok()?;
+    let lines = overlay.last_child()?.downcast::<gtk::DrawingArea>().ok()?;
+    Some((overlay, exp, check, label, lines))
+}
+
 impl TitleTree {
     pub(super) fn new(on_select: RowFn, on_toggle: RowFn) -> Self {
         let rows: Rc<RefCell<Vec<Row>>> = Rc::default();
         let kids: Rc<RefCell<Vec<Vec<usize>>>> = Rc::default();
         let bound: Rc<RefCell<Vec<Bound>>> = Rc::default();
 
+        let branches: Rc<RefCell<Vec<Vec<bool>>>> = Rc::default();
         let selection = gtk::SingleSelection::new(None::<gio::ListModel>);
         selection.set_autoselect(false);
         selection.set_can_unselect(true);
@@ -104,56 +127,172 @@ impl TitleTree {
 
         let view = gtk::ColumnView::new(Some(selection.clone()));
         view.set_show_row_separators(false);
+        view.add_css_class("title-tree");
+        // The branch canvas must reach the next row, including selected rows.
+        let css = gtk::CssProvider::new();
+        css.load_from_data(".title-tree row cell { padding-top: 0; padding-bottom: 0; }");
+        gtk::style_context_add_provider_for_display(
+            &view.display(),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
 
-        // Expander + tick box. The toggle handler is connected per bind and
-        // removed per unbind, so a recycled widget never reports a stale row.
+        // Keep the label inside the native expander: its keyboard actions and
+        // accessibility remain GTK's, while the whole Item cell follows depth.
         let f = gtk::SignalListItemFactory::new();
         f.connect_setup(|_, li| {
             let Some(li) = li.downcast_ref::<gtk::ListItem>() else {
                 return;
             };
             let exp = gtk::TreeExpander::new();
-            exp.set_child(Some(&gtk::CheckButton::new()));
-            li.set_child(Some(&exp));
+            exp.set_indent_for_depth(false);
+            exp.set_indent_for_icon(true);
+            exp.set_hexpand(true);
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let check = gtk::CheckButton::new();
+            content.append(&check);
+            let label = gtk::Label::new(None);
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            content.append(&label);
+            exp.set_child(Some(&content));
+            let overlay = gtk::Overlay::new();
+            overlay.set_height_request(36);
+            overlay.set_child(Some(&exp));
+            let lines = gtk::DrawingArea::new();
+            lines.set_can_target(false);
+            overlay.add_overlay(&lines);
+            li.set_child(Some(&overlay));
         });
-        let (b_rows, b_bound) = (rows.clone(), bound.clone());
+        let (b_rows, b_bound, b_branches) = (rows.clone(), bound.clone(), branches.clone());
         f.connect_bind(move |_, li| {
             let Some(li) = li.downcast_ref::<gtk::ListItem>() else {
                 return;
             };
-            let Some(exp) = li.child().and_downcast::<gtk::TreeExpander>() else {
+            let Some((overlay, exp, cb, label, lines)) = tree_cell(li) else {
                 return;
             };
             let tlr = li.item().and_downcast::<gtk::TreeListRow>();
             exp.set_list_row(tlr.as_ref());
-            let (Some(idx), Some(cb)) = (
-                row_index(li.item()),
-                exp.child().and_downcast::<gtk::CheckButton>(),
-            ) else {
+            let Some(idx) = row_index(li.item()) else {
                 return;
             };
-            let state = b_rows.borrow().get(idx).and_then(|r| r.check);
-            cb.set_visible(state.is_some());
-            // A mirror row (the MPEG-2 extension) shows its base's tick, disabled.
-            cb.set_sensitive(b_rows.borrow().get(idx).is_some_and(|r| r.check_enabled));
-            if let Some(s) = state {
+            let rows = b_rows.borrow();
+            let Some(row) = rows.get(idx) else {
+                return;
+            };
+            let depth = tlr.as_ref().map_or(0, |r| r.depth()) as i32;
+            exp.set_margin_start(depth * INDENT);
+            label.set_text(row.cell("item"));
+            label.set_tooltip_text(Some(row.cell("item")));
+            // Reserve the checkbox slot even for non-selectable rows, so labels
+            // at the same depth stay aligned (video, audio, subtitles, chapters).
+            cb.set_opacity(if row.check.is_some() { 1.0 } else { 0.0 });
+            cb.set_sensitive(row.check.is_some() && row.check_enabled);
+            cb.set_focusable(row.check.is_some() && row.check_enabled);
+            cb.update_property(&[gtk::accessible::Property::Label(row.cell("item"))]);
+            if let Some(s) = row.check {
                 paint(&cb, s);
             }
+            let path = b_branches.borrow().get(idx).cloned().unwrap_or_default();
+            let weak_exp = exp.downgrade();
+            let weak_overlay = overlay.downgrade();
+            lines.set_draw_func(move |area, cr, width, height| {
+                let (Some(exp), Some(overlay)) = (weak_exp.upgrade(), weak_overlay.upgrade())
+                else {
+                    return;
+                };
+                let Some(content) = exp.child() else {
+                    return;
+                };
+                let (Some(e), Some(c)) = (
+                    exp.compute_bounds(&overlay),
+                    content.compute_bounds(&overlay),
+                ) else {
+                    return;
+                };
+                let rtl = exp.direction() == gtk::TextDirection::Rtl;
+                // Measure the native arrow slot rather than assuming its size:
+                // the theme, font and display scale may all change it.
+                let arrow = if rtl {
+                    (e.x() + e.width() - c.x() - c.width()) / 2.0
+                } else {
+                    (c.x() - e.x()) / 2.0
+                } as f64;
+                let x = |level: usize| {
+                    let p = level as f64 * INDENT as f64 + arrow;
+                    if rtl { width as f64 - p } else { p }
+                };
+                let h = height as f64;
+                let middle = h / 2.0;
+                let color = area.color();
+                cr.set_source_rgba(
+                    color.red() as f64,
+                    color.green() as f64,
+                    color.blue() as f64,
+                    0.38,
+                );
+                cr.set_line_width(1.0);
+                let segment = |x1: f64, y1: f64, x2: f64, y2: f64| {
+                    cr.move_to(x1.floor() + 0.5, y1);
+                    cr.line_to(x2.floor() + 0.5, y2);
+                };
+                let depth = depth as usize;
+                for level in 1..depth {
+                    if path.get(level).copied().unwrap_or(false) {
+                        segment(x(level - 1), 0.0, x(level - 1), h);
+                    }
+                }
+                if depth > 0 {
+                    let parent = x(depth - 1);
+                    let bottom = if path.last().copied().unwrap_or(false) {
+                        h
+                    } else {
+                        middle
+                    };
+                    segment(parent, 0.0, parent, bottom);
+                    let gap = if exp.list_row().is_some_and(|r| r.is_expandable()) {
+                        8.0
+                    } else {
+                        0.0
+                    };
+                    segment(
+                        parent,
+                        middle,
+                        x(depth) + if rtl { gap } else { -gap },
+                        middle,
+                    );
+                }
+                if exp.list_row().is_some_and(|r| r.is_expanded()) {
+                    segment(x(depth), middle + 8.0, x(depth), h);
+                }
+                let _ = cr.stroke();
+            });
             let tog = on_toggle.clone();
             let handler = cb.connect_toggled(move |_| tog(idx));
+            let expansion = tlr.map(|row| {
+                let weak = lines.downgrade();
+                let handler = row.connect_expanded_notify(move |_| {
+                    if let Some(lines) = weak.upgrade() {
+                        lines.queue_draw();
+                    }
+                });
+                (row, handler)
+            });
             b_bound.borrow_mut().push(Bound {
                 idx,
                 check: cb.downgrade(),
                 handler,
+                expansion,
             });
         });
         let u_bound = bound.clone();
         f.connect_unbind(move |_, li| {
-            let Some(cb) = li
-                .downcast_ref::<gtk::ListItem>()
-                .and_then(|li| li.child().and_downcast::<gtk::TreeExpander>())
-                .and_then(|e| e.child().and_downcast::<gtk::CheckButton>())
-            else {
+            let Some(li) = li.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some((_, exp, cb, _, lines)) = tree_cell(li) else {
                 return;
             };
             let mut b = u_bound.borrow_mut();
@@ -163,13 +302,23 @@ impl TitleTree {
             {
                 let gone = b.remove(pos);
                 cb.disconnect(gone.handler);
+                if let Some((row, handler)) = gone.expansion {
+                    row.disconnect(handler);
+                }
             }
+            exp.set_list_row(None::<&gtk::TreeListRow>);
+            lines.unset_draw_func();
         });
-        let check_col = gtk::ColumnViewColumn::new(None, Some(f));
-        check_col.set_fixed_width(96);
-        view.append_column(&check_col);
         for col in crate::ui::tree_columns() {
-            view.append_column(&text_column(&rows, &col));
+            if col.id == "item" {
+                let item = gtk::ColumnViewColumn::new(Some(&col.title), Some(f.clone()));
+                // Reuse the former checkbox column's space, now as part of Item.
+                item.set_fixed_width((col.width * WIDTH_SCALE).round() as i32 + 96);
+                item.set_resizable(true);
+                view.append_column(&item);
+            } else {
+                view.append_column(&text_column(&rows, &col));
+            }
         }
 
         let widget = gtk::ScrolledWindow::builder()
@@ -184,6 +333,7 @@ impl TitleTree {
             rows,
             kids,
             bound,
+            branches,
             scroll_to: Rc::default(),
         }
     }
@@ -193,6 +343,19 @@ impl TitleTree {
     pub(super) fn rebuild(&self, rows: &[Row]) {
         *self.rows.borrow_mut() = rows.to_vec();
         let (roots, kids) = glue::tree_shape(rows);
+        // Each path says whether a node at that depth has a following sibling.
+        // Hidden descendants never affect the last-child elbow of their parent.
+        fn paths(ids: &[usize], kids: &[Vec<usize>], prefix: &[bool], out: &mut [Vec<bool>]) {
+            for (position, &idx) in ids.iter().enumerate() {
+                let mut path = prefix.to_vec();
+                path.push(position + 1 < ids.len());
+                out[idx] = path.clone();
+                paths(&kids[idx], kids, &path, out);
+            }
+        }
+        let mut branches = vec![Vec::new(); rows.len()];
+        paths(&roots, &kids, &[], &mut branches);
+        *self.branches.borrow_mut() = branches;
         *self.kids.borrow_mut() = kids;
         let store = |ids: &[usize]| {
             let s = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -276,7 +439,15 @@ impl TitleTree {
             else {
                 continue;
             };
+            cb.block_signal(&b.handler);
             paint(&cb, state);
+            cb.unblock_signal(&b.handler);
         }
     }
 }
+
+#[cfg(debug_assertions)]
+#[path = "tree_visual_gate.rs"]
+mod visual;
+#[cfg(debug_assertions)]
+pub(super) use visual::start as visual_gate;

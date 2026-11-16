@@ -681,7 +681,7 @@ jobs:
           name: "gui-gate-${{ matrix.os }}"
           path: |
             ${{ runner.temp }}/gui-gate/*/*.png
-            ${{ runner.temp }}/gui-gate/*/gate.txt
+            ${{ runner.temp }}/gui-gate/*/*gate.txt
           overwrite: true
           if-no-files-found: warn
 

@@ -44,6 +44,22 @@ fn run(shell: &Rc<Shell>, dir: String) {
     let g = Rc::new(RefCell::new(Gate::default()));
     titles(shell, &dir, &mut g.borrow_mut());
 
+    let Some(main) = shell.main.borrow().clone() else {
+        g.borrow_mut().check("tree-present", false, "no main view");
+        return finish(&dir, &g.borrow());
+    };
+    let me = shell.clone();
+    super::tree::visual_gate(&main.tree, dir.clone(), move |ok| {
+        g.borrow_mut().check(
+            "tree-visual-scenarios",
+            ok,
+            "see tree-gate.txt and tree-*.png",
+        );
+        run_after_tree(&me, dir, g);
+    });
+}
+
+fn run_after_tree(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
     let root: gtk::Widget = shell.window.clone().upcast();
     let rows = chooser_rows(&root);
     g.borrow_mut().check(
