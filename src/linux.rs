@@ -6,6 +6,7 @@
 //! File/URI operations use GTK portal-aware APIs for Flatpak compatibility.
 
 // qa's GUI gate (FMKV_GATE), a debug-build hook like FMKV_OPEN.
+mod chooser;
 #[cfg(debug_assertions)]
 mod gate;
 mod main_view;
@@ -57,7 +58,8 @@ pub(crate) struct Shell {
     app: RefCell<App>,
     gapp: adw::Application,
     window: adw::ApplicationWindow,
-    menu_btn: gtk::MenuButton,
+    menu_list: gtk::ListBox,
+    menu_btn: gtk::ToggleButton,
     toast_overlay: adw::ToastOverlay,
     main: RefCell<Option<Rc<main_view::MainView>>>,
     memo: RefCell<main_view::Memo>,
@@ -88,12 +90,38 @@ fn build_ui(gapp: &adw::Application) {
 
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
-    let menu_btn = gtk::MenuButton::builder()
+    let menu_btn = gtk::ToggleButton::builder()
         .icon_name("open-menu-symbolic")
-        .primary(true)
+        .tooltip_text("Menu")
         .build();
     header.pack_end(&menu_btn);
     toolbar.add_top_bar(&header);
+    let menu_list = gtk::ListBox::new();
+    menu_list.set_selection_mode(gtk::SelectionMode::None);
+    menu_list.add_css_class("boxed-list");
+    menu_list.set_widget_name("application-menu");
+    let menu_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .max_content_height(400)
+        .propagate_natural_height(true)
+        .child(&menu_list)
+        .visible(false)
+        .build();
+    let panel = menu_scroll.clone();
+    menu_btn.connect_toggled(move |button| panel.set_visible(button.is_active()));
+    let keys = gtk::EventControllerKey::new();
+    let close_menu = menu_btn.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gdk::Key::Escape {
+            close_menu.set_active(false);
+            close_menu.grab_focus();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    menu_scroll.add_controller(keys);
+    toolbar.add_top_bar(&menu_scroll);
     let toast_overlay = adw::ToastOverlay::new();
     toolbar.set_content(Some(&toast_overlay));
     window.set_content(Some(&toolbar));
@@ -103,6 +131,7 @@ fn build_ui(gapp: &adw::Application) {
         gapp: gapp.clone(),
         window: window.clone(),
         menu_btn,
+        menu_list,
         toast_overlay,
         main: RefCell::new(None),
         memo: RefCell::new(main_view::Memo::default()),
@@ -263,8 +292,14 @@ impl Shell {
         // The log item names the action it will perform, so the menu is
         // rebuilt whenever that label changes.
         if *self.menu_label.borrow() != v.log_menu_label {
-            self.menu_btn
-                .set_menu_model(Some(&build_menu_model(v.log_hidden)));
+            while let Some(child) = self.menu_list.first_child() {
+                self.menu_list.remove(&child);
+            }
+            append_menu_rows(
+                &build_menu_model(v.log_hidden).upcast(),
+                &self.menu_btn,
+                &|row| self.menu_list.append(row),
+            );
             *self.menu_label.borrow_mut() = v.log_menu_label.clone();
         }
         if let Some(p) = self.prefs.borrow().as_ref() {
@@ -506,6 +541,18 @@ impl Shell {
     }
 
     fn install_actions(self: &Rc<Self>) {
+        // Preserve the primary-menu keyboard entry point after replacing MenuButton.
+        let menu = gio::SimpleAction::new("menu", None);
+        let weak = Rc::downgrade(self);
+        menu.connect_activate(move |_, _| {
+            let Some(me) = weak.upgrade() else { return };
+            me.menu_btn.set_active(!me.menu_btn.is_active());
+            if me.menu_btn.is_active() {
+                me.menu_list.child_focus(gtk::DirectionType::TabForward);
+            }
+        });
+        self.gapp.add_action(&menu);
+        self.gapp.set_accels_for_action("app.menu", &["F10"]);
         let mut installed = Vec::new();
         for (name, ma) in glue::ACTIONS {
             let action = gio::SimpleAction::new(name, None);
@@ -735,6 +782,61 @@ fn build_menu_model(log_hidden: bool) -> gio::Menu {
     menu.append_section(None, &submenus);
     menu.append_section(None, &app);
     menu
+}
+
+/// Render the existing action model using the same inline rows as selections.
+/// Commands remain GtkActionable buttons: sensitivity, shortcuts and dispatch
+/// still come from the application's registered actions.
+fn append_menu_rows(
+    model: &gio::MenuModel,
+    toggle: &gtk::ToggleButton,
+    add: &dyn Fn(&gtk::Widget),
+) {
+    for index in 0..model.n_items() {
+        let text = |name: &str| {
+            model
+                .item_attribute_value(index, name, None)
+                .and_then(|v| v.get::<String>())
+                .unwrap_or_default()
+        };
+        if let Some(section) = model.item_link(index, "section") {
+            append_menu_rows(&section, toggle, add);
+        } else if let Some(submenu) = model.item_link(index, "submenu") {
+            let row = chooser::expander(&text("label"));
+            append_menu_rows(&submenu, toggle, &|child| row.add_row(child));
+            add(row.upcast_ref());
+        } else {
+            let action = text("action");
+            if action.is_empty() {
+                continue;
+            }
+            let button = gtk::Button::from_icon_name("go-next-symbolic");
+            button.add_css_class("flat");
+            button.set_valign(gtk::Align::Center);
+            button.set_action_name(Some(&action));
+            let label = text("label");
+            button.set_tooltip_text(Some(&label));
+            let row = adw::ActionRow::builder()
+                .title(&label)
+                .use_markup(false)
+                .activatable_widget(&button)
+                .build();
+            row.set_title_lines(0);
+            row.add_css_class("freemkv-command");
+            let accel = text("accel");
+            if !accel.is_empty() {
+                if let Some((key, mods)) = gtk::accelerator_parse(&accel) {
+                    row.add_suffix(&gtk::Label::new(Some(&gtk::accelerator_get_label(
+                        key, mods,
+                    ))));
+                }
+            }
+            row.add_suffix(&button);
+            let toggle = toggle.clone();
+            button.connect_clicked(move |_| toggle.set_active(false));
+            add(row.upcast_ref());
+        }
+    }
 }
 
 // Text for GtkBuilder XML: the five predefined entities.

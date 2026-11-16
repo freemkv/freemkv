@@ -7,18 +7,21 @@ use gtk4 as gtk;
 use gtk4::prelude::*;
 
 use super::Shell;
+use super::chooser::{self, Choice};
 use crate::ui::{DetailField, DetailsView, PickEntry, PickView};
+use libadwaita as adw;
+use libadwaita::prelude::*;
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 type Shown = Rc<RefCell<Option<PickView>>>;
 
-/// A menu button whose popover lists the core's entries as tick boxes. It stays open, so
+/// An inline chooser listing the core's entries as tick boxes. It stays open, so
 /// several languages can be ticked in one go.
 struct PickMenu {
-    button: gtk::MenuButton,
-    list: gtk::Box,
+    row: adw::ExpanderRow,
+    rows: RefCell<Vec<adw::ActionRow>>,
     checks: RefCell<Vec<gtk::CheckButton>>,
     /// The entries' labels, tags and separators the list was built from.
     shape: RefCell<Vec<(String, isize, bool)>>,
@@ -27,16 +30,9 @@ struct PickMenu {
 
 impl PickMenu {
     fn new(on_pick: Rc<dyn Fn(isize)>) -> Self {
-        let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        let popover = gtk::Popover::new();
-        popover.set_child(Some(&list));
-        let button = gtk::MenuButton::builder()
-            .popover(&popover)
-            .always_show_arrow(true)
-            .build();
         PickMenu {
-            button,
-            list,
+            row: chooser::expander(""),
+            rows: RefCell::default(),
             checks: RefCell::default(),
             shape: RefCell::default(),
             on_pick,
@@ -46,25 +42,26 @@ impl PickMenu {
     /// Show the closed label and the entries, rebuilding the list only when the entries
     /// themselves changed; otherwise just the ticks.
     fn fill(&self, summary: &str, entries: &[PickEntry]) {
-        self.button.set_label(summary);
+        self.row.set_subtitle(summary);
         let shape: Vec<_> = entries
             .iter()
             .map(|e| (e.label.clone(), e.tag, e.separator_before))
             .collect();
         if *self.shape.borrow() != shape {
-            while let Some(c) = self.list.first_child() {
-                self.list.remove(&c);
+            for row in self.rows.borrow_mut().drain(..) {
+                self.row.remove(&row);
             }
             let mut checks = Vec::new();
             for e in entries {
+                let cb = gtk::CheckButton::new();
+                let row = chooser::option(&e.label, &cb);
                 if e.separator_before {
-                    self.list
-                        .append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+                    row.add_css_class("separator");
                 }
-                let cb = gtk::CheckButton::with_label(&e.label);
                 let (on_pick, tag) = (self.on_pick.clone(), e.tag);
                 cb.connect_toggled(move |_| on_pick(tag));
-                self.list.append(&cb);
+                self.row.add_row(&row);
+                self.rows.borrow_mut().push(row);
                 checks.push(cb);
             }
             *self.checks.borrow_mut() = checks;
@@ -86,7 +83,7 @@ impl PickMenu {
 pub(super) struct PickBar {
     pub widget: gtk::Box,
     titles_list: gtk::StringList,
-    titles_drop: gtk::DropDown,
+    titles_drop: Rc<Choice>,
     audio: PickMenu,
     subs: PickMenu,
     /// Why the ticks need checking.
@@ -110,7 +107,7 @@ impl PickBar {
         let shown: Shown = Rc::default();
 
         let titles_list = gtk::StringList::new(&[]);
-        let titles_drop = gtk::DropDown::new(Some(titles_list.clone()), gtk::Expression::NONE);
+        let titles_drop = Choice::new(&crate::ui::pick_labels()[0], &titles_list);
         let (me, sh) = (shell.clone(), shown.clone());
         titles_drop.connect_selected_notify(move |d| {
             if me.painting.get() {
@@ -146,11 +143,13 @@ impl PickBar {
             }
         }));
 
-        let [t, a, s] = crate::ui::pick_labels();
-        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 24);
-        widget.append(&labelled(&t, &titles_drop));
-        widget.append(&labelled(&a, &audio.button));
-        widget.append(&labelled(&s, &subs.button));
+        let [_, a, s] = crate::ui::pick_labels();
+        audio.row.set_title(&a);
+        subs.row.set_title(&s);
+        let widget = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        widget.append(&chooser::surface(&titles_drop.row));
+        widget.append(&chooser::surface(&audio.row));
+        widget.append(&chooser::surface(&subs.row));
         let banner = gtk::Label::new(None);
         banner.add_css_class("warning");
         banner.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -210,7 +209,7 @@ pub(super) struct DetailsBar {
     pub widget: gtk::Box,
     entries: Vec<(DetailField, gtk::Entry)>,
     kinds_list: gtk::StringList,
-    kinds_drop: gtk::DropDown,
+    kinds_drop: Rc<Choice>,
 }
 
 impl DetailsBar {
@@ -238,7 +237,7 @@ impl DetailsBar {
             entry(DetailField::FirstEpisode, 4),
         ];
         let kinds_list = gtk::StringList::new(&[]);
-        let kinds_drop = gtk::DropDown::new(Some(kinds_list.clone()), gtk::Expression::NONE);
+        let kinds_drop = Choice::new(&kind, &kinds_list);
         let me = shell.clone();
         kinds_drop.connect_selected_notify(move |d| {
             if me.painting.get() {
@@ -247,13 +246,15 @@ impl DetailsBar {
             let at = d.selected() as usize;
             me.apply(|a| a.set_detail_kind(at));
         });
-        let widget = gtk::Box::new(gtk::Orientation::Horizontal, 18);
-        widget.append(&labelled(&name, &entries[0].1));
-        widget.append(&labelled(&year, &entries[1].1));
-        widget.append(&labelled(&kind, &kinds_drop));
-        widget.append(&labelled(&season, &entries[2].1));
-        widget.append(&labelled(&disc, &entries[3].1));
-        widget.append(&labelled(&first, &entries[4].1));
+        let widget = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let fields = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+        fields.append(&labelled(&name, &entries[0].1));
+        fields.append(&labelled(&year, &entries[1].1));
+        fields.append(&labelled(&season, &entries[2].1));
+        fields.append(&labelled(&disc, &entries[3].1));
+        fields.append(&labelled(&first, &entries[4].1));
+        widget.append(&fields);
+        widget.append(&chooser::surface(&kinds_drop.row));
         widget.set_visible(false);
         DetailsBar {
             widget,

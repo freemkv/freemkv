@@ -11,6 +11,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use super::Shell;
+use super::chooser::{self, Choice};
 use crate::linux_glue::{self as glue, row_title};
 use crate::ui::Cmd;
 
@@ -29,7 +30,7 @@ struct LangRow {
 
 impl LangRow {
     fn new(title: &str) -> Rc<Self> {
-        let row = adw::ExpanderRow::builder().title(row_title(title)).build();
+        let row = chooser::expander(&row_title(title));
         Rc::new(LangRow {
             row,
             value: RefCell::new(String::new()),
@@ -41,15 +42,11 @@ impl LangRow {
     fn add_code(self: &Rc<Self>, code: &str) {
         let cb = gtk::CheckButton::new();
         // Plain text: an unknown stored tag is shown verbatim, `&` and all.
-        let r = adw::ActionRow::builder()
-            .use_markup(false)
-            .title(crate::ui::lang_display_name(code))
-            .activatable_widget(&cb)
-            .build();
-        r.add_prefix(&cb);
-        let me = self.clone();
+        let r = chooser::option(&crate::ui::lang_display_name(code), &cb);
+        let weak = Rc::downgrade(self);
         let c = code.to_string();
         cb.connect_toggled(move |_| {
+            let Some(me) = weak.upgrade() else { return };
             if me.painting.get() {
                 return;
             }
@@ -72,8 +69,7 @@ impl LangRow {
             }
         }
         *self.value.borrow_mut() = stored.to_string();
-        self.row
-            .set_subtitle(&glib::markup_escape_text(&crate::ui::lang_summary(stored)));
+        self.row.set_subtitle(&crate::ui::lang_summary(stored));
         self.painting.set(true);
         for (code, cb) in self.checks.borrow().iter() {
             cb.set_active(crate::ui::lang_is_selected(stored, code));
@@ -86,7 +82,7 @@ pub(super) struct Prefs {
     window: adw::PreferencesWindow,
     entries: Vec<(&'static str, adw::EntryRow)>,
     switches: Vec<(&'static str, adw::SwitchRow)>,
-    combos: Vec<(&'static str, adw::ComboRow)>,
+    combos: Vec<(&'static str, Rc<Choice>)>,
     langs: Vec<(&'static str, Rc<LangRow>)>,
     keydb_row: adw::ActionRow,
     /// Test was pressed: the key-service verdict is toasted when it lands.
@@ -99,7 +95,7 @@ pub(super) struct Prefs {
 struct Form {
     entries: Vec<(&'static str, adw::EntryRow)>,
     switches: Vec<(&'static str, adw::SwitchRow)>,
-    combos: Vec<(&'static str, adw::ComboRow)>,
+    combos: Vec<(&'static str, Rc<Choice>)>,
     langs: Vec<(&'static str, Rc<LangRow>)>,
 }
 
@@ -116,49 +112,6 @@ fn group(title: &str, desc: Option<&str>) -> adw::PreferencesGroup {
         grp.set_description(Some(&glib::markup_escape_text(d)));
     }
     grp
-}
-
-/// A dropdown popup row for a `GtkStringList`: the label wraps instead of
-/// ellipsizing, with a tick on the current choice as the default list has.
-fn wrapping_list_factory() -> gtk::SignalListItemFactory {
-    let f = gtk::SignalListItemFactory::new();
-    f.connect_setup(|_, obj| {
-        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let label = gtk::Label::new(None);
-        label.set_xalign(0.0);
-        label.set_hexpand(true);
-        label.set_wrap(true);
-        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        label.set_max_width_chars(48);
-        let tick = gtk::Image::from_icon_name("object-select-symbolic");
-        item.bind_property("selected", &tick, "opacity")
-            .transform_to(|_, sel: bool| Some(if sel { 1.0_f64 } else { 0.0 }))
-            .sync_create()
-            .build();
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row.append(&label);
-        row.append(&tick);
-        item.set_child(Some(&row));
-    });
-    f.connect_bind(|_, obj| {
-        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let text = item
-            .item()
-            .and_downcast::<gtk::StringObject>()
-            .map(|s| s.string());
-        let label = item
-            .child()
-            .and_then(|row| row.first_child())
-            .and_downcast::<gtk::Label>();
-        if let (Some(label), Some(text)) = (label, text) {
-            label.set_text(&text);
-        }
-    });
-    f
 }
 
 impl Form {
@@ -188,32 +141,22 @@ impl Form {
         self.switches.push((key, r));
     }
 
-    fn combo(
-        &mut self,
-        grp: &adw::PreferencesGroup,
-        key: &'static str,
-        label: &str,
-    ) -> adw::ComboRow {
+    fn combo(&mut self, grp: &adw::PreferencesGroup, key: &'static str, label: &str) -> Rc<Choice> {
         let labels: Vec<String> = glue::settings_options(key)
             .into_iter()
             .map(|(_, l)| l)
             .collect();
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        // The choice shows in full under the title, and the popup wraps long
-        // labels: the default factory cuts both at about 20 characters.
-        let r = adw::ComboRow::builder()
-            .title(row_title(label))
-            .model(&gtk::StringList::new(&refs))
-            .use_subtitle(true)
-            .list_factory(&wrapping_list_factory())
-            .build();
-        grp.add(&r);
+        let r = Choice::new(&row_title(label), &gtk::StringList::new(&refs));
+        r.row.set_widget_name(key);
+        grp.add(&r.row);
         self.combos.push((key, r.clone()));
         r
     }
 
     fn langs(&mut self, grp: &adw::PreferencesGroup, key: &'static str, label: &str) {
         let l = LangRow::new(label);
+        l.row.set_widget_name(key);
         grp.add(&l.row);
         self.langs.push((key, l));
     }

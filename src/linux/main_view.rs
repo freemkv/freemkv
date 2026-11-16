@@ -8,6 +8,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 
 use super::Shell;
+use super::chooser::{self, Choice};
 use super::pick_bar::{DetailsBar, PickBar};
 use super::tree::TitleTree;
 use crate::linux_glue::{self as glue, LogDelta, LogMemo};
@@ -32,13 +33,13 @@ pub(super) struct MainView {
     stack: gtk::Stack,
     pick_bar: PickBar,
     details_bar: DetailsBar,
-    tree: TitleTree,
+    pub(super) tree: TitleTree,
     empty: adw::StatusPage,
     open_disc: gtk::Button,
     drive_rows: gtk::Box,
     out_entry: gtk::Entry,
     out_hint: gtk::Label,
-    fmt_drop: gtk::DropDown,
+    fmt_drop: Rc<Choice>,
     fmt_list: gtk::StringList,
     run_btn: gtk::Button,
     eject_btn: gtk::Button,
@@ -183,7 +184,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     browse.connect_clicked(move |_| me.act(Cmd::SetOutput));
 
     let fmt_list = gtk::StringList::new(&[]);
-    let fmt_drop = gtk::DropDown::new(Some(fmt_list.clone()), gtk::Expression::NONE);
+    let fmt_drop = Choice::new(&g("gui.set.default_output"), &fmt_list);
     let me = shell.clone();
     let list = fmt_list.clone();
     fmt_drop.connect_selected_notify(move |d| {
@@ -212,7 +213,6 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     let out_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     out_row.append(&out_entry);
     out_row.append(&browse);
-    out_row.append(&fmt_drop);
     out_row.append(&eject_btn);
     out_row.append(&run_btn);
     let out_head = gtk::Label::new(Some(&g("gui.group.output")));
@@ -225,15 +225,25 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     let output = gtk::Box::new(gtk::Orientation::Vertical, 6);
     output.append(&out_head);
     output.append(&out_row);
+    output.append(&chooser::surface(&fmt_drop.row));
     output.append(&out_hint);
 
     let titles = gtk::Box::new(gtk::Orientation::Vertical, 12);
     titles.append(&details_bar.widget);
     titles.append(&pick_bar.widget);
+    tree.widget.set_min_content_height(360);
     titles.append(&tree.widget);
     titles.append(&output);
     titles.set_vexpand(true);
-    stack.add_named(&titles, Some(glue::page_name(crate::ui::Page::Titles)));
+    let titles_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&titles)
+        .vexpand(true)
+        .build();
+    stack.add_named(
+        &titles_scroll,
+        Some(glue::page_name(crate::ui::Page::Titles)),
+    );
 
     // ── progress page: Information, one or two bars, Cancel ──
     let info_grid = gtk::Grid::new();

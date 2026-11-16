@@ -30,6 +30,9 @@ pub(super) fn start(shell: &Rc<Shell>, dir: String) {
         if me.app.borrow().view().page != Page::Titles && waited < Duration::from_secs(60) {
             return glib::ControlFlow::Continue;
         }
+        if let Some(main) = me.main.borrow().as_ref() {
+            scroll_to(main.tree.widget.upcast_ref());
+        }
         let (me, dir) = (me.clone(), dir.clone());
         glib::timeout_add_local_once(SETTLE, move || run(&me, dir));
         glib::ControlFlow::Break
@@ -41,12 +44,181 @@ fn run(shell: &Rc<Shell>, dir: String) {
     let g = Rc::new(RefCell::new(Gate::default()));
     titles(shell, &dir, &mut g.borrow_mut());
 
-    // Settings, with a destination long enough to be cut off.
-    let mut st = shell.app.borrow().settings_form().clone();
-    st.dest_dir = LONG_DEST.into();
-    super::prefs::show(shell, &st, None);
-    let pages = ["gui.tab.output", "gui.tab.keys", "gui.tab.advanced"];
-    settings_page(dir, g, pages.to_vec());
+    let root: gtk::Widget = shell.window.clone().upcast();
+    let rows = chooser_rows(&root);
+    g.borrow_mut().check(
+        "main-chooser-inventory",
+        rows.len() == 5,
+        format!("{} of 5 selectors", rows.len()),
+    );
+    let me = shell.clone();
+    let next_dir = dir.clone();
+    let next_g = g.clone();
+    chooser_sequence(
+        root,
+        dir,
+        "main".into(),
+        g,
+        rows,
+        0,
+        Box::new(move || {
+            menu_checks(&me, next_dir, next_g);
+        }),
+    );
+}
+
+fn menu_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
+    shell.menu_btn.set_active(true);
+    let me = shell.clone();
+    glib::timeout_add_local_once(SETTLE, move || {
+        let root: gtk::Widget = me.window.clone().upcast();
+        save(&root, &format!("{dir}/menu.png"), &mut g.borrow_mut());
+        let rows = chooser_rows(me.menu_list.upcast_ref());
+        g.borrow_mut().check(
+            "menu-chooser-inventory",
+            rows.len() == 4,
+            format!("{} of 4 submenus", rows.len()),
+        );
+        let next_dir = dir.clone();
+        let next_g = g.clone();
+        chooser_sequence(
+            root,
+            dir,
+            "menu".into(),
+            g,
+            rows,
+            0,
+            Box::new(move || {
+                me.menu_btn.set_active(false);
+                // Settings with a destination long enough to be cut off.
+                let mut st = me.app.borrow().settings_form().clone();
+                st.dest_dir = LONG_DEST.into();
+                super::prefs::show(&me, &st, None);
+                settings_page(
+                    next_dir,
+                    next_g,
+                    vec![
+                        "gui.tab.output",
+                        "gui.tab.selection",
+                        "gui.tab.recovery",
+                        "gui.tab.keys",
+                        "gui.tab.advanced",
+                    ],
+                );
+            }),
+        );
+    });
+}
+
+fn chooser_rows(root: &gtk::Widget) -> Vec<adw::ExpanderRow> {
+    descendants(root)
+        .into_iter()
+        .filter_map(|w| w.downcast::<adw::ExpanderRow>().ok())
+        .filter(|w| w.is_mapped() && w.has_css_class("freemkv-chooser"))
+        .collect()
+}
+
+/// Bring the field to the top of each enclosing viewport, without changing focus
+/// or activating anything. This works for both the main window and Preferences.
+fn scroll_to(widget: &gtk::Widget) {
+    let mut parent = widget.parent();
+    while let Some(w) = parent {
+        if let Some(scroll) = w.downcast_ref::<gtk::ScrolledWindow>() {
+            if let Some(bounds) = widget.compute_bounds(scroll) {
+                let adjustment = scroll.vadjustment();
+                adjustment.set_value(adjustment.value() + f64::from(bounds.y()) - 12.0);
+            }
+        }
+        parent = w.parent();
+    }
+}
+
+/// Expand each real control, measure its option geometry and capture the actual
+/// window. Never infer success from widget types or a nonempty inventory alone.
+fn chooser_sequence(
+    root: gtk::Widget,
+    dir: String,
+    scope: String,
+    g: Rc<RefCell<Gate>>,
+    mut rows: Vec<adw::ExpanderRow>,
+    index: usize,
+    done: Box<dyn FnOnce()>,
+) {
+    if rows.is_empty() {
+        done();
+        return;
+    }
+    let row = rows.remove(0);
+    row.set_expanded(true);
+    glib::timeout_add_local_once(SETTLE, move || {
+        scroll_to(row.upcast_ref());
+        glib::timeout_add_local_once(SETTLE, move || {
+            let options: Vec<_> = descendants(row.upcast_ref())
+                .into_iter()
+                .filter(|w| w.has_css_class("freemkv-choice") || w.has_css_class("freemkv-command"))
+                .collect();
+            let bounds = row.compute_bounds(&root);
+            let header = labels_under(row.upcast_ref())
+                .into_iter()
+                .find(|label| label.text() == row.title());
+            let header_bounds = header.and_then(|label| label.compute_bounds(&root));
+            let below = options
+                .first()
+                .and_then(|option| option.compute_bounds(&root))
+                .zip(header_bounds)
+                .is_some_and(|(option, header)| option.y() >= header.y() + header.height());
+            let full_width = bounds.is_some_and(|bounds| {
+                options.iter().all(|option| {
+                    option
+                        .compute_bounds(&root)
+                        .is_some_and(|b| b.width() >= bounds.width() - 32.0)
+                })
+            });
+            let description = format!(
+                "{scope} #{index}: {:?}, {} options",
+                row.title(),
+                options.len()
+            );
+            {
+                let mut gate = g.borrow_mut();
+                gate.check("chooser-options-present", !options.is_empty(), &description);
+                if row.has_css_class("freemkv-single-choice") {
+                    let active = descendants(row.upcast_ref())
+                        .iter()
+                        .filter_map(|w| w.downcast_ref::<gtk::CheckButton>())
+                        .filter(|check| check.is_active())
+                        .count();
+                    gate.check("chooser-single-selection", active == 1, &description);
+                }
+
+                gate.check("chooser-expands-below", below, &description);
+                gate.check("chooser-options-full-width", full_width, &description);
+                gate.check(
+                    "chooser-options-spacious",
+                    options.iter().all(|w| w.height() >= 40),
+                    &description,
+                );
+                save(
+                    &root,
+                    &format!("{dir}/{scope}-chooser-{index}.png"),
+                    &mut gate,
+                );
+            }
+            // Capture the tail too: long language lists must remain reachable.
+            if let Some(last) = options.last() {
+                scroll_to(last);
+            }
+            glib::timeout_add_local_once(SETTLE, move || {
+                save(
+                    &root,
+                    &format!("{dir}/{scope}-chooser-{index}-tail.png"),
+                    &mut g.borrow_mut(),
+                );
+                row.set_expanded(false);
+                chooser_sequence(root, dir, scope, g, rows, index + 1, done);
+            });
+        });
+    });
 }
 
 // Each page in turn: show it, let it draw, check and capture it; then report and exit.
@@ -64,7 +236,33 @@ fn settings_page(dir: String, g: Rc<RefCell<Gate>>, mut pages: Vec<&'static str>
     win.set_visible_page_name(page);
     glib::timeout_add_local_once(SETTLE, move || {
         settings_checks(&win, page, &dir, &mut g.borrow_mut());
-        settings_page(dir, g, pages);
+        let root: gtk::Widget = win.clone().upcast();
+        let rows = chooser_rows(&root);
+        let expected = match page {
+            "gui.tab.output" => 2,
+            "gui.tab.selection" => 4,
+            "gui.tab.advanced" => 2,
+            _ => 1,
+        };
+        g.borrow_mut().check(
+            "settings-chooser-inventory",
+            rows.len() == expected,
+            format!("{page}: {} of {expected}", rows.len()),
+        );
+        let scope = format!("settings-{}", page.trim_start_matches("gui.tab."));
+        let next_dir = dir.clone();
+        let next_g = g.clone();
+        chooser_sequence(
+            root,
+            dir,
+            scope,
+            g,
+            rows,
+            0,
+            Box::new(move || {
+                settings_page(next_dir, next_g, pages);
+            }),
+        );
     });
 }
 
@@ -148,14 +346,10 @@ fn settings_checks(win: &adw::PreferencesWindow, page: &str, dir: &str, g: &mut 
     // Every dropdown on the page shows its choice in full under its title.
     for row in all
         .iter()
-        .filter_map(|w| w.downcast_ref::<adw::ComboRow>())
+        .filter_map(|w| w.downcast_ref::<adw::ExpanderRow>())
         .filter(|r| r.is_mapped())
     {
-        let choice = row
-            .selected_item()
-            .and_downcast::<gtk::StringObject>()
-            .map(|s| s.string().to_string())
-            .unwrap_or_default();
+        let choice = row.subtitle().map(|s| s.to_string()).unwrap_or_default();
         let label = labels_under(row.upcast_ref())
             .into_iter()
             .find(|l| l.is_mapped() && l.text() == choice);
@@ -255,7 +449,7 @@ fn capture(w: &gtk::Widget) -> Option<(i32, i32, Vec<u8>)> {
     Some((cw, ch, px))
 }
 
-fn save(w: &gtk::Widget, path: &str, g: &mut Gate) {
+pub(super) fn save(w: &gtk::Widget, path: &str, g: &mut Gate) {
     let ok = texture(w).is_some_and(|t| t.save_to_png(path).is_ok());
     g.check("capture", ok, path);
 }
