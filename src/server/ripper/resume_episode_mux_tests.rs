@@ -156,3 +156,27 @@ fn a_saved_image_with_no_key_keeps_the_capture_for_a_later_mux() {
         assert_eq!(std::fs::read(&job.iso).unwrap(), before);
     }
 }
+
+#[test]
+fn an_episode_that_cannot_be_written_is_dropped_and_the_rest_deliver() {
+    let _g = guards();
+    let job = Job::new(2, Some(crate::ku_fixture::K1));
+    std::fs::create_dir(job.dir.join("Show - S01E02.mkv")).unwrap();
+    let outcome = job.run();
+    assert!(outcome.success, "{:?}", outcome.failure_reason);
+    let saved = staging::read_state(&job.dir).unwrap();
+    assert_eq!(saved.outputs.len(), 1, "{:?}", saved.outputs);
+    assert_eq!(saved.outputs[0].filename, "Show - S01E01.mkv");
+}
+
+#[test]
+fn a_primary_output_that_cannot_be_written_fails_and_keeps_the_capture() {
+    let _g = guards();
+    let job = Job::new(1, Some(crate::ku_fixture::K1));
+    std::fs::create_dir(job.dir.join("Show.mkv")).unwrap();
+    let before = std::fs::read(&job.iso).unwrap();
+    let outcome = job.run();
+    assert!(!outcome.success);
+    assert!(outcome.failure_reason.is_some());
+    assert_eq!(std::fs::read(&job.iso).unwrap(), before);
+}

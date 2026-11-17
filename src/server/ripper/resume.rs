@@ -2873,6 +2873,10 @@ mod iso_selection_tests;
 mod episode_mux_tests;
 
 #[cfg(test)]
+#[path = "resume_classify_tests.rs"]
+mod classify_tests;
+
+#[cfg(test)]
 fn resume_production_source() -> String {
     let src = crate::server::util::source_lf(include_str!("resume.rs"));
     let boundary =
