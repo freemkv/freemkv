@@ -1850,6 +1850,9 @@ mod low;
 #[path = "worker_cov_tests.rs"]
 mod cov;
 
+#[path = "worker_cov2_tests.rs"]
+mod cov2;
+
 #[cfg(unix)]
 #[test]
 fn kept_files_are_adopted_once_an_unreadable_queue_file_loads() {
