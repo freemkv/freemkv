@@ -1528,3 +1528,7 @@ fn join(parent: &str, name: &str) -> String {
 #[cfg(test)]
 #[path = "media_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "media_cov_tests.rs"]
+mod cov_tests;
