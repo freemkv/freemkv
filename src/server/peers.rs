@@ -393,3 +393,7 @@ fn relay_events(request: Request, origin: &str) {
 #[cfg(test)]
 #[path = "peers_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "peers_refusal_tests.rs"]
+mod refusal_tests;
