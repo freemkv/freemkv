@@ -49,16 +49,19 @@ class BmpToPng(unittest.TestCase):
 
 class RunEnv(unittest.TestCase):
     def test_every_run_opens_the_fixture_into_the_gate_with_no_drive_probe(self):
-        env = gui_gate.run_env("de", 144, "/fx", "/out", "/profile")
+        env = gui_gate.run_env("de", 144 if os.name == "nt" else 192, "/fx", "/out", "/profile")
         self.assertEqual((env["FMKV_OPEN"], env["FMKV_GATE"], env["FMKV_NO_PROBE"]), ("/fx", "/out", "1"))
         if os.name == "nt":
             self.assertEqual((env["FMKV_SYSTEM_LOCALE"], env["FMKV_DPI"], env["APPDATA"]), ("de", "144", "/profile"))
         else:
-            self.assertEqual((env["LANGUAGE"], env["GDK_DPI_SCALE"], env["XDG_DATA_HOME"]), ("de", "1.5", "/profile"))
+            self.assertEqual((env["LANGUAGE"], env["GDK_SCALE"], env["XDG_DATA_HOME"]), ("de", "2", "/profile"))
+            self.assertEqual(env["LC_ALL"], "de_DE.UTF-8")
+            self.assertEqual(env["FMKV_GATE_LANGUAGE"], "de")
+            self.assertEqual(env["FMKV_GATE_SCALE"], "2")
 
     def test_the_matrix_is_three_languages_at_two_scales(self):
         self.assertEqual(gui_gate.LANGS, ["en", "de", "ar"])
-        self.assertEqual([d * 100 // 96 for d in gui_gate.DPIS], [100, 150])
+        self.assertEqual([d * 100 // 96 for d in gui_gate.DPIS], [100, 150] if os.name == "nt" else [100, 200])
 
 
 class Fixture(unittest.TestCase):
