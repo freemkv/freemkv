@@ -101,6 +101,98 @@ fn environment(shell: &Shell, g: &mut Gate) {
 }
 
 fn run_after_tree(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
+    let me = shell.clone();
+    chooser_activation(
+        shell,
+        g.clone(),
+        Box::new(move || main_chooser_checks(&me, dir, g)),
+    );
+}
+
+/// Exercise the real GTK signal through Choice and into the app, then repaint.
+/// Merely checking the tick/subtitle would miss a disconnected Choice callback.
+fn chooser_activation(shell: &Rc<Shell>, g: Rc<RefCell<Gate>>, done: Box<dyn FnOnce()>) {
+    let root: gtk::Widget = shell.window.clone().upcast();
+    let Some(row) = chooser_rows(&root)
+        .into_iter()
+        .find(|row| row.title() == crate::strings::get("gui.set.default_output"))
+    else {
+        g.borrow_mut().check(
+            "chooser-activation-present",
+            false,
+            "no output-format chooser",
+        );
+        return done();
+    };
+    let checks: Vec<_> = descendants(row.upcast_ref())
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::CheckButton>().ok())
+        .collect();
+    let (original, view) = {
+        let app = shell.app.borrow();
+        (app.format.clone(), app.view())
+    };
+    let formats: Vec<_> = view.formats.into_iter().flatten().collect();
+    // Use an unrestricted container so the probe cannot add mismatch notices
+    // to the fixture's log when it temporarily changes format.
+    let next = formats.iter().position(|format| {
+        *format != view.format && !format.contains("MP4") && !format.contains("MPG")
+    });
+    g.borrow_mut().check(
+        "chooser-activation-present",
+        checks.len() == formats.len() && next.is_some(),
+        format!("{} checkbuttons, {} formats", checks.len(), formats.len()),
+    );
+    let Some(index) = next.filter(|_| checks.len() == formats.len()) else {
+        return done();
+    };
+    let expected = formats[index];
+    let was_expanded = row.is_expanded();
+    row.set_expanded(true);
+    scroll_to(row.upcast_ref());
+    let me = shell.clone();
+    glib::timeout_add_local_once(SETTLE, move || {
+        checks[index].set_active(true);
+        // Force a model-driven repaint even if the callback failed to dispatch.
+        me.render();
+        glib::timeout_add_local_once(SETTLE, move || {
+            {
+                let app = me.app.borrow();
+                g.borrow_mut().check(
+                    "chooser-activation-updates-model",
+                    app.format == expected && app.view().format == expected,
+                    format!("selected {expected:?}, app format {:?}", app.format),
+                );
+            }
+            let active = checks.iter().filter(|check| check.is_active()).count();
+            g.borrow_mut().check(
+                "chooser-activation-single-selection",
+                active == 1
+                    && checks[index].is_active()
+                    && row.subtitle() == crate::ui::format_label(expected),
+                format!("{active} active ticks after repaint, expected {expected:?}"),
+            );
+            // Toggling the current option off must keep that option selected.
+            checks[index].set_active(false);
+            me.render();
+            glib::timeout_add_local_once(SETTLE, move || {
+                let active = checks.iter().filter(|check| check.is_active()).count();
+                g.borrow_mut().check(
+                    "chooser-current-option-stays-selected",
+                    active == 1 && checks[index].is_active() && me.app.borrow().format == expected,
+                    format!("{active} active ticks after toggling the current option"),
+                );
+                // This diagnostic changes only the in-memory format. Restore it
+                // even on failure so the existing captures retain their fixture.
+                me.app_mut(|app| app.format = original);
+                row.set_expanded(was_expanded);
+                glib::timeout_add_local_once(SETTLE, done);
+            });
+        });
+    });
+}
+
+fn main_chooser_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
     let root: gtk::Widget = shell.window.clone().upcast();
     let rows = chooser_rows(&root);
     g.borrow_mut().check(
