@@ -1514,3 +1514,7 @@ pub(crate) fn remux_via_stage(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "deliver_cov_tests.rs"]
+mod cov_tests;
