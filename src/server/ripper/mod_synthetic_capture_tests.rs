@@ -326,3 +326,14 @@ fn a_keyless_multipass_rip_captures_the_image_for_a_deferred_mux() {
     assert_ne!(rip.row.status, "ripping", "{}", rip.row.last_error);
     assert!(!files_ending(&rip.job_path, ".iso").is_empty());
 }
+
+#[test]
+fn a_keyless_online_rip_with_no_key_service_set_is_refused() {
+    let _guard = state_lock();
+    let rip = synthetic_rip("keyless-online", false, false, |c| {
+        c.key_source = "online".into();
+        c.keyserver_url = String::new();
+    });
+    assert_eq!(rip.row.status, "error");
+    assert!(!rip.row.last_error.is_empty());
+}

@@ -180,3 +180,46 @@ fn a_primary_output_that_cannot_be_written_fails_and_keeps_the_capture() {
     assert!(outcome.failure_reason.is_some());
     assert_eq!(std::fs::read(&job.iso).unwrap(), before);
 }
+
+fn remux_cold(job: &Job, device: &str) {
+    let map = freemkv_engine::mapfile_path_for(&job.iso);
+    resume_remux_within(
+        &job.cfg,
+        device,
+        ResumeClass::Remux {
+            iso_path: job.iso.clone(),
+            mapfile_path: map,
+            display_name: "Show".into(),
+            title_confident: None,
+        },
+        std::time::Duration::ZERO,
+        || (),
+    );
+}
+
+#[test]
+fn a_cold_resume_holds_a_job_whose_state_cannot_be_read() {
+    let _g = guards();
+    let job = Job::new(1, Some(crate::ku_fixture::K1));
+    let state = job.dir.join("state.json");
+    std::fs::write(&state, b"{ not json").unwrap();
+    let before = std::fs::read(&job.iso).unwrap();
+    let device = "cold-resume-unreadable";
+    remux_cold(&job, device);
+    assert_eq!(std::fs::read(&state).unwrap(), b"{ not json");
+    assert_eq!(std::fs::read(&job.iso).unwrap(), before);
+    assert!(job.muxed().is_empty());
+    super::super::STATE.lock().unwrap().remove(device);
+}
+
+#[test]
+fn a_cold_resume_of_a_legacy_job_with_no_state_never_loses_the_image() {
+    let _g = guards();
+    let job = Job::new(1, Some(crate::ku_fixture::K1));
+    std::fs::remove_file(job.dir.join("state.json")).unwrap();
+    let device = "cold-resume-legacy";
+    remux_cold(&job, device);
+    assert!(job.iso.exists());
+    assert!(freemkv_engine::mapfile_path_for(&job.iso).exists());
+    super::super::STATE.lock().unwrap().remove(device);
+}

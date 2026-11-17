@@ -245,3 +245,17 @@ fn a_second_request_reuses_the_scan_and_respects_the_worker_owned_image() {
         }
     }
 }
+
+#[test]
+fn an_online_scan_with_no_key_service_set_reports_no_key_without_retrying() {
+    let _guard = state_lock();
+    let s = scan("online-unset", true, false, |c| {
+        c.key_source = "online".into();
+        c.keyserver_url = String::new();
+    });
+    let row = s.row();
+    assert_eq!(row.status, "idle", "{}", row.last_error);
+    assert!(!row.key_status.is_empty());
+    let log = crate::server::log::get_device_log(&s.device, 200).join("\n");
+    assert!(!log.contains("retrying key resolution"), "{log}");
+}
