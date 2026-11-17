@@ -730,7 +730,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - run: pip install reuse==5.1.1
+      - run: pip install reuse==6.3.0
       - run: reuse lint
 
   # Coverage includes the server tests and real GTK widget interactions.
@@ -762,21 +762,18 @@ jobs:
       - uses: taiki-e/install-action@3ce020901a1c1292716d3268bf506c1ae55a84cd # v2
         with:
           tool: cargo-llvm-cov
-      - name: Instrument unit and integration tests
-        run: cargo llvm-cov --workspace --features gui,server --no-report
-        working-directory: freemkv
-      - name: Instrument the desktop app and exercise its real widgets
+      - name: Cover unit tests, server integration and desktop widgets
         shell: bash
         working-directory: freemkv
         run: |
           set -euo pipefail
-          eval "$(cargo llvm-cov show-env --export-prefix)"
+          eval "$(cargo llvm-cov show-env --sh)"
+          cargo llvm-cov clean --workspace
+          cargo test --workspace --features gui,server
           cargo build --features gui,server --bin freemkv
           dbus-run-session -- xvfb-run -a -s '-screen 0 3200x2400x24' \
-            python3 tests/gui_gate.py "$CARGO_TARGET_DIR/debug/freemkv" "$RUNNER_TEMP/coverage-gui"
-      - name: Export combined coverage
-        run: cargo llvm-cov report --lcov --output-path lcov.info
-        working-directory: freemkv
+            python3 tests/gui_gate.py target/debug/freemkv "$RUNNER_TEMP/coverage-gui"
+          cargo llvm-cov report --lcov --output-path lcov.info
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-lcov
