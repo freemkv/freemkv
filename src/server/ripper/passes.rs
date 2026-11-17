@@ -585,3 +585,7 @@ impl freemkv_engine::Sink for ServerPassSink<'_> {
         self.user_halt.load(Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+#[path = "passes_tests.rs"]
+mod tests;
