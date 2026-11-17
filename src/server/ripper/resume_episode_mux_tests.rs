@@ -226,3 +226,78 @@ fn a_cold_resume_of_a_legacy_job_with_no_state_never_loses_the_image() {
     assert!(freemkv_engine::mapfile_path_for(&job.iso).exists());
     super::super::STATE.lock().unwrap().remove(device);
 }
+
+#[test]
+fn a_resume_stopped_before_its_mux_keeps_the_capture() {
+    let _g = guards();
+    let job = Job::new(2, Some(crate::ku_fixture::K1));
+    let device = "resume-stopped-device";
+    let halt = libfreemkv::Halt::new();
+    halt.cancel();
+    super::super::register_halt(device, halt);
+    let before = std::fs::read(&job.iso).unwrap();
+    remux_cold(&job, device);
+    super::super::unregister_halt(device);
+    assert!(job.muxed().is_empty());
+    assert_eq!(std::fs::read(&job.iso).unwrap(), before);
+    super::super::STATE.lock().unwrap().remove(device);
+}
+
+#[test]
+fn a_resume_stopped_while_another_owner_holds_the_job_gives_up_quietly() {
+    let _g = guards();
+    let job = Job::new(1, Some(crate::ku_fixture::K1));
+    let device = "resume-lease-stopped";
+    let lease = staging::job_lease(&job.dir);
+    let _owner = lease.lock().unwrap();
+    let halt = libfreemkv::Halt::new();
+    halt.cancel();
+    super::super::register_halt(device, halt);
+    super::super::test_trace::traced(|| {
+        resume_remux_within(
+            &job.cfg,
+            device,
+            ResumeClass::Remux {
+                iso_path: job.iso.clone(),
+                mapfile_path: freemkv_engine::mapfile_path_for(&job.iso),
+                display_name: "Show".into(),
+                title_confident: Some(true),
+            },
+            std::time::Duration::from_secs(5),
+            || (),
+        )
+    });
+    super::super::unregister_halt(device);
+    let row = super::super::STATE.lock().unwrap().remove(device).unwrap();
+    assert_eq!(row.status, "idle");
+    assert!(job.muxed().is_empty());
+}
+
+#[test]
+fn a_saved_plan_naming_an_output_outside_staging_is_refused() {
+    let _g = guards();
+    let job = Job::new(1, Some(crate::ku_fixture::K1));
+    staging::mutate_state_if_present(&job.dir, |s| s.outputs[0].filename = "../Escape.mkv".into());
+    let device = "resume-escaping-output";
+    remux_cold(&job, device);
+    let row = super::super::STATE.lock().unwrap().remove(device).unwrap();
+    assert_eq!(row.status, "error");
+    assert!(
+        row.last_error.contains("outside its staging folder"),
+        "{}",
+        row.last_error
+    );
+    assert!(!job.dir.parent().unwrap().join("Escape.mkv").exists());
+}
+
+#[test]
+fn an_accepted_loss_is_delivered_and_the_override_spent() {
+    let _g = guards();
+    let job = Job::new(1, Some(crate::ku_fixture::K1));
+    staging::write_accept_loss_marker(&job.dir);
+    assert!(staging::accept_loss_requested(&job.dir));
+    let outcome = job.run();
+    assert!(outcome.success, "{:?}", outcome.failure_reason);
+    assert!(!staging::accept_loss_requested(&job.dir));
+    assert_eq!(job.muxed().len(), 1);
+}
