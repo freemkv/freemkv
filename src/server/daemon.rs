@@ -655,11 +655,15 @@ fn healthcheck_port(raw: Option<&str>) -> u16 {
 
 // Probe the local HTTP API and exit 0 (healthy) or 1 (unhealthy).
 fn run_healthcheck() -> i32 {
+    probe_health(healthcheck_port(std::env::var("PORT").ok().as_deref()))
+}
+
+// One `GET /api/state` against 127.0.0.1:`port`: 0 on a 200 status line, else 1.
+fn probe_health(port: u16) -> i32 {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
 
-    let port = healthcheck_port(std::env::var("PORT").ok().as_deref());
     let addr: SocketAddr = match format!("127.0.0.1:{port}").parse() {
         Ok(a) => a,
         Err(_) => return 1,
@@ -1222,3 +1226,7 @@ fn prune_dir_recursive(
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "daemon_helpers_tests.rs"]
+mod helpers_tests;
