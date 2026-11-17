@@ -79,7 +79,10 @@ fn an_unknown_language_on_a_title_with_subtitles_lists_them() {
     let e = freemkv_engine::StreamSelError::UnknownLanguage { tag: "zz".into() };
     let empty = libfreemkv::DiscTitle::empty();
     let none = render_stream_sel_error(&e, &empty);
-    assert!(none.contains(&strings::get("error.stream_none")), "{none}");
+    assert!(
+        none.contains(&crate::strings::get("error.stream_none")),
+        "{none}"
+    );
     let titled = libfreemkv::DiscTitle {
         streams: vec![Stream::Subtitle(SubtitleStream {
             pid: 0x1200,
@@ -105,7 +108,7 @@ fn an_image_to_a_folder_reports_the_extraction() {
     let dest = format!("dir://{}", out.display());
     let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
     let (_code, text) = with_sources(f, || run_cli(&src, &dest, &[]));
-    let extracting = strings::fmt("dir.extracting", &[("path", &out.display().to_string())]);
+    let extracting = crate::strings::fmt("dir.extracting", &[("path", &out.display().to_string())]);
     assert!(text.contains(&extracting), "{text}");
 }
 
@@ -121,7 +124,7 @@ fn whole_disc_refuses_an_image_onto_itself() {
     let (code, text) = crate::output::capture(|| whole_disc(&plan, &never, &loud()));
     assert_eq!(code, 1);
     assert!(
-        text.contains(&strings::get("error.dest_is_source")),
+        text.contains(&crate::strings::get("error.dest_is_source")),
         "{text}"
     );
     assert_eq!(
@@ -207,11 +210,11 @@ fn drive_open_errors_render_for_the_user() {
     };
     assert_eq!(
         render_drive_open_error(&auto),
-        strings::get("error.no_drive")
+        crate::strings::get("error.no_drive")
     );
     assert_eq!(
         render_drive_open_error(&libfreemkv::Error::Halted),
-        strings::get("rip.interrupted")
+        crate::strings::get("rip.interrupted")
     );
     let other = libfreemkv::Error::NoStreams;
     assert_eq!(render_drive_open_error(&other), render_error(&other));
@@ -263,11 +266,14 @@ fn the_title_loop_sink_reports_a_skipped_stub() {
         sink.event(&freemkv_engine::Event::Phase { name: "mux" });
     });
     assert!(
-        text.contains(&strings::fmt("rip.title_skipped_empty", &[("num", "2")])),
+        text.contains(&crate::strings::fmt(
+            "rip.title_skipped_empty",
+            &[("num", "2")]
+        )),
         "{text}"
     );
     assert!(
-        text.contains(&strings::fmt("rip.title_skipped", &[("num", "3")])),
+        text.contains(&crate::strings::fmt("rip.title_skipped", &[("num", "3")])),
         "{text}"
     );
 }
@@ -299,7 +305,10 @@ fn disc_progress_covers_every_pass_kind_and_title_damage() {
     let mut unknown = pass(PassKind::Sweep);
     unknown.bytes_total_disc = 0;
     assert!(disc_progress_line(&unknown, 0, None).is_none());
-    assert_eq!(fmt_disc_damage(&unknown), strings::get("rip.damage_none"));
+    assert_eq!(
+        fmt_disc_damage(&unknown),
+        crate::strings::get("rip.damage_none")
+    );
     for kind in [
         PassKind::Trim { reverse: false },
         PassKind::Scrape { reverse: true },
@@ -315,7 +324,10 @@ fn disc_progress_covers_every_pass_kind_and_title_damage() {
     damaged.bytes_bad_in_main_title = 10;
     damaged.main_title_duration_secs = Some(7200.0);
     damaged.main_title_size_bytes = Some(10_000);
-    assert_ne!(fmt_disc_damage(&damaged), strings::get("rip.damage_none"));
+    assert_ne!(
+        fmt_disc_damage(&damaged),
+        crate::strings::get("rip.damage_none")
+    );
 }
 
 #[test]
@@ -404,5 +416,8 @@ fn render_extract_reports_a_stop() {
     };
     let (ok, text) = crate::output::capture(|| render_extract(&res, &loud()));
     assert!(!ok);
-    assert!(text.contains(&strings::get("rip.interrupted")), "{text}");
+    assert!(
+        text.contains(&crate::strings::get("rip.interrupted")),
+        "{text}"
+    );
 }
