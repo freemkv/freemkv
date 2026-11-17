@@ -460,17 +460,22 @@ fn drive_failing_playlists() -> libfreemkv::Drive {
 }
 
 #[test]
-fn a_scan_that_cannot_read_the_playlists_reports_it() {
+fn a_scan_that_cannot_read_the_playlists_names_them_and_finds_no_titles() {
     let _guard = state_lock();
     let mut s = prepare("bad-playlist", true, true, |_| {});
     SCAN_DRIVE.with(|slot| *slot.borrow_mut() = Some(drive_failing_playlists()));
     s.trace =
         super::test_trace::traced(|| scan_disc_for(&s.cfg, &s.device, &s.device_path, false)).1;
     SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+    // An unreadable playlist is skipped by the library scan (best effort), so the scan
+    // itself completes with no titles and names the playlist it lost; the rip of such a
+    // disc is what refuses (a_rip_that_reopens_a_drive_it_cannot_scan_reports_it).
     let row = s.row();
-    assert_eq!(row.status, "error", "{}", row.last_error);
-    assert!(!row.last_error.is_empty());
-    assert!(take_session(&s.device).is_none());
+    assert_eq!(row.status, "idle", "{}", row.last_error);
+    assert!(s.trace.contains("00000.mpls"), "{}", s.trace);
+    if let Some(session) = take_session(&s.device) {
+        assert!(session.disc.as_ref().is_none_or(|d| d.titles.is_empty()));
+    }
 }
 
 #[test]
