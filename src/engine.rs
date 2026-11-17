@@ -4534,3 +4534,7 @@ mod ku_gui_tests;
 #[cfg(test)]
 #[path = "engine_held_drive_tests.rs"]
 mod held_drive_tests;
+
+#[cfg(test)]
+#[path = "engine_cov_tests.rs"]
+mod cov_tests;
