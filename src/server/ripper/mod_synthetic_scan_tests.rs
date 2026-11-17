@@ -432,3 +432,101 @@ fn an_eject_uses_the_held_session_handle() {
     assert_eq!(fake.count(eject), 1);
     assert_eq!(fake.live_handles(), 0);
 }
+
+// A drive that reads the disc's identity but not its playlist.
+fn drive_failing_playlists() -> libfreemkv::Drive {
+    let fx = crate::ku_fixture::bd_image();
+    let (start, _) = fx.img.files[1];
+    let (t, _fake) = FakeTransport::new();
+    let t = t.with_image(fx.img.image.clone()).rule(
+        move |cdb| {
+            if cdb[0] != 0x28 {
+                return false;
+            }
+            let lba = u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]);
+            let len = u32::from(u16::from_be_bytes([cdb[7], cdb[8]]));
+            lba <= start && start < lba + len.max(1)
+        },
+        libfreemkv::test_util::FakeMode::Sense {
+            sense: libfreemkv::scsi::ScsiSense {
+                sense_key: 3,
+                asc: 0x11,
+                ascq: 0,
+            },
+            progress: None,
+        },
+    );
+    libfreemkv::Drive::from_transport(Box::new(t))
+}
+
+#[test]
+fn a_scan_that_cannot_read_the_playlists_reports_it() {
+    let _guard = state_lock();
+    let mut s = prepare("bad-playlist", true, true, |_| {});
+    SCAN_DRIVE.with(|slot| *slot.borrow_mut() = Some(drive_failing_playlists()));
+    s.trace =
+        super::test_trace::traced(|| scan_disc_for(&s.cfg, &s.device, &s.device_path, false)).1;
+    SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+    let row = s.row();
+    assert_eq!(row.status, "error", "{}", row.last_error);
+    assert!(!row.last_error.is_empty());
+    assert!(take_session(&s.device).is_none());
+}
+
+#[test]
+fn a_rip_that_reopens_a_drive_it_cannot_scan_reports_it() {
+    let _guard = state_lock();
+    let s = scan("reopen-bad-playlist", true, true, |_| {});
+    drop_session(&s.device);
+    SCAN_DRIVE.with(|slot| *slot.borrow_mut() = Some(drive_failing_playlists()));
+    super::test_trace::traced(|| rip_disc(&s.cfg, &s.device, &s.device_path, false));
+    SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+    let row = s.row();
+    assert_eq!(row.status, "error", "{}", row.last_error);
+}
+
+// A resume request for a disc whose finished capture was held for its loss: the
+// staged image is muxed again, with no disc reads.
+#[test]
+fn a_resume_request_remuxes_a_loss_held_capture_from_its_image() {
+    use crate::server::web::ResumeMode;
+    let _env = crate::server::log::env_guard();
+    let _guard = state_lock();
+    let s = scan("resume-remux", true, true, |_| {});
+    // SAFETY: env access in tests, serialized by env_guard.
+    unsafe { std::env::set_var("AUTORIP_DIR", s.staging.parent().unwrap()) };
+    let job = s.staging.join(s.row().job_id);
+    std::fs::create_dir_all(&job).unwrap();
+    let fx = crate::ku_fixture::bd_image();
+    let iso = fx.write(&job, "Held.iso");
+    crate::ku_fixture::write_sidecar(&fx, &iso, false);
+    let mut st = staging::DiscState::new(staging::StagingState::AbortedLoss);
+    st.failure_reason = Some("aborted: 1.0s lost".into());
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.mapfile_path = freemkv_engine::mapfile_path_for(&iso)
+        .to_string_lossy()
+        .into_owned();
+    st.max_retries = 1;
+    staging::try_write_state(&job, &st).unwrap();
+    super::test_trace::traced(|| {
+        handle_rip_request(&s.cfg, &s.device, &s.device_path, ResumeMode::Require)
+    });
+    let row = s.row();
+    assert_ne!(row.status, "ripping");
+    assert!(iso.exists() || job.read_dir().unwrap().next().is_some());
+}
+
+// The scan watchdog speaks up every 15 s while a scan or key resolve runs.
+#[test]
+fn a_long_scan_is_reported_by_its_watchdog() {
+    let device = format!("scan-watchdog-{}", std::process::id());
+    let wd = ScanWatchdog::arm(&device);
+    wd.enter_resolve();
+    std::thread::sleep(Duration::from_secs(16));
+    drop(wd);
+    std::thread::sleep(Duration::from_millis(1500));
+    let log = crate::server::log::get_device_log(&device, 10).join("\n");
+    assert!(log.contains("Still scanning"), "{log}");
+    assert!(log.contains("phase=resolve_keys"), "{log}");
+    crate::server::log::forget_device(&device);
+}
