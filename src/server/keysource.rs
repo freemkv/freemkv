@@ -927,3 +927,7 @@ mod tests;
 #[cfg(test)]
 #[path = "keysource_ku_e1_tests.rs"]
 mod ku_e1_tests;
+
+#[cfg(test)]
+#[path = "keysource_cached_reads_tests.rs"]
+mod cached_reads_tests;
