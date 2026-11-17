@@ -32,6 +32,10 @@ class Depends(unittest.TestCase):
     def test_static_cli_has_none(self):
         self.assertEqual(deb2pkg.depends('', {}), [])
 
+    def test_cairo_gobject_and_cairo_share_one_arch_dependency(self):
+        self.assertEqual(deb2pkg.depends('libcairo-gobject2 (>= 1.10.0), libcairo2 (>= 1.2.4)', {}),
+                         ['cairo'])
+
     def test_unknown_dependency_is_an_error(self):
         with self.assertRaises(ValueError):
             deb2pkg.depends('libsomething9', {})
