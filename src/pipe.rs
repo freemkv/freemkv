@@ -3090,3 +3090,7 @@ mod formatter_tests;
 #[cfg(test)]
 #[path = "pipe_ku_cli_tests.rs"]
 mod ku_cli_tests;
+
+#[cfg(test)]
+#[path = "pipe_cov_tests.rs"]
+mod cov_tests;
