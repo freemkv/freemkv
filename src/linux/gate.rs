@@ -529,7 +529,7 @@ fn texture(w: &gtk::Widget) -> Option<gdk::Texture> {
 }
 
 // `(width, height, 32-bit rows top-down)` of `w`'s render.
-fn capture(w: &gtk::Widget) -> Option<(i32, i32, Vec<u8>)> {
+pub(super) fn capture(w: &gtk::Widget) -> Option<(i32, i32, Vec<u8>)> {
     let t = texture(w)?;
     let (cw, ch) = (t.width(), t.height());
     let mut px = vec![0u8; cw as usize * ch as usize * 4];

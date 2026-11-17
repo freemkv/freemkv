@@ -6,7 +6,8 @@ use gtk4 as gtk;
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use super::TitleTree;
-use crate::gui_gate::Gate;
+use crate::gui_gate::{Gate, Region, has_ink};
+use crate::ui::Row;
 
 pub(in crate::linux) fn start(tree: &TitleTree, dir: String, done: impl FnOnce(bool) + 'static) {
     let Some(model) = tree.selection.model().and_downcast::<gtk::TreeListModel>() else {
@@ -27,8 +28,11 @@ pub(in crate::linux) fn start(tree: &TitleTree, dir: String, done: impl FnOnce(b
     ];
     theme.set_color_scheme(libadwaita::ColorScheme::ForceLight);
     step(
-        scroll,
-        model,
+        ScenarioTree {
+            scroll,
+            model,
+            rows: tree.rows.clone(),
+        },
         dir,
         g,
         steps,
@@ -40,14 +44,24 @@ pub(in crate::linux) fn start(tree: &TitleTree, dir: String, done: impl FnOnce(b
 }
 
 type Done = Box<dyn FnOnce(bool)>;
-fn step(
+struct ScenarioTree {
     scroll: gtk::ScrolledWindow,
     model: gtk::TreeListModel,
+    rows: Rc<RefCell<Vec<Row>>>,
+}
+
+fn step(
+    tree: ScenarioTree,
     dir: String,
     g: Rc<RefCell<Gate>>,
     mut steps: Vec<(&'static str, u8)>,
     done: Done,
 ) {
+    let ScenarioTree {
+        scroll,
+        model,
+        rows: source_rows,
+    } = tree;
     if steps.is_empty() {
         let report = g.borrow().report();
         let written = std::fs::write(format!("{dir}/tree-gate.txt"), report).is_ok();
@@ -90,9 +104,16 @@ fn step(
                 rows.iter().filter(|r| r.depth() == 1).count() >= 2,
                 name,
             );
+            let mut labels = Vec::new();
+            check_cells(
+                scroll.upcast_ref(),
+                scroll.upcast_ref(),
+                &source_rows.borrow(),
+                name,
+                &mut g.borrow_mut(),
+                &mut labels,
+            );
             if action == 1 {
-                let mut labels = Vec::new();
-                collect_node_starts(scroll.upcast_ref(), scroll.upcast_ref(), &mut labels);
                 let x = |depth| labels.iter().find(|(d, _)| *d == depth).map(|(_, x)| *x);
                 let follows_depth = match (x(1), x(2), x(3)) {
                     (Some(a), Some(b), Some(c))
@@ -133,37 +154,119 @@ fn step(
                 &format!("{dir}/tree-{name}.png"),
                 &mut g.borrow_mut(),
             );
-            step(scroll, model, dir, g, steps, done);
+            step(
+                ScenarioTree {
+                    scroll,
+                    model,
+                    rows: source_rows,
+                },
+                dir,
+                g,
+                steps,
+                done,
+            );
         });
     });
 }
 
-fn collect_node_starts(w: &gtk::Widget, root: &gtk::Widget, out: &mut Vec<(u32, f32)>) {
+// Measure only mapped cells intersecting the viewport: GTK can retain bound
+// cells outside it while scrolling. Expected checkbox presence comes from the
+// app model, independent of the widget visibility/opacity being tested.
+fn check_cells(
+    w: &gtk::Widget,
+    root: &gtk::Widget,
+    rows: &[Row],
+    scenario: &str,
+    g: &mut Gate,
+    starts: &mut Vec<(u32, f32)>,
+) {
     if let Some(exp) = w.downcast_ref::<gtk::TreeExpander>()
+        && exp.is_mapped()
+        && exp.compute_bounds(root).is_some_and(|b| {
+            b.x() < root.width() as f32
+                && b.y() < root.height() as f32
+                && b.x() + b.width() > 0.0
+                && b.y() + b.height() > 0.0
+        })
         && let Some(row) = exp.list_row()
     {
-        // A selectable node begins at its checkbox; other nodes begin at
-        // their label. Hidden checkboxes must not reserve an empty slot.
-        let content = exp.child();
-        let first = content.as_ref().and_then(|c| c.first_child());
-        let start = first
-            .filter(|w| w.is_visible())
-            .or_else(|| content.as_ref().and_then(|c| c.last_child()));
-        if let Some(b) = start.and_then(|w| w.compute_bounds(root)) {
-            // Compare the start edge in both LTR and RTL layouts.
-            out.push((
-                row.depth(),
-                if w.direction() == gtk::TextDirection::Rtl {
-                    b.x() + b.width()
-                } else {
-                    b.x()
-                },
-            ));
+        let idx = super::row_index(Some(row.clone().upcast()));
+        let expected = idx.and_then(|i| rows.get(i));
+        g.check(
+            "tree-cell-model-bound",
+            expected.is_some(),
+            format!("{scenario}: row {idx:?}"),
+        );
+        if let Some(expected) = expected {
+            let content = exp.child();
+            let label = content.as_ref().and_then(|c| c.last_child());
+            let start = if expected.check.is_some() {
+                content.as_ref().and_then(|c| c.first_child())
+            } else {
+                label.clone()
+            };
+            let rtl = exp.direction() == gtk::TextDirection::Rtl;
+            let edge = |b: gtk::graphene::Rect| {
+                if rtl { b.x() + b.width() } else { b.x() }
+            };
+            if let Some(b) = start.and_then(|w| w.compute_bounds(root)) {
+                starts.push((row.depth(), edge(b)));
+            }
+            if expected.check.is_none() {
+                let gap = content
+                    .as_ref()
+                    .and_then(|c| c.compute_bounds(root))
+                    .zip(label.and_then(|l| l.compute_bounds(root)))
+                    .map(|(c, l)| (edge(l) - edge(c)).abs());
+                g.check(
+                    "tree-nonselectable-has-no-checkbox-slot",
+                    gap.is_some_and(|gap| gap <= 1.0),
+                    format!("{scenario}: row {idx:?}, label/content start gap {gap:?} px"),
+                );
+            }
+        }
+        // A nested row always has a parent branch; an expanded root has a
+        // downward branch. Snapshot only the overlay's connector canvas: text,
+        // expander arrows and checkboxes cannot contribute any ink here.
+        if row.depth() > 0 || row.is_expanded() {
+            let lines = exp
+                .parent()
+                .and_downcast::<gtk::Overlay>()
+                .and_then(|overlay| overlay.last_child())
+                .and_downcast::<gtk::DrawingArea>();
+            let ink = lines
+                .as_ref()
+                .and_then(|lines| super::super::gate::capture(lines.upcast_ref()))
+                .is_some_and(|(width, height, mut pixels)| {
+                    // Transparent black and a black rule differ only in alpha.
+                    // Present alpha as RGB to the shared colour-variation probe.
+                    for pixel in pixels.chunks_exact_mut(4) {
+                        let alpha = pixel[3];
+                        pixel[..3].fill(alpha);
+                    }
+                    has_ink(
+                        &pixels,
+                        width,
+                        height,
+                        false,
+                        Region {
+                            x: 0,
+                            y: 0,
+                            w: width,
+                            h: height,
+                        },
+                    )
+                });
+            g.check(
+                "tree-connector-has-ink",
+                ink,
+                format!("{scenario}: row {idx:?}, depth {}", row.depth()),
+            );
         }
     }
     let mut child = w.first_child();
     while let Some(c) = child {
-        collect_node_starts(&c, root, out);
+        check_cells(&c, root, rows, scenario, g, starts);
         child = c.next_sibling();
     }
 }

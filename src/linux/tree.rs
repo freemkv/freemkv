@@ -188,7 +188,7 @@ impl TitleTree {
             label.set_tooltip_text(Some(row.cell("item")));
             // Non-selectable nodes have no checkbox slot: their label follows
             // the expander directly, including chapter groups and chapter leaves.
-            cb.set_visible(row.check.is_some());
+            cb.set_opacity(if row.check.is_some() { 1.0 } else { 0.0 });
             cb.set_sensitive(row.check.is_some() && row.check_enabled);
             cb.set_focusable(row.check.is_some() && row.check_enabled);
             cb.update_property(&[gtk::accessible::Property::Label(row.cell("item"))]);
@@ -277,7 +277,6 @@ impl TitleTree {
                 if exp.list_row().is_some_and(|r| r.is_expanded()) {
                     segment(x(depth), middle + 8.0, x(depth), h);
                 }
-                let _ = cr.stroke();
             });
             let tog = on_toggle.clone();
             let handler = cb.connect_toggled(move |_| tog(idx));
