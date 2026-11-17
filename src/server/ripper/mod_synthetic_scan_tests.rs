@@ -399,3 +399,31 @@ fn a_rip_without_a_session_on_a_blank_drive_reports_the_failed_scan() {
     assert_eq!(row.status, "error");
     assert!(!row.last_error.is_empty());
 }
+
+// An eject goes through the idle session's own drive handle when it holds one.
+#[test]
+fn an_eject_uses_the_held_session_handle() {
+    let _guard = state_lock();
+    let device = format!("eject-held-{}", std::process::id());
+    let (t, fake) = FakeTransport::new();
+    store_session(
+        &device,
+        DriveSession {
+            drive: libfreemkv::Drive::from_transport(Box::new(t)),
+            disc: None,
+            scanned: true,
+            probed: true,
+            tmdb: None,
+            device_path: format!("/nonexistent/{device}"),
+            key_verdict: None,
+            keys: None,
+            key_error: None,
+            key_reads: KeyReads::default(),
+        },
+    );
+    assert!(eject_drive(&format!("/nonexistent/{device}")).is_ok());
+    assert!(take_session(&device).is_none());
+    let eject = |c: &[u8]| c[0] == 0x1B && c[4] & 0x03 == 0x02;
+    assert_eq!(fake.count(eject), 1);
+    assert_eq!(fake.live_handles(), 0);
+}
