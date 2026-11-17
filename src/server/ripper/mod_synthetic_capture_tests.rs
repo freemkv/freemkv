@@ -105,6 +105,10 @@ struct Rip {
     trace: String,
     job_path: std::path::PathBuf,
     live_handles: usize,
+    cfg: Arc<RwLock<Config>>,
+    device: String,
+    identity: String,
+    job: String,
     _root: tempfile::TempDir,
 }
 
@@ -120,6 +124,18 @@ fn synthetic_rip_on(
     keyed: bool,
     wipe: bool,
     shape: impl FnOnce(FakeTransport, &crate::ku_fixture::Fx) -> FakeTransport,
+    tune: impl FnOnce(&mut Config),
+) -> Rip {
+    synthetic_rip_in(name, keyed, wipe, shape, |_, _| {}, tune)
+}
+
+// `synthetic_rip_on` with `prepare` given the job dir and fixture before the rip starts.
+fn synthetic_rip_in(
+    name: &str,
+    keyed: bool,
+    wipe: bool,
+    shape: impl FnOnce(FakeTransport, &crate::ku_fixture::Fx) -> FakeTransport,
+    prepare: impl FnOnce(&std::path::Path, &crate::ku_fixture::Fx),
     tune: impl FnOnce(&mut Config),
 ) -> Rip {
     let root = tempfile::tempdir().unwrap();
@@ -168,12 +184,13 @@ fn synthetic_rip_on(
         RipState {
             device: device.clone(),
             job_id: job.clone(),
-            disc_identity: identity,
+            disc_identity: identity.clone(),
             disc_present: true,
             status: "idle".into(),
             ..Default::default()
         },
     );
+    prepare(&staging_root.join(&job), &fx);
     let mut cfg = Config {
         staging_dir: staging_root.to_string_lossy().into_owned(),
         output_dir: output_root.to_string_lossy().into_owned(),
@@ -207,8 +224,12 @@ fn synthetic_rip_on(
     Rip {
         row,
         trace,
-        job_path: staging_root.join(job),
+        job_path: staging_root.join(&job),
         live_handles: handle.live_handles(),
+        cfg,
+        device,
+        identity,
+        job,
         _root: root,
     }
 }
@@ -540,4 +561,151 @@ fn a_live_mux_that_skips_a_dead_sector_with_no_tolerance_is_not_clean() {
         rip.row.status != "done" || rip.row.errors > 0 || rip.row.lost_video_secs > 0.0,
         "a skipped dead sector finished clean"
     );
+}
+
+// Rip `rip`'s disc again on a clean drive, resuming its sweep when `resume_sweep`.
+fn rerip(rip: &Rip, resume_sweep: bool) -> RipState {
+    let fx = crate::ku_fixture::bd_image();
+    let (transport, _handle) = FakeTransport::new();
+    let drive =
+        libfreemkv::Drive::from_transport(Box::new(transport.with_image(fx.img.image.clone())));
+    let keys = freemkv_engine::keys::resolve_for_rip(
+        &fx.disc,
+        &mut libfreemkv::test_util::MemSource::new(fx.img.image.clone()),
+        libfreemkv::keys::KeyScope::WholeDisc,
+        &crate::ku_fixture::holding(
+            &Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            crate::ku_fixture::K1,
+        ),
+        None,
+        None,
+    )
+    .unwrap();
+    let device_path = format!("/nonexistent/{}", rip.device);
+    store_session(
+        &rip.device,
+        DriveSession {
+            drive,
+            disc: Some(fx.scan()),
+            scanned: true,
+            probed: true,
+            tmdb: None,
+            device_path: device_path.clone(),
+            key_verdict: None,
+            keys: Some(keys),
+            key_error: None,
+            key_reads: KeyReads::default(),
+        },
+    );
+    update_state(
+        &rip.device,
+        RipState {
+            device: rip.device.clone(),
+            job_id: rip.job.clone(),
+            disc_identity: rip.identity.clone(),
+            disc_present: true,
+            status: "idle".into(),
+            ..Default::default()
+        },
+    );
+    super::test_trace::traced(|| {
+        rip_disc_inner(
+            &rip.cfg,
+            &rip.device,
+            &device_path,
+            resume_sweep,
+            false,
+            true,
+        )
+    });
+    let row = STATE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&rip.device)
+        .unwrap();
+    drop_session(&rip.device);
+    unregister_halt(&rip.device);
+    row
+}
+
+#[test]
+fn a_single_pass_iso_rip_is_refused_for_multi_pass() {
+    let _guard = state_lock();
+    let rip = synthetic_rip("iso-single", true, false, |c| {
+        c.output_format = "iso".into();
+        c.max_retries = 0;
+    });
+    assert_eq!(rip.row.status, "error");
+    assert!(
+        rip.row.last_error.contains("multi-pass"),
+        "{}",
+        rip.row.last_error
+    );
+}
+
+// A loss-aborted capture resumed on a drive that now reads every sector finishes.
+#[test]
+fn a_loss_aborted_capture_resumes_its_sweep_and_hands_off() {
+    let _guard = state_lock();
+    let rip = synthetic_rip_on(
+        "loss-resume",
+        true,
+        false,
+        |t, fx| {
+            let (start, sectors) = fx.img.files[3];
+            let bad = start + sectors / 2;
+            t.rule(
+                move |cdb| {
+                    if cdb[0] != 0x28 {
+                        return false;
+                    }
+                    let lba = u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]);
+                    let len = u32::from(u16::from_be_bytes([cdb[7], cdb[8]]));
+                    lba <= bad && bad < lba + len.max(1)
+                },
+                libfreemkv::test_util::FakeMode::Sense {
+                    sense: libfreemkv::scsi::ScsiSense {
+                        sense_key: 3,
+                        asc: 0x11,
+                        ascq: 0,
+                    },
+                    progress: None,
+                },
+            )
+            .rule(|cdb| cdb[0] == 0x1B, libfreemkv::test_util::FakeMode::Fault)
+        },
+        |c| {
+            c.max_retries = 1;
+            c.abort_on_lost_secs = 0;
+        },
+    );
+    assert!(rip.row.loss_aborted, "{}", rip.row.last_error);
+    let row = rerip(&rip, true);
+    assert_ne!(row.status, "ripping");
+    assert!(!files_ending(&rip.job_path, ".iso").is_empty());
+}
+
+// The live mux's output name taken by a directory: the stale-output sweep cannot clear
+// it and the mux cannot open it, so the rip ends in an error, not a delivery.
+#[test]
+fn a_live_mux_whose_output_name_is_taken_does_not_deliver() {
+    let _guard = state_lock();
+    let rip = synthetic_rip_in(
+        "live-taken",
+        true,
+        false,
+        |t, _| t,
+        |job, fx| {
+            std::fs::create_dir_all(job).unwrap();
+            for name in [fx.disc.meta_title.clone(), Some(fx.disc.volume_id.clone())]
+                .into_iter()
+                .flatten()
+            {
+                std::fs::create_dir_all(job.join(staged_output_name(&name, "mkv"))).unwrap();
+            }
+        },
+        |_| {},
+    );
+    assert_ne!(rip.row.status, "done", "{}", rip.row.last_error);
+    assert_ne!(rip.row.status, "ripping");
 }
