@@ -94,6 +94,6 @@ fn a_held_synthetic_disc_completes_a_whole_disc_iso_capture() {
         .find(|p| p.to_string_lossy().ends_with(".mapfile"))
         .expect("capture mapfile");
     let stats = freemkv_engine::Mapfile::load(&map).unwrap().stats();
-    assert_eq!(stats.bytes_finished, fx.img.image.len() as u64);
+    assert_eq!(stats.bytes_good, fx.img.image.len() as u64);
     assert_eq!(stats.bytes_unreadable, 0);
 }
