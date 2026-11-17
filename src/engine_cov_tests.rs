@@ -40,6 +40,7 @@ fn lines(st: &Arc<RunState>) -> Vec<String> {
 }
 
 // A `fe::open_scan` stand-in over a fake drive serving `fx`.
+#[allow(clippy::type_complexity)]
 fn fresh(
     fx: &Fx,
 ) -> (
