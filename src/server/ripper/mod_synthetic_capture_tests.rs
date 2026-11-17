@@ -468,7 +468,13 @@ fn a_live_mux_whose_drive_dies_mid_feature_is_not_a_clean_finish() {
             let bad = start + sectors / 2;
             t.rule(
                 move |cdb| {
-                    cdb[0] == 0x28 && u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]) >= bad
+                    let len = match cdb[0] {
+                        0x28 => u32::from(u16::from_be_bytes([cdb[7], cdb[8]])),
+                        0xA8 => u32::from_be_bytes([cdb[6], cdb[7], cdb[8], cdb[9]]),
+                        _ => return false,
+                    };
+                    let lba = u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]);
+                    lba + len.max(1) > bad
                 },
                 libfreemkv::test_util::FakeMode::Fault,
             )
