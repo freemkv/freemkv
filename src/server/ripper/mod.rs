@@ -1376,6 +1376,34 @@ fn clear_probe_error(row: &mut RipState, presence: libfreemkv::DiscPresence) {
 /// `list_drives()` / `disc_presence(path)` do the platform enumeration and disc-presence probe
 /// (no internal recovery). autorip just iterates the snapshot, tracks logical state
 /// (idle/scanning/ripping/cooldown), and spawns rip threads.
+// The drives the poll loop watches; a test may stand in its own.
+fn poll_list_drives() -> Vec<libfreemkv::DriveInfo> {
+    #[cfg(test)]
+    if let Some(fake) = FAKE_POLL.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return fake.drives.clone();
+    }
+    libfreemkv::list_drives()
+}
+
+// One presence probe of the drive at `path`, and whether it reported a medium change.
+fn poll_presence(path: &str) -> libfreemkv::Result<(libfreemkv::DiscPresence, bool)> {
+    #[cfg(test)]
+    if let Some(fake) = FAKE_POLL.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return (fake.presence)(path);
+    }
+    libfreemkv::disc_presence_probe(std::path::Path::new(path))
+        .map(|p| (p.presence, p.medium_changed))
+}
+
+#[cfg(test)]
+struct FakePoll {
+    drives: Vec<libfreemkv::DriveInfo>,
+    presence: fn(&str) -> libfreemkv::Result<(libfreemkv::DiscPresence, bool)>,
+}
+
+#[cfg(test)]
+static FAKE_POLL: std::sync::Mutex<Option<FakePoll>> = std::sync::Mutex::new(None);
+
 pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
     // Re-enumerate drives every RESCAN_INTERVAL_SECS so a USB unplug+replug
     // (which may rename the device node) is detected without a container restart.
@@ -1406,7 +1434,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
         }
     }
 
-    let initial_drives = libfreemkv::list_drives();
+    let initial_drives = poll_list_drives();
     let mut drive_paths: Vec<String> = initial_drives.iter().map(|d| d.path.clone()).collect();
     for d in &initial_drives {
         tracing::info!(
@@ -1446,7 +1474,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
         // have their session cleared so the UI doesn't show a phantom drive.
         if last_rescan.elapsed().as_secs() >= RESCAN_INTERVAL_SECS {
             last_rescan = std::time::Instant::now();
-            let fresh = libfreemkv::list_drives();
+            let fresh = poll_list_drives();
             let fresh_paths: Vec<String> = fresh.iter().map(|d| d.path.clone()).collect();
             probe_fail.on_rescan(fresh_paths.clone());
             // Added: in fresh but not in drive_paths.
@@ -1519,12 +1547,12 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                 // `Settling` (spin-up, tray closing) changes nothing this tick.
                 let probe = match session::held_drive_presence(&device) {
                     Some(p) => Ok(p),
-                    None => libfreemkv::disc_presence_probe(std::path::Path::new(path)).map(|p| {
+                    None => poll_presence(path).map(|(presence, medium_changed)| {
                         // A 28h the probe re-polled away: the disc may have been swapped.
-                        if p.medium_changed {
+                        if medium_changed {
                             state::note_medium_changed(&device);
                         }
-                        p.presence
+                        presence
                     }),
                 };
                 // One is_in_cooldown read for both halves: asking twice could
@@ -1553,12 +1581,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                     ProbedTick::Failed { error: e, .. } => {
                         // A drive gone from the enumeration is unplugged, not wedged: skip
                         // the tile and let the next rescan clean up.
-                        let enumerate = || {
-                            libfreemkv::list_drives()
-                                .into_iter()
-                                .map(|d| d.path)
-                                .collect()
-                        };
+                        let enumerate = || poll_list_drives().into_iter().map(|d| d.path).collect();
                         let class = probe_fail.on_probe_err(&device, path, enumerate);
                         if class == ProbeFailure::Pending {
                             continue;
