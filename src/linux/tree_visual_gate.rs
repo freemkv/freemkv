@@ -17,6 +17,14 @@ pub(in crate::linux) fn start(tree: &TitleTree, dir: String, done: impl FnOnce(b
     let previous = theme.color_scheme();
     let scroll = tree.widget.clone();
     let g = Rc::new(RefCell::new(Gate::default()));
+    let temporary = TitleTree::new(Rc::new(|_| {}), Rc::new(|_| {}));
+    let provider = temporary.css.downgrade();
+    drop(temporary);
+    g.borrow_mut().check(
+        "tree-css-provider-released",
+        provider.upgrade().is_none(),
+        "dropping a tree must release its display-wide CSS provider",
+    );
     let steps = vec![
         ("light-default", 0),
         ("light-chapters-expanded", 1),

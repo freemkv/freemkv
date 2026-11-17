@@ -29,6 +29,8 @@ struct Bound {
 
 pub(super) struct TitleTree {
     pub widget: gtk::ScrolledWindow,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    css: gtk::CssProvider,
     selection: gtk::SingleSelection,
     rows: Rc<RefCell<Vec<Row>>>,
     kids: Rc<RefCell<Vec<Vec<usize>>>>,
@@ -339,6 +341,7 @@ impl TitleTree {
         super::main_view::card(&widget);
         TitleTree {
             widget,
+            css,
             selection,
             rows,
             kids,
