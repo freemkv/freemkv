@@ -424,3 +424,60 @@ fn a_stop_whose_kept_file_is_gone_just_says_stopped() {
     assert_eq!(j.failure.unwrap().message, "Stopped.");
     assert!(j.staged.is_none());
 }
+
+#[test]
+fn damaged_links_fail_only_a_job_that_may_overwrite() {
+    let t = tempfile::tempdir().unwrap();
+    let config = t.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join(super::super::super::links::LINKS_FILE),
+        b"broken",
+    )
+    .unwrap();
+    let mut job = job_for(t.path(), 1);
+    job.replace = false;
+    let cfg = Config::default();
+    assert_eq!(capture_owned(&job, &cfg, &config).unwrap(), Vec::new());
+    assert!(!linked_episode(&config, &job, false).unwrap());
+    let e = linked_episode(&config, &job, true).unwrap_err();
+    assert!(e.to_string().contains("could not be read"), "{e}");
+    job.replace = true;
+    let e = capture_owned(&job, &cfg, &config).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
+    job.retire = true;
+    assert!(!linked_episode(&config, &job, true).unwrap());
+}
+
+#[test]
+fn a_tv_lookup_result_plans_a_real_image_or_says_why_not() {
+    let t = tempfile::tempdir().unwrap();
+    let lib = Library::open(t.path(), &t.path().join("logs"));
+    let iso = t.path().join("Show.iso");
+    std::fs::write(&iso, &crate::ku_fixture::bd_image().img.image).unwrap();
+    lib.queue.add(vec![NewJob {
+        title: "Show".into(),
+        iso,
+        target: t.path().join("movies/Show/Show.mkv"),
+        replace: false,
+    }]);
+    let mut job = lib.queue.claim_next().unwrap();
+    let cfg = Config {
+        output_dir: t.path().join("output").to_string_lossy().into_owned(),
+        tv_auto: true,
+        tmdb_api_key: String::new(),
+        ..Default::default()
+    };
+    let found = tv_metadata(&MediaMetadata {
+        title: "Show".into(),
+        year: 2001,
+        tmdb_id: 7,
+        kind: Some(MediaKind::Tv),
+        ..Default::default()
+    });
+    match attach_from_lookup(&lib, &cfg, &mut job, Ok(Some(found))) {
+        Ok(()) => assert!(job.plan.is_some()),
+        Err(e) => assert!(!e.to_string().is_empty()),
+    }
+    assert!(!job.target.exists(), "planning writes no media");
+}
