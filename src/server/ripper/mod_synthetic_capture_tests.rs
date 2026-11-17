@@ -420,3 +420,37 @@ fn a_sweep_whose_drive_faults_and_cannot_be_found_again_fails() {
     assert!(!rip.row.last_error.is_empty());
     assert!(files_ending(&rip.job_path, ".mkv").is_empty());
 }
+
+// A hand-off to the mux worker that does not land falls back to muxing the staged image
+// inline, for a one-title plan.
+#[test]
+fn a_refused_hand_off_muxes_the_staged_image_inline() {
+    let _guard = state_lock();
+    REFUSE_HANDOFF.with(|r| r.set(true));
+    let rip = synthetic_rip("inline-mux", true, false, |c| {
+        c.max_retries = 1;
+        c.keep_iso = true;
+    });
+    REFUSE_HANDOFF.with(|r| r.set(false));
+    assert_eq!(
+        rip.row.status, "done",
+        "inline mux failed: {} ({})",
+        rip.row.last_error, rip.row.key_status
+    );
+    assert_eq!(rip.row.progress_pct, 100);
+    assert!(!files_ending(&rip.job_path, ".mkv").is_empty());
+    assert!(!files_ending(&rip.job_path, ".iso").is_empty(), "keep_iso");
+}
+
+#[test]
+fn a_refused_hand_off_without_keep_iso_prunes_the_image_after_the_inline_mux() {
+    let _guard = state_lock();
+    REFUSE_HANDOFF.with(|r| r.set(true));
+    let rip = synthetic_rip("inline-prune", true, false, |c| {
+        c.max_retries = 1;
+        c.auto_eject = true;
+    });
+    REFUSE_HANDOFF.with(|r| r.set(false));
+    assert_eq!(rip.row.status, "done", "{}", rip.row.last_error);
+    assert!(!files_ending(&rip.job_path, ".mkv").is_empty());
+}

@@ -5634,6 +5634,11 @@ fn quarantine_or_log(device: &str, staging_disc_path: &std::path::Path, reason: 
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static REFUSE_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 // Hand the swept ISO to the mux worker: lend it the rip's key set (memory only, J6), record
 // the deliverable plan while this rip still owns the dir, then flip state.json to Ripped,
 // which lets the worker claim it. A failed hand-off takes the keys back.
@@ -5643,6 +5648,12 @@ fn hand_off_to_mux_worker(
     keys: Option<&libfreemkv::keys::KeyRing>,
     plan: impl FnOnce(&mut staging::DiscState),
 ) -> std::io::Result<()> {
+    #[cfg(test)]
+    if REFUSE_HANDOFF.with(std::cell::Cell::get) {
+        return Err(std::io::Error::other(
+            "the hand-off is refused for this test",
+        ));
+    }
     let iso = std::path::Path::new(&marker.iso_path);
     if let Some(set) = keys {
         crate::server::keysource::hold_rip_keys(iso, set.clone());
