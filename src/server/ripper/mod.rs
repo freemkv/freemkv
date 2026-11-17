@@ -7110,3 +7110,7 @@ mod synthetic_capture_tests;
 #[cfg(test)]
 #[path = "mod_synthetic_scan_tests.rs"]
 mod synthetic_scan_tests;
+
+#[cfg(test)]
+#[path = "mod_error_text_tests.rs"]
+mod error_text_tests;
