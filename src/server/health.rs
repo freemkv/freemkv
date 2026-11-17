@@ -1833,3 +1833,7 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> Option<std::thread::JoinHandle<()>> {
 #[cfg(test)]
 #[path = "health_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "health_refresh_tests.rs"]
+mod refresh_tests;
