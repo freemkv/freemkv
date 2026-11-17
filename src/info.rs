@@ -212,6 +212,27 @@ pub fn run(device: Option<&str>, args: &[String]) {
         }),
     };
 
+    share_drive(
+        &mut session,
+        DriveFlags {
+            share,
+            mask,
+            quiet,
+            verbose,
+        },
+        Path::new(""),
+    );
+}
+
+// Everything after the open: print the identity and, with --share, write the profile
+// under `base` (empty = the working directory). Split out so tests can drive a fake.
+pub(crate) fn share_drive(session: &mut libfreemkv::Drive, flags: DriveFlags, base: &Path) {
+    let DriveFlags {
+        share,
+        mask,
+        quiet,
+        verbose,
+    } = flags;
     // The identity block for every later use — display, `drive.toml`, and the
     // shared issue body — sanitised once, here. See [`DriveIdentity`].
     let raw_id = session.drive_id.clone();
@@ -262,7 +283,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
     // ── Capture raw drive data via library ─────────────────────────────────
 
-    let capture = match freemkv_engine::capture_drive_data(&mut session) {
+    let capture = match freemkv_engine::capture_drive_data(session) {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
@@ -287,7 +308,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
         id.vendor_specific.to_lowercase()
     ));
 
-    let profile_dir = std::path::PathBuf::from(&profile_name);
+    let profile_dir = base.join(&profile_name);
     if let Err(e) = std::fs::create_dir_all(&profile_dir) {
         eprintln!(
             "{}",
@@ -475,21 +496,20 @@ pub fn run(device: Option<&str>, args: &[String]) {
     // Also fold in the disc's structure metadata when media is present (issue #45
     // repros from the playlists, not the drive). Best-effort — no disc/unreadable
     // tree just yields a drive-only profile, as before.
-    let disc_summary =
-        crate::disc_capture::fold_structure(&profile_dir, &mut written, &mut session)
-            .unwrap_or_else(|e| {
-                if !quiet {
-                    eprintln!(
-                        "{}",
-                        strings::fmt_or(
-                            "drive.structure_unreadable",
-                            "Disc structure not captured: {err}",
-                            &[("err", &crate::pipe::fmt_err(&e))],
-                        )
-                    );
-                }
-                None
-            });
+    let disc_summary = crate::disc_capture::fold_structure(&profile_dir, &mut written, session)
+        .unwrap_or_else(|e| {
+            if !quiet {
+                eprintln!(
+                    "{}",
+                    strings::fmt_or(
+                        "drive.structure_unreadable",
+                        "Disc structure not captured: {err}",
+                        &[("err", &crate::pipe::fmt_err(&e))],
+                    )
+                );
+            }
+            None
+        });
     if let (Some(ds), false) = (&disc_summary, quiet) {
         crate::disc_capture::report_skipped(ds);
         if ds.file_count == 0 {
@@ -1237,3 +1257,7 @@ mod tests;
 #[cfg(test)]
 #[path = "info_share_safety_tests.rs"]
 mod share_safety_tests;
+
+#[cfg(test)]
+#[path = "info_share_drive_tests.rs"]
+mod share_drive_tests;
