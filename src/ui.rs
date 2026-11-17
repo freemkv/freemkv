@@ -5495,3 +5495,7 @@ pub struct View {
 #[cfg(test)]
 #[path = "ui_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ui_cov_tests.rs"]
+mod cov_tests;
