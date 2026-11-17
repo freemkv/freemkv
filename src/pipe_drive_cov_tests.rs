@@ -6,7 +6,9 @@ use crate::rip_keys::with_sources;
 use std::cell::Cell;
 use std::rc::Rc;
 
-const SRC: &str = "disc:///dev/fmkv-cov-no-such-drive";
+// Autodetect: an explicitly named device must exist before any open, so tests name none.
+const SRC: &str = "disc://";
+const MISSING: &str = "disc:///dev/fmkv-cov-no-such-drive";
 
 fn args(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
@@ -103,10 +105,10 @@ fn a_drive_that_will_not_open_stops_before_any_output() {
 fn a_missing_device_fails_the_drive_scan() {
     let dir = TempDir::new("pdc-missing");
     let dest = format!("mkv://{}", dir.path().join("out.mkv").display());
-    let (code, text) = run_cli(SRC, &dest, &["-t", "1"]);
+    let (code, text) = run_cli(MISSING, &dest, &["-t", "1"]);
     assert_eq!(code, 1, "{text}");
     let iso = format!("iso://{}", dir.path().join("out.iso").display());
-    let (code, text) = run_cli(SRC, &iso, &[]);
+    let (code, text) = run_cli(MISSING, &iso, &[]);
     assert_eq!(code, 1, "{text}");
 }
 
