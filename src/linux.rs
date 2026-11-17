@@ -824,12 +824,12 @@ fn append_menu_rows(
             row.set_title_lines(0);
             row.add_css_class("freemkv-command");
             let accel = text("accel");
-            if !accel.is_empty() {
-                if let Some((key, mods)) = gtk::accelerator_parse(&accel) {
-                    row.add_suffix(&gtk::Label::new(Some(&gtk::accelerator_get_label(
-                        key, mods,
-                    ))));
-                }
+            if !accel.is_empty()
+                && let Some((key, mods)) = gtk::accelerator_parse(&accel)
+            {
+                row.add_suffix(&gtk::Label::new(Some(&gtk::accelerator_get_label(
+                    key, mods,
+                ))));
             }
             row.add_suffix(&button);
             let toggle = toggle.clone();

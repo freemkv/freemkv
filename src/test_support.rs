@@ -226,6 +226,11 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::StagedCopySizeMismatch { have: 0, want: 1 },
         Error::WorkerLost { op: "copy" },
         Error::StreamLanguageUnknown { tag: p() },
+        Error::StreamIndexOutOfRange {
+            class: "audio".into(),
+            requested: 3,
+            count: 2,
+        },
         Error::RemuxTargetExists { path: p() },
         // A mux batch of zero sectors, E9085.
         Error::MuxBatchSectorsZero,

@@ -12,7 +12,7 @@ use libadwaita::prelude::*;
 
 use super::Shell;
 use crate::gui_gate::{Gate, LONG_DEST, Region, has_ink};
-use crate::ui::Page;
+use crate::ui::{Cmd, Page};
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,6 +29,11 @@ pub(super) fn start(shell: &Rc<Shell>, dir: String) {
         waited += Duration::from_millis(200);
         if me.app.borrow().view().page != Page::Titles && waited < Duration::from_secs(60) {
             return glib::ControlFlow::Continue;
+        }
+        // Give both fixture titles room before checking their rendered cells.
+        let log_visible = !me.app.borrow().view().log_hidden;
+        if log_visible {
+            me.act(Cmd::ToggleLog);
         }
         if let Some(main) = me.main.borrow().as_ref() {
             scroll_to(main.tree.widget.upcast_ref());
@@ -139,11 +144,11 @@ fn chooser_rows(root: &gtk::Widget) -> Vec<adw::ExpanderRow> {
 fn scroll_to(widget: &gtk::Widget) {
     let mut parent = widget.parent();
     while let Some(w) = parent {
-        if let Some(scroll) = w.downcast_ref::<gtk::ScrolledWindow>() {
-            if let Some(bounds) = widget.compute_bounds(scroll) {
-                let adjustment = scroll.vadjustment();
-                adjustment.set_value(adjustment.value() + f64::from(bounds.y()) - 12.0);
-            }
+        if let Some(scroll) = w.downcast_ref::<gtk::ScrolledWindow>()
+            && let Some(bounds) = widget.compute_bounds(scroll)
+        {
+            let adjustment = scroll.vadjustment();
+            adjustment.set_value(adjustment.value() + f64::from(bounds.y()) - 12.0);
         }
         parent = w.parent();
     }

@@ -139,34 +139,34 @@ fn step(
 }
 
 fn collect_labels(w: &gtk::Widget, root: &gtk::Widget, out: &mut Vec<(u32, f32)>) {
-    if let Some(exp) = w.downcast_ref::<gtk::TreeExpander>() {
-        if let Some(row) = exp.list_row() {
-            fn label(w: &gtk::Widget) -> Option<gtk::Label> {
-                if let Some(l) = w.downcast_ref::<gtk::Label>() {
-                    return Some(l.clone());
-                }
-                let mut child = w.first_child();
-                while let Some(c) = child {
-                    if let Some(l) = label(&c) {
-                        return Some(l);
-                    }
-                    child = c.next_sibling();
-                }
-                None
+    if let Some(exp) = w.downcast_ref::<gtk::TreeExpander>()
+        && let Some(row) = exp.list_row()
+    {
+        fn label(w: &gtk::Widget) -> Option<gtk::Label> {
+            if let Some(l) = w.downcast_ref::<gtk::Label>() {
+                return Some(l.clone());
             }
-            if let Some(l) = exp.child().and_then(|c| label(&c)) {
-                if let Some(b) = l.compute_bounds(root) {
-                    // Compare the start edge in both LTR and RTL layouts.
-                    out.push((
-                        row.depth(),
-                        if w.direction() == gtk::TextDirection::Rtl {
-                            b.x() + b.width()
-                        } else {
-                            b.x()
-                        },
-                    ));
+            let mut child = w.first_child();
+            while let Some(c) = child {
+                if let Some(l) = label(&c) {
+                    return Some(l);
                 }
+                child = c.next_sibling();
             }
+            None
+        }
+        if let Some(l) = exp.child().and_then(|c| label(&c))
+            && let Some(b) = l.compute_bounds(root)
+        {
+            // Compare the start edge in both LTR and RTL layouts.
+            out.push((
+                row.depth(),
+                if w.direction() == gtk::TextDirection::Rtl {
+                    b.x() + b.width()
+                } else {
+                    b.x()
+                },
+            ));
         }
     }
     let mut child = w.first_child();
