@@ -7087,3 +7087,7 @@ mod capture_review_hold_tests;
 #[cfg(test)]
 #[path = "mod_stop_and_claim_tests.rs"]
 mod stop_and_claim_tests;
+
+#[cfg(test)]
+#[path = "mod_synthetic_capture_tests.rs"]
+mod synthetic_capture_tests;
