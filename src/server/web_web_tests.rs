@@ -3180,6 +3180,55 @@ mod http {
         upstream.join().unwrap();
         assert_eq!(code, 502, "{body}");
         assert!(body.contains("HTTP 404"), "{body}");
+
+        // Nothing listening: a connect failure that never echoes the origin.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        cfg.write().unwrap().keydb_url = format!("http://127.0.0.1:{closed}/k");
+        let (code, body) = roundtrip(&cfg, "POST", "/api/update-keydb", None, &[]);
+        assert_eq!(code, 502, "{body}");
+        assert!(body.contains("Could not connect"), "{body}");
+        assert!(!body.contains("127.0.0.1"), "{body}");
+
+        // Served bodies: a valid keydb saves; garbage or a cut-short body is a 500.
+        let keydb = tmp.path().join("keys").join("keydb.cfg");
+        cfg.write().unwrap().keydb_path = Some(keydb.to_string_lossy().to_string());
+        let valid = "0xDEADBEEFDEADBEEFDEADBEEFDEADBEEF = Test\n";
+        for (response, want) in [
+            (
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{valid}",
+                    valid.len()
+                ),
+                200,
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nnot a keydb"
+                    .to_string(),
+                500,
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\n0x".to_string(),
+                500,
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let upstream = std::thread::spawn(move || {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(response.as_bytes());
+            });
+            cfg.write().unwrap().keydb_url = format!("http://127.0.0.1:{port}/k");
+            let (code, body) = roundtrip(&cfg, "POST", "/api/update-keydb", None, &[]);
+            upstream.join().unwrap();
+            assert_eq!(code, want, "{body}");
+        }
+        assert!(keydb.exists(), "the valid download was saved");
     }
 
     #[test]

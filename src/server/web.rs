@@ -3889,6 +3889,10 @@ mod dashboard_button_tests;
 #[path = "web_resume_param_tests.rs"]
 mod resume_param_tests;
 
+#[cfg(test)]
+#[path = "web_route_coverage_tests.rs"]
+mod route_coverage_tests;
+
 /// Cap for the KEYDB download (`keysource::refresh_keydb`), read with `read_capped_keydb_body` so overflow is detected
 /// rather than silently truncating at the cap.
 pub(crate) const KEYDB_MAX_BYTES: u64 = 100 * 1024 * 1024;
