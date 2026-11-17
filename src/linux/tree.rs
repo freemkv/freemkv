@@ -29,6 +29,8 @@ struct Bound {
 
 pub(super) struct TitleTree {
     pub widget: gtk::ScrolledWindow,
+    css: gtk::CssProvider,
+    css_display: gtk::gdk::Display,
     selection: gtk::SingleSelection,
     rows: Rc<RefCell<Vec<Row>>>,
     kids: Rc<RefCell<Vec<Vec<usize>>>>,
@@ -36,6 +38,12 @@ pub(super) struct TitleTree {
     branches: Rc<RefCell<Vec<Vec<bool>>>>,
     /// The row to bring into view after the next layout, of how many.
     scroll_to: Rc<Cell<Option<(usize, usize)>>>,
+}
+
+impl Drop for TitleTree {
+    fn drop(&mut self) {
+        gtk::style_context_remove_provider_for_display(&self.css_display, &self.css);
+    }
 }
 
 fn row_index(item: Option<glib::Object>) -> Option<usize> {
@@ -131,8 +139,9 @@ impl TitleTree {
         // The branch canvas must reach the next row, including selected rows.
         let css = gtk::CssProvider::new();
         css.load_from_data(".title-tree row cell { padding-top: 0; padding-bottom: 0; }");
+        let css_display = view.display();
         gtk::style_context_add_provider_for_display(
-            &view.display(),
+            &css_display,
             &css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
@@ -339,6 +348,8 @@ impl TitleTree {
         super::main_view::card(&widget);
         TitleTree {
             widget,
+            css,
+            css_display,
             selection,
             rows,
             kids,
