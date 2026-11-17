@@ -110,6 +110,17 @@ struct Rip {
 // Rip the fixture through `rip_disc_inner` with `tune` applied to a base config. `keyed`
 // stores the scan's key ring in the session; without it the keydb is missing.
 fn synthetic_rip(name: &str, keyed: bool, wipe: bool, tune: impl FnOnce(&mut Config)) -> Rip {
+    synthetic_rip_on(name, keyed, wipe, |t, _| t, tune)
+}
+
+// `synthetic_rip` on a drive `shape` scripts, given the fixture it serves.
+fn synthetic_rip_on(
+    name: &str,
+    keyed: bool,
+    wipe: bool,
+    shape: impl FnOnce(FakeTransport, &crate::ku_fixture::Fx) -> FakeTransport,
+    tune: impl FnOnce(&mut Config),
+) -> Rip {
     let root = tempfile::tempdir().unwrap();
     let staging_root = root.path().join("staging");
     let output_root = root.path().join("output");
@@ -121,13 +132,14 @@ fn synthetic_rip(name: &str, keyed: bool, wipe: bool, tune: impl FnOnce(&mut Con
     let device = format!("synthetic-{name}-{}", std::process::id());
     let device_path = format!("/nonexistent/{device}");
     let (transport, handle) = FakeTransport::new();
-    let mut drive =
-        libfreemkv::Drive::from_transport(Box::new(transport.with_image(fx.img.image.clone())));
+    let transport = shape(transport.with_image(fx.img.image.clone()), &fx);
+    let drive = libfreemkv::Drive::from_transport(Box::new(transport));
+    // Resolved over the image, so a scripted drive fault never reaches the key walk.
     let keys = keyed.then(|| {
         let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         freemkv_engine::keys::resolve_for_rip(
             &fx.disc,
-            &mut drive,
+            &mut libfreemkv::test_util::MemSource::new(fx.img.image.clone()),
             libfreemkv::keys::KeyScope::WholeDisc,
             &crate::ku_fixture::holding(&requests, crate::ku_fixture::K1),
             None,
@@ -336,4 +348,55 @@ fn a_keyless_online_rip_with_no_key_service_set_is_refused() {
     });
     assert_eq!(rip.row.status, "error");
     assert!(!rip.row.last_error.is_empty());
+}
+
+// Sectors of the feature's clip that never read: a multipass MKV rip with no loss
+// tolerance aborts on them and records a resumable loss abort.
+#[test]
+fn a_multipass_rip_that_loses_feature_sectors_aborts_on_the_loss() {
+    let _guard = state_lock();
+    let started = std::time::Instant::now();
+    let rip = synthetic_rip_on(
+        "loss-abort",
+        true,
+        false,
+        |t, fx| {
+            let (start, sectors) = fx.img.files[3];
+            let bad = start + sectors / 2;
+            t.rule(
+                move |cdb| {
+                    if cdb[0] != 0x28 {
+                        return false;
+                    }
+                    let lba = u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]);
+                    let len = u32::from(u16::from_be_bytes([cdb[7], cdb[8]]));
+                    lba <= bad && bad < lba + len.max(1)
+                },
+                libfreemkv::test_util::FakeMode::Sense {
+                    sense: libfreemkv::scsi::ScsiSense {
+                        sense_key: 3,
+                        asc: 0x11,
+                        ascq: 0,
+                    },
+                    progress: None,
+                },
+            )
+            .rule(|cdb| cdb[0] == 0x1B, libfreemkv::test_util::FakeMode::Fault)
+        },
+        |c| {
+            c.max_retries = 1;
+            c.abort_on_lost_secs = 0;
+        },
+    );
+    assert_eq!(
+        rip.row.status,
+        "error",
+        "{} ({:?})",
+        rip.row.last_error,
+        started.elapsed()
+    );
+    assert!(rip.row.loss_aborted, "{}", rip.row.last_error);
+    let st = staging::read_state(&rip.job_path).expect("loss-abort state");
+    assert_eq!(st.state, staging::StagingState::AbortedLoss);
+    assert!(!files_ending(&rip.job_path, ".iso").is_empty());
 }

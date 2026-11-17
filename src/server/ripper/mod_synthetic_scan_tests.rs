@@ -259,3 +259,37 @@ fn an_online_scan_with_no_key_service_set_reports_no_key_without_retrying() {
     let log = crate::server::log::get_device_log(&s.device, 200).join("\n");
     assert!(!log.contains("retrying key resolution"), "{log}");
 }
+
+#[test]
+fn a_finished_capture_is_never_ripped_again_by_a_plain_or_resume_request() {
+    use crate::server::web::ResumeMode;
+    let _guard = state_lock();
+    let s = request("finished", ResumeMode::Default, |c| {
+        c.output_format = "iso".into();
+        c.max_retries = 1;
+        c.keep_iso = true;
+    });
+    let row = s.row();
+    assert_eq!(row.status, "done", "{}", row.last_error);
+    let job = s.staging.join(&row.job_id);
+    let iso = std::fs::read_dir(&job)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "iso"))
+        .expect("staged ISO");
+    let before = std::fs::read(&iso).unwrap();
+    for mode in [ResumeMode::Default, ResumeMode::Require, ResumeMode::Prefer] {
+        let (t, _fake) = FakeTransport::new();
+        let image = crate::ku_fixture::bd_image().img.image;
+        SCAN_DRIVE.with(|slot| {
+            *slot.borrow_mut() = Some(libfreemkv::Drive::from_transport(Box::new(
+                t.with_image(image),
+            )))
+        });
+        handle_rip_request(&s.cfg, &s.device, &s.device_path, mode);
+        SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+        assert_ne!(s.row().status, "ripping", "{mode:?}");
+        assert_eq!(std::fs::read(&iso).unwrap(), before, "{mode:?}");
+    }
+}
