@@ -3464,3 +3464,7 @@ mod upgrade_tests;
 #[cfg(test)]
 #[path = "mover_retry_tests.rs"]
 mod retry_tests;
+
+#[cfg(test)]
+#[path = "mover_outcome_tests.rs"]
+mod outcome_tests;
