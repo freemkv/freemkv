@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.8.10] — UNRELEASED
+
+### Added
+
+- CLI audio and subtitle selection accepts one-based track numbers as well as languages, all and none. `freemkv info` labels each class with the matching numbers (#85). (CLI)
+
+### Fixed
+
+- Linux selection lists consistently expand below their fields with square indicators. File, Edit, View and Help expand within a compact menu panel (#86). (Linux app)
+- Linux title-tree branches connect parents, titles, tracks and chapters consistently, with no empty checkbox space before chapter labels (#87). (Linux app)
+- Separate episode titles sharing an opening or ending with Play All remain available as episode suggestions; language alternatives remain selectable and uncertain suggestions still require review (#88). (CLI, app, server)
+- Rebuilding the Linux interface after a language change releases its old tree stylesheet. (Linux app)
+
 ## [1.8.9] — 2026-11-11
 
 ### Added
@@ -16,8 +29,6 @@
 - Settings ▸ Debug dump shows the startup mode and the preferred drive. (app only: the desktop's Settings)
 
 ### Fixed
-
-- Linux selection lists consistently expand below their fields; application menus expand within a compact panel without shifting the main content (#86). Tree nodes without checkboxes no longer leave an empty checkbox slot before their labels (#87). (app only)
 
 - Library corrections file under the Library folder: with a Library folder set, a Movie correction was refused as "not under the library folder". (server only: the Library's corrections)
 - A Movie correction drops a multi-episode pick instead of filing its first episode as the film; the job falls back to the main title. (server only: the Library's corrections)
