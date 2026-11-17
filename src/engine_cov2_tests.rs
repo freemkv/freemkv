@@ -169,3 +169,16 @@ fn every_disc_format_has_a_name() {
         crate::strings::get("disc.format_unknown")
     );
 }
+
+// Ejects and the media check over a fake drive and a device path no machine has: each
+// ends in a log line or a verdict, never a panic.
+#[test]
+fn ejects_and_the_media_check_touch_no_real_drive() {
+    let st = Arc::new(RunState::default());
+    let sink = UiSink(st.clone());
+    eject_device("/dev/fmkv-cov2-no-such-drive", &sink);
+    let (t, _fake) = FakeTransport::new();
+    let held = libfreemkv::DiscSession::from_drive(libfreemkv::Drive::from_transport(Box::new(t)));
+    eject_disc(held, &sink);
+    assert_ne!(registry_disc_present(SRC), Some(true));
+}

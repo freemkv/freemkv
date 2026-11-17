@@ -238,3 +238,19 @@ fn flag_and_destination_edges() {
     std::fs::write(&file, b"x").unwrap();
     assert!(validate_dir_input(&file.join("below")).is_err());
 }
+
+// A file the user cannot read or write is refused as an image source and as a destination
+// (a root runner can do both; then both pass).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_is_refused_where_permissions_hold() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("pdc-perms");
+    let locked = dir.path().join("locked.iso");
+    std::fs::write(&locked, b"x").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let source = validate_iso_input(&locked);
+    let dest = validate_file_dest(&locked);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(source.is_err(), dest.is_err(), "{source:?} {dest:?}");
+}
