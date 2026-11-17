@@ -1789,6 +1789,24 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     scan_disc_for(cfg, device, device_path, false);
 }
 
+// The scan's session on the drive at `device_path`; a test may hand it a drive instead.
+fn open_scan_session(device_path: &str) -> freemkv_engine::Result<libfreemkv::DiscSession> {
+    #[cfg(test)]
+    if let Some(drive) = SCAN_DRIVE.with(|slot| slot.borrow_mut().take()) {
+        return Ok(libfreemkv::DiscSession::from_drive(drive));
+    }
+    freemkv_engine::drive::open_session(
+        libfreemkv::DeviceTarget::Path(std::path::PathBuf::from(device_path)),
+        libfreemkv::KeySpec::default(),
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCAN_DRIVE: std::cell::RefCell<Option<libfreemkv::Drive>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 // `scan_disc`; `insert` when the disc's insertion started it, not the operator.
 fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, insert: bool) {
     // Snapshot Config and drop the read guard immediately (see rip_disc):
@@ -1823,10 +1841,7 @@ fn scan_disc_for(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, ins
     // drive comes back out after the scan (into_drive), so the rest of
     // scan_disc is untouched.
     crate::server::log::device_log(device, "Initializing...");
-    let mut session = match freemkv_engine::drive::open_session(
-        libfreemkv::DeviceTarget::Path(std::path::PathBuf::from(device_path)),
-        libfreemkv::KeySpec::default(),
-    ) {
+    let mut session = match open_scan_session(device_path) {
         Ok(s) => s,
         Err(e) => {
             let msg = format_lib_error("Cannot open drive", &e);
@@ -7091,3 +7106,7 @@ mod stop_and_claim_tests;
 #[cfg(test)]
 #[path = "mod_synthetic_capture_tests.rs"]
 mod synthetic_capture_tests;
+
+#[cfg(test)]
+#[path = "mod_synthetic_scan_tests.rs"]
+mod synthetic_scan_tests;
