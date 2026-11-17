@@ -1801,6 +1801,15 @@ fn open_scan_session(device_path: &str) -> freemkv_engine::Result<libfreemkv::Di
     )
 }
 
+// A rip's own open of the drive at `device_path`; a test may hand it a drive instead.
+fn open_rip_drive(device_path: &str) -> freemkv_engine::Result<libfreemkv::Drive> {
+    #[cfg(test)]
+    if let Some(drive) = SCAN_DRIVE.with(|slot| slot.borrow_mut().take()) {
+        return Ok(drive);
+    }
+    freemkv_engine::drive::open(std::path::Path::new(device_path))
+}
+
 #[cfg(test)]
 thread_local! {
     static SCAN_DRIVE: std::cell::RefCell<Option<libfreemkv::Drive>> =
@@ -3235,7 +3244,7 @@ fn rip_disc_inner(
                 drop_session(device);
             }
             crate::server::log::device_log(device, "Opening drive...");
-            let mut drive = match freemkv_engine::drive::open(std::path::Path::new(device_path)) {
+            let mut drive = match open_rip_drive(device_path) {
                 Ok(d) => d,
                 Err(e) => {
                     let msg = format_lib_error("Cannot open drive", &e);

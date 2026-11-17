@@ -360,3 +360,42 @@ fn a_quarantine_that_cannot_be_written_is_logged() {
     assert!(log.contains("did not persist"), "{log}");
     crate::server::log::forget_device(&device);
 }
+
+// A rip whose scan session is gone opens the drive, scans and keys the disc itself.
+#[test]
+fn a_rip_without_a_held_session_opens_and_scans_the_drive_itself() {
+    let _guard = state_lock();
+    let s = scan("reopen", true, true, |_| {});
+    assert_eq!(s.row().status, "idle");
+    drop_session(&s.device);
+    let (t, _fake) = FakeTransport::new();
+    let image = crate::ku_fixture::bd_image().img.image;
+    SCAN_DRIVE.with(|slot| {
+        *slot.borrow_mut() = Some(libfreemkv::Drive::from_transport(Box::new(
+            t.with_image(image),
+        )))
+    });
+    rip_disc(&s.cfg, &s.device, &s.device_path, false);
+    SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+    let row = s.row();
+    assert_eq!(
+        row.status, "done",
+        "rip failed: {} ({})",
+        row.last_error, row.key_status
+    );
+}
+
+#[test]
+fn a_rip_without_a_session_on_a_blank_drive_reports_the_failed_scan() {
+    let _guard = state_lock();
+    let s = scan("reopen-blank", true, true, |_| {});
+    drop_session(&s.device);
+    let (t, _fake) = FakeTransport::new();
+    SCAN_DRIVE
+        .with(|slot| *slot.borrow_mut() = Some(libfreemkv::Drive::from_transport(Box::new(t))));
+    rip_disc(&s.cfg, &s.device, &s.device_path, false);
+    SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+    let row = s.row();
+    assert_eq!(row.status, "error");
+    assert!(!row.last_error.is_empty());
+}

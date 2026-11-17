@@ -454,3 +454,31 @@ fn a_refused_hand_off_without_keep_iso_prunes_the_image_after_the_inline_mux() {
     assert_eq!(rip.row.status, "done", "{}", rip.row.last_error);
     assert!(!files_ending(&rip.job_path, ".mkv").is_empty());
 }
+
+// A live single-pass mux whose drive dies mid-feature never reports a clean finish.
+#[test]
+fn a_live_mux_whose_drive_dies_mid_feature_is_not_a_clean_finish() {
+    let _guard = state_lock();
+    let rip = synthetic_rip_on(
+        "live-fault",
+        true,
+        false,
+        |t, fx| {
+            let (start, sectors) = fx.img.files[3];
+            let bad = start + sectors / 2;
+            t.rule(
+                move |cdb| {
+                    cdb[0] == 0x28 && u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]) >= bad
+                },
+                libfreemkv::test_util::FakeMode::Fault,
+            )
+        },
+        |c| c.on_read_error = "stop".into(),
+    );
+    assert_ne!(rip.row.status, "ripping");
+    assert!(
+        rip.row.status != "done" || rip.row.errors > 0 || rip.row.lost_video_secs > 0.0,
+        "a fault mid-feature finished clean: {:?}",
+        rip.row.status
+    );
+}
