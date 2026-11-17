@@ -83,9 +83,8 @@ impl Choice {
                 let changed = me.selected.get() != at;
                 me.set_selected(at);
                 if changed {
-                    for _cb in me.changed.borrow().iter() {
-                        // TEMPORARY APP-T1 mutation: prove the native gate
-                        // rejects a chooser that never dispatches its change.
+                    for cb in me.changed.borrow().iter() {
+                        cb(&me);
                     }
                 }
             });
