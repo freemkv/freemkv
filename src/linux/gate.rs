@@ -144,7 +144,7 @@ fn menu_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
             );
             gate.check(
                 "menu-compact-width",
-                root.width() > 0 && root.width() < me.window.width() / 2,
+                root.width() >= 360 && root.width() < me.window.width() / 2,
                 format!("menu {}px, window {}px", root.width(), me.window.width()),
             );
         }
@@ -258,6 +258,18 @@ fn chooser_sequence(
             {
                 let mut gate = g.borrow_mut();
                 gate.check("chooser-options-present", !options.is_empty(), &description);
+                gate.check(
+                    "chooser-labels-keep-words",
+                    options.iter().flat_map(labels_under).all(|label| {
+                        label.text().split_whitespace().all(|word| {
+                            let layout = label.layout().copy();
+                            layout.set_width(-1);
+                            layout.set_text(word);
+                            layout.pixel_size().0 <= label.width()
+                        })
+                    }),
+                    &description,
+                );
                 if row.has_css_class("freemkv-single-choice") {
                     let active = descendants(row.upcast_ref())
                         .iter()

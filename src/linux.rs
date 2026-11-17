@@ -102,7 +102,7 @@ fn build_ui(gapp: &adw::Application) {
     menu_list.set_widget_name("application-menu");
     let menu_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .min_content_width(360)
+        .width_request(360)
         .max_content_height(400)
         .propagate_natural_height(true)
         .child(&menu_list)
@@ -822,9 +822,7 @@ fn append_menu_rows(model: &gio::MenuModel, toggle: &gtk::MenuButton, add: &dyn 
             if !accel.is_empty()
                 && let Some((key, mods)) = gtk::accelerator_parse(&accel)
             {
-                row.add_suffix(&gtk::Label::new(Some(&gtk::accelerator_get_label(
-                    key, mods,
-                ))));
+                row.set_subtitle(&gtk::accelerator_get_label(key, mods));
             }
             row.add_suffix(&button);
             let toggle = toggle.clone();
