@@ -8,13 +8,13 @@
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14740/badge)](https://www.bestpractices.dev/projects/14740)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/freemkv/freemkv/badge)](https://scorecard.dev/viewer/?uri=github.com/freemkv/freemkv)
 [![REUSE status](https://api.reuse.software/badge/github.com/freemkv/freemkv)](https://api.reuse.software/info/github.com/freemkv/freemkv)
-[![MSRV](https://img.shields.io/badge/MSRV-1.98-blue.svg)](#minimum-supported-rust-version)
+[![MSRV](https://img.shields.io/badge/MSRV-1.98.1-blue.svg)](#minimum-supported-rust-version)
 
 # freemkv
 
-Open source 4K UHD / Blu-ray / DVD backup tool — a **command-line tool and a native desktop app** for macOS, Windows and Linux. On the command line it's two arguments — source and destination; stream URLs let you rip, remux, and transfer between any combination of disc, file, and network. Or open the desktop app: pick titles and tracks, choose a format, press Rip. Same engine either way.
+Open source 4K UHD / Blu-ray / DVD backup tool — a **command-line tool, a native desktop app, and a server with a web UI** for macOS, Windows and Linux. On the command line it's two arguments — source and destination; stream URLs let you rip, remux, and transfer between any combination of disc, file, and network. Or open the desktop app: pick titles and tracks, choose a format, press Rip. The CLI, desktop app and server use the same engine.
 
-Two builds ship, both installed as `freemkv`: the **app** (the window, plus the full CLI for any command) and the **CLI** (command line only, no UI libraries). Install one or the other.
+Two desktop/command-line builds ship, both installed as `freemkv`: the **app** (the window, plus the full CLI for any command) and the **CLI** (command line only, no UI libraries). Install one or the other.
 
 DVDs (CSS) need no setup. Blu-ray and UHD (AACS) require a `keydb.cfg` supplying disc-specific volume unique keys.
 
@@ -45,7 +45,7 @@ mv freemkv-cli-x86_64-linux freemkv && chmod +x freemkv && sudo mv freemkv /usr/
 See [INSTALL.md](INSTALL.md) for every asset, the `freemkv-cli` `.deb`, checksum
 verification, and per-platform steps.
 
-### 2. Set up decryption keys (UHD discs only)
+### 2. Set up decryption keys (Blu-ray and UHD)
 
 **DVD:** No setup needed. CSS decryption works out of the box.
 
@@ -67,6 +67,23 @@ freemkv disc:// m2ts://Movie.m2ts           # Disc to raw transport stream
 freemkv m2ts://Movie.m2ts mkv://Movie.mkv   # Remux m2ts to MKV
 freemkv info disc://                        # Show disc info
 ```
+
+## Server and Library
+
+The server build adds `freemkv server`: unattended disc capture, a web UI, and
+Library workflows for matching, remuxing and delivering films and episodes.
+The container image is `ghcr.io/freemkv/freemkv-library:latest`, with versioned
+`vX.Y.Z` tags for reproducible deployments. It supports Linux amd64, arm64 and
+arm/v7; the desktop and CLI downloads remain separate.
+
+Start with [the Docker Compose example](docker/docker-compose.example.yml).
+Set the host output and staging paths, retain `/config` across upgrades, then
+open `http://localhost:8080`. Configure ripping, keys and library destinations
+in the web UI. Existing autorip configuration directories remain supported.
+
+A source build enables the server with `--features server`; launch it with
+`freemkv server`. The `gui` feature enables the desktop shell. With neither
+feature, the binary provides the CLI only.
 
 ## How It Works
 
@@ -112,7 +129,7 @@ freemkv disc:///dev/sg4 mkv://Movie.mkv -t 1        # Specific drive
 
 ```bash
 freemkv iso://Disc.iso mkv://Movie.mkv              # ISO to MKV
-freemkv iso://Disc.iso mkv://Movie.mkv -t 1         # Main feature from ISO
+freemkv iso://Disc.iso mkv://Movie.mkv -t 1         # Title 1 from ISO
 ```
 
 ### Remux between formats
@@ -279,7 +296,7 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 ```
 -t, --title N       Select title (1-based, repeatable). Default: the main
                     title only; use `-t all` for every title.
-    --keydb PATH    KEYDB.cfg path (optional; only required for UHD / AACS 2.0+ discs)
+    --keydb PATH    KEYDB.cfg path for Blu-ray / UHD AACS keys
     --log-level N   Log verbosity: 1 = warnings/errors only (default), 2 = info,
                     3 = debug, 4 = trace. At level ≥2 also widens human stdout detail.
     --log-file PATH Also write the full log to PATH (for bug reports)
@@ -289,7 +306,7 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
                     before the language is needed — it is read out of argv
                     before anything else, so it can go anywhere on the line.
     --raw           Skip decryption (raw encrypted output)
--s, --share         Submit drive profile (with info disc://)
+    --share         Submit drive profile (with info disc://)
 -m, --mask          Mask serial numbers (with --share)
 ```
 
@@ -339,7 +356,7 @@ cargo build --release --features gui    # app (Linux: needs libgtk-4-dev libadwa
 
 ## Supported Drives
 
-Works with LG, ASUS, HP, and other MediaTek-based BD-RE drives on Linux, macOS, and Windows. Run `freemkv info disc://` to check. Pioneer support planned.
+Works with LG, ASUS, HP, and other MediaTek-based BD-RE drives on Linux, macOS, and Windows. Run `freemkv info disc://` to check. Supported Pioneer/Renesas drives also have runtime unlock support. Support depends on the drive and firmware; detection alone does not establish that a drive can be unlocked.
 
 ## Contributing
 
@@ -351,13 +368,20 @@ freemkv pursues the [OpenSSF Best Practices](https://www.bestpractices.dev/proje
 badge. Quality is enforced in CI on every change: `cargo fmt --check`,
 `cargo clippy --all-targets -D warnings`, the test suite, `cargo-deny` dependency
 scanning, and code coverage via [Codecov](https://codecov.io/gh/freemkv/freemkv).
+The coverage target is at least 90%; consult Codecov for the measured result.
+Coverage includes the server feature and runs the GTK widget gate under a
+virtual display alongside unit and integration tests.
+
+Licensing metadata lives in [REUSE.toml](REUSE.toml), with license texts in
+[LICENSES](LICENSES). Validate it with `reuse lint`, against the current
+[REUSE Specification 3.3](https://reuse.software/spec/).
 Releases are code-signed with SHA-256 checksums. See
 [CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md),
 [ROADMAP.md](ROADMAP.md), and [SECURITY.md](SECURITY.md).
 
 ## Minimum Supported Rust Version
 
-The minimum supported Rust version (MSRV) is **1.98**, declared as
+The minimum supported Rust version (MSRV) is **1.98.1**, declared as
 `rust-version` in [`Cargo.toml`](Cargo.toml) and enforced in CI on every change.
 
 ## License

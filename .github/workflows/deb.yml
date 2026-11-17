@@ -100,7 +100,7 @@ jobs:
             git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$repo.git" "freemkv/siblings/$repo"
           done
           python3 - <<'PY'
-          import importlib.util, json, pathlib, subprocess, tomllib
+          import importlib.util, json, os, pathlib, subprocess, tomllib
           spec = importlib.util.spec_from_file_location('flatpak_prepare', 'freemkv/packaging/flatpak/prepare.py')
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
@@ -109,7 +109,7 @@ jobs:
           for repo in module.REPOS[1:]:
               path = pathlib.Path('freemkv/siblings', repo)
               actual = tomllib.loads((path / 'Cargo.toml').read_text())['package']['version']
-              if actual != version:
+              if os.environ['BUILD_REF_TYPE'] == 'tag' and actual != version:
                   raise SystemExit(f'{repo} version {actual} differs from {version}')
               revisions[repo] = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
           config = pathlib.Path('freemkv/.cargo/config.toml')

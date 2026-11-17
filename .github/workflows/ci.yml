@@ -723,14 +723,18 @@ jobs:
           FREEMKV_SRC: ${{ github.workspace }}/freemkv/src
           FREEMKV_ENGINE_SRC: ${{ github.workspace }}/freemkv-engine/src
 
-  # ── Coverage: informational Codecov upload ─────────────────────────────────
-  # Additive, NON-REQUIRED. Mirrors the Linux CLI job's sibling-checkout layout
-  # (this is not a monorepo) so cargo llvm-cov can resolve the freemkv crates
-  # from their dev tips via the generated .cargo/config.toml. `--locked` is
-  # intentionally omitted for the same reason the rest of this file omits it
-  # (see the header note): the committed Cargo.lock describes a developer's
-  # machine, not a release. Uploads with CODECOV_TOKEN (empty on forks, where
-  # Codecov falls back to its tokenless mode) and never fails CI.
+  reuse:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: pip install reuse==5.1.1
+      - run: reuse lint
+
+  # Coverage includes the server tests and real GTK widget interactions.
+  # Siblings resolve from the branch tips, as in the ordinary Linux tests.
   coverage:
     if: "${{ !(github.event_name == 'push' && github.ref_type == 'branch' && github.event.commits[0] != null && github.event.commits[1] == null && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, ': bump version')) }}"
     runs-on: ubuntu-24.04
@@ -746,7 +750,8 @@ jobs:
       - name: Install GTK4 + libadwaita development headers
         timeout-minutes: 5
         run: |
-          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential
+          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus locales
+          sudo locale-gen en_US.UTF-8 de_DE.UTF-8 ar_SA.UTF-8
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
@@ -757,8 +762,25 @@ jobs:
       - uses: taiki-e/install-action@3ce020901a1c1292716d3268bf506c1ae55a84cd # v2
         with:
           tool: cargo-llvm-cov
-      - run: cargo llvm-cov --workspace --features gui --ignore-run-fail --lcov --output-path lcov.info
+      - name: Instrument unit and integration tests
+        run: cargo llvm-cov --workspace --features gui,server --no-report
         working-directory: freemkv
+      - name: Instrument the desktop app and exercise its real widgets
+        shell: bash
+        working-directory: freemkv
+        run: |
+          set -euo pipefail
+          eval "$(cargo llvm-cov show-env --export-prefix)"
+          cargo build --features gui,server --bin freemkv
+          dbus-run-session -- xvfb-run -a -s '-screen 0 3200x2400x24' \
+            python3 tests/gui_gate.py "$CARGO_TARGET_DIR/debug/freemkv" "$RUNNER_TEMP/coverage-gui"
+      - name: Export combined coverage
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+        working-directory: freemkv
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-lcov
+          path: freemkv/lcov.info
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

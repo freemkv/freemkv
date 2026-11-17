@@ -176,15 +176,11 @@ jobs:
           # Windows runners have `python`, not always `python3`.
           py=$(command -v python3 || command -v python)
           "$py" - <<'PY'
-          import importlib.util, os, pathlib, tomllib
+          import importlib.util, pathlib
           spec = importlib.util.spec_from_file_location('flatpak_prepare', 'packaging/flatpak/prepare.py')
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
-          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
-          for repo in module.REPOS[1:]:
-              actual = tomllib.loads(pathlib.Path('siblings', repo, 'Cargo.toml').read_text())['package']['version']
-              if actual != version:
-                  raise SystemExit(f'{repo} {os.environ["GITHUB_REF_NAME"]} is {actual}, freemkv is {version}')
+          # Development tips can differ after a release; tags use pinned dependencies.
           config = pathlib.Path('.cargo/config.toml')
           config.parent.mkdir(exist_ok=True)
           config.write_text(module.patches().replace('"../', '"siblings/'))
@@ -407,15 +403,11 @@ jobs:
           # Windows runners have `python`, not always `python3`.
           py=$(command -v python3 || command -v python)
           "$py" - <<'PY'
-          import importlib.util, os, pathlib, tomllib
+          import importlib.util, pathlib
           spec = importlib.util.spec_from_file_location('flatpak_prepare', 'packaging/flatpak/prepare.py')
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
-          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
-          for repo in module.REPOS[1:]:
-              actual = tomllib.loads(pathlib.Path('siblings', repo, 'Cargo.toml').read_text())['package']['version']
-              if actual != version:
-                  raise SystemExit(f'{repo} {os.environ["GITHUB_REF_NAME"]} is {actual}, freemkv is {version}')
+          # Development tips can differ after a release; tags use pinned dependencies.
           config = pathlib.Path('.cargo/config.toml')
           config.parent.mkdir(exist_ok=True)
           config.write_text(module.patches().replace('"../', '"siblings/'))
