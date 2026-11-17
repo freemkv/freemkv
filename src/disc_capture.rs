@@ -539,3 +539,7 @@ mod fold_structure_tests;
 #[cfg(test)]
 #[path = "disc_capture_share_fix_tests.rs"]
 mod share_fix_tests;
+
+#[cfg(test)]
+#[path = "disc_capture_image_tests.rs"]
+mod image_tests;
