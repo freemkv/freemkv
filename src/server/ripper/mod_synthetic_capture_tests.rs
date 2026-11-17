@@ -400,3 +400,23 @@ fn a_multipass_rip_that_loses_feature_sectors_aborts_on_the_loss() {
     assert_eq!(st.state, staging::StagingState::AbortedLoss);
     assert!(!files_ending(&rip.job_path, ".iso").is_empty());
 }
+
+// A drive whose every read dies on the bus, and that cannot be found again: the sweep
+// gives up with an error card instead of a capture.
+#[test]
+fn a_sweep_whose_drive_faults_and_cannot_be_found_again_fails() {
+    let _guard = state_lock();
+    let rip = synthetic_rip_on(
+        "transport-fault",
+        true,
+        false,
+        |t, _| t.rule(|cdb| cdb[0] == 0x28, libfreemkv::test_util::FakeMode::Fault),
+        |c| {
+            c.max_retries = 1;
+            c.transport_recovery_delay_secs = 0;
+        },
+    );
+    assert_eq!(rip.row.status, "error", "{}", rip.row.last_error);
+    assert!(!rip.row.last_error.is_empty());
+    assert!(files_ending(&rip.job_path, ".mkv").is_empty());
+}

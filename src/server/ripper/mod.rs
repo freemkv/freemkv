@@ -7114,3 +7114,7 @@ mod synthetic_scan_tests;
 #[cfg(test)]
 #[path = "mod_error_text_tests.rs"]
 mod error_text_tests;
+
+#[cfg(test)]
+#[path = "mod_poll_loop_tests.rs"]
+mod poll_loop_tests;
