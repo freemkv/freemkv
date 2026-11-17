@@ -14,6 +14,14 @@ struct Scanned {
 // Scan the fixture image (`image`, or a blank drive) with the keydb holding the disc's key
 // when `keyed`.
 fn scan(name: &str, image: bool, keyed: bool, tune: impl FnOnce(&mut Config)) -> Scanned {
+    let s = prepare(name, image, keyed, tune);
+    scan_disc_for(&s.cfg, &s.device, &s.device_path, false);
+    SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+    s
+}
+
+// The drive and config of a scan, the drive waiting for the next scan to open it.
+fn prepare(name: &str, image: bool, keyed: bool, tune: impl FnOnce(&mut Config)) -> Scanned {
     let root = tempfile::tempdir().unwrap();
     let staging = root.path().join("staging");
     let output = root.path().join("output");
@@ -55,8 +63,6 @@ fn scan(name: &str, image: bool, keyed: bool, tune: impl FnOnce(&mut Config)) ->
     };
     tune(&mut cfg);
     let cfg = Arc::new(RwLock::new(cfg));
-    scan_disc_for(&cfg, &device, &device_path, false);
-    SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
     Scanned {
         device,
         device_path,
@@ -159,4 +165,83 @@ fn a_scan_with_no_drive_reports_that_it_cannot_open_it() {
         .unwrap();
     assert_eq!(row.status, "error");
     assert!(row.last_error.contains("open"), "{}", row.last_error);
+}
+
+// A rip request on a disc not yet scanned: the scan, then the mode's route.
+fn request(
+    name: &str,
+    mode: crate::server::web::ResumeMode,
+    tune: impl FnOnce(&mut Config),
+) -> Scanned {
+    let s = prepare(name, true, true, tune);
+    handle_rip_request(&s.cfg, &s.device, &s.device_path, mode);
+    SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+    s
+}
+
+#[test]
+fn every_fresh_rip_request_mode_scans_then_rips_the_new_disc() {
+    use crate::server::web::ResumeMode;
+    let _guard = state_lock();
+    for (i, mode) in [
+        ResumeMode::Default,
+        ResumeMode::Wipe,
+        ResumeMode::Fresh,
+        ResumeMode::Prefer,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let s = request(&format!("mode{i}"), mode, |_| {});
+        let row = s.row();
+        assert_eq!(
+            row.status, "done",
+            "{mode:?}: {} ({})",
+            row.last_error, row.key_status
+        );
+    }
+}
+
+#[test]
+fn a_resume_request_for_a_disc_with_nothing_staged_is_refused() {
+    let _guard = state_lock();
+    let s = request("require", crate::server::web::ResumeMode::Require, |_| {});
+    let row = s.row();
+    assert_eq!(row.status, "error");
+    assert!(
+        row.last_error.contains("no resumable staging state"),
+        "{}",
+        row.last_error
+    );
+    assert!(take_session(&s.device).is_none());
+}
+
+#[test]
+fn a_second_request_reuses_the_scan_and_respects_the_worker_owned_image() {
+    use crate::server::web::ResumeMode;
+    let _guard = state_lock();
+    let s = request("handoff", ResumeMode::Default, |c| c.max_retries = 1);
+    let row = s.row();
+    assert_eq!(row.status, "done", "{}", row.last_error);
+    let job = s.staging.join(&row.job_id);
+    assert!(crate::server::muxer::read_marker(&job).is_ok());
+    // A fresh scan of the same disc finds its image in the mux worker's hands.
+    for mode in [ResumeMode::Wipe, ResumeMode::Require] {
+        let (t, _fake) = FakeTransport::new();
+        let image = crate::ku_fixture::bd_image().img.image;
+        SCAN_DRIVE.with(|slot| {
+            *slot.borrow_mut() = Some(libfreemkv::Drive::from_transport(Box::new(
+                t.with_image(image),
+            )))
+        });
+        handle_rip_request(&s.cfg, &s.device, &s.device_path, mode);
+        SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+        let row = s.row();
+        assert_ne!(row.status, "ripping", "{mode:?}");
+        if mode == ResumeMode::Wipe {
+            assert_eq!(row.status, "error");
+            assert!(row.last_error.contains("Cannot wipe"), "{}", row.last_error);
+            assert!(crate::server::muxer::read_marker(&job).is_ok());
+        }
+    }
 }
