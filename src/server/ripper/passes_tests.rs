@@ -96,7 +96,7 @@ fn recovery_milestones_publish_pass_state_damage_and_actionable_logs() {
         },
         RecoveryEvent::LossUnmeasured { error: &io_error },
     ] {
-        sink.event(&freemkv_engine::Event::Recovery(event));
+        sink.event(&freemkv_engine::Event::Recovery(&event));
     }
     let row = state::STATE
         .lock()
