@@ -1175,9 +1175,8 @@ fn mover_tick(cfg: &Arc<RwLock<Config>>, do_move: impl FnOnce(&Config)) -> bool 
 }
 
 pub fn run(cfg: &Arc<RwLock<Config>>) {
-    use std::sync::atomic::Ordering;
     tracing::info!("mover loop starting");
-    while !crate::server::SHUTDOWN.load(Ordering::Relaxed) {
+    while !crate::server::stopping() {
         if !mover_tick(cfg, check_and_move) {
             std::thread::sleep(std::time::Duration::from_secs(10));
             continue;
@@ -1185,7 +1184,7 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
         // SHUTDOWN-responsive sleep — break early on signal so SIGTERM
         // doesn't have to wait the full 10 s tick.
         for _ in 0..100 {
-            if crate::server::SHUTDOWN.load(Ordering::Relaxed) {
+            if crate::server::stopping() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -3180,9 +3179,9 @@ fn move_file(
                 &|| crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed),
                 Some(&worker_halt),
                 &|candidate| {
-                    check_candidate(&src_owned, &dest_owned, candidate)?;
                     #[cfg(test)]
                     test_hooks::before_publish(&hook_job);
+                    check_candidate(&src_owned, &dest_owned, candidate)?;
                     before_publish(candidate)
                 },
                 Some(&worker_activity),

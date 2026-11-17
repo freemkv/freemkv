@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 pub(crate) fn shutting_down() -> bool {
-    crate::server::SHUTDOWN.load(Ordering::Relaxed)
+    crate::server::stopping()
 }
 
 /// The worker loop: waits while a rip holds the slot or the queue is paused.

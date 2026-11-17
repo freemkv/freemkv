@@ -26,6 +26,51 @@ pub(crate) fn sleep_unless_shutdown(total: std::time::Duration) -> bool {
     true
 }
 
+/// Whether a worker loop should drain: [`SHUTDOWN`] is set.
+pub(crate) fn stopping() -> bool {
+    #[cfg(test)]
+    if test_stop::spent() {
+        return true;
+    }
+    SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// Stops a loop running on the calling thread after a set number of passes, as a shutdown
+// would, without the process-wide flag every other test shares.
+#[cfg(test)]
+pub(crate) mod test_stop {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LEFT: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// Until dropped, this thread's [`super::stopping`] answers false `checks` times, then true.
+    pub(crate) struct After(());
+
+    impl Drop for After {
+        fn drop(&mut self) {
+            LEFT.with(|left| left.set(None));
+        }
+    }
+
+    pub(crate) fn after(checks: u32) -> After {
+        LEFT.with(|left| left.set(Some(checks)));
+        After(())
+    }
+
+    pub(super) fn spent() -> bool {
+        LEFT.with(|left| match left.get() {
+            None => false,
+            Some(0) => true,
+            Some(n) => {
+                left.set(Some(n - 1));
+                false
+            }
+        })
+    }
+}
+
 /// Set only by SIGTERM/SIGINT: the process must stop. It vetoes the relaunch a
 /// reboot would do.
 pub static TERMINATE: AtomicBool = AtomicBool::new(false);
