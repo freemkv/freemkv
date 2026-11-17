@@ -1,6 +1,6 @@
 {
   "schema": 4,
-  "revision": 5,
+  "revision": 6,
   "libraries": ["libfreemkv", "freemkv-engine", "freemkv-keysources"],
   "library_required": ["src/**", "build.rs", "Cargo.toml"],
   "library_inert": [".github/**", "tests/**", "benches/**", "examples/**", "docs/**", "*.md", "*.rst",
@@ -36,7 +36,7 @@
   "closure_roots": ["ureq", "mimalloc", "libc", "tempfile"],
   "closure_skip": ["freemkv-unlock", "freemkv-i18n"],
   "runner_name_re": "^ephemeral-(linux|windows)(-perf)?-(i-[0-9a-f]{8,17})$",
-  "harness": {"repository": "freemkv/freemkv-ci", "sha": "f2fcd7d0409596ee48a98fb27f6e0f97d88e0da9"},
+  "harness": {"repository": "freemkv/freemkv-ci", "sha": "d84cebe85373b0fdbd21d1cc75eff9705004f9b9"},
   "launch": {
     "linux": {"template": "freemkv-runner-linux", "types": ["c6id.4xlarge", "m6id.4xlarge", "c6id.8xlarge"],
               "on_demand_only": true, "spot_max_price": "0.72", "on_demand_fallback": true}
