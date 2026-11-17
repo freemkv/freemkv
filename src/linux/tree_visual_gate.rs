@@ -248,7 +248,7 @@ fn check_cells(
                 .is_some_and(|(width, height, mut pixels)| {
                     // Transparent black and a black rule differ only in alpha.
                     // Present alpha as RGB to the shared colour-variation probe.
-                    for pixel in pixels.chunks_exact_mut(4) {
+                    for pixel in pixels.as_chunks_mut::<4>().0 {
                         let alpha = pixel[3];
                         pixel[..3].fill(alpha);
                     }
