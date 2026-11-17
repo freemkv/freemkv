@@ -293,3 +293,70 @@ fn a_finished_capture_is_never_ripped_again_by_a_plain_or_resume_request() {
         assert_eq!(std::fs::read(&iso).unwrap(), before, "{mode:?}");
     }
 }
+
+fn retitle(title: &str) -> staging::UserMetadata {
+    staging::UserMetadata {
+        season: None,
+        disc: None,
+        title: title.into(),
+        year: 2020,
+        media_type: crate::server::planner::MediaKind::Movie,
+        tmdb_id: 0,
+        episode_start: None,
+        poster_url: String::new(),
+        overview: String::new(),
+    }
+}
+
+#[test]
+fn a_correction_lands_only_on_the_scanned_discs_own_job() {
+    let _guard = state_lock();
+    let s = scan("correct", true, true, |_| {});
+    let job = s.row().job_id;
+    let err = |r: std::io::Result<u64>| r.expect_err("refused").to_string();
+    assert!(
+        err(retitle_staging_for_device(
+            &s.cfg,
+            "no-such-drive",
+            &job,
+            retitle("A")
+        ))
+        .contains("unknown device")
+    );
+    assert!(
+        err(retitle_staging_for_device(
+            &s.cfg,
+            &s.device,
+            "disc-other",
+            retitle("A")
+        ))
+        .contains("disc changed")
+    );
+    let revision = retitle_staging_for_device(&s.cfg, &s.device, &job, retitle("Corrected"))
+        .expect("the scanned disc's job takes the correction");
+    assert!(revision > 0);
+    let saved = staging::read_state(&s.staging.join(&job)).unwrap();
+    assert_eq!(saved.user_metadata.unwrap().title, "Corrected");
+    update_state_with(&s.device, |r| r.status = "scanning".into());
+    assert!(
+        err(retitle_staging_for_device(
+            &s.cfg,
+            &s.device,
+            &job,
+            retitle("B")
+        ))
+        .contains("disc changed")
+    );
+}
+
+#[test]
+fn a_quarantine_that_cannot_be_written_is_logged() {
+    let device = format!("quarantine-unwritable-{}", std::process::id());
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("not-a-dir");
+    std::fs::write(&file, b"").unwrap();
+    quarantine_or_log(&device, &file, "mux finalize failed");
+    let log = crate::server::log::get_device_log(&device, 10).join("\n");
+    assert!(log.contains("did not persist"), "{log}");
+    crate::server::log::forget_device(&device);
+}
