@@ -6987,7 +6987,7 @@ fn open_drive_with_backoff(
     transport_recovery_delay_secs: u64,
 ) -> Option<libfreemkv::Drive> {
     for retry in 0..3 {
-        match freemkv_engine::drive::open(std::path::Path::new(path)) {
+        match open_rip_drive(path) {
             Ok(d) => return Some(d),
             Err(e) if retry < 2 => {
                 let backoff_secs = transport_recovery_delay_secs * (1u64 << retry);

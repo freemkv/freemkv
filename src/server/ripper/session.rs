@@ -600,6 +600,10 @@ pub(super) fn rediscover_drive(
     original_path: &str,
     halt: &libfreemkv::Halt,
 ) -> Option<String> {
+    #[cfg(test)]
+    if let Some(path) = REDISCOVERED.with(|slot| slot.borrow_mut().take()) {
+        return Some(path);
+    }
     rediscover_drive_with(
         device,
         original_path,
@@ -608,6 +612,13 @@ pub(super) fn rediscover_drive(
         probe_volume_id,
         || sleep_unless_halted(halt, SETTLE_PAUSE),
     )
+}
+
+#[cfg(test)]
+thread_local! {
+    // Where a test says the drive came back after a transport fault.
+    pub(super) static REDISCOVERED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Sleep `dur`, waking early on `halt`; false if halted.

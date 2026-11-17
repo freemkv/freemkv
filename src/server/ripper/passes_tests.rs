@@ -278,3 +278,61 @@ fn a_spin_cycle_that_fails_before_a_patch_pass_settles_instead() {
     assert!(log.contains("spin-cycle before pass 2 failed"), "{log}");
     crate::server::log::forget_device(&device);
 }
+
+// The drive comes back at a new path after a bridge crash: the host re-opens it there.
+#[test]
+fn a_transport_fault_whose_drive_returns_reopens_it_and_continues() {
+    use freemkv_engine::PassHost;
+    for ready in [true, false] {
+        let device = format!("transport-return-{ready}-{}", std::process::id());
+        let path = "/nonexistent/recover-old";
+        let (t, _fake) = libfreemkv::test_util::FakeTransport::new();
+        let mut session = session_on(t, path);
+        let (fresh, fresh_fake) = libfreemkv::test_util::FakeTransport::new();
+        let fresh = if ready {
+            fresh
+        } else {
+            fresh.rule(|cdb| cdb[0] == 0x00, libfreemkv::test_util::FakeMode::Fault)
+        };
+        super::super::session::REDISCOVERED
+            .with(|slot| *slot.borrow_mut() = Some("/nonexistent/recover-new".into()));
+        super::super::SCAN_DRIVE.with(|slot| {
+            *slot.borrow_mut() = Some(libfreemkv::Drive::from_transport(Box::new(fresh)))
+        });
+        let mut host = ServerPassHost {
+            device: &device,
+            device_path: path,
+            session: &mut session,
+            halt: Arc::new(AtomicBool::new(false)),
+            user_halt: Arc::new(AtomicBool::new(false)),
+            delay_secs: 0,
+            attempt: 0,
+            gave_up: false,
+            halted: false,
+        };
+        let fault = libfreemkv::Error::ScsiError {
+            opcode: 0x28,
+            status: libfreemkv::scsi::SCSI_STATUS_TRANSPORT_FAILURE,
+            sense: None,
+        };
+        let recovered = host.recover_transport(1, &fault);
+        super::super::SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
+        let log = crate::server::log::get_device_log(&device, 100).join("\n");
+        assert!(
+            log.contains("rediscovered at /nonexistent/recover-new"),
+            "{log}"
+        );
+        if ready {
+            assert!(recovered, "{log}");
+            assert_eq!(host.attempt, 2);
+            assert!(!host.gave_up);
+            assert_eq!(session.device_path, "/nonexistent/recover-new");
+        } else {
+            assert!(!recovered, "{log}");
+            assert!(host.gave_up);
+            assert!(log.contains("wait_ready"), "{log}");
+        }
+        drop(fresh_fake);
+        crate::server::log::forget_device(&device);
+    }
+}
