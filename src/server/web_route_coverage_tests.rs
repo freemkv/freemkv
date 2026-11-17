@@ -570,17 +570,21 @@ fn state_json_carries_a_cards_episode_list() {
 fn roll_back_restores_only_the_failed_save() {
     let previous = Config::default();
     let cfg = Arc::new(RwLock::new(Config {
-        port: previous.port.wrapping_add(1),
+        movie_dir: "Applied".into(),
         ..previous.clone()
     }));
     let applied = serde_json::to_value(&*cfg.read().unwrap()).ok();
     roll_back_settings(&cfg, applied.as_ref(), &previous);
-    assert_eq!(cfg.read().unwrap().port, previous.port, "rolled back");
+    assert_eq!(
+        cfg.read().unwrap().movie_dir,
+        previous.movie_dir,
+        "rolled back"
+    );
 
     // A newer save moved the config on: leave it.
-    cfg.write().unwrap().port = previous.port.wrapping_add(2);
+    cfg.write().unwrap().movie_dir = "Newer".into();
     roll_back_settings(&cfg, applied.as_ref(), &previous);
-    assert_eq!(cfg.read().unwrap().port, previous.port.wrapping_add(2));
+    assert_eq!(cfg.read().unwrap().movie_dir, "Newer");
 }
 
 struct FailingWriter;
