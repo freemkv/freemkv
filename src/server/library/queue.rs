@@ -1505,3 +1505,7 @@ impl Queue {
 #[cfg(test)]
 #[path = "queue_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "queue_cov_tests.rs"]
+mod cov_tests;
