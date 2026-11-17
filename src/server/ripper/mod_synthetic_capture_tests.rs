@@ -488,3 +488,47 @@ fn a_live_mux_whose_drive_dies_mid_feature_is_not_a_clean_finish() {
         rip.row.status
     );
 }
+
+// The same dead sector skipped with no loss tolerance: whatever the mux lost of the
+// feature is a loss, never a clean delivery.
+#[test]
+fn a_live_mux_that_skips_a_dead_sector_with_no_tolerance_is_not_clean() {
+    let _guard = state_lock();
+    let rip = synthetic_rip_on(
+        "live-skip",
+        true,
+        false,
+        |t, fx| {
+            let (start, sectors) = fx.img.files[3];
+            let bad = start + sectors / 2;
+            t.rule(
+                move |cdb| {
+                    let len = match cdb[0] {
+                        0x28 => u32::from(u16::from_be_bytes([cdb[7], cdb[8]])),
+                        0xA8 => u32::from_be_bytes([cdb[6], cdb[7], cdb[8], cdb[9]]),
+                        _ => return false,
+                    };
+                    let lba = u32::from_be_bytes([cdb[2], cdb[3], cdb[4], cdb[5]]);
+                    lba <= bad && bad < lba + len.max(1)
+                },
+                libfreemkv::test_util::FakeMode::Sense {
+                    sense: libfreemkv::scsi::ScsiSense {
+                        sense_key: 3,
+                        asc: 0x11,
+                        ascq: 0,
+                    },
+                    progress: None,
+                },
+            )
+        },
+        |c| {
+            c.on_read_error = "skip".into();
+            c.abort_on_lost_secs = 0;
+        },
+    );
+    assert_ne!(rip.row.status, "ripping");
+    assert!(
+        rip.row.status != "done" || rip.row.errors > 0 || rip.row.lost_video_secs > 0.0,
+        "a skipped dead sector finished clean"
+    );
+}
