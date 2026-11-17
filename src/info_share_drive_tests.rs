@@ -137,3 +137,33 @@ fn a_masked_renesas_share_hides_serials_and_records_the_knock_windows() {
     );
     let _ = std::fs::remove_dir_all(&b);
 }
+
+// A drive with a disc in it: the structure files ride in the profile and the issue body.
+#[test]
+fn a_share_with_a_disc_folds_its_structure_into_the_profile() {
+    let fx = crate::ku_fixtures::bd_image(&[None], 1);
+    let (t, _fake) = libfreemkv::test_util::FakeTransport::new();
+    let mut d = libfreemkv::Drive::from_transport(Box::new(t.with_image(fx.img.image.clone())));
+    d.drive_id = drive(false).drive_id.clone();
+    let b = base("disc");
+    let flags = DriveFlags {
+        share: true,
+        ..DriveFlags::default()
+    };
+    share_drive(&mut d, flags, &b);
+    let dir = profile_dir(&b);
+    assert!(dir.join("profile.zip").is_file());
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.len() > 3, "{names:?}");
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+#[test]
+fn share_help_and_the_zip_failure_line_render() {
+    super::print_share_help();
+    let line = super::zip_failed_line(&"disk full");
+    assert!(line.contains("disk full"), "{line}");
+}
