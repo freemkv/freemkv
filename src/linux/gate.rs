@@ -47,6 +47,7 @@ pub(super) fn start(shell: &Rc<Shell>, dir: String) {
 fn run(shell: &Rc<Shell>, dir: String) {
     let _ = std::fs::create_dir_all(&dir);
     let g = Rc::new(RefCell::new(Gate::default()));
+    environment(shell, &mut g.borrow_mut());
     titles(shell, &dir, &mut g.borrow_mut());
 
     let Some(main) = shell.main.borrow().clone() else {
@@ -62,6 +63,41 @@ fn run(shell: &Rc<Shell>, dir: String) {
         );
         run_after_tree(&me, dir, g);
     });
+}
+
+// Assert what GTK and the app actually applied, not just the driver's folder name.
+fn environment(shell: &Shell, g: &mut Gate) {
+    if let Ok(language) = super::dev_env("FMKV_GATE_LANGUAGE") {
+        // Arabic is deliberately a fallback/RTL case: no Arabic catalog ships yet.
+        let catalog = crate::strings::bundled_locale_json(&language)
+            .or_else(|| crate::strings::bundled_locale_json("en"))
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+        let expected = catalog
+            .as_ref()
+            .and_then(|json| json.pointer("/gui/menu/file"))
+            .and_then(serde_json::Value::as_str);
+        let actual = crate::strings::get("gui.menu.file");
+        g.check(
+            "gate-applied-language",
+            expected == Some(actual.as_str()),
+            format!("requested {language}, rendered menu label {actual:?}"),
+        );
+        let expected_rtl = language == "ar";
+        let actual_rtl = shell.window.direction() == gtk::TextDirection::Rtl;
+        g.check(
+            "gate-applied-direction",
+            actual_rtl == expected_rtl,
+            format!("requested RTL={expected_rtl}, GTK RTL={actual_rtl}"),
+        );
+    }
+    if let Ok(scale) = super::dev_env("FMKV_GATE_SCALE") {
+        let actual = shell.window.scale_factor();
+        g.check(
+            "gate-applied-scale",
+            scale.parse::<i32>().ok() == Some(actual),
+            format!("requested {scale}, GTK scale factor {actual}"),
+        );
+    }
 }
 
 fn run_after_tree(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {

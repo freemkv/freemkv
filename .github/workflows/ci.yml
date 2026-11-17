@@ -654,7 +654,8 @@ jobs:
         timeout-minutes: 5
         if: matrix.os == 'linux'
         run: |
-          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus
+          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus locales
+          sudo locale-gen en_US.UTF-8 de_DE.UTF-8 ar_SA.UTF-8
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -670,7 +671,7 @@ jobs:
           set -euo pipefail
           py=$(command -v python3 || command -v python)
           if [ "${{ matrix.os }}" = linux ]; then
-            dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1200x24' \
+            dbus-run-session -- xvfb-run -a -s '-screen 0 3200x2400x24' \
               "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}" "$RUNNER_TEMP/gui-gate"
           else
             "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}.exe" "$RUNNER_TEMP/gui-gate"

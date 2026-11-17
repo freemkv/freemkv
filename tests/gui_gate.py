@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """qa's GUI gate driver: run a debug build of the desktop app over the synthetic disc folder
-(tests/gui_fixture.py) in English, German and Arabic at 100% and 150%, once per pair.
+(tests/gui_fixture.py) in English, German and Arabic-system-locale fallback,
+at 100% and 150% on Windows or 100% and 200% on Linux, once per pair.
 
     python3 tests/gui_gate.py APP OUT_DIR
 
@@ -26,7 +27,7 @@ for _s in (sys.stdout, sys.stderr):
     _s.reconfigure(encoding="utf-8", errors="replace")
 
 LANGS = ["en", "de", "ar"]
-DPIS = [96, 144]
+DPIS = [96, 144] if os.name == "nt" else [96, 192]
 TIMEOUT_S = 180
 
 
@@ -37,8 +38,11 @@ def run_env(lang, dpi, fixture, out, profile):
     if os.name == "nt":
         env.update(APPDATA=profile, FMKV_SYSTEM_LOCALE=lang, FMKV_DPI=str(dpi))
     else:
+        locale = {"en": "en_US", "de": "de_DE", "ar": "ar_SA"}[lang] + ".UTF-8"
         env.update(XDG_DATA_HOME=profile, XDG_CONFIG_HOME=profile, XDG_CACHE_HOME=profile,
-                   LANGUAGE=lang, LANG="C.UTF-8", GDK_DPI_SCALE=str(dpi / 96),
+                   LANGUAGE=lang, LANG=locale, LC_ALL=locale,
+                   GDK_SCALE=str(dpi // 96), GDK_DPI_SCALE="1",
+                   FMKV_GATE_LANGUAGE=lang, FMKV_GATE_SCALE=str(dpi // 96),
                    GSK_RENDERER="cairo")
     return env
 
