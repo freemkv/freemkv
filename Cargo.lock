@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.8.9"
+version = "1.8.10"
 dependencies = [
  "block2",
  "freemkv-engine",
@@ -418,8 +418,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.8.9"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.9#425df3e5b4bcbfc89999e54327597e2990d0b4b7"
+version = "1.8.10"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.10#2c2b426c058a03d2140576f891d655eeb5fce6b1"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -434,16 +434,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.8.9"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.9#9d636e03f8533eb6b2f50882578409029de4bf17"
+version = "1.8.10"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.10#47568fa990a5699815654397bbe00a453bfb7d4b"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.8.9"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.9#cf0e64929b3cc5d72fb5f0cc1479d99cdcf35211"
+version = "1.8.10"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.10#96cf993c36f6143345c9fe00821ac303238b8602"
 dependencies = [
  "base64",
  "flate2",
@@ -456,8 +456,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.8.9"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.9#fb5a51d40ff29b1aead3713b0ed4b7a0d781fb5b"
+version = "1.8.10"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.10#03933fc05ea6c97751b79f44eb19a274d3441c1f"
 dependencies = [
  "aes",
  "anyhow",
@@ -1040,8 +1040,8 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libfreemkv"
-version = "1.8.9"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.9#4db1a72ee5ada587db48f3b3e6f15ee6285265eb"
+version = "1.8.10"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.10#c0c5fffbc0a2fff8c8f1d8e75279b73f855ab3f5"
 dependencies = [
  "aes",
  "base64",
