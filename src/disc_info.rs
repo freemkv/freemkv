@@ -168,7 +168,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
         },
         ..Default::default()
     };
-    let mut session = freemkv_engine::drive::open_session(target, keyspec).unwrap_or_else(|e| {
+    let session = freemkv_engine::drive::open_session(target, keyspec).unwrap_or_else(|e| {
         match &e {
             // Autodetect with no drive surfaces as an empty-path DeviceNotFound;
             // keep the dedicated "no drive" message. Any other open failure (or a
@@ -181,6 +181,18 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
         crate::cli_entry::exit(1);
     });
 
+    report_session(session, &out, verbose, full, basic, &keydb);
+}
+
+// Scan an opened session and print the report. Split from `run` so tests can drive a fake.
+pub(crate) fn report_session(
+    mut session: libfreemkv::DiscSession,
+    out: &Output,
+    verbose: bool,
+    full: bool,
+    basic: bool,
+    keydb: &Option<String>,
+) {
     // Reads PGS streams to detect forced subtitles from content, matching a rip's
     // muxer. Gated to verbose: it needs AACS keys for encrypted UHD subtitles and
     // reads the clip (slow) — keyless `info` stays fast, using vendor-label forced.
@@ -255,7 +267,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
     for line in freemkv::engine::layer_lines(&disc) {
         out.raw(Normal, &line);
     }
-    emit_encryption_line(&out, &disc);
+    emit_encryption_line(out, &disc);
 
     // Report the unlocker that actually handled this rip. Keep the matrix as the
     // source of truth, but do not expose the internal capability list here.
@@ -266,7 +278,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
     // resolve against the local keydb, so the crypto block shows a real unit-key set.
     if verbose {
         let status = if disc.aacs.is_some() {
-            crate::pipe::resolve_info_keys(&mut drive, &disc, &keydb, &out)
+            crate::pipe::resolve_info_keys(&mut drive, &disc, keydb, out)
         } else {
             None
         };
@@ -292,7 +304,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
         out.raw(Normal, &format!("Region: {}", region_name(&disc.region)));
 
         if let Some(ref aacs) = disc.aacs {
-            emit_aacs_block(&out, aacs, status.as_ref());
+            emit_aacs_block(out, aacs, status.as_ref());
         }
     }
 
@@ -301,7 +313,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
 
     out.blank(Normal);
 
-    print_titles(&out, &disc, full, verbose, basic);
+    print_titles(out, &disc, full, verbose, basic);
 }
 
 /// The report's `Unlocker:` line, in the active locale.
@@ -753,3 +765,7 @@ fn format_volume_id(vol_id: &str) -> String {
 #[cfg(test)]
 #[path = "disc_info_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "disc_info_session_tests.rs"]
+mod session_tests;
