@@ -365,7 +365,7 @@ fn settings_checks(win: &adw::PreferencesWindow, page: &str, dir: &str, g: &mut 
         .filter_map(|w| w.downcast_ref::<adw::ExpanderRow>())
         .filter(|r| r.is_mapped())
     {
-        let choice = row.subtitle().map(|s| s.to_string()).unwrap_or_default();
+        let choice = row.subtitle().to_string();
         let label = labels_under(row.upcast_ref())
             .into_iter()
             .find(|l| l.is_mapped() && l.text() == choice);
