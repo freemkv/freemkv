@@ -674,3 +674,7 @@ mod tests;
 #[cfg(test)]
 #[path = "api_cov_tests.rs"]
 mod cov_tests;
+
+#[cfg(test)]
+#[path = "api_cov2_tests.rs"]
+mod cov2_tests;
