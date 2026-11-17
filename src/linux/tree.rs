@@ -186,9 +186,9 @@ impl TitleTree {
             exp.set_margin_start(depth * INDENT);
             label.set_text(row.cell("item"));
             label.set_tooltip_text(Some(row.cell("item")));
-            // Reserve the checkbox slot even for non-selectable rows, so labels
-            // at the same depth stay aligned (video, audio, subtitles, chapters).
-            cb.set_opacity(if row.check.is_some() { 1.0 } else { 0.0 });
+            // Non-selectable nodes have no checkbox slot: their label follows
+            // the expander directly, including chapter groups and chapter leaves.
+            cb.set_visible(row.check.is_some());
             cb.set_sensitive(row.check.is_some() && row.check_enabled);
             cb.set_focusable(row.check.is_some() && row.check_enabled);
             cb.update_property(&[gtk::accessible::Property::Label(row.cell("item"))]);
@@ -256,12 +256,11 @@ impl TitleTree {
                     let end = if expandable {
                         x(depth) + if rtl { 8.0 } else { -8.0 }
                     } else {
-                        // Leaves have no arrow. Connect to their visible content,
-                        // including across the reserved but empty checkbox slot
-                        // on chapter rows, instead of leaving a floating stub.
+                        // Leaves have no arrow. Connect to their visible checkbox
+                        // or label instead of leaving a floating stub.
                         let target = content
                             .first_child()
-                            .filter(|w| w.opacity() > 0.0)
+                            .filter(|w| w.is_visible())
                             .or_else(|| content.last_child());
                         target
                             .and_then(|w| w.compute_bounds(&overlay))

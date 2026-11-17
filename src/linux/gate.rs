@@ -125,10 +125,29 @@ fn run_after_tree(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
 }
 
 fn menu_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
+    let content_before = shell.toast_overlay.compute_bounds(&shell.window);
     shell.menu_btn.set_active(true);
     let me = shell.clone();
     glib::timeout_add_local_once(SETTLE, move || {
-        let root: gtk::Widget = me.window.clone().upcast();
+        let Some(popover) = me.menu_btn.popover() else {
+            g.borrow_mut()
+                .check("menu-panel", false, "menu has no popover");
+            return finish(&dir, &g.borrow());
+        };
+        let root: gtk::Widget = popover.upcast();
+        {
+            let mut gate = g.borrow_mut();
+            gate.check(
+                "menu-keeps-content-in-place",
+                content_before == me.toast_overlay.compute_bounds(&me.window),
+                "opening the menu must not move or shrink the main content",
+            );
+            gate.check(
+                "menu-compact-width",
+                root.width() > 0 && root.width() < me.window.width() / 2,
+                format!("menu {}px, window {}px", root.width(), me.window.width()),
+            );
+        }
         save(&root, &format!("{dir}/menu.png"), &mut g.borrow_mut());
         let rows = chooser_rows(me.menu_list.upcast_ref());
         g.borrow_mut().check(

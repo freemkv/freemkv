@@ -92,7 +92,7 @@ fn step(
             );
             if action == 1 {
                 let mut labels = Vec::new();
-                collect_labels(scroll.upcast_ref(), scroll.upcast_ref(), &mut labels);
+                collect_node_starts(scroll.upcast_ref(), scroll.upcast_ref(), &mut labels);
                 let x = |depth| labels.iter().find(|(d, _)| *d == depth).map(|(_, x)| *x);
                 let follows_depth = match (x(1), x(2), x(3)) {
                     (Some(a), Some(b), Some(c))
@@ -104,7 +104,7 @@ fn step(
                     _ => false,
                 };
                 g.borrow_mut().check(
-                    "tree-label-follows-depth",
+                    "tree-content-follows-depth",
                     follows_depth,
                     format!("{labels:?}"),
                 );
@@ -138,26 +138,18 @@ fn step(
     });
 }
 
-fn collect_labels(w: &gtk::Widget, root: &gtk::Widget, out: &mut Vec<(u32, f32)>) {
+fn collect_node_starts(w: &gtk::Widget, root: &gtk::Widget, out: &mut Vec<(u32, f32)>) {
     if let Some(exp) = w.downcast_ref::<gtk::TreeExpander>()
         && let Some(row) = exp.list_row()
     {
-        fn label(w: &gtk::Widget) -> Option<gtk::Label> {
-            if let Some(l) = w.downcast_ref::<gtk::Label>() {
-                return Some(l.clone());
-            }
-            let mut child = w.first_child();
-            while let Some(c) = child {
-                if let Some(l) = label(&c) {
-                    return Some(l);
-                }
-                child = c.next_sibling();
-            }
-            None
-        }
-        if let Some(l) = exp.child().and_then(|c| label(&c))
-            && let Some(b) = l.compute_bounds(root)
-        {
+        // A selectable node begins at its checkbox; other nodes begin at
+        // their label. Hidden checkboxes must not reserve an empty slot.
+        let content = exp.child();
+        let first = content.as_ref().and_then(|c| c.first_child());
+        let start = first
+            .filter(|w| w.is_visible())
+            .or_else(|| content.as_ref().and_then(|c| c.last_child()));
+        if let Some(b) = start.and_then(|w| w.compute_bounds(root)) {
             // Compare the start edge in both LTR and RTL layouts.
             out.push((
                 row.depth(),
@@ -171,7 +163,7 @@ fn collect_labels(w: &gtk::Widget, root: &gtk::Widget, out: &mut Vec<(u32, f32)>
     }
     let mut child = w.first_child();
     while let Some(c) = child {
-        collect_labels(&c, root, out);
+        collect_node_starts(&c, root, out);
         child = c.next_sibling();
     }
 }

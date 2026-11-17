@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- Linux selection lists consistently expand below their fields; application menus expand within a compact panel without shifting the main content (#86). Tree nodes without checkboxes no longer leave an empty checkbox slot before their labels (#87). (app only)
+
 - Library corrections file under the Library folder: with a Library folder set, a Movie correction was refused as "not under the library folder". (server only: the Library's corrections)
 - A Movie correction drops a multi-episode pick instead of filing its first episode as the film; the job falls back to the main title. (server only: the Library's corrections)
 - A new scan no longer inherits the previous disc's job, identity and correction, so a title pick for the disc in the drive cannot land in the old disc's job; Start over and a stale write keep the operator's title pick. (server only: the drive card)

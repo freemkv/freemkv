@@ -59,7 +59,7 @@ pub(crate) struct Shell {
     gapp: adw::Application,
     window: adw::ApplicationWindow,
     menu_list: gtk::ListBox,
-    menu_btn: gtk::ToggleButton,
+    menu_btn: gtk::MenuButton,
     toast_overlay: adw::ToastOverlay,
     main: RefCell<Option<Rc<main_view::MainView>>>,
     memo: RefCell<main_view::Memo>,
@@ -90,7 +90,7 @@ fn build_ui(gapp: &adw::Application) {
 
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
-    let menu_btn = gtk::ToggleButton::builder()
+    let menu_btn = gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .tooltip_text("Menu")
         .build();
@@ -102,13 +102,13 @@ fn build_ui(gapp: &adw::Application) {
     menu_list.set_widget_name("application-menu");
     let menu_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_width(360)
         .max_content_height(400)
         .propagate_natural_height(true)
         .child(&menu_list)
-        .visible(false)
         .build();
-    let panel = menu_scroll.clone();
-    menu_btn.connect_toggled(move |button| panel.set_visible(button.is_active()));
+    let popover = gtk::Popover::builder().child(&menu_scroll).build();
+    menu_btn.set_popover(Some(&popover));
     let keys = gtk::EventControllerKey::new();
     let close_menu = menu_btn.clone();
     keys.connect_key_pressed(move |_, key, _, _| {
@@ -121,7 +121,6 @@ fn build_ui(gapp: &adw::Application) {
         }
     });
     menu_scroll.add_controller(keys);
-    toolbar.add_top_bar(&menu_scroll);
     let toast_overlay = adw::ToastOverlay::new();
     toolbar.set_content(Some(&toast_overlay));
     window.set_content(Some(&toolbar));
@@ -541,7 +540,7 @@ impl Shell {
     }
 
     fn install_actions(self: &Rc<Self>) {
-        // Preserve the primary-menu keyboard entry point after replacing MenuButton.
+        // Keep the primary menu available from the keyboard as well as the header.
         let menu = gio::SimpleAction::new("menu", None);
         let weak = Rc::downgrade(self);
         menu.connect_activate(move |_, _| {
@@ -787,11 +786,7 @@ fn build_menu_model(log_hidden: bool) -> gio::Menu {
 /// Render the existing action model using the same inline rows as selections.
 /// Commands remain GtkActionable buttons: sensitivity, shortcuts and dispatch
 /// still come from the application's registered actions.
-fn append_menu_rows(
-    model: &gio::MenuModel,
-    toggle: &gtk::ToggleButton,
-    add: &dyn Fn(&gtk::Widget),
-) {
+fn append_menu_rows(model: &gio::MenuModel, toggle: &gtk::MenuButton, add: &dyn Fn(&gtk::Widget)) {
     for index in 0..model.n_items() {
         let text = |name: &str| {
             model
