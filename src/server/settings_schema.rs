@@ -791,3 +791,7 @@ pub fn schema_json() -> Value {
 #[cfg(test)]
 #[path = "settings_schema_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_schema_builder_tests.rs"]
+mod builder_tests;
