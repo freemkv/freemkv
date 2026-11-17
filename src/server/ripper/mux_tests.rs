@@ -1163,3 +1163,49 @@ fn a_title_less_outcome_names_its_failure() {
         format!("E{}", libfreemkv::error::E_NO_DISC_KEY)
     );
 }
+
+// A mux that stops moving shows "stalled" on its tile after the soft threshold, and logs
+// the recovery once bytes flow again. Real time: the watchdog wakes every 15 s.
+#[test]
+fn a_stalled_mux_is_shown_stalled_and_then_recovered() {
+    let device = "watchdog_soft_stall_device";
+    let dest = tempfile::tempdir().unwrap();
+    let mut inputs = inputs_for(device, &dest.path().join("Test.mkv"));
+    inputs.total_bytes = 4 << 20;
+    update_state(
+        device,
+        RipState {
+            device: device.into(),
+            status: "ripping".into(),
+            ..Default::default()
+        },
+    );
+    let a = atomics();
+    let active = Arc::new(AtomicBool::new(true));
+    a.wd_bytes.store(1 << 20, Ordering::Relaxed);
+    spawn_mux_watchdog_with(
+        &inputs,
+        active.clone(),
+        a.wd_last_frame.clone(),
+        a.wd_bytes.clone(),
+        |watch| std::thread::Builder::new().spawn(watch).map(drop),
+    );
+    std::thread::sleep(Duration::from_secs(SOFT_WATCHDOG_STALL_SECS + 2));
+    let row = super::super::STATE
+        .lock()
+        .unwrap()
+        .get(device)
+        .cloned()
+        .unwrap();
+    assert_eq!(row.status, "ripping");
+    assert!(row.eta.starts_with("stalled"), "{:?}", row.eta);
+    assert_eq!(row.progress_pct, 25);
+    a.wd_bytes.store(2 << 20, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_secs(16));
+    active.store(false, Ordering::Relaxed);
+    let log = crate::server::log::get_device_log(device, 20).join("\n");
+    assert!(log.contains("Drive stalled at"), "{log}");
+    assert!(log.contains("Drive recovered"), "{log}");
+    super::super::STATE.lock().unwrap().remove(device);
+    crate::server::log::forget_device(device);
+}
