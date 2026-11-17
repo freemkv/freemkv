@@ -1081,3 +1081,85 @@ fn reboot_during_watchdog_counter_wait_suppresses_exit() {
         || {}
     ));
 }
+
+#[test]
+fn the_minute_progress_line_logs_once_a_minute_with_speed_and_eta() {
+    let device = format!("mux-tick-{}", std::process::id());
+    let t0 = Instant::now();
+    let last = Mutex::new(t0);
+    let gib = 1u64 << 30;
+    let tick = |bytes_done, total_bytes, speed, eta| MuxTick {
+        bytes_done,
+        total_bytes,
+        pct: 50,
+        speed,
+        eta,
+    };
+    log_mux_tick(
+        &device,
+        &last,
+        t0 + Duration::from_secs(10),
+        &tick(gib, 2 * gib, 12.5, "1:00"),
+    );
+    log_mux_tick(
+        &device,
+        &last,
+        t0 + Duration::from_secs(61),
+        &tick(gib, 2 * gib, 12.5, "1:00"),
+    );
+    log_mux_tick(
+        &device,
+        &last,
+        t0 + Duration::from_secs(122),
+        &tick(gib, 0, 0.5, ""),
+    );
+    let log = crate::server::log::get_device_log(&device, 10);
+    assert_eq!(log.len(), 2, "{log:?}");
+    let all = log.join("\n");
+    assert!(
+        all.contains("1.0 GB / 2.0 GB (50%) 12.5 MB/s ETA 1:00"),
+        "{all}"
+    );
+    assert!(all.contains("1.0 GB 512 KB/s"), "{all}");
+    crate::server::log::forget_device(&device);
+}
+
+#[test]
+fn coded_producer_faults_read_as_english_causes() {
+    use libfreemkv::error as ec;
+    for (code, label) in [
+        (ec::E_DECRYPT_FAILED, "decryption failed"),
+        (ec::E_DISC_READ, "disc read error"),
+        (ec::E_HALTED, "rip stopped by user"),
+        (ec::E_MAPFILE_INVALID, "recovery mapfile invalid"),
+        (ec::E_NO_STREAMS, "no playable streams"),
+        (ec::E_DISC_CAPACITY_OVERFLOW, "unusable disc capacity"),
+        (ec::E_DISC_CAPACITY_MALFORMED, "unusable disc capacity"),
+        (ec::E_SCSI_ERROR, "read failed mid-stream"),
+    ] {
+        assert!(coded_error_label(code).contains(label), "E{code}");
+    }
+}
+
+#[test]
+fn a_title_less_outcome_names_its_failure() {
+    use freemkv_engine::RipOutcome;
+    let failed = |code, data: &str| RipOutcome::Failed {
+        title_index: 0,
+        code,
+        kind: std::io::ErrorKind::PermissionDenied,
+        data: data.into(),
+    };
+    assert_eq!(
+        outcome_error(&failed(Some(6000), "x")).to_string(),
+        "E6000: x"
+    );
+    assert_eq!(outcome_error(&failed(Some(6000), "")).to_string(), "E6000");
+    let uncoded = outcome_error(&failed(None, ""));
+    assert_eq!(uncoded.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(uncoded.to_string(), "image mux failed before any title");
+    assert_eq!(
+        outcome_error(&RipOutcome::NoKey).to_string(),
+        format!("E{}", libfreemkv::error::E_NO_DISC_KEY)
+    );
+}
