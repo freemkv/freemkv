@@ -1752,3 +1752,42 @@ fn a_new_scan_never_inherits_the_previous_discs_job() {
     assert_ne!(row.tmdb_title, "Disc A");
     STATE.lock().unwrap().remove(device);
 }
+
+// A long pass logs its position once a minute, with skipped sectors when there are any.
+#[test]
+fn a_long_pass_logs_its_position_once_a_minute() {
+    let dev = format!("test-pps-minute-log-{}", std::process::id());
+    let ctx = minimal_pass_ctx(&dev);
+    for (pass, lost) in [(1u8, 0u64), (3, 20_480)] {
+        let state = std::sync::Mutex::new(PassProgressState::new());
+        {
+            let mut s = state.lock().unwrap();
+            s.last_work_done = 1 << 30;
+            s.last_work_total = 2 << 30;
+            s.last_log = std::time::Instant::now() - std::time::Duration::from_secs(61);
+        }
+        let p = libfreemkv::progress::PassProgress {
+            kind: libfreemkv::progress::PassKind::Sweep,
+            work_done: 1 << 30,
+            work_total: 2 << 30,
+            bytes_good_total: 1 << 30,
+            bytes_unreadable_total: lost,
+            bytes_pending_total: 0,
+            bytes_retryable_total: 0,
+            bytes_total_disc: ctx.bytes_total_disc,
+            disc_duration_secs: None,
+            bytes_bad_in_main_title: lost,
+            main_title_duration_secs: None,
+            main_title_size_bytes: None,
+            located: Default::default(),
+        };
+        push_pass_state(&ctx, &p, 2048.0, pass, 4, &state);
+        push_pass_state(&ctx, &p, 2048.0, pass, 4, &state);
+    }
+    let log = crate::server::log::get_device_log(&dev, 20).join("\n");
+    assert_eq!(log.matches("Pass 1/4: swept").count(), 1, "{log}");
+    assert_eq!(log.matches("Pass 3/4: swept").count(), 1, "{log}");
+    assert!(log.contains("10 skipped"), "{log}");
+    STATE.lock().unwrap().remove(&dev);
+    crate::server::log::forget_device(&dev);
+}
