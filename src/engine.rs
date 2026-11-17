@@ -3579,6 +3579,29 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     run_disc_scanning(req, sink, state, HOLD.take(), fe::open_scan)
 }
 
+/// A title's failed drive reopen, passed on as is; tests stand a fake drive in for it.
+#[cfg(not(test))]
+fn reopen_stand_in(e: libfreemkv::Error) -> Result<libfreemkv::DiscSession, libfreemkv::Error> {
+    Err(e)
+}
+
+#[cfg(test)]
+type TestReopen = dyn FnMut() -> Result<libfreemkv::DiscSession, libfreemkv::Error>;
+
+#[cfg(test)]
+thread_local! {
+    /// The drive a title's reopen gets on this thread when the real one fails (CI has none).
+    static TEST_REOPEN: std::cell::RefCell<Option<Box<TestReopen>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn reopen_stand_in(e: libfreemkv::Error) -> Result<libfreemkv::DiscSession, libfreemkv::Error> {
+    TEST_REOPEN
+        .with(|t| t.borrow_mut().as_mut().map(|open| open()))
+        .unwrap_or(Err(e))
+}
+
 /// What a whole-disc output of a drive decrypts (KU §2.5): nothing for a raw ISO copy
 /// (“GUI "Keep encrypted", GUI `raw_copy`) | `None`: no key call”), else the whole disc.
 fn disc_copy_scope(kind: OutKind, raw: bool) -> libfreemkv::keys::KeyScope {
@@ -3884,7 +3907,9 @@ fn run_disc_scanning(
             disc_target(&req.source),
             session_credentials(&req.keys),
             false,
-        ) {
+        )
+        .or_else(reopen_stand_in)
+        {
             Ok(v) => v,
             // Same bypass as the identity check below: an `Err` returned
             // straight out never reaches the arm that logs a per-title reason,
@@ -4538,3 +4563,7 @@ mod held_drive_tests;
 #[cfg(test)]
 #[path = "engine_cov_tests.rs"]
 mod cov_tests;
+
+#[cfg(test)]
+#[path = "engine_cov2_tests.rs"]
+mod cov2_tests;
