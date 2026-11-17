@@ -73,7 +73,7 @@ fn fetch_keydb_logs_each_failure_without_writing() {
         let (port, h) = serve(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
         fetch_keydb(&cfg, &format!("http://127.0.0.1:{port}/k"), boot);
         h.join().unwrap();
-        fetch_keydb(&cfg, "ftp://example.invalid/k", boot);
+        fetch_keydb(&cfg, "ftp://example.com/k", boot);
     }
     assert!(!dest.exists());
     // A save under a regular file cannot create its directory.

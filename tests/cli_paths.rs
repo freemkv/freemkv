@@ -117,7 +117,7 @@ fn update_keys_needs_a_url_and_reports_a_failed_fetch() {
         l.local_addr().unwrap().port()
     };
     for url in [
-        "ftp://example.invalid/keydb.cfg".to_string(),
+        "ftp://example.com/keydb.cfg".to_string(),
         format!("http://127.0.0.1:{port}/keydb.cfg"),
     ] {
         let out = run(&["update-keys", "--url", &url, "--keydb", &dest]);
