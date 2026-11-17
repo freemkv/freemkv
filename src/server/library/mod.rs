@@ -1912,3 +1912,7 @@ fn matches_unreadable(config_dir: &Path, why: &str) -> String {
         &[("dir", &config_dir.display().to_string()), ("error", why)],
     )
 }
+
+#[cfg(test)]
+#[path = "mod_cov_tests.rs"]
+mod cov_tests;

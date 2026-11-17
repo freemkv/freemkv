@@ -670,3 +670,7 @@ pub fn sse_frame(cursor: &mut SseCursor, dirs: Option<&super::Dirs>) -> Option<S
 #[cfg(test)]
 #[path = "api_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "api_cov_tests.rs"]
+mod cov_tests;
