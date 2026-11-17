@@ -3103,3 +3103,43 @@ fn start_over_keeps_the_operators_title_pick() {
     assert_eq!(st.metadata_revision, 1);
     assert_eq!(st.title_pick, pick);
 }
+
+#[test]
+fn legacy_loss_markers_read_back_and_clear_without_a_state_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let marker = dir.join(ABORTED_LOSS_MARKER);
+    std::fs::write(&marker, br#"{"reason":"2.0s lost","attempt":3}"#).unwrap();
+    assert_eq!(read_aborted_loss(dir), Some(("2.0s lost".to_string(), 3)));
+    std::fs::write(&marker, b"{}").unwrap();
+    assert_eq!(
+        read_aborted_loss(dir),
+        Some(("aborted on loss".to_string(), 0))
+    );
+    std::fs::write(&marker, b"not json").unwrap();
+    assert_eq!(read_aborted_loss(dir), None);
+    clear_aborted_loss_marker(dir);
+    assert!(!marker.exists());
+    assert!(!accept_loss_requested(dir));
+    write_accept_loss_marker(dir);
+    assert!(dir.join(ACCEPT_LOSS_MARKER).exists());
+    assert!(accept_loss_requested(dir));
+    clear_accept_loss_marker(dir);
+    assert!(!accept_loss_requested(dir));
+}
+
+#[test]
+fn the_accept_loss_override_lives_in_the_state_file_when_there_is_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    try_write_state(dir, &DiscState::new(StagingState::AbortedLoss)).unwrap();
+    assert_eq!(
+        read_aborted_loss(dir),
+        Some(("aborted on loss".to_string(), 0))
+    );
+    write_accept_loss_marker(dir);
+    assert!(!dir.join(ACCEPT_LOSS_MARKER).exists());
+    assert!(read_state(dir).unwrap().accept_loss);
+    clear_accept_loss_marker(dir);
+    assert!(!accept_loss_requested(dir));
+}
