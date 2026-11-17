@@ -1602,7 +1602,14 @@ thread_local! {
     /// The titles `run` built its jobs for on this thread.
     pub(crate) static RAN_TITLES: std::cell::RefCell<Option<Vec<Option<usize>>>> =
         const { std::cell::RefCell::new(None) };
+    /// The drive `open_drive_scan` opens on this thread (tests have no drive).
+    pub(crate) static TEST_DRIVE: std::cell::RefCell<Option<Box<TestDrive>>> =
+        const { std::cell::RefCell::new(None) };
 }
+
+/// A test's stand-in for a drive open and scan, given the scan's `raw` flag.
+#[cfg(test)]
+pub(crate) type TestDrive = dyn FnMut(bool) -> Result<libfreemkv::DiscSession, libfreemkv::Error>;
 
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
     #[cfg(test)]
@@ -1731,6 +1738,11 @@ fn open_drive_scan(
     credentials: Option<libfreemkv::DriveCredentials>,
     raw: bool,
 ) -> Result<libfreemkv::DiscSession, libfreemkv::Error> {
+    #[cfg(test)]
+    if let Some(opened) = TEST_DRIVE.with(|t| t.borrow_mut().as_mut().map(|open| open(raw))) {
+        let _ = (target, credentials);
+        return opened;
+    }
     let progress = libfreemkv::halt::Liveness::new();
     freemkv_engine::open_scan_with(
         target,
@@ -3094,3 +3106,7 @@ mod ku_cli_tests;
 #[cfg(test)]
 #[path = "pipe_cov_tests.rs"]
 mod cov_tests;
+
+#[cfg(test)]
+#[path = "pipe_drive_cov_tests.rs"]
+mod drive_cov_tests;
