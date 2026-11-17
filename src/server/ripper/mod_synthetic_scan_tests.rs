@@ -530,3 +530,51 @@ fn a_long_scan_is_reported_by_its_watchdog() {
     assert!(log.contains("phase=resolve_keys"), "{log}");
     crate::server::log::forget_device(&device);
 }
+
+// A capture stopped half way: its image and a map whose second half was never read.
+fn stage_partial_capture(job: &std::path::Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(job).unwrap();
+    let fx = crate::ku_fixture::bd_image();
+    let iso = fx.write(job, "Partial.iso");
+    let total = fx.img.image.len() as u64;
+    let half = (total / 2) / 2048 * 2048;
+    let map = freemkv_engine::mapfile_path_for(&iso);
+    let mut m = freemkv_engine::Mapfile::create(&map, total, "t").unwrap();
+    m.record(0, half, freemkv_engine::SectorStatus::Finished)
+        .unwrap();
+    m.record(half, total - half, freemkv_engine::SectorStatus::NonTried)
+        .unwrap();
+    m.set_disc_hash(&fx.disc.aacs.as_ref().unwrap().disc_hash);
+    m.flush().unwrap();
+    let mut st = staging::DiscState::new(staging::StagingState::Stopped);
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.mapfile_path = map.to_string_lossy().into_owned();
+    st.max_retries = 1;
+    st.output_format = Some("mkv".into());
+    staging::try_write_state(job, &st).unwrap();
+    iso
+}
+
+#[test]
+fn resume_requests_continue_a_partial_sweep_from_its_map() {
+    use crate::server::web::ResumeMode;
+    let _guard = state_lock();
+    for (i, mode) in [ResumeMode::Require, ResumeMode::Prefer]
+        .into_iter()
+        .enumerate()
+    {
+        let s = scan(&format!("partial{i}"), true, true, |c| c.max_retries = 1);
+        let job = s.staging.join(s.row().job_id);
+        let iso = stage_partial_capture(&job);
+        super::test_trace::traced(|| handle_rip_request(&s.cfg, &s.device, &s.device_path, mode));
+        let log = crate::server::log::get_device_log(&s.device, 500).join("\n");
+        let row = s.row();
+        assert_ne!(row.status, "ripping", "{mode:?}");
+        assert!(
+            log.contains("partial sweep") || !row.last_error.is_empty(),
+            "{mode:?}: {}",
+            row.last_error
+        );
+        assert!(iso.exists(), "{mode:?}");
+    }
+}
