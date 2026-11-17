@@ -826,3 +826,7 @@ mod keydb_tests;
 #[cfg(test)]
 #[path = "settings_temp_tests.rs"]
 mod temp_tests;
+
+#[cfg(test)]
+#[path = "settings_json_round_trip_tests.rs"]
+mod json_round_trip_tests;
