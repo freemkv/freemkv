@@ -73,7 +73,7 @@ libfreemkv = "1.8"
 freemkv-keysources = "1.8"
 freemkv-i18n = "1.8"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 ureq = { version = "3", features = ["json"] }
 isolang = "2"
 tracing = "0.1"
