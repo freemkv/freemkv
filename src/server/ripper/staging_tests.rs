@@ -3143,3 +3143,57 @@ fn the_accept_loss_override_lives_in_the_state_file_when_there_is_one() {
     clear_accept_loss_marker(dir);
     assert!(!accept_loss_requested(dir));
 }
+
+fn tv_metadata(season: Option<u16>, disc: Option<u16>, episode_start: Option<u16>) -> UserMetadata {
+    UserMetadata {
+        season,
+        disc,
+        title: "Show".into(),
+        year: 2020,
+        media_type: crate::server::planner::MediaKind::Tv,
+        tmdb_id: 0,
+        episode_start,
+        poster_url: String::new(),
+        overview: String::new(),
+    }
+}
+
+#[test]
+fn metadata_edits_refuse_zero_numbers_reset_jobs_delivered_jobs_and_missing_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let err = |r: io::Result<u64>| r.expect_err("refused").to_string();
+    assert!(
+        err(save_user_metadata(dir, tv_metadata(Some(1), None, Some(0)))).contains("First episode")
+    );
+    assert!(
+        err(save_user_metadata(dir, tv_metadata(Some(0), None, None))).contains("Season and disc")
+    );
+    assert!(
+        err(save_user_metadata(dir, tv_metadata(Some(1), Some(0), None)))
+            .contains("Season and disc")
+    );
+    assert!(err(save_user_metadata(dir, tv_metadata(Some(1), None, None))).contains("unavailable"));
+    let mut st = DiscState::new(StagingState::Stopped);
+    st.reset_in_progress = true;
+    try_write_state(dir, &st).unwrap();
+    assert!(
+        err(save_user_metadata(dir, tv_metadata(Some(1), None, None)))
+            .contains("reset is incomplete")
+    );
+    st.reset_in_progress = false;
+    st.state = StagingState::Done;
+    write_state_unlocked(dir, &st).unwrap();
+    assert!(
+        err(save_user_metadata(dir, tv_metadata(Some(1), None, None)))
+            .contains("delivery has started")
+    );
+    st.state = StagingState::Review;
+    st.title_identity_review = true;
+    write_state_unlocked(dir, &st).unwrap();
+    assert!(
+        err(save_user_metadata(dir, tv_metadata(Some(1), None, None))).contains("retained ISO")
+    );
+    std::fs::write(dir.join(STATE_FILE), b"{ torn").unwrap();
+    assert!(save_user_metadata(dir, tv_metadata(Some(1), None, None)).is_err());
+}
