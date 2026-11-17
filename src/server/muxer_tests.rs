@@ -1574,3 +1574,168 @@ fn the_mux_worker_takes_no_slot_while_a_hand_off_waits_for_its_job() {
         "the worker loop took the mux slot for a waiting hand-off"
     );
 }
+
+// A finished capture handed to the worker: a keyed two-title image saved with a movie plan.
+fn handed_off_capture(root: &Path, name: &str, key: bool) -> std::path::PathBuf {
+    use crate::server::ripper::staging;
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let k1 = crate::ku_fixture::K1;
+    let fx = crate::ku_fixtures::bd_image(&[Some(k1), Some(k1)], 1);
+    let iso = fx.write(&dir, &format!("{name}.iso"));
+    crate::ku_fixtures::sidecar(&fx, &iso, true);
+    let (scanned, _) =
+        freemkv_engine::scan_image(&freemkv_engine::ImageSource::Iso(iso.clone())).unwrap();
+    if key {
+        let hash = libfreemkv::hex::strip_hex_prefix(&fx.disc.aacs.as_ref().unwrap().disc_hash);
+        let hex: String = k1.iter().map(|b| format!("{b:02x}")).collect();
+        let keydb = root.parent().unwrap().join("keydb.cfg");
+        std::fs::write(&keydb, format!("0x{hash} = ISO | U | 1-0x{hex}\n")).unwrap();
+    }
+    let mut st = staging::DiscState::new(staging::StagingState::Ripped);
+    st.output_format = Some("mkv".into());
+    st.title = name.into();
+    st.disc_name = name.into();
+    st.iso_path = iso.to_string_lossy().into_owned();
+    st.mapfile_path = freemkv_engine::mapfile_path_for(&iso)
+        .to_string_lossy()
+        .into_owned();
+    st.max_retries = 2;
+    st.origin_device = format!("{name}-drive");
+    st.outputs = vec![staging::Output {
+        filename: format!("{name}.mkv"),
+        title_index: 0,
+        title_identity: Some(crate::title_identity::TitleIdentity::of(&scanned.titles[0])),
+        ..Default::default()
+    }];
+    staging::try_write_state(&dir, &st).unwrap();
+    dir
+}
+
+#[test]
+fn a_worker_tick_muxes_a_hand_off_and_holds_loss_and_disc_waits() {
+    use crate::server::ripper::staging;
+    let _guard = crate::server::log::env_guard();
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    // SAFETY: env access in tests, serialized by env_guard.
+    unsafe {
+        std::env::set_var("AUTORIP_DIR", tmp.path());
+    }
+    let root = tmp.path().join("staging");
+    let muxed = handed_off_capture(&root, "Worker_Film", true);
+    // The origin tile is still "ripping": a successful worker mux settles it.
+    crate::server::ripper::update_state(
+        "Worker_Film-drive",
+        crate::server::ripper::RipState {
+            device: "Worker_Film-drive".into(),
+            status: "ripping".into(),
+            disc_name: "Worker_Film".into(),
+            ..Default::default()
+        },
+    );
+    let lossy = root.join("Lossy_Film");
+    std::fs::create_dir_all(&lossy).unwrap();
+    let mut st = staging::DiscState::new(staging::StagingState::AbortedLoss);
+    st.failure_reason = Some("aborted: 3.0s lost".into());
+    staging::try_write_state(&lossy, &st).unwrap();
+    let waiting = root.join("Waiting_Film");
+    std::fs::create_dir_all(&waiting).unwrap();
+    let mut st = staging::DiscState::new(staging::StagingState::Ripped);
+    st.needs_disc = true;
+    staging::try_write_state(&waiting, &st).unwrap();
+    std::fs::write(root.join("stray-file"), b"").unwrap();
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: root.to_string_lossy().to_string(),
+        keydb_path: Some(tmp.path().join("keydb.cfg").to_string_lossy().into_owned()),
+        output_format: "mkv".into(),
+        keep_iso: true,
+        ..Config::default()
+    }));
+    check_and_mux(&cfg);
+    let done = staging::read_state(&muxed).unwrap();
+    assert!(
+        matches!(
+            done.state,
+            staging::StagingState::Done
+                | staging::StagingState::Review
+                | staging::StagingState::Completed
+        ),
+        "{:?} {:?}",
+        done.state,
+        MUX_ERRORS
+            .lock()
+            .unwrap()
+            .get(&muxed.to_string_lossy().to_string())
+    );
+    assert!(muxed.join("Worker_Film.mkv").exists());
+    let errors = MUX_ERRORS.lock().unwrap().clone();
+    assert!(!errors.contains_key(&muxed.to_string_lossy().to_string()));
+    assert_eq!(
+        errors
+            .get(&lossy.to_string_lossy().to_string())
+            .map(|e| e.reason.clone()),
+        Some("aborted: 3.0s lost".to_string())
+    );
+    assert!(errors.contains_key(&waiting.to_string_lossy().to_string()));
+    crate::server::ripper::STATE
+        .lock()
+        .unwrap()
+        .remove("Worker_Film-drive");
+    for d in [&lossy, &waiting] {
+        clear_mux_error(&d.to_string_lossy());
+    }
+    crate::server::ripper::STATE.lock().unwrap().remove("_mux");
+}
+
+#[test]
+fn a_worker_tick_on_a_missing_staging_root_pauses_with_a_card() {
+    let _g = crate::server::mover::TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("gone");
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: root.to_string_lossy().to_string(),
+        ..Config::default()
+    }));
+    check_and_mux(&cfg);
+    let key = root.to_string_lossy().to_string();
+    let card = MUX_ERRORS.lock().unwrap().get(&key).cloned();
+    assert!(
+        card.is_some_and(|c| c.reason.contains("cannot read staging dir")),
+        "a missing staging root must raise a card"
+    );
+    std::fs::create_dir_all(&root).unwrap();
+    check_and_mux(&cfg);
+    assert!(!MUX_ERRORS.lock().unwrap().contains_key(&key));
+}
+
+// The worker loop ticks once and stops on shutdown; a child process, as the flag is global.
+#[test]
+fn the_worker_loop_stops_on_shutdown() {
+    const CHILD: &str = "FREEMKV_TEST_MUX_LOOP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = crate::server::util::child_test(
+            "server::muxer::tests::the_worker_loop_stops_on_shutdown",
+            CHILD,
+        );
+        assert!(status.success(), "the mux loop child failed: {status}");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let cfg = Arc::new(RwLock::new(Config {
+        staging_dir: tmp.path().to_string_lossy().to_string(),
+        ..Config::default()
+    }));
+    crate::server::SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+    let worker = {
+        let cfg = cfg.clone();
+        std::thread::spawn(move || run(&cfg))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    worker.join().unwrap();
+}
