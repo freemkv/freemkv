@@ -72,7 +72,8 @@ impl Job {
 
     fn run(&self) -> MuxHandoffOutcome {
         let marker = staging::read_state(&self.dir).unwrap().to_ripped_marker();
-        remux_from_ripped_marker(&self.cfg, &self.dir, &marker)
+        super::super::test_trace::traced(|| remux_from_ripped_marker(&self.cfg, &self.dir, &marker))
+            .0
     }
 
     fn assert_capture_retained(&self) {

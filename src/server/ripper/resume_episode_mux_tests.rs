@@ -77,7 +77,8 @@ impl Job {
 
     fn run(&self) -> MuxHandoffOutcome {
         let marker = staging::read_state(&self.dir).unwrap().to_ripped_marker();
-        remux_from_ripped_marker(&self.cfg, &self.dir, &marker)
+        super::super::test_trace::traced(|| remux_from_ripped_marker(&self.cfg, &self.dir, &marker))
+            .0
     }
 
     fn muxed(&self) -> Vec<PathBuf> {
@@ -183,18 +184,20 @@ fn a_primary_output_that_cannot_be_written_fails_and_keeps_the_capture() {
 
 fn remux_cold(job: &Job, device: &str) {
     let map = freemkv_engine::mapfile_path_for(&job.iso);
-    resume_remux_within(
-        &job.cfg,
-        device,
-        ResumeClass::Remux {
-            iso_path: job.iso.clone(),
-            mapfile_path: map,
-            display_name: "Show".into(),
-            title_confident: None,
-        },
-        std::time::Duration::ZERO,
-        || (),
-    );
+    super::super::test_trace::traced(|| {
+        resume_remux_within(
+            &job.cfg,
+            device,
+            ResumeClass::Remux {
+                iso_path: job.iso.clone(),
+                mapfile_path: map,
+                display_name: "Show".into(),
+                title_confident: None,
+            },
+            std::time::Duration::ZERO,
+            || (),
+        )
+    });
 }
 
 #[test]

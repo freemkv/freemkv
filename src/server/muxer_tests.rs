@@ -1654,7 +1654,7 @@ fn a_worker_tick_muxes_a_hand_off_and_holds_loss_and_disc_waits() {
         keep_iso: true,
         ..Config::default()
     }));
-    check_and_mux(&cfg);
+    crate::server::ripper::test_trace::traced(|| check_and_mux(&cfg));
     let done = staging::read_state(&muxed).unwrap();
     assert!(
         matches!(

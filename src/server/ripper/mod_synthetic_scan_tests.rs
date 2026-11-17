@@ -4,6 +4,7 @@ use super::*;
 use libfreemkv::test_util::FakeTransport;
 
 struct Scanned {
+    trace: String,
     device: String,
     device_path: String,
     cfg: Arc<RwLock<Config>>,
@@ -14,8 +15,9 @@ struct Scanned {
 // Scan the fixture image (`image`, or a blank drive) with the keydb holding the disc's key
 // when `keyed`.
 fn scan(name: &str, image: bool, keyed: bool, tune: impl FnOnce(&mut Config)) -> Scanned {
-    let s = prepare(name, image, keyed, tune);
-    scan_disc_for(&s.cfg, &s.device, &s.device_path, false);
+    let mut s = prepare(name, image, keyed, tune);
+    s.trace =
+        super::test_trace::traced(|| scan_disc_for(&s.cfg, &s.device, &s.device_path, false)).1;
     SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
     s
 }
@@ -64,6 +66,7 @@ fn prepare(name: &str, image: bool, keyed: bool, tune: impl FnOnce(&mut Config))
     tune(&mut cfg);
     let cfg = Arc::new(RwLock::new(cfg));
     Scanned {
+        trace: String::new(),
         device,
         device_path,
         cfg,
@@ -105,6 +108,7 @@ fn state_lock() -> std::sync::MutexGuard<'static, ()> {
 fn a_scan_identifies_keys_and_stages_the_disc_and_its_rip_muxes() {
     let _guard = state_lock();
     let s = scan("keyed", true, true, |_| {});
+    assert!(s.trace.contains("scan: begin"), "{}", s.trace);
     let row = s.row();
     assert_eq!(
         row.status, "idle",
@@ -120,7 +124,7 @@ fn a_scan_identifies_keys_and_stages_the_disc_and_its_rip_muxes() {
         assert!(session.keys.is_some(), "{:?}", session.key_error);
         store_session(&s.device, session);
     }
-    rip_disc(&s.cfg, &s.device, &s.device_path, false);
+    super::test_trace::traced(|| rip_disc(&s.cfg, &s.device, &s.device_path, false));
     let row = s.row();
     assert_eq!(
         row.status, "done",
@@ -173,8 +177,9 @@ fn request(
     mode: crate::server::web::ResumeMode,
     tune: impl FnOnce(&mut Config),
 ) -> Scanned {
-    let s = prepare(name, true, true, tune);
-    handle_rip_request(&s.cfg, &s.device, &s.device_path, mode);
+    let mut s = prepare(name, true, true, tune);
+    s.trace =
+        super::test_trace::traced(|| handle_rip_request(&s.cfg, &s.device, &s.device_path, mode)).1;
     SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
     s
 }
@@ -234,7 +239,7 @@ fn a_second_request_reuses_the_scan_and_respects_the_worker_owned_image() {
                 t.with_image(image),
             )))
         });
-        handle_rip_request(&s.cfg, &s.device, &s.device_path, mode);
+        super::test_trace::traced(|| handle_rip_request(&s.cfg, &s.device, &s.device_path, mode));
         SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
         let row = s.row();
         assert_ne!(row.status, "ripping", "{mode:?}");
@@ -287,7 +292,7 @@ fn a_finished_capture_is_never_ripped_again_by_a_plain_or_resume_request() {
                 t.with_image(image),
             )))
         });
-        handle_rip_request(&s.cfg, &s.device, &s.device_path, mode);
+        super::test_trace::traced(|| handle_rip_request(&s.cfg, &s.device, &s.device_path, mode));
         SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
         assert_ne!(s.row().status, "ripping", "{mode:?}");
         assert_eq!(std::fs::read(&iso).unwrap(), before, "{mode:?}");
@@ -375,7 +380,7 @@ fn a_rip_without_a_held_session_opens_and_scans_the_drive_itself() {
             t.with_image(image),
         )))
     });
-    rip_disc(&s.cfg, &s.device, &s.device_path, false);
+    super::test_trace::traced(|| rip_disc(&s.cfg, &s.device, &s.device_path, false));
     SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
     let row = s.row();
     assert_eq!(
@@ -393,7 +398,7 @@ fn a_rip_without_a_session_on_a_blank_drive_reports_the_failed_scan() {
     let (t, _fake) = FakeTransport::new();
     SCAN_DRIVE
         .with(|slot| *slot.borrow_mut() = Some(libfreemkv::Drive::from_transport(Box::new(t))));
-    rip_disc(&s.cfg, &s.device, &s.device_path, false);
+    super::test_trace::traced(|| rip_disc(&s.cfg, &s.device, &s.device_path, false));
     SCAN_DRIVE.with(|slot| slot.borrow_mut().take());
     let row = s.row();
     assert_eq!(row.status, "error");

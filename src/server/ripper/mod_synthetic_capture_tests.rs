@@ -102,6 +102,7 @@ fn a_held_synthetic_disc_completes_a_whole_disc_iso_capture() {
 // open handles once the rip returned.
 struct Rip {
     row: RipState,
+    trace: String,
     job_path: std::path::PathBuf,
     live_handles: usize,
     _root: tempfile::TempDir,
@@ -193,7 +194,9 @@ fn synthetic_rip_on(
     };
     tune(&mut cfg);
     let cfg = Arc::new(RwLock::new(cfg));
-    rip_disc_inner(&cfg, &device, &device_path, false, wipe, true);
+    let ((), trace) = super::test_trace::traced(|| {
+        rip_disc_inner(&cfg, &device, &device_path, false, wipe, true)
+    });
     let row = STATE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -203,6 +206,7 @@ fn synthetic_rip_on(
     unregister_halt(&device);
     Rip {
         row,
+        trace,
         job_path: staging_root.join(job),
         live_handles: handle.live_handles(),
         _root: root,
@@ -234,6 +238,11 @@ fn a_single_pass_mkv_rip_muxes_live_from_the_drive() {
         rip.row.status, "done",
         "live mux failed: {} ({})",
         rip.row.last_error, rip.row.key_status
+    );
+    assert!(
+        rip.trace.contains("mux using reader: physical drive"),
+        "{}",
+        rip.trace
     );
     assert_eq!(rip.row.progress_pct, 100);
     assert!(!files_ending(&rip.job_path, ".mkv").is_empty());

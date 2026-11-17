@@ -7161,3 +7161,7 @@ mod error_text_tests;
 #[cfg(test)]
 #[path = "mod_poll_loop_tests.rs"]
 mod poll_loop_tests;
+
+#[cfg(test)]
+#[path = "mod_test_trace.rs"]
+pub(crate) mod test_trace;
