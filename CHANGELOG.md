@@ -4,14 +4,14 @@
 
 ### Added
 
-- CLI audio and subtitle selection accepts one-based track numbers as well as languages, all and none. `freemkv info` labels each class with the matching numbers (#85). (CLI)
+- CLI audio and subtitle selection accepts one-based track numbers as well as languages, all and none. `freemkv info` labels each class with the matching numbers (#85). (CLI only: numeric flags and info output)
 
 ### Fixed
 
-- Linux selection lists consistently expand below their fields with square indicators. File, Edit, View and Help expand within a compact menu panel (#86). (Linux app)
-- Linux title-tree branches connect parents, titles, tracks and chapters consistently, with no empty checkbox space before chapter labels (#87). (Linux app)
+- Linux selection lists consistently expand below their fields with square indicators. File, Edit, View and Help expand within a compact menu panel (#86). (app only: Linux GTK interface)
+- Linux title-tree branches connect parents, titles, tracks and chapters consistently, with no empty checkbox space before chapter labels (#87). (app only: Linux GTK interface)
 - Separate episode titles sharing an opening or ending with Play All remain available as episode suggestions; language alternatives remain selectable and uncertain suggestions still require review (#88). (CLI, app, server)
-- Rebuilding the Linux interface after a language change releases its old tree stylesheet. (Linux app)
+- Rebuilding the Linux interface after a language change releases its old tree stylesheet. (app only: Linux GTK interface)
 
 ## [1.8.9] — 2026-11-11
 
