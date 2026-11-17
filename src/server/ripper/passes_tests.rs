@@ -123,3 +123,158 @@ fn recovery_milestones_publish_pass_state_damage_and_actionable_logs() {
     }
     crate::server::log::forget_device(&device);
 }
+
+fn sense(sense_key: u8, asc: u8) -> Option<libfreemkv::scsi::ScsiSense> {
+    Some(libfreemkv::scsi::ScsiSense {
+        sense_key,
+        asc,
+        ascq: 0,
+    })
+}
+
+#[test]
+fn a_failed_patch_pass_logs_its_category_and_the_action_it_calls_for() {
+    let device = format!("patch-failure-{}", std::process::id());
+    let halt = AtomicBool::new(false);
+    let cases: Vec<(libfreemkv::Error, &str)> = vec![
+        (
+            libfreemkv::Error::ScsiError {
+                opcode: 0x28,
+                status: libfreemkv::scsi::SCSI_STATUS_TRANSPORT_FAILURE,
+                sense: None,
+            },
+            "USB bridge crashed",
+        ),
+        (
+            libfreemkv::Error::DiscRead {
+                sector: 7,
+                status: Some(2),
+                sense: sense(4, 0x08),
+            },
+            "drive may be failing",
+        ),
+        (
+            libfreemkv::Error::ScsiError {
+                opcode: 0x28,
+                status: 2,
+                sense: sense(5, 0x20),
+            },
+            "firmware wedged",
+        ),
+        (
+            libfreemkv::Error::DeviceNotFound {
+                path: "/dev/sg9".into(),
+            },
+            "DEVICE_ERROR",
+        ),
+        (
+            libfreemkv::Error::IoError {
+                source: std::io::Error::other("bus reset"),
+            },
+            "ERROR_CODE_5",
+        ),
+    ];
+    for (pass, (error, expect)) in cases.iter().enumerate() {
+        log_patch_failure(&device, &halt, pass as u32 + 2, error);
+        let log = crate::server::log::get_device_log(&device, 200).join("\n");
+        assert!(log.contains(expect), "missing {expect}: {log}");
+    }
+    let log = crate::server::log::get_device_log(&device, 200).join("\n");
+    assert!(log.contains("STRATEGY_FAILURE: patch_recovery"), "{log}");
+    assert!(log.contains("DISC_READ_ERROR"), "{log}");
+    halt.store(true, Ordering::Relaxed);
+    log_patch_failure(
+        &device,
+        &halt,
+        9,
+        &libfreemkv::Error::ScsiError {
+            opcode: 0x28,
+            status: 2,
+            sense: sense(3, 0x11),
+        },
+    );
+    let log = crate::server::log::get_device_log(&device, 200).join("\n");
+    assert!(log.contains("PASS 9 CANCELLED: user halt"), "{log}");
+    assert!(log.contains("sense_key=03 ASC=11"), "{log}");
+    crate::server::log::forget_device(&device);
+}
+
+fn session_on(transport: libfreemkv::test_util::FakeTransport, path: &str) -> DriveSession {
+    DriveSession {
+        drive: libfreemkv::Drive::from_transport(Box::new(transport)),
+        disc: None,
+        scanned: true,
+        probed: true,
+        tmdb: None,
+        device_path: path.into(),
+        key_verdict: None,
+        keys: None,
+        key_error: None,
+        key_reads: Default::default(),
+    }
+}
+
+#[test]
+fn a_transport_fault_whose_drive_cannot_be_found_again_gives_up() {
+    use freemkv_engine::PassHost;
+    for stopped in [false, true] {
+        let device = format!("transport-recover-{stopped}-{}", std::process::id());
+        let path = "/nonexistent/recover-drive";
+        let (t, _fake) = libfreemkv::test_util::FakeTransport::new();
+        let mut session = session_on(t, path);
+        let mut host = ServerPassHost {
+            device: &device,
+            device_path: path,
+            session: &mut session,
+            halt: Arc::new(AtomicBool::new(stopped)),
+            user_halt: Arc::new(AtomicBool::new(false)),
+            delay_secs: 0,
+            attempt: 0,
+            gave_up: false,
+            halted: false,
+        };
+        let fault = libfreemkv::Error::ScsiError {
+            opcode: 0x28,
+            status: libfreemkv::scsi::SCSI_STATUS_TRANSPORT_FAILURE,
+            sense: None,
+        };
+        assert!(!host.recover_transport(3, &fault));
+        assert_eq!(host.attempt, 3);
+        assert_eq!((host.halted, host.gave_up), (stopped, !stopped));
+        let log = crate::server::log::get_device_log(&device, 100).join("\n");
+        let expect = if stopped {
+            "cancelled (halt)"
+        } else {
+            "could not re-discover drive"
+        };
+        assert!(log.contains(expect), "{log}");
+        crate::server::log::forget_device(&device);
+    }
+}
+
+#[test]
+fn a_spin_cycle_that_fails_before_a_patch_pass_settles_instead() {
+    use freemkv_engine::PassHost;
+    let device = format!("spin-cycle-{}", std::process::id());
+    let path = "/nonexistent/spin-drive";
+    let (t, _fake) = libfreemkv::test_util::FakeTransport::new();
+    let t = t.rule(|cdb| cdb[0] == 0x1B, libfreemkv::test_util::FakeMode::Fault);
+    let mut session = session_on(t, path);
+    let mut host = ServerPassHost {
+        device: &device,
+        device_path: path,
+        session: &mut session,
+        halt: Arc::new(AtomicBool::new(false)),
+        user_halt: Arc::new(AtomicBool::new(true)),
+        delay_secs: 0,
+        attempt: 0,
+        gave_up: false,
+        halted: false,
+    };
+    let started = std::time::Instant::now();
+    host.before_patch(2);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let log = crate::server::log::get_device_log(&device, 100).join("\n");
+    assert!(log.contains("spin-cycle before pass 2 failed"), "{log}");
+    crate::server::log::forget_device(&device);
+}
