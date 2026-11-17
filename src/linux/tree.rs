@@ -252,17 +252,28 @@ impl TitleTree {
                         middle
                     };
                     segment(parent, 0.0, parent, bottom);
-                    let gap = if exp.list_row().is_some_and(|r| r.is_expandable()) {
-                        8.0
+                    let expandable = exp.list_row().is_some_and(|r| r.is_expandable());
+                    let end = if expandable {
+                        x(depth) + if rtl { 8.0 } else { -8.0 }
                     } else {
-                        0.0
+                        // Leaves have no arrow. Connect to their visible content,
+                        // including across the reserved but empty checkbox slot
+                        // on chapter rows, instead of leaving a floating stub.
+                        let target = content
+                            .first_child()
+                            .filter(|w| w.opacity() > 0.0)
+                            .or_else(|| content.last_child());
+                        target
+                            .and_then(|w| w.compute_bounds(&overlay))
+                            .map_or(x(depth), |b| {
+                                if rtl {
+                                    f64::from(b.x() + b.width()) + 4.0
+                                } else {
+                                    f64::from(b.x()) - 4.0
+                                }
+                            })
                     };
-                    segment(
-                        parent,
-                        middle,
-                        x(depth) + if rtl { gap } else { -gap },
-                        middle,
-                    );
+                    segment(parent, middle, end, middle);
                 }
                 if exp.list_row().is_some_and(|r| r.is_expanded()) {
                     segment(x(depth), middle + 8.0, x(depth), h);
