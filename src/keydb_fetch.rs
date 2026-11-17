@@ -538,3 +538,7 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, Refusal>
 #[cfg(test)]
 #[path = "keydb_fetch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "keydb_fetch_dns_tests.rs"]
+mod dns_tests;
