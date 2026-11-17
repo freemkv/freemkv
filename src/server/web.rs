@@ -2787,6 +2787,30 @@ fn tail_file(path: &str, max_bytes: u64) -> std::io::Result<String> {
 // from autorip.jsonl with optional level/device/substring filters. Output
 // is raw JSONL (not a JSON array) for streamability, used by the Debug tab.
 fn handle_debug_log(request: tiny_http::Request, url: &str) {
+    let path = crate::server::observe::json_log_path();
+    let content = match tail_file(&path, DEBUG_TAIL_BYTES) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // The non-rolling jsonl file may not exist on a fresh boot
+            // before the first event flushes. Return empty rather than 404
+            // — UI can poll without alerting.
+            tracing::debug!(path = %path, error = %e, "debug: jsonl missing");
+            return text_response(request, "");
+        }
+        Err(e) => {
+            tracing::warn!(path = %path, error = %e, "debug: jsonl unreadable");
+            return json_response(
+                request,
+                500,
+                r#"{"ok":false,"error":"could not read the debug log"}"#,
+            );
+        }
+    };
+    text_response(request, &filter_debug_log(url, &content));
+}
+
+// The `/api/debug` query filters in `url`, applied to the tailed JSONL `content`.
+fn filter_debug_log(url: &str, content: &str) -> String {
     let params = parse_query(url);
     let n: usize = params
         .get("n")
@@ -2808,26 +2832,6 @@ fn handle_debug_log(request: tiny_http::Request, url: &str) {
         .get("q")
         .filter(|s| s.bytes().all(|b| (0x20..=0x7E).contains(&b)))
         .cloned();
-
-    let path = crate::server::observe::json_log_path();
-    let content = match tail_file(&path, DEBUG_TAIL_BYTES) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // The non-rolling jsonl file may not exist on a fresh boot
-            // before the first event flushes. Return empty rather than 404
-            // — UI can poll without alerting.
-            tracing::debug!(path = %path, error = %e, "debug: jsonl missing");
-            return text_response(request, "");
-        }
-        Err(e) => {
-            tracing::warn!(path = %path, error = %e, "debug: jsonl unreadable");
-            return json_response(
-                request,
-                500,
-                r#"{"ok":false,"error":"could not read the debug log"}"#,
-            );
-        }
-    };
 
     let levels_at_or_above = |min: &str| -> &'static [&'static str] {
         match min {
@@ -2870,7 +2874,7 @@ fn handle_debug_log(request: tiny_http::Request, url: &str) {
         out.push(line);
     }
     out.drain(..out.len().saturating_sub(n));
-    text_response(request, &out.join("\n"));
+    out.join("\n")
 }
 
 // Parse ?key=value&key2=v2 into a HashMap. Naive: percent-decodes but does
