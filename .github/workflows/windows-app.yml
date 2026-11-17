@@ -113,7 +113,7 @@ jobs:
       - name: Exact toolchain (rust-version)
         shell: bash
         run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml "${{ matrix.target }}"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: freemkv
           key: ${{ matrix.target }}-app
@@ -234,7 +234,7 @@ jobs:
         run: |
           sha256sum "$A.zip" > "$A.zip.sha256"
           sha256sum "$A-setup.exe" > "$A-setup.exe.sha256"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: windows-app-${{ matrix.arch }}
           path: |
@@ -251,13 +251,13 @@ jobs:
       contents: write
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: windows-app-*
           merge-multiple: true
       - name: Upload to the release
         if: ${{ !inputs.backfill }}
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           fail_on_unmatched_files: true
           files: |
