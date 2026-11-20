@@ -4780,7 +4780,10 @@ impl App {
             .as_ref()
             .map(|st| *st.prog.lock().unwrap_or_else(|e| e.into_inner()))
             .unwrap_or_default();
-        // Top bar: the current title; bottom bar: the whole run (a single title's mirrors it).
+        // The two bars, as MakeMKV draws them (#103; the arithmetic is `engine::Bars`'s):
+        // top: the title being processed, 100% when it ends, back to 0% for the next;
+        // bottom: the whole job across every selected title, weighted by bytes (a single
+        // title's mirrors the top bar and stays hidden).
         let pct = p.title_pct;
         let overall = p.batch_pct.unwrap_or(pct);
         let elapsed = self.run_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
@@ -4823,15 +4826,32 @@ impl App {
             // Only title jobs plan a batch. An ISO/folder backup is one operation,
             // even when several titles were checked before choosing that output.
             show_overall_bar: self.run_titles > 1 && p.batch_pct.is_some(),
+            // With several titles the caption names the phase and the title's place in the
+            // run (#103): "Reading title 2 of 3", then "Writing MKV 1 of 3".
             saving_current: stop_caption(stopping, titles_done, self.run_titles).unwrap_or_else(
                 || {
-                    if p.preparation == crate::engine::TitlePreparation::Reading {
-                        crate::strings::get("gui.progress.reading_titles")
-                    } else {
-                        crate::strings::fmt(
+                    let reading = p.preparation == crate::engine::TitlePreparation::Reading;
+                    let container = container_label(&self.effective_format());
+                    match p.position.filter(|&(_, count)| count > 1) {
+                        Some((n, count)) if reading => crate::strings::fmt_or(
+                            "gui.progress.reading_title",
+                            "Reading title {n} of {total}",
+                            &[("n", &n.to_string()), ("total", &count.to_string())],
+                        ),
+                        Some((n, count)) => crate::strings::fmt_or(
+                            "gui.progress.writing_title",
+                            "Writing {container} {n} of {total}",
+                            &[
+                                ("container", &container),
+                                ("n", &n.to_string()),
+                                ("total", &count.to_string()),
+                            ],
+                        ),
+                        None if reading => crate::strings::get("gui.progress.reading_titles"),
+                        None => crate::strings::fmt(
                             "gui.progress.saving_current",
-                            &[("container", &container_label(&self.effective_format()))],
-                        )
+                            &[("container", &container)],
+                        ),
                     }
                 },
             ),

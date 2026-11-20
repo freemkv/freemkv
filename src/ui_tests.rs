@@ -2644,6 +2644,76 @@ fn the_bottom_bar_weighs_titles_by_bytes_not_by_count() {
     b.assert_full_only_at_end();
 }
 
+fn near(got: (f64, f64), want: (f64, f64)) -> bool {
+    (got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9
+}
+
+// #103: a single-pass 3-title run. At each title boundary the top bar has just reached 100%
+// for the title ending and restarts at 0% for the next; the bottom bar is a third per title.
+#[test]
+fn three_titles_show_the_title_and_the_whole_job_at_each_boundary() {
+    let mut b = Bars::new(&[1000, 1000, 1000]);
+    for idx in 0..3 {
+        let after = b.title(idx, 1000);
+        let job = (idx + 1) as f64 * 100.0 / 3.0;
+        let before = b.seen[b.seen.len() - 2];
+        assert!(near(before, (100.0, job)), "title {idx} ends: {before:?}");
+        let next = if idx < 2 { 0.0 } else { 100.0 };
+        assert!(near(after, (next, job)), "after title {idx}: {after:?}");
+    }
+    b.assert_overall_monotonic();
+    b.assert_full_only_at_end();
+}
+
+// #103: a multi-pass run reads every title off the disc before it muxes any. The top bar
+// still follows one title at a time through that read (100% as a title's share of it ends,
+// 0% as the next one's begins). The bottom bar gives the read 85% of the job, so it stands
+// near a third and two thirds as the first and second titles are read, whatever navigation
+// data the read stages alongside the titles; the muxes share the last 15%.
+#[test]
+fn a_staged_three_title_read_shows_one_title_at_a_time() {
+    let mut b = Bars::new(&[1000, 1000, 1000]);
+    b.st.begin_read();
+    // The read stages 10% more than the titles: 3300 bytes for 3000.
+    for (done, top, at) in [
+        (550, 50.0, 500.0),
+        (1089, 99.0, 990.0),
+        (1100, 0.0, 1000.0),
+        (2189, 99.0, 1990.0),
+        (2200, 0.0, 2000.0),
+        (3300, 100.0, 3000.0),
+    ] {
+        let got = b.tick("sweep", done, 3300);
+        assert!(
+            near(got, (top, at / 3000.0 * 85.0)),
+            "read at {done}: {got:?}"
+        );
+    }
+    for (idx, want) in [(0, 90.0), (1, 95.0), (2, 100.0)] {
+        let after = b.title(idx, 1000).1;
+        assert!((after - want).abs() < 1e-9, "after title {idx}: {after}");
+    }
+    b.assert_overall_monotonic();
+    b.assert_full_only_at_end();
+}
+
+// #103: the top bar's ETA during a staged read is its title's part of the read's estimate.
+#[test]
+fn a_staged_read_gives_the_top_bar_its_titles_share_of_the_eta() {
+    let st = RunState::default();
+    st.plan_titles(vec![(0, 1000), (1, 1000), (2, 1000)]);
+    st.begin_read();
+    st.progress(&freemkv_engine::Progress {
+        pass: "sweep".into(),
+        bytes_done: 1500,
+        bytes_total: 3000,
+        eta_secs: Some(300),
+        ..Default::default()
+    });
+    // Half of the second title (500 bytes) of the 1500 the read has left: a third.
+    assert_eq!(st.prog.lock().unwrap().eta_secs, Some(100));
+}
+
 #[test]
 fn a_multipass_read_counts_toward_the_bottom_bar_and_never_rewinds_it() {
     let mut b = Bars::new(&[1000, 1000]);
@@ -2652,10 +2722,10 @@ fn a_multipass_read_counts_toward_the_bottom_bar_and_never_rewinds_it() {
     for q in 1..=4 {
         b.tick("sweep", 500 * q, 2000);
     }
-    assert_eq!(b.sample(), (100.0, 50.0), "read done: half the run's bytes");
+    assert_eq!(b.sample(), (100.0, 85.0), "read done: its 85% of the job");
     // A patch pass is its own pass on the top bar; the read stays counted below.
-    assert_eq!(b.tick("patch-scrape", 0, 64), (0.0, 50.0));
-    assert_eq!(b.title(0, 1000).1, 75.0);
+    assert_eq!(b.tick("patch-scrape", 0, 64), (0.0, 85.0));
+    assert_eq!(b.title(0, 1000).1, 92.5);
     assert_eq!(b.title(1, 1000).1, 100.0);
     b.assert_overall_monotonic();
     b.assert_full_only_at_end();
@@ -2665,13 +2735,20 @@ fn a_multipass_read_counts_toward_the_bottom_bar_and_never_rewinds_it() {
 fn preparing_three_titles_is_labelled_as_a_read_before_the_first_mkv() {
     let mut b = Bars::new(&[1000, 1000, 1000]);
     b.st.begin_read();
-    assert_eq!(b.tick("sweep", 1440, 3000), (48.0, 24.0));
+    // 48% of the read is into the second title's share: the top bar is that title's 44%,
+    // and the bottom bar 48% of the read's 85%.
+    let (top, overall) = b.tick("sweep", 1440, 3000);
+    assert!(
+        (top - 44.0).abs() < 1e-9 && (overall - 40.8).abs() < 1e-9,
+        "{top} {overall}"
+    );
     let reading = b.app.view();
     assert_eq!(
         reading.saving_current,
-        crate::strings::get_or(
-            "gui.progress.reading_titles",
-            "Reading selected titles from disc"
+        crate::strings::fmt_or(
+            "gui.progress.reading_title",
+            "Reading title {n} of {total}",
+            &[("n", "2"), ("total", "3")]
         )
     );
     assert_eq!(
@@ -2683,8 +2760,15 @@ fn preparing_three_titles_is_labelled_as_a_read_before_the_first_mkv() {
     );
     b.tick("sweep", 3000, 3000);
     b.st.title_start(0);
-    assert_eq!(b.sample(), (0.0, 50.0));
-    assert_ne!(b.app.view().saving_current, reading.saving_current);
+    assert_eq!(b.sample(), (0.0, 85.0));
+    assert_eq!(
+        b.app.view().saving_current,
+        crate::strings::fmt_or(
+            "gui.progress.writing_title",
+            "Writing {container} {n} of {total}",
+            &[("container", "MKV"), ("n", "1"), ("total", "3")]
+        )
+    );
     assert_eq!(b.app.view().saving_overall, reading.saving_overall);
     b.title(0, 1000);
     b.title(1, 1000);
@@ -2786,7 +2870,7 @@ fn title_progress_matrix_covers_all_offered_sinks_and_recovery_pass_counts() {
                         .into_iter()
                         .take(passes - 1)
                     {
-                        assert_eq!(b.tick(pass, 0, 100), (0.0, 50.0));
+                        assert_eq!(b.tick(pass, 0, 100), (0.0, 85.0));
                         b.tick(pass, 50, 100);
                         b.tick(pass, 100, 100);
                     }

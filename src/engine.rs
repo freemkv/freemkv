@@ -1539,18 +1539,32 @@ pub struct Prog {
     /// None until the engine's estimate converges.
     pub eta_secs: Option<u64>,
     pub sectors_bad: u64,
-    /// The top bar: the current title's percent, or the current pass's outside a title.
+    /// The top bar: the title being processed, 0 → 100% and back to 0 for the next title
+    /// (MakeMKV's "current" bar). During a multi-pass run's staging read that is the
+    /// title's share of the read; outside any title (a patch pass, a whole-disc copy) it
+    /// is the current pass.
     pub title_pct: f64,
     /// When the top bar's title, or the run's read, began.
     pub title_started: Option<std::time::Instant>,
-    /// The bottom bar: the run's bytes done over its planned bytes, never decreasing.
-    /// `None` when the run planned no titles; `Some(0.0)` while a planned size is unknown.
+    /// The bottom bar: the whole job over every selected title, weighted by bytes, never
+    /// decreasing (MakeMKV's "total" bar). `None` when the run planned no titles;
+    /// `Some(0.0)` while a planned size is unknown.
     pub batch_pct: Option<f64>,
     pub preparation: TitlePreparation,
+    /// The top bar's title as `(position, count)` among the planned titles, 1-based: the
+    /// title being read during a staging read, the title being written during a mux.
+    /// `None` outside a title, or while a staging read cannot be split by title.
+    pub position: Option<(usize, usize)>,
 }
 
 /// The two bars' bookkeeping, updated in the worker's event order so the UI never
 /// samples a title boundary half-way.
+///
+/// Top bar: the title being processed, 0 → 100%, reset at each title. Bottom bar: the
+/// whole job, every title weighted by its bytes. A single-pass run processes each title
+/// once, so 1 of 3 equal titles is 33%. A multi-pass run processes each title's bytes
+/// twice, first reading them all off the disc into the staging image and then muxing each
+/// title from it; the read is [`READ_SHARE_PCT`] of the job and the mux the rest.
 #[derive(Default)]
 struct Bars {
     /// `(title index, size_bytes)` of each title the run muxes; empty when unplanned.
@@ -1563,6 +1577,14 @@ struct Bars {
     current: Option<(usize, u64, f64)>,
 }
 
+/// A multi-pass run's staging read, as a percentage of the bottom bar (#103); the muxes
+/// share the rest. Reading the titles off the disc is nearly all of the wait: the drive
+/// manages tens of MB/s, while the mux that follows copies the staged image from local
+/// storage several times faster. Weighing the two by bytes alone put the bar at 50% when
+/// the disc was done and the job was almost over; at 85% the bar after episode N of M is
+/// read stands near N/M of the job.
+const READ_SHARE_PCT: f64 = 85.0;
+
 /// The pre-title read, measured by its first pass; later passes leave it complete.
 #[derive(Default)]
 struct ReadPass {
@@ -1570,6 +1592,18 @@ struct ReadPass {
     done: u64,
     total: u64,
     over: bool,
+    /// A later pass (a patch pass) has begun: the first pass's read is all done.
+    later: bool,
+}
+
+/// Where a staging read is, seen as the title being read (#103).
+struct ReadSlice {
+    /// The planned title's position in the plan.
+    slot: usize,
+    /// How much of that title's share of the read is done, 0..=1.
+    frac: f64,
+    /// That title's remaining share over the whole read's remaining bytes, 0..=1.
+    share_left: f64,
 }
 
 impl Bars {
@@ -1578,6 +1612,67 @@ impl Bars {
             .iter()
             .find(|&&(i, _)| i == idx)
             .map_or(0, |&(_, s)| s)
+    }
+
+    fn planned(&self) -> u64 {
+        self.sizes.iter().map(|&(_, s)| s).sum()
+    }
+
+    // #103: the staging read covers every selected title in one pass, before any mux. Its
+    // bytes map onto the planned titles in plan order, by size, so the top bar still follows
+    // one title at a time instead of the whole read. `None` outside that first pass, or
+    // while a size or the read's total is unknown.
+    fn read_slice(&self) -> Option<ReadSlice> {
+        let r = self
+            .read
+            .as_ref()
+            .filter(|r| !r.over && !r.later && r.total > 0)?;
+        if self.current.is_some() || self.sizes.iter().any(|&(_, s)| s == 0) {
+            return None;
+        }
+        let planned = self.planned() as f64;
+        let at = r.done.min(r.total) as f64 * planned / r.total as f64;
+        let mut start = 0.0;
+        for (slot, &(_, size)) in self.sizes.iter().enumerate() {
+            let size = size as f64;
+            let end = start + size;
+            if at < end || slot + 1 == self.sizes.len() {
+                let read_left = planned - at;
+                return Some(ReadSlice {
+                    slot,
+                    frac: ((at - start) / size).clamp(0.0, 1.0),
+                    share_left: if read_left > 0.0 {
+                        ((end - at) / read_left).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                });
+            }
+            start = end;
+        }
+        None
+    }
+
+    // How much of the staging read is done, 0..=1, whatever navigation data rides along
+    // with the titles; `None` for a run without one.
+    fn read_frac(&self) -> Option<f64> {
+        let r = self.read.as_ref()?;
+        Some(if r.over || r.later {
+            1.0
+        } else if r.total == 0 {
+            0.0
+        } else {
+            r.done.min(r.total) as f64 / r.total as f64
+        })
+    }
+
+    // The top bar's title among the planned ones, 1-based: see [`Prog::position`].
+    fn position(&self) -> Option<(usize, usize)> {
+        let slot = match self.current {
+            Some((idx, _, _)) => self.sizes.iter().position(|&(i, _)| i == idx)?,
+            None => self.read_slice()?.slot,
+        };
+        Some((slot + 1, self.sizes.len()))
     }
 
     fn tick(&mut self, p: &fe::Progress) {
@@ -1603,7 +1698,10 @@ impl Bars {
                 }
                 r.done = r.done.max(p.bytes_done.min(r.total));
             }
-            Some(_) => r.done = r.total,
+            Some(_) => {
+                r.done = r.total;
+                r.later = true;
+            }
         }
     }
 
@@ -1622,11 +1720,13 @@ impl Bars {
         if self.sizes.iter().any(|&(_, s)| s == 0) {
             return Some(0.0);
         }
-        let (read_done, read_total) = self.read.as_ref().map_or((0, 0), |r| (r.done, r.total));
-        let total = read_total + self.sizes.iter().map(|&(_, s)| s).sum::<u64>();
         let current = self.current.map_or(0.0, |(_, size, f)| size as f64 * f);
-        let done = (read_done + self.passed) as f64 + current;
-        Some((done / total as f64 * 100.0).min(100.0))
+        let muxed = (self.passed as f64 + current) / self.planned() as f64;
+        let pct = match self.read_frac() {
+            Some(read) => read * READ_SHARE_PCT + muxed * (100.0 - READ_SHARE_PCT),
+            None => muxed * 100.0,
+        };
+        Some(pct.min(100.0))
     }
 
     fn publish(&self, prog: &mut Prog) {
@@ -1635,12 +1735,14 @@ impl Bars {
             Some(r) if r.over => TitlePreparation::Complete,
             Some(_) => TitlePreparation::Reading,
         };
-        let planned: u64 = self.sizes.iter().map(|&(_, s)| s).sum();
+        prog.position = self.position();
+        let planned = self.planned();
+        let slice = self.read_slice();
         prog.title_pct = match self.current {
             Some((_, _, f)) => f * 100.0,
-            // A pre-title read is its own visible pass.  Keep showing that
-            // pass until it ends; the per-title bar resets only between
-            // authored titles.
+            // The staging read's first pass, as the title it is reading (#103).
+            None if slice.is_some() => slice.map_or(0.0, |s| s.frac * 100.0),
+            // A patch pass, or a read with no known sizes: its own visible pass.
             None if self.read.as_ref().is_some_and(|r| !r.over) && prog.bytes_total > 0 => {
                 (prog.bytes_done as f64 / prog.bytes_total as f64 * 100.0).min(100.0)
             }
@@ -1763,7 +1865,18 @@ impl RunState {
             prog.speed_bps = p.speed_bps;
             prog.eta_secs = p.eta_secs;
             prog.sectors_bad = p.sectors_bad;
+            let was = b.read_slice().map(|s| s.slot);
             b.tick(p);
+            // A staging read shown per title (#103): the top bar's clock restarts with each
+            // title, and its ETA is that title's part of the engine's whole-read estimate.
+            if let Some(s) = b.read_slice() {
+                if was.is_some_and(|w| w != s.slot) {
+                    prog.title_started = Some(std::time::Instant::now());
+                }
+                prog.eta_secs = p
+                    .eta_secs
+                    .map(|eta| (eta as f64 * s.share_left).round() as u64);
+            }
         });
     }
 
