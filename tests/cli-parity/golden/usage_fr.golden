@@ -58,6 +58,7 @@ Exemples :
 
 Options :
   -t, --title N       Sélectionner le titre (base 1, répétable). Défaut : le titre principal (titre 1) ; -t all pour tous.
+      --source-names  With several titles, name each file after its title's source (00024.mpls gives <name>_00024.mkv) instead of <name>_t<N>.
   -a, --audio LANGUES Ne garder que ces langues audio (noms ou codes ISO, séparés par des virgules, insensible à la casse), ou all/none. Défaut : tout garder.
       --presentation-language de  Préférer la version du film dans cette langue (conserve le titre principal s'il n'y en a pas)
   -s, --subtitles LANGUES  Ne garder que ces langues de sous-titres (noms ou codes ISO, séparés par des virgules, insensible à la casse), ou all/none. Défaut : tout garder.

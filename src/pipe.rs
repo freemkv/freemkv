@@ -412,6 +412,9 @@ struct ParsedFlags {
     /// `-a`/`-s`: which audio + subtitle streams to keep, as one bundle (video
     /// is always kept). Default keeps everything (archival).
     streams: freemkv_engine::StreamChoice,
+    /// `--source-names`: name each title's file after the title's own source
+    /// (`<name>_00024.mkv` for `00024.mpls`) instead of `<name>_t<N>`.
+    source_names: bool,
 }
 
 fn parse_stream_spec(spec: &str) -> Result<freemkv_engine::StreamFilter, String> {
@@ -529,6 +532,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             "--raw" => f.raw = true,
             "--multipass" => f.multipass = true,
             "--force" => f.force = true,
+            "--source-names" => f.source_names = true,
             "-t" | "--title" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
@@ -721,6 +725,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         mut title_nums,
         all_titles,
         streams,
+        source_names,
     } = flags;
     // Stream selection is active when the user narrowed either class; the
     // default (All/All) short-circuits to a no-op so the output is byte-
@@ -852,11 +857,20 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         };
         (title_nums, identities)
     };
+    // `--source-names`: each scanned title's source (`00024.mpls`), by 0-based title index,
+    // the order `-t N` counts in.
+    let sources: Option<Vec<String>> = scanned_titles
+        .filter(|_| source_names)
+        .map(|titles| titles.iter().map(|t| t.playlist.clone()).collect());
+    let layout = JobLayout {
+        is_dir_dest,
+        sources: sources.as_deref(),
+    };
     let jobs = match build_jobs(
         &titles,
         is_disc,
         &title_nums,
-        is_dir_dest,
+        layout,
         dest,
         &parsed_dest,
         &out,
@@ -1387,15 +1401,62 @@ fn resolve_disc_all_titles(
     Some((disc_title_nums(true, requested, ids.len()), ids))
 }
 
+/// How `build_jobs` lays out the files of several titles.
+#[derive(Clone, Copy)]
+struct JobLayout<'a> {
+    /// The destination is a directory: every title gets its own file inside it.
+    is_dir_dest: bool,
+    /// `--source-names`: each scanned title's source name (`00024.mpls`), by 0-based title
+    /// index. `None` names every file `<name>_t<N>`.
+    sources: Option<&'a [String]>,
+}
+
+// A bare `is_dir_dest` is the default `<name>_t<N>` naming.
+impl From<bool> for JobLayout<'_> {
+    fn from(is_dir_dest: bool) -> Self {
+        JobLayout {
+            is_dir_dest,
+            sources: None,
+        }
+    }
+}
+
+// `--source-names`: the stem of title `idx`'s source name (`00024` of `00024.mpls`),
+// sanitised like every other name part. `None` when the title has no source name, or when
+// another of the selected `indices` has the same one and the two files would collide.
+fn source_stem(sources: Option<&[String]>, indices: &[usize], idx: usize) -> Option<String> {
+    let stem_of = |i: usize| -> Option<String> {
+        let name = sources?.get(i)?;
+        let stem = std::path::Path::new(name.trim())
+            .file_stem()?
+            .to_string_lossy();
+        stem.chars()
+            .any(|c| c.is_ascii_alphanumeric())
+            .then(|| sanitize_name(&stem))
+    };
+    let stem = stem_of(idx)?;
+    let clash = indices.iter().any(|&other| {
+        other != idx && stem_of(other).is_some_and(|s| s.eq_ignore_ascii_case(&stem))
+    });
+    (!clash).then_some(stem)
+}
+
 fn build_jobs(
     titles: &Option<Vec<libfreemkv::DiscTitle>>,
     is_disc: bool,
     title_nums: &[usize],
-    is_dir_dest: bool,
+    layout: impl Into<JobLayout<'_>>,
     dest: &str,
     parsed_dest: &libfreemkv::StreamUrl,
     out: &Output,
 ) -> Option<Vec<(Option<usize>, String)>> {
+    let layout = layout.into();
+    let is_dir_dest = layout.is_dir_dest;
+    // What tells a title's file from its siblings: `t<N>`, or with `--source-names` the
+    // title's own source stem where it has one that no other selected title shares.
+    let tag = |indices: &[usize], idx: usize| -> String {
+        source_stem(layout.sources, indices, idx).unwrap_or_else(|| format!("t{}", idx + 1))
+    };
     // Lay out one file per selected title under a directory destination.
     // `disc_name` seeds the filename stem; falls back to "disc".
     let dir_jobs = |indices: &[usize], disc_name: &str| -> Option<Vec<(Option<usize>, String)>> {
@@ -1421,7 +1482,7 @@ fn build_jobs(
             indices
                 .iter()
                 .map(|&idx| {
-                    let filename = format!("{}_t{}.{}", disc_name, idx + 1, ext);
+                    let filename = format!("{}_{}.{}", disc_name, tag(indices, idx), ext);
                     let url = format!("{}://{}", ext, dest_dir.join(filename).display());
                     (Some(idx), url)
                 })
@@ -1446,7 +1507,7 @@ fn build_jobs(
         indices
             .iter()
             .map(|&idx| {
-                let file = parent.join(format!("{stem}_t{}.{ext}", idx + 1));
+                let file = parent.join(format!("{stem}_{}.{ext}", tag(indices, idx)));
                 (
                     Some(idx),
                     format!("{}://{}", parsed_dest.scheme(), file.display()),

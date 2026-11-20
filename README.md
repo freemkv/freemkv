@@ -120,6 +120,7 @@ freemkv disc:// mkv://Movie.mkv                     # Main feature (the default 
 freemkv disc:// mkv://Movie.mkv -t 1                # Title 1 explicitly
 freemkv disc:// mkv://out.mkv -t 1 -t 3             # Titles 1 and 3: out_t1.mkv and out_t3.mkv beside out.mkv
 freemkv disc:// mkv://out/ -t all                   # Every title
+freemkv disc:// mkv://out/ -t all --source-names    # Every title, named after its playlist: disc_00024.mkv, ...
 freemkv disc:// iso://Disc.iso                      # Full disc to ISO (decrypted)
 freemkv disc:// iso://Disc.iso --raw                # Full disc to ISO (encrypted)
 freemkv disc:///dev/sg4 mkv://Movie.mkv -t 1        # Specific drive
@@ -296,6 +297,11 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 ```
 -t, --title N       Select title (1-based, repeatable). Default: the main
                     title only; use `-t all` for every title.
+    --source-names  When several titles make several files, name each after
+                    its title's own source: `00024.mpls` gives
+                    `<name>_00024.mkv` instead of `<name>_t<N>.mkv`. A title
+                    with no source name, or one that shares it with another
+                    selected title, keeps `<name>_t<N>`.
     --keydb PATH    KEYDB.cfg path for Blu-ray / UHD AACS keys
     --log-level N   Log verbosity: 1 = warnings/errors only (default), 2 = info,
                     3 = debug, 4 = trace. At level ≥2 also widens human stdout detail.

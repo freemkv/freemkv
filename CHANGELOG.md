@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `--source-names` names each title's file after the title's own source when several titles make several files: `disc_00024.mkv` for `00024.mpls` instead of `disc_t1.mkv`. A title with no source name, or one that shares it with another selected title, keeps `_t<N>` (#78). (CLI only: a rip flag)
+
 ### Changed
 
 - Linux: the disc page puts the title tree first again. Name and Year sit on one line (Season, Disc and First episode join it for a TV disc), Kind, Titles, Audio and Subtitles are four equal choosers in one row that each open below themselves, the tree takes the remaining height, and the output folder, format, Eject and Rip Now share one line under it. The log sits under a draggable divider, short by default; View ▸ Hide log still hides it (#98). (app only: Linux GTK interface)

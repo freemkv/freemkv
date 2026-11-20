@@ -1042,6 +1042,228 @@ fn disc_multiple_titles_build_one_job_each() {
     let _ = std::fs::remove_dir_all(&dest_dir);
 }
 
+// ── --source-names: per-title outputs named after the title's own source ────
+
+#[test]
+fn source_names_flag_is_parsed() {
+    assert!(parse_flags(&v(&["--source-names"])).unwrap().source_names);
+    assert!(!parse_flags(&v(&[])).unwrap().source_names);
+    let flags = parse_flags(&v(&["-t", "2", "--source-names", "-t", "3"])).unwrap();
+    assert!(flags.source_names);
+    assert_eq!(flags.title_nums, vec![2, 3]);
+}
+
+// Scanned titles with these sources, and the sources as `run` hands them to `build_jobs`.
+fn sourced(playlists: &[&str]) -> (Option<Vec<libfreemkv::DiscTitle>>, Vec<String>) {
+    let titles = playlists
+        .iter()
+        .map(|playlist| {
+            let mut title = libfreemkv::DiscTitle::empty();
+            title.playlist = playlist.to_string();
+            title
+        })
+        .collect();
+    let sources = playlists.iter().map(|p| p.to_string()).collect();
+    (Some(titles), sources)
+}
+
+fn by_source(is_dir_dest: bool, sources: &[String]) -> super::JobLayout<'_> {
+    super::JobLayout {
+        is_dir_dest,
+        sources: Some(sources),
+    }
+}
+
+// The file names of `jobs`, without their folder.
+fn file_names(jobs: &[(Option<usize>, String)]) -> Vec<String> {
+    jobs.iter()
+        .map(|(_, url)| {
+            url.rsplit(['/', '\\'])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+// Into a folder: `<name>_<source stem>.<ext>`, the `<name>` that `<name>_t<N>` has.
+#[test]
+fn source_names_name_folder_outputs_after_each_titles_source() {
+    let (titles, sources) = sourced(&["00024.mpls", "00025.mpls"]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("source-names-dir");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+    let plain = build_jobs(&titles, false, &[], true, &dest, &parsed_dest, &out)
+        .expect("dir creation should succeed in temp");
+    let named = build_jobs(
+        &titles,
+        false,
+        &[],
+        by_source(true, &sources),
+        &dest,
+        &parsed_dest,
+        &out,
+    )
+    .expect("dir creation should succeed in temp");
+    // An unscanned disc's titles take the sources its up-front scan found.
+    let disc = build_jobs(
+        &None,
+        true,
+        &[1, 2],
+        by_source(true, &sources),
+        &dest,
+        &parsed_dest,
+        &out,
+    )
+    .expect("dir creation should succeed in temp");
+    let _ = std::fs::remove_dir_all(&dest_dir);
+
+    assert_eq!(file_names(&plain), ["00024mpls_t1.mkv", "00024mpls_t2.mkv"]);
+    assert_eq!(
+        file_names(&named),
+        ["00024mpls_00024.mkv", "00024mpls_00025.mkv"]
+    );
+    assert_eq!(file_names(&disc), ["disc_00024.mkv", "disc_00025.mkv"]);
+    let indices: Vec<_> = named.iter().map(|(idx, _)| *idx).collect();
+    assert_eq!(indices, [Some(0), Some(1)]);
+}
+
+// Several titles onto a single-file name: each file takes its title's source beside it,
+// under the file's own stem (`movie_00024.mkv`), not `movie_t<N>.mkv`.
+#[test]
+fn source_names_fan_out_beside_a_file_dest() {
+    let (titles, sources) = sourced(&["00024.mpls", "00025.mpls"]);
+    let out = Output::new(false, true);
+    let file = temp_path("source-names-file").join("movie.mkv");
+    let dest = format!("mkv://{}", file.display());
+    let parsed_dest = parse_url(&dest);
+    let jobs = build_jobs(
+        &titles,
+        false,
+        &[],
+        by_source(false, &sources),
+        &dest,
+        &parsed_dest,
+        &out,
+    )
+    .expect("several titles onto a file name fan out");
+    let beside = |name: &str| format!("mkv://{}", file.with_file_name(name).display());
+    assert_eq!(
+        jobs,
+        vec![
+            (Some(0), beside("movie_00024.mkv")),
+            (Some(1), beside("movie_00025.mkv")),
+        ]
+    );
+    assert!(!file.parent().unwrap().exists(), "nothing is created yet");
+}
+
+// Two selected titles from the same playlist would write one file: both keep `_t<N>`.
+#[test]
+fn source_names_shared_by_two_selected_titles_keep_title_numbers() {
+    let (titles, sources) = sourced(&["00024.mpls", "00024.mpls", "00026.mpls"]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("source-names-dup");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+    let jobs = build_jobs(
+        &titles,
+        false,
+        &[],
+        by_source(true, &sources),
+        &dest,
+        &parsed_dest,
+        &out,
+    )
+    .expect("dir creation should succeed in temp");
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    assert_eq!(
+        file_names(&jobs),
+        [
+            "00024mpls_t1.mkv",
+            "00024mpls_t2.mkv",
+            "00024mpls_00026.mkv"
+        ]
+    );
+}
+
+// Only the selected titles count: a source an unselected title shares is still free.
+#[test]
+fn source_names_ignore_duplicates_among_unselected_titles() {
+    let (titles, sources) = sourced(&["00024.mpls", "00025.mpls", "00024.mpls"]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("source-names-unselected");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+    let names = |title_nums: &[usize]| {
+        let jobs = build_jobs(
+            &titles,
+            false,
+            title_nums,
+            by_source(true, &sources),
+            &dest,
+            &parsed_dest,
+            &out,
+        )
+        .expect("dir creation should succeed in temp");
+        file_names(&jobs)
+    };
+    assert_eq!(
+        names(&[1, 2]),
+        ["00024mpls_00024.mkv", "00024mpls_00025.mkv"]
+    );
+    assert_eq!(
+        names(&[2, 3]),
+        ["00024mpls_00025.mkv", "00024mpls_00024.mkv"]
+    );
+    // Selected together, titles 1 and 3 collide.
+    assert_eq!(names(&[1, 3]), ["00024mpls_t1.mkv", "00024mpls_t3.mkv"]);
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+// A title with no source name, or none a file name can carry, keeps `_t<N>`.
+#[test]
+fn source_names_without_a_source_keep_title_numbers() {
+    let (titles, sources) = sourced(&["", "00025.mpls", " . "]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("source-names-empty");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+    let jobs = build_jobs(
+        &titles,
+        false,
+        &[],
+        by_source(true, &sources),
+        &dest,
+        &parsed_dest,
+        &out,
+    )
+    .expect("dir creation should succeed in temp");
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    assert_eq!(
+        file_names(&jobs),
+        ["disc_t1.mkv", "disc_00025.mkv", "disc_t3.mkv"]
+    );
+    // A disc whose scan listed fewer titles than `-t` asks for: no source, no panic.
+    assert_eq!(super::source_stem(Some(sources.as_slice()), &[7], 7), None);
+    assert_eq!(super::source_stem(None, &[1], 1), None);
+}
+
+// Without --source-names the naming is unchanged, whatever the titles' sources.
+#[test]
+fn without_source_names_the_title_numbers_stay() {
+    let (titles, _) = sourced(&["00024.mpls", "00025.mpls"]);
+    let out = Output::new(false, true);
+    let dest_dir = temp_path("no-source-names");
+    let dest = format!("mkv://{}", dest_dir.display());
+    let parsed_dest = parse_url(&dest);
+    let jobs = build_jobs(&titles, false, &[], true, &dest, &parsed_dest, &out)
+        .expect("dir creation should succeed in temp");
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    assert_eq!(file_names(&jobs), ["00024mpls_t1.mkv", "00024mpls_t2.mkv"]);
+}
+
 // Several titles of an unscanned disc onto a single-file name: one file per title beside
 // it, as for an image or folder (`-t 1 -t 2 mkv://d/movie.mkv` -> `d/movie_t1.mkv`, `_t2`).
 #[test]
