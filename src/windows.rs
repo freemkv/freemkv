@@ -3641,6 +3641,7 @@ impl Prefs {
                 240,
             ),
         ));
+        r.note(&crate::ui::presentation_language_hint());
         langs.push((
             "audio_langs",
             r.lang(&g("gui.set.audio_langs"), &st.audio_langs, 240),

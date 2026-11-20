@@ -1100,9 +1100,14 @@ pub fn valid_presentation_language(tag: &str) -> bool {
 
 /// Settings row label for the presentation-language field, shared by all shells.
 pub fn presentation_language_label() -> String {
+    crate::strings::get_or("gui.set.presentation_language", "Presentation language:")
+}
+
+/// The hint under that field: what a blank box does.
+pub fn presentation_language_hint() -> String {
     crate::strings::get_or(
-        "gui.set.presentation_language",
-        "Presentation language (de / en; blank = audio preference)",
+        "gui.set.presentation_language_hint",
+        "Leave blank to follow your audio languages.",
     )
 }
 
