@@ -201,6 +201,48 @@ fn normalize_leaves_every_recognized_value_alone() {
     assert_eq!(s.log_level, "Debug");
 }
 
+// #99: the title modes 1.8.10 and earlier saved ("Main film / episodes", "Main film only",
+// "Episodes"), and the main-window-only "No titles", load as Automatic; the current
+// Settings modes load as themselves. Automatic is the default.
+#[test]
+fn a_saved_legacy_title_mode_loads_as_automatic() {
+    assert_eq!(Settings::default().selection, crate::ui::AUTOMATIC);
+    for legacy in [
+        "Main film / episodes",
+        "Main film only",
+        "Episodes",
+        "No titles",
+    ] {
+        let mut s = Settings {
+            selection: legacy.into(),
+            ..Settings::default()
+        };
+        s.normalize();
+        assert_eq!(s.selection, crate::ui::AUTOMATIC, "{legacy}");
+    }
+    for current in ["Automatic", "Longest title", "All titles"] {
+        let mut s = Settings {
+            selection: current.into(),
+            ..Settings::default()
+        };
+        s.normalize();
+        assert_eq!(s.selection, current);
+    }
+    // As `load_reporting` reads a file an older build wrote: parse, then normalize.
+    let dir = scratch("legacy-selection");
+    let path = dir.join("gui-settings.json");
+    std::fs::write(&path, r#"{"selection":"Main film only"}"#).unwrap();
+    let (mut s, outcome) = Settings::load_from(&path);
+    assert_eq!(outcome, LoadOutcome::Loaded);
+    assert_eq!(
+        s.selection, "Main film only",
+        "parsing keeps the saved text"
+    );
+    s.normalize();
+    assert_eq!(s.selection, crate::ui::AUTOMATIC);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // A relative destination cannot be written to and renders blank; this
 // catches an empty base dir — the unset-`HOME` bug where
 // `default_dest_dir()` came back as `"Movies"` and rips landed at CWD.

@@ -153,7 +153,7 @@ impl Default for Settings {
             // read phase completes so the user can grab it / load the next.
             auto_eject: true,
             notify_when_rip_finished: true,
-            selection: "Main film / episodes".into(),
+            selection: crate::ui::AUTOMATIC.into(),
             min_title_secs: "120".into(),
             // Empty = no preference = exactly the pre-1.6.2 behaviour: a
             // ticked title ticks every one of its streams.
@@ -498,6 +498,9 @@ impl Settings {
                 *cur = def.to_string();
             }
         };
+        // The title modes 1.8.10 and earlier saved ("Main film / episodes", "Main film
+        // only", "Episodes") load as Automatic (#99): the Kind now picks film or episodes.
+        self.selection = crate::ui::migrate_title_mode(&self.selection).to_string();
         snap(&mut self.selection, "selection", &d.selection);
         snap(&mut self.startup_mode, "startup_mode", &d.startup_mode);
         snap(&mut self.rip_mode, "rip_mode", &d.rip_mode);

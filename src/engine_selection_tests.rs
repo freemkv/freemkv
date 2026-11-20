@@ -1,5 +1,6 @@
 use super::{key_summary_tests::disc, scanned_from_disc};
 use crate::ui::{LangPrefs, Tree};
+use freemkv_engine::metadata::MediaKind;
 use freemkv_engine::{Selection, SelectionModel, StreamFilter};
 use libfreemkv::disc::EpisodeEvidence;
 use libfreemkv::{AudioChannels, AudioStream, Codec, DiscTitle, LabelPurpose, SampleRate, Stream};
@@ -22,7 +23,8 @@ fn the_gui_ticks_the_cut_in_the_wanted_language() {
             audio,
             ..Default::default()
         };
-        let ticked = Tree::from_scan(&scan, "Main film only", 0.0, &prefs).ticked_titles();
+        let ticked = Tree::from_scan_as(&scan, "Automatic", 0.0, &prefs, Some(MediaKind::Movie))
+            .ticked_titles();
         assert_eq!(ticked, expected, "{language:?} {:?}", prefs.audio);
     }
     // A separate German programme is never the main film.
@@ -32,7 +34,8 @@ fn the_gui_ticks_the_cut_in_the_wanted_language() {
         audio: vec!["deu".into()],
         ..Default::default()
     };
-    let ticked = Tree::from_scan(&scan, "Main film only", 0.0, &prefs).ticked_titles();
+    let ticked =
+        Tree::from_scan_as(&scan, "Automatic", 0.0, &prefs, Some(MediaKind::Movie)).ticked_titles();
     assert_eq!(ticked, vec![0]);
 }
 
@@ -120,7 +123,9 @@ fn authored_order_survives_canonical_duration_sort_in_cli_and_gui() {
             freemkv_engine::resolve_selection(&disc, &Selection::Episodes, &audio, None),
             Ok(expected.clone())
         );
-        let tree = Tree::from_scan(&scan, "Episodes", 0.0, &prefs);
+        // A TV disc under Automatic runs the proven roster in its authored order.
+        let tree = Tree::from_scan_as(&scan, "Automatic", 0.0, &prefs, Some(MediaKind::Tv));
+        assert!(tree.review.is_none());
         assert_eq!(tree.ticked_titles(), expected);
         assert_eq!(
             tree.arena
@@ -175,20 +180,33 @@ fn gui_modes_match_the_disc_model_with_language_alternates_and_authored_episodes
         } else {
             StreamFilter::Langs(prefs.audio.clone())
         };
-        for (mode, selection, expected) in [
-            ("Main film only", Selection::MainMovie, main),
-            ("Episodes", Selection::Episodes, episodes),
-            ("Longest title", Selection::Longest, vec![6]),
-            ("All titles", Selection::All, (0..7).collect()),
-            ("No titles", Selection::Titles(vec![]), vec![]),
+        // Automatic follows the Kind: Movie takes the main feature, TV the authored episodes,
+        // an unknown Kind the engine's main-film-or-episodes guess (episodes: a roster is
+        // proven). The other modes ignore the Kind.
+        let movie = Some(MediaKind::Movie);
+        let tv = Some(MediaKind::Tv);
+        for (mode, kind, selection, expected) in [
+            ("Automatic", movie, Selection::MainMovie, main),
+            ("Automatic", tv, Selection::Episodes, episodes.clone()),
+            ("Automatic", None, Selection::Episodes, episodes),
+            ("Longest title", None, Selection::Longest, vec![6]),
+            ("Longest title", tv, Selection::Longest, vec![6]),
+            ("All titles", movie, Selection::All, (0..7).collect()),
+            ("All titles", None, Selection::All, (0..7).collect()),
+            ("No titles", tv, Selection::Titles(vec![]), vec![]),
+            ("No titles", None, Selection::Titles(vec![]), vec![]),
         ] {
             assert_eq!(model.select(&selection, &audio, None), Ok(expected.clone()));
             assert_eq!(
-                Tree::from_scan(&scan, mode, 0.0, &prefs).ticked_titles(),
+                Tree::from_scan_as(&scan, mode, 0.0, &prefs, kind).ticked_titles(),
                 expected,
-                "{mode}, {languages}"
+                "{mode}, {kind:?}, {languages}"
             );
         }
+        assert_eq!(
+            model.main_or_episodes(&audio, None),
+            Ok(Tree::from_scan(&scan, "Automatic", 0.0, &prefs).ticked_titles())
+        );
     }
 }
 
@@ -201,11 +219,12 @@ fn visibility_never_promotes_an_unrelated_movie_in_the_preferred_language() {
     ];
     let scan = scanned_from_disc(&disc, "none".into());
     let prefs = LangPrefs::parse("deu", "", "");
+    let movie = Some(MediaKind::Movie);
     assert_eq!(
-        Tree::from_scan(&scan, "Main film only", 0.0, &prefs).ticked_titles(),
+        Tree::from_scan_as(&scan, "Automatic", 0.0, &prefs, movie).ticked_titles(),
         vec![0]
     );
-    let filtered = Tree::from_scan(&scan, "Main film only", 300.0, &prefs);
+    let filtered = Tree::from_scan_as(&scan, "Automatic", 300.0, &prefs, movie);
     assert_eq!(filtered.title_count(), 1);
     assert!(filtered.ticked_titles().is_empty());
     let row = filtered
@@ -240,16 +259,31 @@ fn unknown_or_partial_episode_evidence_leaves_candidates_for_explicit_selection(
             .select(&Selection::Episodes, &StreamFilter::All, None)
             .unwrap_err();
         assert_eq!(review.candidates, vec![0, 1]);
-        let tree = Tree::from_scan(&scan, "Episodes", 0.0, &LangPrefs::default());
-        assert!(tree.ticked_titles().is_empty());
+        // A TV disc under Automatic holds for review: the engine may suggest (and tick) a
+        // set, but the operator's ticks are the confirmation and stay theirs to change.
+        let tree = Tree::from_scan_as(
+            &scan,
+            "Automatic",
+            0.0,
+            &LangPrefs::default(),
+            Some(MediaKind::Tv),
+        );
+        assert!(tree.review.is_some(), "partial={partial}");
         assert_eq!(tree.title_count(), 2);
         let row = tree
             .arena
             .iter()
             .position(|n| n.type_s == "Title" && n.title_idx == 1)
             .unwrap();
+        let had = tree.ticked_titles().contains(&1);
         tree.toggle(row);
-        assert_eq!(tree.ticked_titles(), vec![1]);
+        assert_eq!(tree.ticked_titles().contains(&1), !had, "partial={partial}");
+        // An unknown Kind's main-film-or-episodes guess ticks nothing on partial evidence.
+        if partial {
+            let unknown = Tree::from_scan(&scan, "Automatic", 0.0, &LangPrefs::default());
+            assert!(unknown.review.is_some());
+            assert!(unknown.ticked_titles().is_empty());
+        }
     }
 }
 
@@ -265,7 +299,7 @@ fn visible_episode_subset_keeps_canonical_indices_and_longest_ties_match_engine(
     let scan = scanned_from_disc(&disc, "none".into());
     let prefs = LangPrefs::parse("deu", "", "");
     assert_eq!(
-        Tree::from_scan(&scan, "Episodes", 300.0, &prefs).ticked_titles(),
+        Tree::from_scan_as(&scan, "Automatic", 300.0, &prefs, Some(MediaKind::Tv)).ticked_titles(),
         vec![1, 2]
     );
     assert_eq!(

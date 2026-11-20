@@ -398,30 +398,39 @@ fn the_selection_bar_picks_episodes_and_the_film_in_the_chosen_languages() {
         audio: a.iter().map(|s| s.to_string()).collect(),
         ..Default::default()
     };
-    let ticked = |mode: &str, p: &LangPrefs| Tree::from_scan(&sc, mode, 0.0, p).ticked_titles();
-    assert_eq!(ticked("Main film / episodes", &langs(&["deu"])), vec![3, 5]);
-    assert_eq!(ticked("Main film / episodes", &langs(&[])), vec![2, 4]);
-    assert_eq!(ticked("Episodes", &langs(&["deu"])), vec![3, 5]);
-    assert_eq!(ticked("Episodes", &langs(&["eng", "deu"])), vec![2, 4]);
-    assert_eq!(ticked("Main film only", &langs(&["deu"])), vec![1]);
-    assert_eq!(ticked("Main film only", &langs(&[])), vec![0]);
-    assert_eq!(ticked("No titles", &langs(&[])), Vec::<usize>::new());
+    use freemkv_engine::metadata::MediaKind;
+    let ticked = |mode: &str, kind: Option<MediaKind>, p: &LangPrefs| {
+        Tree::from_scan_as(&sc, mode, 0.0, p, kind).ticked_titles()
+    };
+    let (movie, tv) = (Some(MediaKind::Movie), Some(MediaKind::Tv));
+    // Automatic with the Kind unknown: the proven episodes.
+    assert_eq!(ticked(AUTOMATIC, None, &langs(&["deu"])), vec![3, 5]);
+    assert_eq!(ticked(AUTOMATIC, None, &langs(&[])), vec![2, 4]);
+    // Automatic on TV: the episodes; on a Movie: the main feature.
+    assert_eq!(ticked(AUTOMATIC, tv, &langs(&["deu"])), vec![3, 5]);
+    assert_eq!(ticked(AUTOMATIC, tv, &langs(&["eng", "deu"])), vec![2, 4]);
+    assert_eq!(ticked(AUTOMATIC, movie, &langs(&["deu"])), vec![1]);
+    assert_eq!(ticked(AUTOMATIC, movie, &langs(&[])), vec![0]);
+    assert_eq!(ticked("No titles", tv, &langs(&[])), Vec::<usize>::new());
     // A language no title carries does not empty the choice.
-    assert_eq!(ticked("Episodes", &langs(&["jpn"])), vec![2, 4]);
+    assert_eq!(ticked(AUTOMATIC, tv, &langs(&["jpn"])), vec![2, 4]);
 }
 
-// The Open preflight checks the titles the opened tree ticks: the settings' pick, with Episodes
-// a per-disc choice that is never inherited.
+// The Open preflight checks the titles the opened tree ticks: the settings' pick. A mode an
+// earlier version saved, and the one-off "No titles", open as Automatic, which on this disc
+// of unknown Kind with a proven roster is its episodes.
 #[test]
 fn the_open_preflight_covers_the_titles_the_settings_tick() {
     let sc = episode_disc();
     let mut settings = crate::settings::Settings::default();
     for (selection, audio, want) in [
-        ("Main film only", "", vec![0]),
+        (AUTOMATIC, "", vec![2, 4]),
+        (AUTOMATIC, "deu", vec![3, 5]),
+        ("Main film only", "", vec![2, 4]),
         ("Main film / episodes", "", vec![2, 4]),
-        ("Episodes", "", vec![0]),
-        ("Main film only", "deu", vec![1]),
-        ("No titles", "", vec![]),
+        ("Episodes", "deu", vec![3, 5]),
+        ("No titles", "", vec![2, 4]),
+        ("All titles", "", (0..6).collect()),
     ] {
         settings.selection = selection.into();
         settings.audio_langs = audio.into();
@@ -431,6 +440,87 @@ fn the_open_preflight_covers_the_titles_the_settings_tick() {
             "{selection} {audio}"
         );
     }
+}
+
+// #99: four title modes in the selection bar, three of them Settings defaults. The Kind, not
+// a mode, chooses between the main feature and the episodes.
+#[test]
+fn the_title_modes_are_automatic_longest_all_and_none() {
+    assert_eq!(
+        PICK_TITLES.to_vec(),
+        vec!["Automatic", "Longest title", "All titles", "No titles"]
+    );
+    assert_eq!(AUTOMATIC, "Automatic");
+    let saved: Vec<&str> = enum_options("selection")
+        .into_iter()
+        .map(|(canon, _)| canon)
+        .collect();
+    assert_eq!(saved, vec!["Automatic", "Longest title", "All titles"]);
+    for legacy in ["Main film / episodes", "Main film only", "Episodes"] {
+        assert!(!PICK_TITLES.contains(&legacy), "{legacy}");
+        assert!(!saved.contains(&legacy), "{legacy}");
+    }
+}
+
+#[test]
+fn a_legacy_or_unknown_title_mode_migrates_to_automatic() {
+    for legacy in [
+        "Main film / episodes",
+        "Main film only",
+        "Episodes",
+        "",
+        "Every third title",
+    ] {
+        assert_eq!(migrate_title_mode(legacy), AUTOMATIC, "{legacy:?}");
+    }
+    for &current in PICK_TITLES {
+        assert_eq!(migrate_title_mode(current), current);
+    }
+    // A tree built from a legacy mode is the Automatic tree for that Kind.
+    let sc = episode_disc();
+    let prefs = LangPrefs::default();
+    use freemkv_engine::metadata::MediaKind;
+    for kind in [None, Some(MediaKind::Movie), Some(MediaKind::Tv)] {
+        let want = Tree::from_scan_as(&sc, AUTOMATIC, 0.0, &prefs, kind).ticked_titles();
+        for legacy in ["Main film / episodes", "Main film only", "Episodes"] {
+            assert_eq!(
+                Tree::from_scan_as(&sc, legacy, 0.0, &prefs, kind).ticked_titles(),
+                want,
+                "{legacy} {kind:?}"
+            );
+        }
+    }
+}
+
+// Under Automatic the Kind decides: TV ticks the authored episodes, Movie the main feature,
+// and Auto (unknown) the engine's main-film-or-episodes guess.
+#[test]
+fn the_kind_picks_episodes_or_the_main_feature_under_automatic() {
+    let mut app = App::new();
+    app.apply_scan("/a.iso", Ok(pick_disc()), true);
+    assert_eq!(app.pick_mode, AUTOMATIC);
+    let model = app.pick_scan.as_ref().unwrap().selection_model.clone();
+    let all = freemkv_engine::StreamFilter::All;
+    let guess = model.main_or_episodes(&all, None).unwrap();
+    let roster = model
+        .select(&freemkv_engine::Selection::Episodes, &all, None)
+        .unwrap();
+    let main = model
+        .select(&freemkv_engine::Selection::MainMovie, &all, None)
+        .unwrap();
+    assert_eq!(
+        (guess.clone(), roster.clone(), main.clone()),
+        (vec![2, 4], vec![2, 4], vec![0])
+    );
+    assert_eq!(app.tree.ticked_titles(), guess, "Kind Auto");
+    app.set_detail_kind(2);
+    assert_eq!(app.tree.ticked_titles(), roster, "Kind TV");
+    assert!(app.tree.review.is_none());
+    app.set_detail_kind(1);
+    assert_eq!(app.tree.ticked_titles(), main, "Kind Movie");
+    app.set_detail_kind(0);
+    assert_eq!(app.tree.ticked_titles(), guess, "Kind Auto again");
+    assert_eq!(app.pick_mode, AUTOMATIC, "a Kind change keeps the mode");
 }
 
 // `episode_disc` with, on every title, a regular French subtitle (0x40+) and a forced
@@ -472,7 +562,8 @@ fn subtitles_none_and_forced_only_untick_regular_subtitles() {
             no_forced,
             ..Default::default()
         };
-        ticked_pids(&Tree::from_scan(&sc, "Main film only", 0.0, &p), 0)
+        let movie = Some(freemkv_engine::metadata::MediaKind::Movie);
+        ticked_pids(&Tree::from_scan_as(&sc, AUTOMATIC, 0.0, &p, movie), 0)
     };
     // Audio 0x80, regular 0x20 and 0x40, forced 0x60.
     assert_eq!(pids(false, false), vec![0x80, 0x20, 0x40, 0x60], "All");
@@ -480,10 +571,12 @@ fn subtitles_none_and_forced_only_untick_regular_subtitles() {
     assert_eq!(pids(true, false), vec![0x80, 0x60], "Forced only");
 }
 
-// An App with `sc` open in the selection bar, as a finished scan leaves it.
+// An App with `sc` open in the selection bar, as a finished scan leaves it: a Movie under
+// Automatic, so the main feature (title 0) is ticked.
 fn picking(sc: Scanned) -> App {
     let mut app = App::new();
-    app.pick_mode = "Main film only".into();
+    app.pick_mode = AUTOMATIC.into();
+    app.details.kind = Some(freemkv_engine::metadata::MediaKind::Movie);
     app.pick_scan = Some(sc);
     app.repick();
     app
@@ -578,7 +671,8 @@ fn the_subtitle_choices_step_through_their_states() {
 #[test]
 fn the_audio_choice_toggles_languages_and_all_clears_them() {
     let mut app = picking(pick_disc());
-    app.pick_titles("Episodes");
+    // Kind TV: Automatic takes the episodes.
+    app.set_detail_kind(2);
     let v = app.view().pick.unwrap();
     assert!(v.audio_all);
     assert_eq!(v.audio_summary, "All");
@@ -676,10 +770,11 @@ fn every_menu_entry_maps_back_to_its_own_choice() {
     }
 }
 
+// Every disc, with or without episode evidence, offers the same four title modes: the Kind,
+// not the menu, decides between the main feature and the episodes.
 #[test]
-fn the_title_choices_offer_episodes_only_on_a_disc_that_proves_them() {
+fn the_title_choices_are_the_same_four_modes_on_every_disc() {
     let mut authored = pick_disc();
-    // Display labels cannot grant or revoke the model's episode evidence.
     for row in &mut authored.rows {
         row.notes.clear();
     }
@@ -687,19 +782,22 @@ fn the_title_choices_offer_episodes_only_on_a_disc_that_proves_them() {
     let v = app.view().pick.unwrap();
     let modes: Vec<_> = v.titles.iter().map(|t| t.0).collect();
     assert_eq!(modes, PICK_TITLES.to_vec());
-    let at = modes.iter().position(|m| *m == "Episodes").unwrap();
-    assert_eq!(v.title_choice(at), Some("Episodes"));
+    let at = modes.iter().position(|m| *m == "All titles").unwrap();
+    assert_eq!(v.title_choice(at), Some("All titles"));
     assert_eq!(v.title_choice(modes.len()), None);
-    app.pick_titles("Episodes");
+    app.pick_titles("All titles");
     let v = app.view().pick.unwrap();
-    assert_eq!((v.title.as_str(), v.title_index()), ("Episodes", at));
+    assert_eq!((v.title.as_str(), v.title_index()), ("All titles", at));
 
     let mut unknown = probe_scan();
     unknown.rows[0].notes = "Episode".into();
-    let plain = picking(unknown);
-    let v = plain.view().pick.unwrap();
-    assert!(v.titles.iter().all(|t| t.0 != "Episodes"));
-    assert_eq!(v.titles.len(), PICK_TITLES.len() - 1);
+    let mut plain = picking(unknown);
+    for kind in 0..3 {
+        plain.set_detail_kind(kind);
+        let v = plain.view().pick.unwrap();
+        let modes: Vec<_> = v.titles.iter().map(|t| t.0).collect();
+        assert_eq!(modes, PICK_TITLES.to_vec(), "kind {kind}");
+    }
 }
 
 // A forced-subtitle preference that matches nothing must keep NOTHING — unlike audio, a
@@ -2323,7 +2421,7 @@ fn an_empty_scan_yields_an_empty_tree() {
             needs_disc: false,
             refusal: None,
         },
-        "Main film only",
+        AUTOMATIC,
         0.0,
         &LangPrefs::default(),
     );
@@ -3186,8 +3284,8 @@ fn the_title_mode_is_remembered_as_the_default_selection() {
     let form = app.settings.clone();
     app.pick_titles("All titles");
     assert_eq!(app.settings.selection, "All titles");
-    app.pick_titles("Main film only");
-    assert_eq!(app.settings.selection, "Main film only");
+    app.pick_titles(AUTOMATIC);
+    assert_eq!(app.settings.selection, AUTOMATIC);
     app.pick_titles("Longest title");
     assert_eq!(app.settings.selection, "Longest title");
     // "No titles" is a one-off clearing of the ticks, never a default to open with.
@@ -3585,20 +3683,24 @@ fn two_commits_in_a_session_keep_a_bar_pick() {
 }
 
 #[test]
-fn a_saved_episodes_mode_does_not_apply_to_a_newly_opened_disc() {
-    let mut app = App::new();
-    app.settings.selection = "Episodes".into();
-    app.apply_scan("/a.iso", Ok(pick_disc()), true);
-    assert_eq!(app.pick_mode, "Main film only");
-    let v = app.view().pick.unwrap();
-    assert_eq!(v.title, "Main film only");
-    assert!(v.titles.iter().any(|(m, _)| *m == "Episodes"));
-    assert_ne!(app.tree.ticked_titles(), vec![2, 4]);
-
-    app.pick_titles("Episodes");
-    assert_eq!(app.tree.ticked_titles(), vec![2, 4]);
-    app.apply_scan("/b.iso", Ok(pick_disc()), true);
-    assert_eq!(app.pick_mode, "Main film only");
+// #99: a title mode an earlier version saved ("Main film / episodes", "Main film only",
+// "Episodes") opens a disc as Automatic; the Kind then picks the main feature or episodes.
+fn a_saved_legacy_title_mode_opens_a_disc_as_automatic() {
+    for legacy in ["Main film / episodes", "Main film only", "Episodes"] {
+        let mut app = App::new();
+        app.settings.selection = legacy.into();
+        app.apply_scan("/a.iso", Ok(pick_disc()), true);
+        assert_eq!(app.pick_mode, AUTOMATIC, "{legacy}");
+        let v = app.view().pick.unwrap();
+        assert_eq!(v.title, AUTOMATIC, "{legacy}");
+        let modes: Vec<_> = v.titles.iter().map(|(m, _)| *m).collect();
+        assert_eq!(modes, PICK_TITLES.to_vec(), "{legacy}");
+        // The Kind is unknown: the engine's main-film-or-episodes guess, here the roster.
+        assert_eq!(app.tree.ticked_titles(), vec![2, 4], "{legacy}");
+        app.set_detail_kind(1);
+        assert_eq!(app.tree.ticked_titles(), vec![0], "{legacy}");
+        assert_eq!(app.pick_mode, AUTOMATIC, "{legacy}");
+    }
 }
 
 // With the Default selection set to "All titles", Open keys every title the tree ticks, so
@@ -4563,7 +4665,7 @@ fn samurai(label: &str) -> Scanned {
 
 fn opened(sc: Scanned) -> App {
     let mut app = App::new();
-    app.settings.selection = "Main film / episodes".into();
+    app.settings.selection = AUTOMATIC.into();
     app.settings.min_title_secs = "120".into();
     app.apply_scan("/media/disc.iso", Ok(sc), false);
     app
@@ -4588,24 +4690,32 @@ fn title_notes(app: &App, ti: usize) -> String {
     n.map(|n| n.notes.clone()).unwrap_or_default()
 }
 
+// The Kind, set by the operator or read from the label, decides what Automatic ticks; the
+// title modes offered never change with it.
 #[test]
-fn episodes_are_offered_when_the_operator_or_the_label_says_tv() {
+fn the_kind_decides_what_automatic_ticks_and_every_mode_stays_offered() {
     let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
-    assert!(
-        !offered(&app).contains(&"Episodes"),
-        "no roster, no TV: no Episodes"
+    assert_eq!(offered(&app), PICK_TITLES.to_vec());
+    assert_eq!(
+        app.tree.ticked_titles(),
+        vec![0],
+        "no roster, no TV: the film"
     );
     app.set_detail_kind(2);
     assert_eq!(
         app.details.kind,
         Some(freemkv_engine::metadata::MediaKind::Tv)
     );
-    assert!(offered(&app).contains(&"Episodes"));
+    assert_eq!(app.pick_mode, AUTOMATIC);
+    assert_eq!(offered(&app), PICK_TITLES.to_vec());
+    assert_eq!(app.tree.ticked_titles(), vec![1, 3, 0, 2]);
     app.set_detail_kind(1);
-    assert!(!offered(&app).contains(&"Episodes"));
+    assert_eq!(offered(&app), PICK_TITLES.to_vec());
+    assert_eq!(app.tree.ticked_titles(), vec![0]);
     // A label naming a season is TV without the operator saying so.
     let app = opened(samurai("SAMURAI_CHAMPLOO_S1"));
-    assert!(offered(&app).contains(&"Episodes"));
+    assert_eq!(offered(&app), PICK_TITLES.to_vec());
+    assert_eq!(app.tree.ticked_titles(), vec![1, 3, 0, 2]);
     let details = app.view().details.expect("details row");
     assert_eq!((details.kind_index, details.numbering), (0, true));
     assert_eq!(details.name, "SAMURAI_CHAMPLOO_S1");
@@ -4646,8 +4756,11 @@ fn a_tv_disc_without_a_roster_ticks_the_suggestion_in_its_order() {
         Some(freemkv_engine::metadata::MediaKind::Tv)
     );
     assert_eq!(naming.operator.title, "", "an unedited name is the label");
-    // "Main film only" is no episode pick.
-    app.pick_titles("Main film only");
+    // A Movie's Automatic pick, and an explicit mode on TV, are no episode pick.
+    app.set_detail_kind(1);
+    assert!(app.naming_request(&app.tree.ticked_titles()).is_none());
+    app.set_detail_kind(2);
+    app.pick_titles("All titles");
     assert!(app.naming_request(&app.tree.ticked_titles()).is_none());
 }
 
@@ -4685,7 +4798,7 @@ fn a_disc_that_is_not_tv_keeps_todays_selection() {
         .selection_model
         .main_or_episodes(&freemkv_engine::StreamFilter::All, None)
         .unwrap();
-    let tree = Tree::from_scan_as(&sc, "Main film / episodes", 120.0, &prefs, None);
+    let tree = Tree::from_scan_as(&sc, AUTOMATIC, 120.0, &prefs, None);
     assert_eq!(tree.ticked_titles(), main);
     assert!(tree.review.is_none());
     assert!(title_notes(&opened(sc), 1).is_empty());
@@ -4695,15 +4808,17 @@ fn a_disc_that_is_not_tv_keeps_todays_selection() {
 #[test]
 fn a_review_reason_is_shown_not_swallowed() {
     let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
-    app.pick_titles("Episodes");
-    assert!(app.tree.ticked_titles().is_empty());
+    assert!(app.tree.review.is_none(), "not TV: the film, no review");
+    // TV under Automatic, on a disc that lists no episodes.
+    app.set_detail_kind(2);
+    assert_eq!(app.pick_mode, AUTOMATIC);
     let review = app.tree.review.clone().expect("review");
     assert_eq!(
         review.reason,
         freemkv_engine::SelectionReviewReason::MissingEpisodeRoster
     );
     let banner = app.view().pick.unwrap().banner.expect("banner");
-    assert!(banner.contains("Tick the titles to rip"), "{banner}");
+    assert!(banner.contains("does not list its episodes"), "{banner}");
     assert!(app.log.iter().any(|l| l.text == banner));
 }
 
@@ -4750,13 +4865,13 @@ fn the_library_layout_is_opt_in_and_rides_the_naming_request() {
     assert!(app.naming_request(&ticked).is_none(), "a whole-disc copy");
 }
 
-// "Episodes" is offered only while the disc is TV: leaving TV leaves no stale choice behind.
+// Leaving TV keeps the mode Automatic and re-ticks the main feature; a Kind change never
+// rewrites the title mode.
 #[test]
-fn the_episodes_choice_does_not_outlive_the_tv_kind() {
+fn leaving_tv_re_ticks_the_main_feature_under_automatic() {
     for leave in [0, 1] {
         let mut app = opened(samurai("SAMURAI_CHAMPLOO_VOL1"));
         app.set_detail_kind(2);
-        app.pick_titles("Episodes");
         assert_eq!(app.tree.ticked_titles(), vec![1, 3, 0, 2]);
         app.set_detail_kind(leave);
         let pick = app.view().pick.unwrap();
@@ -4766,14 +4881,16 @@ fn the_episodes_choice_does_not_outlive_the_tv_kind() {
             "{leave}: {} not in {offered:?}",
             pick.title
         );
-        assert_eq!(pick.title, "Main film only");
+        assert_eq!(pick.title, AUTOMATIC);
         assert_eq!(app.tree.ticked_titles(), vec![0]);
     }
-    // A disc that proves no roster keeps Episodes while it stays TV.
+    // An explicit mode survives a Kind change.
     let mut app = opened(samurai("SAMURAI_CHAMPLOO_S1"));
-    app.pick_titles("Episodes");
+    app.pick_titles("All titles");
     app.set_detail_kind(2);
-    assert_eq!(app.pick_mode, "Episodes");
+    assert_eq!(app.pick_mode, "All titles");
+    app.set_detail_kind(1);
+    assert_eq!(app.pick_mode, "All titles");
 }
 
 #[test]
@@ -4948,7 +5065,7 @@ fn an_unchanged_banner_is_logged_once() {
 #[test]
 fn the_open_preflight_follows_a_season_label() {
     let settings = crate::settings::Settings {
-        selection: "Main film / episodes".into(),
+        selection: AUTOMATIC.into(),
         min_title_secs: "120".into(),
         ..Default::default()
     };
@@ -4986,4 +5103,51 @@ fn an_older_settings_write_never_lands_after_a_newer_one() {
     ordered_write(&order, 2, record, &newer).unwrap();
     ordered_write(&order, 1, record, &older).unwrap();
     assert_eq!(*WRITES.lock().unwrap(), vec!["/newer".to_string()]);
+}
+
+// #102: a ready-screen drive row reads as the drive model over `path · status`.
+#[test]
+fn a_home_drive_row_names_the_model_over_its_path_and_status() {
+    let mut drive = an_empty_drive().remove(0);
+    let empty = crate::strings::get_or("gui.home.empty", "Empty");
+    assert_eq!(
+        home_drive_lines(&drive),
+        (
+            "FAKE EMPTY (rev 1.00)".to_string(),
+            format!("/dev/sr1 · {empty}")
+        )
+    );
+    // A display with no OS name in front: the whole display, led by the device.
+    drive.display = "FAKE BARE".into();
+    drive.present = Some(true);
+    let loaded = crate::strings::get_or("gui.home.loaded", "Disc inserted");
+    assert_eq!(
+        home_drive_lines(&drive),
+        ("FAKE BARE".to_string(), format!("/dev/sr1 · {loaded}"))
+    );
+}
+
+// #102: a ready-screen drive's own Eject opens that drive's tray, off the UI thread, and
+// leaves the ready screen in place; with a source open it does nothing.
+#[test]
+fn a_home_drive_ejects_from_the_ready_screen() {
+    let mut app = launched_home(an_empty_drive);
+    app.eject_fn = fake_eject_ok;
+    let before = EJECT_CALLS.load(Ordering::SeqCst);
+    let fx = app.eject_home_drive(0);
+    assert!(fx.contains(&Effect::StartTicking), "{fx:?}");
+    drain_eject(&mut app);
+    assert!(
+        EJECT_CALLS.load(Ordering::SeqCst) > before,
+        "the eject never ran"
+    );
+    assert_eq!(app.page, Page::Empty);
+    assert!(app.source.is_empty());
+    assert!(app.eject_home_drive(9).is_empty(), "no such drive");
+
+    let mut open = launched_home(an_empty_drive);
+    open.eject_fn = fake_eject_ok;
+    open.source = "/m/Film.iso".into();
+    assert_eq!(open.eject_home_drive(0), vec![Effect::Redraw]);
+    assert!(open.ejecting.is_none());
 }

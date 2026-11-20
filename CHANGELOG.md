@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Linux: the disc page puts the title tree first again. Name and Year sit on one line (Season, Disc and First episode join it for a TV disc), Kind, Titles, Audio and Subtitles are four equal choosers in one row that each open below themselves, the tree takes the remaining height, and the output folder, format, Eject and Rip Now share one line under it. The log sits under a draggable divider, short by default; View ▸ Hide log still hides it (#98). (app only: Linux GTK interface)
+- Linux: the start screen lists the drives as rows: the drive model, its device and whether it holds a disc, Open (only with a disc), and a menu with Use at startup and Eject. The rows update as discs are inserted or removed (#102, #101). (app only: Linux GTK interface)
+- The Titles choice is now Automatic, Longest title, All titles or None, and Kind decides what Automatic takes: the main feature for a Movie, the episodes for a TV series, and the existing main-film-or-episodes guess while Kind is Auto and the disc label does not say. A saved "Main film / episodes", "Main film only" or "Episodes" loads as Automatic (#99). (app only: all desktop interfaces)
+
 ### Fixed
 
 - Linux: title-tree branch lines are now centred on the expand/collapse arrows (#97). (app only: Linux GTK interface)

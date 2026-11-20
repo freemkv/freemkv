@@ -1,8 +1,10 @@
 //! qa's GUI gate on the GTK shell (`crate::gui_gate`), run by a debug build with
-//! `FMKV_GATE=<dir>` over the source `FMKV_OPEN` opened: the title tree's Length and Size
-//! columns and the Settings path and dropdowns, measured in the widgets themselves and checked
-//! for ink in a render of the real window. Writes `<dir>/gate.txt` and the captures, and exits
-//! with the verdict.
+//! `FMKV_GATE=<dir>` over the source `FMKV_OPEN` opened: the disc page's layout (the tree's
+//! share of the height, the four choosers in one row), the title tree's Length and Size
+//! columns, the ready screen's drive rows, and the Settings path and dropdowns, measured in
+//! the widgets themselves and checked for ink in a render of the real window. Writes
+//! `<dir>/gate.txt` and the captures (`disc-page.png` and `home-page.png` among them), and
+//! exits with the verdict.
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -30,23 +32,134 @@ pub(super) fn start(shell: &Rc<Shell>, dir: String) {
         if me.app.borrow().view().page != Page::Titles && waited < Duration::from_secs(60) {
             return glib::ControlFlow::Continue;
         }
-        // Give both fixture titles room before checking their rendered cells.
-        let log_visible = !me.app.borrow().view().log_hidden;
-        if log_visible {
-            me.act(Cmd::ToggleLog);
-        }
-        if let Some(main) = me.main.borrow().as_ref() {
-            scroll_to(main.tree.widget.upcast_ref());
-        }
         let (me, dir) = (me.clone(), dir.clone());
-        glib::timeout_add_local_once(SETTLE, move || run(&me, dir));
+        // The disc page as it opens, log and all, before anything is moved for a check.
+        glib::timeout_add_local_once(SETTLE, move || {
+            let _ = std::fs::create_dir_all(&dir);
+            let g = Rc::new(RefCell::new(Gate::default()));
+            disc_page(&me, &dir, &mut g.borrow_mut());
+            // Give both fixture titles room before checking their rendered cells.
+            let log_visible = !me.app.borrow().view().log_hidden;
+            if log_visible {
+                me.act(Cmd::ToggleLog);
+            }
+            if let Some(main) = me.main.borrow().as_ref() {
+                scroll_to(main.tree.widget.upcast_ref());
+            }
+            glib::timeout_add_local_once(SETTLE, move || run(&me, dir, g));
+        });
         glib::ControlFlow::Break
     });
 }
 
-fn run(shell: &Rc<Shell>, dir: String) {
-    let _ = std::fs::create_dir_all(&dir);
-    let g = Rc::new(RefCell::new(Gate::default()));
+/// The disc page's layout (#98): the title tree takes at least half the window's content
+/// height, and the Kind, Titles, Audio and Subtitles choosers share one row at one width.
+/// Captured as `disc-page.png`.
+fn disc_page(shell: &Rc<Shell>, dir: &str, g: &mut Gate) {
+    let Some(main) = shell.main.borrow().clone() else {
+        g.check("disc-page-present", false, "no main view");
+        return;
+    };
+    let win: gtk::Widget = shell.window.clone().upcast();
+    let content = shell.toast_overlay.height();
+    let tree = main.tree.widget.height();
+    g.check(
+        "disc-tree-fills-page",
+        content > 0 && tree * 2 >= content,
+        format!("title tree {tree}px of {content}px window content"),
+    );
+    let mut columns = Vec::new();
+    let mut child = main.pick_bar.row.first_child();
+    while let Some(c) = child {
+        if c.is_mapped()
+            && let Some(b) = c.compute_bounds(&win)
+        {
+            columns.push((b.y(), b.width()));
+        }
+        child = c.next_sibling();
+    }
+    let ys: Vec<f32> = columns.iter().map(|c| c.0).collect();
+    let widths: Vec<f32> = columns.iter().map(|c| c.1).collect();
+    g.check(
+        "disc-choosers-one-row",
+        columns.len() == 4 && within(&ys, 1.0),
+        format!("{} choosers, (y, width) {columns:?}", columns.len()),
+    );
+    g.check(
+        "disc-choosers-equal-width",
+        columns.len() == 4 && within(&widths, 2.0),
+        format!("{} choosers, (y, width) {columns:?}", columns.len()),
+    );
+    save(&win, &format!("{dir}/disc-page.png"), g);
+}
+
+// Every value within `slack` of the first.
+fn within(values: &[f32], slack: f32) -> bool {
+    values
+        .first()
+        .is_some_and(|first| values.iter().all(|v| (v - first).abs() <= slack))
+}
+
+/// The ready screen (#102) with two drives, one holding a disc: one `AdwActionRow` per drive
+/// in the Drives list. Captured as `home-page.png`; the disc page is put back afterwards.
+fn home_page(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>, done: Box<dyn FnOnce()>) {
+    let drives = vec![
+        crate::ui::HomeDrive {
+            device: "/dev/sg0".into(),
+            display: "/dev/sr0  HL-DT-ST BD-RE BU40N (rev 1.04)".into(),
+            legacy_label: "HL-DT-ST BD-RE BU40N".into(),
+            present: Some(true),
+        },
+        crate::ui::HomeDrive {
+            device: "/dev/sg1".into(),
+            display: "/dev/sr1  ASUS BW-16D1HT (rev 3.10)".into(),
+            legacy_label: "ASUS BW-16D1HT".into(),
+            present: Some(false),
+        },
+    ];
+    let want = drives.len();
+    let (page, log_hidden) = {
+        let a = shell.app.borrow();
+        (a.page, a.log_hidden)
+    };
+    // The ready screen with its log, as it opens.
+    if log_hidden {
+        shell.act(Cmd::ToggleLog);
+    }
+    shell.app_mut(|a| {
+        a.page = Page::Empty;
+        a.home_drives = drives;
+    });
+    let me = shell.clone();
+    glib::timeout_add_local_once(SETTLE, move || {
+        let win: gtk::Widget = me.window.clone().upcast();
+        let rows = me.main.borrow().as_ref().map_or(0, |main| {
+            descendants(main.drives.upcast_ref())
+                .into_iter()
+                .filter(|w| w.is::<adw::ActionRow>() && w.is_mapped())
+                .count()
+        });
+        {
+            let mut gate = g.borrow_mut();
+            gate.check(
+                "home-one-row-per-drive",
+                rows == want,
+                format!("{rows} drive rows for {want} drives"),
+            );
+            save(&win, &format!("{dir}/home-page.png"), &mut gate);
+        }
+        me.app_mut(|a| {
+            a.page = page;
+            a.home_drives.clear();
+        });
+        if log_hidden {
+            me.act(Cmd::ToggleLog);
+        }
+        glib::timeout_add_local_once(SETTLE, done);
+    });
+}
+
+fn run(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
     environment(shell, &mut g.borrow_mut());
     titles(shell, &dir, &mut g.borrow_mut());
 
@@ -211,7 +324,13 @@ fn main_chooser_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
         rows,
         0,
         Box::new(move || {
-            menu_checks(&me, next_dir, next_g);
+            let (then, then_dir, then_g) = (me.clone(), next_dir.clone(), next_g.clone());
+            home_page(
+                &me,
+                next_dir,
+                next_g,
+                Box::new(move || menu_checks(&then, then_dir, then_g)),
+            );
         }),
     );
 }

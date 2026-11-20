@@ -172,6 +172,28 @@ fn tree_prefs(sc: &Scanned, sel_mode: &str, prefs: &LangPrefs) -> Tree {
     Tree::from_scan(sc, sel_mode, 0.0, prefs)
 }
 
+/// A Movie disc's tree under Automatic: the main feature starts ticked.
+fn movie_tree(sc: &Scanned, min_secs: f64) -> Tree {
+    Tree::from_scan_as(
+        sc,
+        AUTOMATIC,
+        min_secs,
+        &LangPrefs::default(),
+        Some(freemkv_engine::metadata::MediaKind::Movie),
+    )
+}
+
+/// The same Movie tree, built with preferred-language defaults.
+fn movie_tree_prefs(sc: &Scanned, prefs: &LangPrefs) -> Tree {
+    Tree::from_scan_as(
+        sc,
+        AUTOMATIC,
+        0.0,
+        prefs,
+        Some(freemkv_engine::metadata::MediaKind::Movie),
+    )
+}
+
 /// Arena position of the `n`th row of a given type.
 fn nth(t: &Tree, type_s: &str, n: usize) -> usize {
     t.arena
@@ -190,7 +212,7 @@ fn the_disc_row_is_not_a_choice() {
     // Ticking "the disc" means nothing — the choice is which titles, so a
     // checkbox there is a control that cannot do anything. Verified against
     // the shells' own rule: both render a no-checkbox row as a blank spacer.
-    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let t = movie_tree(&two_title_disc(), 0.0);
     let root = t.roots[0];
     assert!(!t.arena[root].checkable(), "the disc root grew a checkbox");
     assert_eq!(t.arena[root].type_s, "Bluray disc");
@@ -201,7 +223,7 @@ fn video_is_implicit_and_carries_no_checkbox() {
     // Every rip includes the video; offering to untick it would offer a
     // combination the engine does not produce. VERIFIED: `engine::stream_rows`
     // sets `checkable: ty != "Video"` for exactly this reason.
-    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let t = movie_tree(&two_title_disc(), 0.0);
     let videos: Vec<usize> = t
         .arena
         .iter()
@@ -217,7 +239,7 @@ fn video_is_implicit_and_carries_no_checkbox() {
 
 #[test]
 fn titles_and_audio_tracks_are_choices() {
-    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let t = movie_tree(&two_title_disc(), 0.0);
     for ty in ["Title", "Audio"] {
         let any = t.arena.iter().filter(|n| n.type_s == ty).count();
         assert!(any > 0, "fixture must contain {ty} rows");
@@ -232,7 +254,7 @@ fn bulk_selection_never_touches_a_row_that_has_no_checkbox() {
     // Select All / Select None / Invert are advertised as acting on the
     // selection; silently flipping the hidden `checked` flag of a Video or the
     // disc row would put the model in a state no click can produce.
-    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let t = movie_tree(&two_title_disc(), 0.0);
     let uncheckable: Vec<usize> = t
         .arena
         .iter()
@@ -727,13 +749,15 @@ fn nothing_ticked_falls_back_to_the_first_row() {
 
 #[test]
 fn the_default_selection_setting_decides_what_starts_ticked() {
-    // Three modes, three different answers, all on the same disc. "Main film
-    // only" means title 1; "All titles" means every title; "Longest title"
-    // means the longest, which here is NOT title 1.
+    // Three modes, three different answers, all on the same disc. Automatic on
+    // a Movie (and on a disc without episode evidence) means title 1; "All
+    // titles" means every title; "Longest title" means the longest, which here
+    // is NOT title 1.
     let sc = disc(&[(600.0, 1), (5400.0, 1), (900.0, 1)]);
 
-    let main = tree(&sc, "Main film only", 0.0);
+    let main = movie_tree(&sc, 0.0);
     assert_eq!(main.ticked_titles(), vec![0]);
+    assert_eq!(tree(&sc, AUTOMATIC, 0.0).ticked_titles(), vec![0]);
 
     let all = tree(&sc, "All titles", 0.0);
     assert_eq!(all.ticked_titles(), vec![0, 1, 2]);
@@ -864,7 +888,7 @@ fn the_filter_never_empties_the_list() {
 fn hiding_the_main_film_does_not_select_an_unrelated_visible_title() {
     // Visibility cannot change the engine's main-feature decision.
     let sc = disc(&[(30.0, 1), (5400.0, 1)]);
-    let t = tree(&sc, "Main film only", 300.0);
+    let t = movie_tree(&sc, 300.0);
     assert_eq!(t.title_count(), 1, "the filter should have hidden title 0");
     assert_eq!(
         t.ticked_titles(),
@@ -892,7 +916,7 @@ fn every_default_selection_ticks_only_titles_that_are_on_screen() {
         "\"All titles\" did not tick every title it shows"
     );
 
-    let main = tree(&sc, "Main film only", 300.0);
+    let main = movie_tree(&sc, 300.0);
     assert_eq!(main.ticked_titles(), vec![0]);
 
     let longest = tree(&sc, "Longest title", 300.0);
@@ -1155,15 +1179,7 @@ fn every_settings_dropdown_stores_a_canonical_value_the_code_matches_on() {
     // strings are compared verbatim elsewhere, so renaming one here
     // silently disables the feature it selects.
     let expect: &[(&str, &[&str])] = &[
-        (
-            "selection",
-            &[
-                "Main film / episodes",
-                "Main film only",
-                "All titles",
-                "Longest title",
-            ],
-        ),
+        ("selection", &["Automatic", "Longest title", "All titles"]),
         (
             "startup_mode",
             &[
@@ -1192,19 +1208,18 @@ fn every_settings_dropdown_stores_a_canonical_value_the_code_matches_on() {
 #[test]
 fn the_selection_dropdown_offers_exactly_the_modes_the_tree_implements() {
     let sc = disc(&[(600.0, 1), (5400.0, 1)]);
-    let main = tree(&sc, "Main film only", 0.0).ticked_titles();
+    let main = movie_tree(&sc, 0.0).ticked_titles();
     let distinct: Vec<Vec<usize>> = enum_options("selection")
         .iter()
         .map(|(canon, _)| tree(&sc, canon, 0.0).ticked_titles())
         .collect();
-    assert_eq!(distinct.len(), 4);
+    assert_eq!(distinct.len(), 3);
     assert_eq!(
         distinct[0], main,
         "a disc without episode evidence keeps the film"
     );
-    assert_eq!(distinct[1], main);
+    assert_ne!(distinct[1], main, "Longest title must pick by duration");
     assert_ne!(distinct[2], main, "All titles must select every title");
-    assert_ne!(distinct[3], main, "Longest title must pick by duration");
 }
 
 #[test]
@@ -1756,7 +1771,7 @@ fn clicking_a_partly_ticked_title_selects_all_of_it() {
 // A track ticked under an unticked title must not be a tick that is silently never ripped.
 #[test]
 fn ticking_a_track_under_an_unticked_title_brings_the_title_in() {
-    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let t = movie_tree(&two_title_disc(), 0.0);
     let extra = nth(&t, "Title", 1);
     assert_eq!(
         t.check_state(extra),
@@ -1878,7 +1893,7 @@ fn the_audio_preference_keeps_several_languages_at_once() {
         ("Audio", "eng", false),
     ]);
     let prefs = LangPrefs::parse("German, Spanish", "", "");
-    let t = tree_prefs(&sc, "Main film only", &prefs);
+    let t = movie_tree_prefs(&sc, &prefs);
 
     let (mut audio, subs, explicit) = t.ticked_streams();
     audio.sort_unstable();
@@ -1913,7 +1928,7 @@ fn the_forced_subtitle_set_is_honoured_independently_of_the_subtitle_set() {
         ("Subtitles", "eng", true),  // wanted: forced English
     ]);
     let prefs = LangPrefs::parse("", "German", "English");
-    let t = tree_prefs(&sc, "Main film only", &prefs);
+    let t = movie_tree_prefs(&sc, &prefs);
 
     let (audio, mut subs, _) = t.ticked_streams();
     subs.sort_unstable();
@@ -1925,11 +1940,7 @@ fn the_forced_subtitle_set_is_honoured_independently_of_the_subtitle_set() {
     );
 
     // The two sides are genuinely independent: swapping them swaps the result.
-    let swapped = tree_prefs(
-        &sc,
-        "Main film only",
-        &LangPrefs::parse("", "English", "German"),
-    );
+    let swapped = movie_tree_prefs(&sc, &LangPrefs::parse("", "English", "German"));
     let (_, mut sw, _) = swapped.ticked_streams();
     sw.sort_unstable();
     assert_eq!(sw, vec![spid(1), spid(2)]);
@@ -1949,7 +1960,7 @@ fn a_language_the_disc_lacks_falls_back_to_keeping_that_whole_class() {
     ]);
     // German/Spanish audio is not on this disc; German subtitles are.
     let prefs = LangPrefs::parse("German, Spanish", "German", "English");
-    let t = tree_prefs(&sc, "Main film only", &prefs);
+    let t = movie_tree_prefs(&sc, &prefs);
 
     let (mut audio, mut subs, _) = t.ticked_streams();
     audio.sort_unstable();
@@ -1969,11 +1980,7 @@ fn a_language_the_disc_lacks_falls_back_to_keeping_that_whole_class() {
 
     // An unresolvable tag (a typo) is treated the same way — it cannot strip a
     // class either.
-    let typo = tree_prefs(
-        &sc,
-        "Main film only",
-        &LangPrefs::parse("Klingonish", "", ""),
-    );
+    let typo = movie_tree_prefs(&sc, &LangPrefs::parse("Klingonish", "", ""));
     let (mut ta, _, _) = typo.ticked_streams();
     ta.sort_unstable();
     assert_eq!(ta, vec![spid(0), spid(1)]);
@@ -1992,7 +1999,7 @@ fn a_subtitle_language_the_disc_lacks_keeps_the_whole_subtitle_class() {
     ]);
     for subtitles in ["German", "Klingonish"] {
         let prefs = LangPrefs::parse("German", subtitles, "German");
-        let t = tree_prefs(&sc, "Main film only", &prefs);
+        let t = movie_tree_prefs(&sc, &prefs);
         let (audio, mut subs, _) = t.ticked_streams();
         subs.sort_unstable();
         assert_eq!(audio, vec![spid(0)], "{subtitles}: audio matched");
@@ -2014,8 +2021,8 @@ fn an_empty_preference_behaves_exactly_as_before() {
         ("Audio", "eng", false),
         ("Subtitles", "eng", true),
     ]);
-    let before = tree(&sc, "Main film only", 0.0);
-    let after = tree_prefs(&sc, "Main film only", &LangPrefs::parse("", "  ", ",;"));
+    let before = movie_tree(&sc, 0.0);
+    let after = movie_tree_prefs(&sc, &LangPrefs::parse("", "  ", ",;"));
 
     for t in [&before, &after] {
         let (mut audio, subs, explicit) = t.ticked_streams();
@@ -2033,7 +2040,7 @@ fn an_empty_preference_behaves_exactly_as_before() {
     // or not a preference is set — the preference narrows a selection, it never
     // creates one.
     let two = disc(&[(5400.0, 2), (600.0, 1)]);
-    let t = tree_prefs(&two, "Main film only", &LangPrefs::parse("German", "", ""));
+    let t = movie_tree_prefs(&two, &LangPrefs::parse("German", "", ""));
     assert_eq!(t.check_state(nth(&t, "Title", 1)), Check::Off);
 }
 

@@ -156,26 +156,33 @@ pub enum SubPick {
     Lang(String),
 }
 
-/// Stored title modes. "Episodes" is offered when the shared selection model returns an
-/// executable episode selection, or when the operator or the label calls the disc TV.
-pub const PICK_TITLES: &[&str] = &[
-    "Main film / episodes",
-    "Main film only",
-    "Episodes",
-    "Longest title",
-    "All titles",
-    "No titles",
-];
+/// The title mode that follows the disc's Kind: the main feature for a Movie, the episodes
+/// for TV, and the engine's main-film-or-episodes guess while the Kind is unknown.
+pub const AUTOMATIC: &str = "Automatic";
+
+/// Stored title modes, in menu order. The Kind (Auto / Movie / TV) decides between a main
+/// feature and episodes; these only say how much of the disc to take.
+pub const PICK_TITLES: &[&str] = &[AUTOMATIC, "Longest title", "All titles", "No titles"];
+
+/// A saved or requested title mode in today's terms (#99). The modes 1.8.10 and earlier
+/// stored, "Main film / episodes", "Main film only" and "Episodes", are all Automatic now:
+/// the Kind says whether that means the main feature or the episodes. Anything else
+/// unknown is Automatic too.
+pub fn migrate_title_mode(mode: &str) -> &'static str {
+    PICK_TITLES
+        .iter()
+        .copied()
+        .find(|m| *m == mode)
+        .unwrap_or(AUTOMATIC)
+}
 
 // A title choice's label in the active locale.
 fn pick_title_label(mode: &str) -> String {
     match mode {
-        "Main film / episodes" => crate::strings::get("gui.pick.main_or_episodes"),
-        "Episodes" => crate::strings::get_or("gui.pick.episodes", "Episodes"),
         "Longest title" => crate::strings::get("gui.set.sel_longest"),
         "All titles" => crate::strings::get("gui.set.sel_all"),
         "No titles" => crate::strings::get_or("gui.pick.none", "None"),
-        _ => crate::strings::get("gui.set.sel_main"),
+        _ => crate::strings::get_or("gui.pick.automatic", "Automatic"),
     }
 }
 
@@ -225,12 +232,13 @@ fn saved_selection(mode: &str) -> Option<&'static str> {
 }
 
 // The title mode, language preferences and minimum title length an opened disc starts with.
-// Episodes is a per-disc choice offered when a roster exists, never inherited.
+// A mode an earlier version saved reads as Automatic (`migrate_title_mode`).
 fn open_picks(settings: &crate::settings::Settings) -> (String, LangPrefs, f64) {
-    let mode = match settings.selection.as_str() {
-        "Episodes" => "Main film only".to_string(),
-        saved => saved.to_string(),
-    };
+    let mode = match migrate_title_mode(&settings.selection) {
+        "No titles" => AUTOMATIC,
+        mode => mode,
+    }
+    .to_string();
     let min_secs = settings.min_title_secs.trim().parse::<f64>().unwrap_or(0.0);
     (mode, LangPrefs::from_settings(settings), min_secs)
 }
@@ -490,11 +498,12 @@ impl Tree {
         Self::from_scan_as(sc, sel_mode, min_secs, prefs, None)
     }
 
-    /// [`Tree::from_scan`] for a disc of `kind`. For TV, "Main film / episodes" and
-    /// "Episodes" take the engine's episode resolution: a proven roster is ticked as before;
-    /// without one, the suggested set is ticked in its order (or, with several, nothing,
-    /// the sets marked in Notes) and [`Tree::review`] says to check it. Any other kind
-    /// keeps the disc-proven selection exactly.
+    /// [`Tree::from_scan`] for a disc of `kind`. The kind is authoritative for
+    /// [`AUTOMATIC`]: Movie ticks the main feature; TV takes the engine's episode
+    /// resolution (a proven roster is ticked as before; without one, the suggested set is
+    /// ticked in its order, or, with several, nothing, the sets marked in Notes, and
+    /// [`Tree::review`] says to check it); an unknown kind takes the engine's
+    /// main-film-or-episodes guess. Longest title, All titles and No titles ignore the kind.
     pub fn from_scan_as(
         sc: &Scanned,
         sel_mode: &str,
@@ -502,22 +511,22 @@ impl Tree {
         prefs: &LangPrefs,
         kind: Option<freemkv_engine::metadata::MediaKind>,
     ) -> Self {
-        let selection = match sel_mode {
-            "All titles" => freemkv_engine::Selection::All,
-            "No titles" => freemkv_engine::Selection::Titles(Vec::new()),
-            "Episodes" => freemkv_engine::Selection::Episodes,
-            "Longest title" => freemkv_engine::Selection::Longest,
-            _ => freemkv_engine::Selection::MainMovie,
+        use freemkv_engine::metadata::MediaKind;
+        let explicit = match migrate_title_mode(sel_mode) {
+            "All titles" => Some(freemkv_engine::Selection::All),
+            "No titles" => Some(freemkv_engine::Selection::Titles(Vec::new())),
+            "Longest title" => Some(freemkv_engine::Selection::Longest),
+            _ => None,
         };
         // Select against the full evidence snapshot before applying visibility. Hiding the
         // main feature must not promote an unrelated title. Review candidates remain
         // available for manual ticking, but never become automatic executable choices.
         let audio = lang_filter(&prefs.audio);
         let presentation = prefs.presentation_language.as_deref();
-        let episodes_mode = sel_mode == "Main film / episodes"
-            || matches!(selection, freemkv_engine::Selection::Episodes);
+        // Episodes run in their play order; a main film and the explicit modes need none.
+        let episodes_mode = explicit.is_none() && kind != Some(MediaKind::Movie);
         let mut review = None;
-        let automatic = if episodes_mode && kind == Some(freemkv_engine::metadata::MediaKind::Tv) {
+        let automatic = if explicit.is_none() && kind == Some(MediaKind::Tv) {
             match sc.selection_model.resolve_episodes(
                 &audio,
                 presentation,
@@ -545,10 +554,14 @@ impl Tree {
                 }
             }
         } else {
-            let picked = if sel_mode == "Main film / episodes" {
-                sc.selection_model.main_or_episodes(&audio, presentation)
-            } else {
-                sc.selection_model.select(&selection, &audio, presentation)
+            let picked = match explicit {
+                Some(selection) => sc.selection_model.select(&selection, &audio, presentation),
+                None if kind == Some(MediaKind::Movie) => sc.selection_model.select(
+                    &freemkv_engine::Selection::MainMovie,
+                    &audio,
+                    presentation,
+                ),
+                None => sc.selection_model.main_or_episodes(&audio, presentation),
             };
             picked.unwrap_or_else(|r| {
                 review = Some(TreeReview {
@@ -1944,11 +1957,15 @@ pub fn locale_code(sel: &str) -> &'static str {
 pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     let g = crate::strings::get;
     match key {
+        // The Kind (Movie / TV) decides between a main feature and episodes. Modes earlier
+        // versions saved are read through `migrate_title_mode`.
         "selection" => vec![
-            ("Main film / episodes", g("gui.pick.main_or_episodes")),
-            ("Main film only", g("gui.set.sel_main")),
-            ("All titles", g("gui.set.sel_all")),
+            (
+                AUTOMATIC,
+                crate::strings::get_or("gui.pick.automatic", "Automatic"),
+            ),
             ("Longest title", g("gui.set.sel_longest")),
+            ("All titles", g("gui.set.sel_all")),
         ],
         "startup_mode" => vec![
             ("Show drives", g("gui.set.startup_show")),
@@ -2058,7 +2075,7 @@ pub fn starts_collapsed(r: &Row) -> bool {
 
 /// Which row a freshly-rebuilt tree should leave sitting at the top.
 ///
-/// Not simply "row 0": under the default "Main film / episodes" the ticked titles can be
+/// Not simply "row 0": under the default "Automatic" the ticked titles can be
 /// anywhere in the disc's order, and the first of them is the point of the screen.
 /// So it is the first TICKED row, which under "All titles" is row 0 anyway.
 /// Nothing ticked (an empty disc, or a preset that selected nothing) falls back to the first row.
@@ -2549,12 +2566,34 @@ pub fn ready_line() -> String {
 
 /// A ready-screen drive row's text: the drive and whether it holds a disc.
 pub fn home_drive_label(drive: &HomeDrive) -> String {
-    let status = match drive.present {
+    format!("{} — {}", drive.display, home_drive_status(drive))
+}
+
+// Whether a ready-screen drive holds a disc, in words.
+fn home_drive_status(drive: &HomeDrive) -> String {
+    match drive.present {
         Some(true) => crate::strings::get_or("gui.home.loaded", "Disc inserted"),
         Some(false) => crate::strings::get_or("gui.home.empty", "Empty"),
         None => crate::strings::get_or("gui.home.unknown", "Disc status unknown"),
-    };
-    format!("{} — {status}", drive.display)
+    }
+}
+
+/// A ready-screen drive as a list row: the drive model (`VENDOR MODEL (rev FW)`) as the
+/// title, and `path · status` (`/dev/sr0 · Empty`) as the subtitle. A display without the
+/// OS name in front titles the row with the whole display and leads with the device.
+// Only the Linux ready screen lists drives as rows; the other shells leave this unused.
+#[allow(dead_code)]
+pub fn home_drive_lines(drive: &HomeDrive) -> (String, String) {
+    let (path, model) = drive
+        .display
+        .split_once("  ")
+        .map(|(name, model)| (name.trim(), model.trim()))
+        .filter(|(name, model)| !name.is_empty() && !model.is_empty())
+        .unwrap_or((drive.device.as_str(), drive.display.trim()));
+    (
+        model.to_string(),
+        format!("{path} · {}", home_drive_status(drive)),
+    )
 }
 
 #[cfg(not(test))]
@@ -3609,11 +3648,32 @@ impl App {
             );
             return vec![Effect::Redraw];
         }
+        self.eject_source(self.source.clone())
+    }
+
+    /// The ready screen's per-drive Eject: open the tray of the drive at `index`. Only while
+    /// nothing is open, ripping, opening or ejecting; `tick` collects the verdict and the
+    /// ready screen lists its drives again.
+    // Only the Linux ready screen offers a per-drive Eject; the other shells leave this unused.
+    #[allow(dead_code)]
+    pub fn eject_home_drive(&mut self, index: usize) -> Vec<Effect> {
+        if !self.source.is_empty() || self.running() || self.opening() || self.ejecting.is_some() {
+            return vec![Effect::Redraw];
+        }
+        match self.home_drive_source(index) {
+            Some(source) => self.eject_source(source),
+            None => Vec::new(),
+        }
+    }
+
+    // Eject `source` (a `disc://` drive) on a worker.
+    fn eject_source(&mut self, source: String) -> Vec<Effect> {
         self.say(
             LogKind::Detail,
             &crate::strings::get_or("gui.log.ejecting", "Ejecting the disc…"),
         );
-        let (source, eject) = (self.source.clone(), self.eject_fn);
+        let ejecting = source.clone();
+        let eject = self.eject_fn;
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("eject".into())
@@ -3624,7 +3684,7 @@ impl App {
             self.say(LogKind::Notice, &e.to_string());
             return vec![Effect::Redraw];
         }
-        self.ejecting = Some((self.source.clone(), rx));
+        self.ejecting = Some((ejecting, rx));
         vec![Effect::Redraw, Effect::StartTicking]
     }
 
@@ -3675,6 +3735,10 @@ impl App {
                 // Only the ejected disc is stale; never wipe a source opened since.
                 if ejected.as_deref() == Some(self.source.as_str()) {
                     self.close_source();
+                    refresh = true;
+                } else if self.source.is_empty() && self.page == Page::Empty {
+                    // A ready-screen drive's Eject: show its tray empty now, not on the
+                    // watch's next listing.
                     refresh = true;
                 }
                 self.say(
@@ -3865,8 +3929,9 @@ impl App {
         vec![Effect::Redraw]
     }
 
-    /// The details row's Movie / TV choice: its index in [`DetailsView::kinds`]. Re-ticks
-    /// the tree for the kind (TV resolves episodes).
+    /// The Kind chooser's Auto / Movie / TV: its index in [`DetailsView::kinds`]. Re-ticks
+    /// the tree for the kind: under Automatic, Movie ticks the main feature and TV
+    /// resolves the episodes.
     pub fn set_detail_kind(&mut self, index: usize) -> Vec<Effect> {
         let Some(&kind) = DETAIL_KINDS.get(index) else {
             return Vec::new();
@@ -3875,14 +3940,6 @@ impl App {
             return vec![Effect::Redraw];
         }
         self.details.kind = kind;
-        // Episodes is not offered once the disc is no longer TV: leave no stale choice.
-        if self.pick_mode == "Episodes"
-            && !self
-                .pick_view()
-                .is_some_and(|v| v.titles.iter().any(|t| t.0 == "Episodes"))
-        {
-            self.pick_mode = "Main film only".to_string();
-        }
         self.repick()
     }
 
@@ -3892,6 +3949,7 @@ impl App {
             return None;
         }
         let d = &self.details;
+        let resolved = d.resolved_kind(&self.disc_label);
         let auto = match DiscDetails::default().resolved_kind(&self.disc_label) {
             Some(freemkv_engine::metadata::MediaKind::Tv) => {
                 crate::strings::get_or("gui.details.auto_tv", "Auto (TV series)")
@@ -3910,8 +3968,8 @@ impl App {
                 crate::strings::get_or("gui.details.tv", "TV series"),
             ],
             kind_index: DETAIL_KINDS.iter().position(|k| *k == d.kind).unwrap_or(0),
-            numbering: d.resolved_kind(&self.disc_label)
-                != Some(freemkv_engine::metadata::MediaKind::Movie),
+            numbering: resolved != Some(freemkv_engine::metadata::MediaKind::Movie),
+            tv: resolved == Some(freemkv_engine::metadata::MediaKind::Tv),
         })
     }
 
@@ -4480,10 +4538,11 @@ impl App {
                 .review
                 .as_ref()
                 .is_some_and(|r| r.suggestion.is_some());
+        // Only Automatic takes episodes, and never for a disc the Kind calls a Movie.
+        let movie = self.details.resolved_kind(&self.disc_label)
+            == Some(freemkv_engine::metadata::MediaKind::Movie);
         let roster = match self.pick_scan.as_ref() {
-            Some(_) if !matches!(self.pick_mode.as_str(), "Episodes" | "Main film / episodes") => {
-                Vec::new()
-            }
+            Some(_) if migrate_title_mode(&self.pick_mode) != AUTOMATIC || movie => Vec::new(),
             Some(_) if confirmed => ticked.to_vec(),
             Some(sc) => automatic_titles(
                 &sc.selection_model,
@@ -4743,14 +4802,8 @@ impl App {
                 (c, on)
             })
             .collect();
-        // Episodes: a disc that proves its roster, or one the operator or label calls TV.
-        let has_episodes = self.details.resolved_kind(&self.disc_label)
-            == Some(freemkv_engine::metadata::MediaKind::Tv)
-            || !automatic_titles(&sc.selection_model, &freemkv_engine::Selection::Episodes, p)
-                .is_empty();
         let titles = PICK_TITLES
             .iter()
-            .filter(|mode| **mode != "Episodes" || has_episodes)
             .map(|mode| (*mode, pick_title_label(mode)))
             .collect();
         let all = crate::strings::get_or("gui.pick.all", "All");
@@ -5134,6 +5187,9 @@ pub struct DetailsView {
     pub kind_index: usize,
     /// Season, Disc and First episode apply: the kind is not Movie.
     pub numbering: bool,
+    /// The effective kind is TV (chosen, or Auto on a label that names a season): a shell
+    /// that shows Season, Disc and First episode only for TV reads this.
+    pub tv: bool,
 }
 
 impl DetailsView {

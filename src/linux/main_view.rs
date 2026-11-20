@@ -1,11 +1,17 @@
 //! The main window's content: the four pages the core switches between
-//! (empty / titles / progress / result) above the log. Built once per locale;
-//! `render` only assigns `View` fields to it.
+//! (empty / titles / progress / result) over the log, in a vertical `GtkPaned` so the
+//! log can be dragged taller or shorter. Built once per locale; `render` only assigns
+//! `View` fields to it.
+//!
+//! The disc page, top to bottom: the details line, the four choosers in one row, the
+//! title tree taking the remaining height, the output action bar. The ready screen: the
+//! status page, a "Drives" list with one row per drive, and Open file or ISO.
 
 use gtk4 as gtk;
-use gtk4::glib;
 use gtk4::prelude::*;
+use gtk4::{gio, glib};
 use libadwaita as adw;
+use libadwaita::prelude::*;
 
 use super::Shell;
 use super::chooser::{self, Choice};
@@ -25,18 +31,27 @@ pub(super) struct Memo {
     hint_shown: Option<String>,
     log: LogMemo,
     home: Option<(Vec<crate::ui::HomeDrive>, String, String)>,
+    /// Whether the log was last laid out to take the spare height (`glue::log_fills`).
+    log_fills: Option<bool>,
 }
+
+/// The log's height when the window opens, before any drag.
+const LOG_HEIGHT: i32 = 120;
 
 pub(super) struct MainView {
     shell: std::rc::Weak<Shell>,
     pub root: gtk::Box,
     stack: gtk::Stack,
-    pick_bar: PickBar,
+    /// The page over the log.
+    paned: gtk::Paned,
+    pub(super) pick_bar: PickBar,
     details_bar: DetailsBar,
     pub(super) tree: TitleTree,
     empty: adw::StatusPage,
     open_disc: gtk::Button,
-    drive_rows: gtk::Box,
+    /// The ready screen's "Drives" list and the rows it holds, one per drive.
+    pub(super) drives: adw::PreferencesGroup,
+    pub(super) drive_rows: std::cell::RefCell<Vec<adw::ActionRow>>,
     out_entry: gtk::Entry,
     out_hint: gtk::Label,
     fmt_drop: Rc<Choice>,
@@ -128,7 +143,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     stack.set_vhomogeneous(false);
     stack.set_transition_type(gtk::StackTransitionType::None);
 
-    // ── empty page: both ways in, side by side ──
+    // ── empty page: the drives, one row each, then the ways in ──
     let open_disc = gtk::Button::with_label(&g("gui.btn.open_disc"));
     open_disc.add_css_class("pill");
     open_disc.add_css_class("suggested-action");
@@ -142,10 +157,12 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     buttons.set_halign(gtk::Align::Center);
     buttons.append(&open_disc);
     buttons.append(&open_file);
-    let drive_rows = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let home_actions = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    home_actions.set_halign(gtk::Align::Center);
-    home_actions.append(&drive_rows);
+    let drives = adw::PreferencesGroup::builder()
+        .title(crate::strings::get_or("gui.home.drives", "Drives"))
+        .build();
+    drives.set_visible(false);
+    let home_actions = gtk::Box::new(gtk::Orientation::Vertical, 24);
+    home_actions.append(&drives);
     home_actions.append(&buttons);
     let empty = adw::StatusPage::builder()
         .icon_name("media-optical-symbolic")
@@ -168,6 +185,10 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
 
     let out_entry = gtk::Entry::new();
     out_entry.set_hexpand(true);
+    out_entry.set_valign(gtk::Align::Center);
+    // The bar has no room for a heading: the folder icon and the tooltip say what it is.
+    out_entry.set_primary_icon_name(Some("folder-symbolic"));
+    out_entry.set_tooltip_text(Some(&g("gui.group.output")));
     let me = shell.clone();
     out_entry.connect_changed(move |e| {
         if me.painting.get() {
@@ -210,31 +231,44 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     let me = shell.clone();
     run_btn.connect_clicked(move |_| me.act(Cmd::Run));
 
-    let out_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    out_row.append(&out_entry);
-    out_row.append(&browse);
-    out_row.append(&eject_btn);
-    out_row.append(&run_btn);
-    let out_head = gtk::Label::new(Some(&g("gui.group.output")));
-    out_head.set_xalign(0.0);
-    out_head.add_css_class("heading");
     let out_hint = gtk::Label::new(None);
-    out_hint.set_xalign(0.0);
     out_hint.add_css_class("dim-label");
     out_hint.add_css_class("caption");
-    let output = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    output.append(&out_head);
-    output.append(&out_row);
-    output.append(&chooser::surface(&fmt_drop.row));
-    output.append(&out_hint);
+    out_hint.add_css_class("numeric");
+    out_hint.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    out_hint.set_max_width_chars(24);
+    out_hint.set_valign(gtk::Align::Center);
+    // The format chooser stays compact: one line while closed, a fixed column wide, and,
+    // like the choosers over the tree, expanding below itself.
+    fmt_drop.row.set_title_lines(1);
+    fmt_drop.row.set_subtitle_lines(1);
+    let fmt_column = chooser::surface(&fmt_drop.row);
+    fmt_column.set_valign(gtk::Align::Start);
+    fmt_column.set_size_request(260, -1);
+    for b in [&browse, &eject_btn, &run_btn] {
+        b.set_valign(gtk::Align::Center);
+    }
 
-    let titles = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    // ── the action bar: one line under the tree ──
+    let out_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    out_row.append(&out_entry);
+    out_row.append(&out_hint);
+    out_row.append(&browse);
+    out_row.append(&fmt_column);
+    out_row.append(&eject_btn);
+    out_row.append(&run_btn);
+
+    let titles = gtk::Box::new(gtk::Orientation::Vertical, 8);
     titles.append(&details_bar.widget);
     titles.append(&pick_bar.widget);
-    tree.widget.set_min_content_height(360);
+    // The tree takes every pixel the rows above and the bar below leave.
+    tree.widget.set_min_content_height(160);
+    tree.widget.set_vexpand(true);
     titles.append(&tree.widget);
-    titles.append(&output);
+    titles.append(&out_row);
     titles.set_vexpand(true);
+    // An open chooser can be taller than the window: the page scrolls then, and the tree
+    // keeps its minimum.
     let titles_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .child(&titles)
@@ -343,23 +377,38 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     let log_end = buf.create_mark(None, &buf.end_iter(), false);
     let log_scroll = gtk::ScrolledWindow::builder()
         .child(&log_view)
-        .min_content_height(200)
+        .min_content_height(LOG_HEIGHT)
         .build();
     card(&log_scroll);
+    log_scroll.set_margin_top(8);
+
+    // The page over the log. Unmoved, the paned keeps the log at its own height and gives
+    // the page the rest; a drag sets the split, and "Hide log" hides the log's side.
+    let paned = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .start_child(&stack)
+        .end_child(&log_scroll)
+        .resize_start_child(true)
+        .resize_end_child(false)
+        .shrink_start_child(false)
+        .shrink_end_child(true)
+        .vexpand(true)
+        .build();
 
     let root = padded_box(gtk::Orientation::Vertical, 8);
-    root.append(&stack);
-    root.append(&log_scroll);
+    root.append(&paned);
 
     Rc::new(MainView {
         shell: Rc::downgrade(shell),
         root,
         stack,
+        paned,
         pick_bar,
         details_bar,
         empty,
         open_disc,
-        drive_rows,
+        drives,
+        drive_rows: std::cell::RefCell::default(),
         tree,
         out_entry,
         out_hint,
@@ -405,51 +454,30 @@ impl MainView {
             v.preferred_drive.clone(),
             v.startup_mode.clone(),
         );
+        // Rebuilt whenever the core's drive list changes: the ready screen's watch lists the
+        // drives again every couple of seconds, so an inserted or removed disc shows here.
         if memo.home.as_ref() != Some(&home) {
-            while let Some(child) = self.drive_rows.first_child() {
-                self.drive_rows.remove(&child);
+            for row in self.drive_rows.borrow_mut().drain(..) {
+                self.drives.remove(&row);
             }
             for (index, drive) in v.home_drives.iter().enumerate() {
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                let label = gtk::Label::new(Some(&crate::ui::home_drive_label(drive)));
-                label.set_xalign(0.0);
-                label.set_hexpand(true);
-                row.append(&label);
-                let open =
-                    gtk::Button::with_label(&crate::strings::get_or("gui.home.open", "Open"));
-                let shell = self.shell.clone();
-                open.connect_clicked(move |_| {
-                    if let Some(shell) = shell.upgrade() {
-                        let source = shell.app.borrow().home_drive_source(index);
-                        if let Some(source) = source {
-                            shell.open_path(&source);
-                        }
-                    }
-                });
-                row.append(&open);
-                let prefer = gtk::Button::with_label(&crate::strings::get_or(
-                    "gui.home.use_startup",
-                    "Use at startup",
-                ));
-                prefer.set_sensitive(crate::ui::can_prefer_home_drive(
-                    &v.startup_mode,
-                    &v.preferred_drive,
-                    &drive.display,
-                ));
-                let shell = self.shell.clone();
-                prefer.connect_clicked(move |_| {
-                    if let Some(shell) = shell.upgrade() {
-                        shell.apply(|a| a.prefer_home_drive(index));
-                    }
-                });
-                row.append(&prefer);
-                self.drive_rows.append(&row);
+                let row = self.drive_row(index, drive, v);
+                self.drives.add(&row);
+                self.drive_rows.borrow_mut().push(row);
             }
+            self.drives.set_visible(!v.home_drives.is_empty());
             memo.home = Some(home);
         }
-        let log_fills = glue::log_fills(v.page) && !v.log_hidden;
-        self.stack.set_vexpand(!log_fills);
-        self.log_scroll.set_vexpand(log_fills);
+        // While ripping and on the result page the log takes the spare height; elsewhere the
+        // page does and the log keeps its own. Re-laid out only when that changes, so a drag
+        // holds until then.
+        let log_fills = glue::log_fills(v.page);
+        if memo.log_fills != Some(log_fills) {
+            self.paned.set_resize_start_child(!log_fills);
+            self.paned.set_resize_end_child(log_fills);
+            self.paned.set_property("position-set", false);
+            memo.log_fills = Some(log_fills);
+        }
         self.log_scroll.set_visible(!v.log_hidden);
 
         let sig = glue::rows_sig(&v.title_rows);
@@ -459,7 +487,7 @@ impl MainView {
         } else {
             self.tree.sync_checks(&v.title_rows);
         }
-        self.pick_bar.render(v.pick.as_ref());
+        self.pick_bar.render(v.pick.as_ref(), v.details.as_ref());
         self.details_bar.render(v.details.as_ref());
 
         if self.out_entry.text() != v.output_dir {
@@ -506,6 +534,80 @@ impl MainView {
             .set_description(Some(&glib::markup_escape_text(&v.result_summary)));
 
         self.render_log(&v.log, v.log_first, memo);
+    }
+
+    /// One ready-screen drive: its model over `path · status`, an optical-drive icon, Open
+    /// (only with a disc in it), and a menu with "Use at startup" and "Eject".
+    fn drive_row(&self, index: usize, drive: &crate::ui::HomeDrive, v: &View) -> adw::ActionRow {
+        use crate::strings::get_or;
+        let (title, subtitle) = crate::ui::home_drive_lines(drive);
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .use_markup(false)
+            .build();
+        row.add_prefix(&gtk::Image::from_icon_name("drive-optical-symbolic"));
+
+        // An empty tray has nothing to open. A drive whose status could not be read keeps
+        // Open, so a failed presence check never locks the user out of the drive.
+        let loaded = drive.present != Some(false);
+        let open = gtk::Button::with_label(&get_or("gui.home.open", "Open"));
+        open.set_valign(gtk::Align::Center);
+        open.set_sensitive(loaded);
+        let shell = self.shell.clone();
+        open.connect_clicked(move |_| {
+            if let Some(shell) = shell.upgrade() {
+                let source = shell.app.borrow().home_drive_source(index);
+                if let Some(source) = source {
+                    shell.open_path(&source);
+                }
+            }
+        });
+        row.add_suffix(&open);
+
+        let actions = gio::SimpleActionGroup::new();
+        let prefer = gio::SimpleAction::new("use-startup", None);
+        prefer.set_enabled(crate::ui::can_prefer_home_drive(
+            &v.startup_mode,
+            &v.preferred_drive,
+            &drive.display,
+        ));
+        let shell = self.shell.clone();
+        prefer.connect_activate(move |_, _| {
+            if let Some(shell) = shell.upgrade() {
+                shell.apply(|a| a.prefer_home_drive(index));
+            }
+        });
+        actions.add_action(&prefer);
+        let eject = gio::SimpleAction::new("eject", None);
+        eject.set_enabled(loaded);
+        let shell = self.shell.clone();
+        eject.connect_activate(move |_, _| {
+            if let Some(shell) = shell.upgrade() {
+                shell.apply(|a| a.eject_home_drive(index));
+            }
+        });
+        actions.add_action(&eject);
+        row.insert_action_group("drive", Some(&actions));
+
+        let menu = gio::Menu::new();
+        menu.append(
+            Some(&get_or("gui.home.use_startup", "Use at startup")),
+            Some("drive.use-startup"),
+        );
+        menu.append(
+            Some(&get_or("gui.home.eject", "Eject")),
+            Some("drive.eject"),
+        );
+        let more = gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .menu_model(&menu)
+            .valign(gtk::Align::Center)
+            .tooltip_text(get_or("gui.home.drive_actions", "Drive actions"))
+            .build();
+        more.add_css_class("flat");
+        row.add_suffix(&more);
+        row
     }
 
     fn append_log(&self, lines: &[LogLine]) {
