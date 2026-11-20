@@ -5666,10 +5666,13 @@ impl Shell {
                 format!("{k}: longest choice {longest} px, list {list} px"),
             );
         }
-        for (tab, key, name) in [
-            (0, "container", "settings-output"),
-            (3, "key_source", "settings-keys"),
-            (4, "language", "settings-advanced"),
+        // Every tab, and the dropdown open on the tabs with one worth checking.
+        for (tab, name, key) in [
+            (0, "settings-output", Some("container")),
+            (1, "settings-selection", None),
+            (2, "settings-recovery", None),
+            (3, "settings-keys", Some("key_source")),
+            (4, "settings-advanced", Some("language")),
         ] {
             self.prefs.select_tab(tab);
             pump(400);
@@ -5679,6 +5682,7 @@ impl Shell {
                 snapshot(self.prefs.wnd.hwnd(), &shot).is_ok(),
                 &shot,
             );
+            let Some(key) = key else { continue };
             let Some((_, c)) = self.prefs.combos.iter().find(|(k, _)| *k == key) else {
                 continue;
             };
@@ -5689,7 +5693,7 @@ impl Shell {
                 c.hwnd()
                     .SendMessage(msg::CbGetComboBoxInfo { data: &mut info })
             };
-            let shot = format!("{dir}/{name}-list.bmp");
+            let shot = format!("{dir}/{name}-{}-open.bmp", key.replace('_', "-"));
             g.check(
                 "open-dropdown-has-ink",
                 capture(&info.hwndList).is_ok_and(|(cx, cy, px)| {
@@ -5711,6 +5715,8 @@ impl Shell {
             unsafe { c.hwnd().SendMessage(msg::CbShowDropDown { show: false }) };
         }
         self.prefs.hide();
+        pump(300);
+        self.review_tour(dir, &mut g);
         g
     }
 
@@ -5731,6 +5737,308 @@ impl Shell {
             None
         }
         find(self.tree.items().iter_root(), row)
+    }
+}
+
+// ── the review tour ─────────────────────────────────────────────────────────
+// After the gate's checks: every screen and state the `ui-screenshots` gallery shows that the
+// checks did not capture. A capture that fails is a `GATE NOTE`, never a gate failure.
+
+/// The timer that captures a modal popup (a menu, a file dialog) from inside its own loop.
+#[cfg(debug_assertions)]
+const TIMER_GATE_GRAB: usize = 7;
+
+/// What the grab timer looks for, where it writes it, and what it found.
+#[cfg(debug_assertions)]
+struct Grab {
+    class: &'static str,
+    title: Option<String>,
+    path: String,
+    /// A menu is dismissed with `EndMenu`; a dialog with `WM_CLOSE`.
+    menu: bool,
+    tries: u32,
+    shot: Option<bool>,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static GRAB: RefCell<Option<Grab>> = const { RefCell::new(None) };
+}
+
+/// The visible top-level window of `class`, titled `title` when one is given.
+#[cfg(debug_assertions)]
+fn find_top(class: &str, title: Option<&str>) -> Option<w::HWND> {
+    let mut hit = None;
+    let _ = w::EnumWindows(|h: w::HWND| {
+        let found = h.IsWindowVisible()
+            && h.GetClassName().is_ok_and(|c| c == class)
+            && title.is_none_or(|t| h.GetWindowText().is_ok_and(|x| x == t));
+        if found {
+            hit = Some(h);
+        }
+        !found
+    });
+    hit
+}
+
+// Runs inside the menu's or dialog's modal loop: capture the popup once it shows, then dismiss
+// it, so the call that opened it returns as if the user had pressed Escape.
+#[cfg(debug_assertions)]
+extern "system" fn grab_timer(hwnd: w::HWND, _: co::WM, id: usize, _: u32) {
+    GRAB.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(grab) = slot.as_mut() else {
+            let _ = hwnd.KillTimer(id);
+            return;
+        };
+        grab.tries += 1;
+        // A dialog whose title never matches is taken by its class after a couple of seconds.
+        let title = (grab.tries <= 4).then_some(grab.title.as_deref()).flatten();
+        let found = find_top(grab.class, title);
+        if found.is_none() && grab.tries < 16 {
+            return;
+        }
+        let _ = hwnd.KillTimer(id);
+        grab.shot = Some(
+            found
+                .as_ref()
+                .is_some_and(|h| snapshot(h, &grab.path).is_ok()),
+        );
+        if grab.menu {
+            let _ = w::EndMenu();
+        } else if let Some(h) = &found {
+            unsafe { h.SendMessage(msg::WmClose {}) };
+        }
+    });
+}
+
+// One review capture of a window that is already on screen.
+#[cfg(debug_assertions)]
+fn tour_shot(dir: &str, name: &str, hwnd: &w::HWND, g: &mut crate::gui_gate::Gate) {
+    if let Err(e) = snapshot(hwnd, &format!("{dir}/{name}.bmp")) {
+        g.note(name, format!("capture failed: {e}"));
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Shell {
+    /// Run `open`, which shows a modal popup of `class`, and capture the popup to `path`
+    /// from inside its loop. Whether it was captured.
+    fn grab_modal(
+        &self,
+        class: &'static str,
+        title: Option<String>,
+        path: String,
+        menu: bool,
+        open: impl FnOnce(),
+    ) -> bool {
+        GRAB.set(Some(Grab {
+            class,
+            title,
+            path,
+            menu,
+            tries: 0,
+            shot: None,
+        }));
+        let timer: extern "system" fn(w::HWND, co::WM, usize, u32) = grab_timer;
+        if self
+            .wnd
+            .hwnd()
+            .SetTimer(TIMER_GATE_GRAB, 500, Some(timer))
+            .is_err()
+        {
+            GRAB.set(None);
+            return false;
+        }
+        open();
+        let _ = self.wnd.hwnd().KillTimer(TIMER_GATE_GRAB);
+        GRAB.take().and_then(|grab| grab.shot).unwrap_or(false)
+    }
+
+    // Show or hide the log through the real command, so the menu label follows.
+    fn tour_log(&self, shown: bool) {
+        if self.app.borrow().log_hidden == shown {
+            self.act(Cmd::ToggleLog);
+        }
+    }
+
+    // Let a state lay out and paint before it is captured.
+    fn tour_settle(&self) {
+        self.render();
+        self.relayout_now();
+        pump(500);
+    }
+
+    // A dropdown open, captured as its list.
+    fn tour_dropdown(
+        &self,
+        c: &gui::ComboBox,
+        dir: &str,
+        name: &str,
+        g: &mut crate::gui_gate::Gate,
+    ) {
+        unsafe { c.hwnd().SendMessage(msg::CbShowDropDown { show: true }) };
+        pump(400);
+        let mut info = w::COMBOBOXINFO::default();
+        let _ = unsafe {
+            c.hwnd()
+                .SendMessage(msg::CbGetComboBoxInfo { data: &mut info })
+        };
+        tour_shot(dir, name, &info.hwndList, g);
+        unsafe { c.hwnd().SendMessage(msg::CbShowDropDown { show: false }) };
+        pump(200);
+    }
+
+    fn review_tour(&self, dir: &str, g: &mut crate::gui_gate::Gate) {
+        use crate::engine::RunOutcome;
+        use crate::gui_gate::{self as fx, Rip};
+        let present = self.app.borrow().disc_present;
+        let main = unsafe { self.wnd.hwnd().raw_copy() };
+
+        // ── the ready screen ──
+        for (name, drives, tray, log) in [
+            ("home-drives", true, None, true),
+            ("home-drives-log-hidden", true, None, false),
+            ("home-no-drives", false, None, true),
+            ("home-no-disc", false, Some(false), true),
+        ] {
+            self.tour_log(log);
+            self.app_mut(|a| {
+                a.page = Page::Empty;
+                a.home_drives = if drives {
+                    fx::fake_drives()
+                } else {
+                    Vec::new()
+                };
+                a.disc_present = tray;
+            });
+            self.tour_settle();
+            tour_shot(dir, name, &main, g);
+        }
+
+        // ── the disc page and its choosers ──
+        self.tour_log(true);
+        self.app_mut(|a| {
+            a.page = Page::Titles;
+            a.home_drives.clear();
+            a.disc_present = present;
+        });
+        self.tour_settle();
+        tour_shot(dir, "disc-page", &main, g);
+        self.tour_dropdown(&self.cmb_details_kind, dir, "disc-page-kind-open", g);
+        self.tour_dropdown(&self.cmb_pick_titles, dir, "disc-page-titles-open", g);
+        self.tour_dropdown(&self.cmb_format, dir, "disc-page-format-open", g);
+        for (name, audio) in [
+            ("disc-page-audio-open", true),
+            ("disc-page-subtitles-open", false),
+        ] {
+            let path = format!("{dir}/{name}.bmp");
+            let shot = self.grab_modal("#32768", None, path, true, || {
+                if audio {
+                    self.on_pick_audio();
+                } else {
+                    self.on_pick_subs();
+                }
+            });
+            if !shot {
+                g.note(name, "the chooser's menu was not captured");
+            }
+            self.tour_settle();
+        }
+        let before = self.app.borrow_mut().tree.review.replace(fx::review());
+        self.tour_settle();
+        tour_shot(dir, "disc-page-review-banner", &main, g);
+        self.app_mut(|a| a.tree.review = before);
+        self.tour_log(false);
+        self.tour_settle();
+        tour_shot(dir, "disc-page-log-hidden", &main, g);
+        self.tour_log(true);
+        self.app_mut(fx::notices);
+        self.tour_settle();
+        tour_shot(dir, "disc-page-notices", &main, g);
+
+        // ── the menu bar's menus, and what they open ──
+        if let Some(bar) = self.wnd.hwnd().GetMenu() {
+            let names = ["menu-file", "menu-edit", "menu-view", "menu-help"];
+            for (i, name) in names.into_iter().enumerate() {
+                let i = i as u32;
+                let (Some(sub), Ok(rc)) = (bar.GetSubMenu(i), main.GetMenuItemRect(&bar, i)) else {
+                    g.note(name, "no such menu on the menu bar");
+                    continue;
+                };
+                let path = format!("{dir}/{name}.bmp");
+                let shot = self.grab_modal("#32768", None, path, true, || {
+                    main.SetForegroundWindow();
+                    let _ = sub.TrackPopupMenu(
+                        co::TPM::LEFTBUTTON | co::TPM::RETURNCMD,
+                        w::POINT::with(rc.left, rc.bottom),
+                        &main,
+                    );
+                });
+                if !shot {
+                    g.note(name, "the menu was not captured");
+                }
+                pump(300);
+            }
+        }
+        let st = self.app.borrow().settings.clone();
+        self.about.show(&st);
+        pump(600);
+        tour_shot(dir, "about", self.about.wnd.hwnd(), g);
+        self.about.hide();
+        pump(300);
+        for (name, title, effect) in [
+            (
+                "open-file-dialog",
+                "gui.panel.source_msg",
+                Effect::PickSource,
+            ),
+            (
+                "open-folder-dialog",
+                "gui.panel.folder_msg",
+                Effect::PickSourceFolder,
+            ),
+            (
+                "output-folder-dialog",
+                "gui.panel.output_msg",
+                Effect::PickOutputDir,
+            ),
+        ] {
+            let path = format!("{dir}/{name}.bmp");
+            let title = Some(crate::strings::get(title));
+            if !self.grab_modal("#32770", title, path, false, || self.perform(vec![effect])) {
+                g.note(name, "the file dialog was not captured");
+            }
+            pump(300);
+        }
+
+        // ── a rip in progress ──
+        for (name, rip, log) in [
+            ("rip-single", Rip::Single, true),
+            ("rip-multi", Rip::Multi, true),
+            ("rip-multi-reading", Rip::Reading, true),
+            ("rip-multi-log-hidden", Rip::Multi, false),
+            ("rip-stopping", Rip::Stopping, true),
+        ] {
+            self.tour_log(log);
+            self.app_mut(|a| fx::show_rip(a, rip));
+            self.tour_settle();
+            tour_shot(dir, name, &main, g);
+        }
+        self.app_mut(|a| fx::end_rip(a, Page::Titles));
+
+        // ── the result page ──
+        for (name, outcome, log) in [
+            ("result-finished", RunOutcome::Completed, true),
+            ("result-finished-log-hidden", RunOutcome::Completed, false),
+            ("result-cancelled", RunOutcome::Cancelled, true),
+            ("result-failed", RunOutcome::Failed, true),
+        ] {
+            self.tour_log(log);
+            self.app_mut(|a| fx::show_result(a, outcome));
+            self.tour_settle();
+            tour_shot(dir, name, &main, g);
+        }
     }
 }
 

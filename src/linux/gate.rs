@@ -3,8 +3,8 @@
 //! share of the height, the four choosers in one row), the title tree's Length and Size
 //! columns, the ready screen's drive rows, and the Settings path and dropdowns, measured in
 //! the widgets themselves and checked for ink in a render of the real window. Writes
-//! `<dir>/gate.txt` and the captures (`disc-page.png` and `home-page.png` among them), and
-//! exits with the verdict.
+//! `<dir>/gate.txt` and the captures (`disc-page.png` and `home-drives.png` among them), then
+//! takes the review tour (`gate_tour`) and exits with the verdict.
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -100,23 +100,11 @@ fn within(values: &[f32], slack: f32) -> bool {
         .is_some_and(|first| values.iter().all(|v| (v - first).abs() <= slack))
 }
 
-/// The ready screen (#102) with two drives, one holding a disc: one `AdwActionRow` per drive
-/// in the Drives list. Captured as `home-page.png`; the disc page is put back afterwards.
+/// The ready screen (#102) with three drives (a disc, empty, status unknown): one
+/// `AdwActionRow` per drive in the Drives list. Captured as `home-drives.png`; the disc page
+/// is put back afterwards.
 fn home_page(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>, done: Box<dyn FnOnce()>) {
-    let drives = vec![
-        crate::ui::HomeDrive {
-            device: "/dev/sg0".into(),
-            display: "/dev/sr0  HL-DT-ST BD-RE BU40N (rev 1.04)".into(),
-            legacy_label: "HL-DT-ST BD-RE BU40N".into(),
-            present: Some(true),
-        },
-        crate::ui::HomeDrive {
-            device: "/dev/sg1".into(),
-            display: "/dev/sr1  ASUS BW-16D1HT (rev 3.10)".into(),
-            legacy_label: "ASUS BW-16D1HT".into(),
-            present: Some(false),
-        },
-    ];
+    let drives = crate::gui_gate::fake_drives();
     let want = drives.len();
     let (page, log_hidden) = {
         let a = shell.app.borrow();
@@ -146,7 +134,7 @@ fn home_page(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>, done: Box<dyn
                 rows == want,
                 format!("{rows} drive rows for {want} drives"),
             );
-            save(&win, &format!("{dir}/home-page.png"), &mut gate);
+            save(&win, &format!("{dir}/home-drives.png"), &mut gate);
         }
         me.app_mut(|a| {
             a.page = page;
@@ -319,7 +307,7 @@ fn main_chooser_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
     chooser_sequence(
         root,
         dir,
-        "main".into(),
+        "disc-page".into(),
         g,
         rows,
         0,
@@ -366,6 +354,7 @@ fn menu_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
         st.dest_dir = LONG_DEST.into();
         super::prefs::show(&me, &st, None);
         settings_page(
+            me.clone(),
             dir,
             g,
             vec![
@@ -377,6 +366,23 @@ fn menu_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
             ],
         );
     });
+}
+
+/// Which disc-page chooser `row` is, for its capture's name: the same in every language.
+fn chooser_role(row: &adw::ExpanderRow) -> Option<String> {
+    let title = row.title().to_string();
+    let [_, _, kind, _, _, _] = crate::ui::details_labels();
+    let [titles, audio, subtitles] = crate::ui::pick_labels();
+    [
+        (kind, "kind"),
+        (titles, "titles"),
+        (audio, "audio"),
+        (subtitles, "subtitles"),
+        (crate::strings::get("gui.set.default_output"), "format"),
+    ]
+    .into_iter()
+    .find(|(label, _)| *label == title)
+    .map(|(_, role)| role.to_string())
 }
 
 fn chooser_rows(root: &gtk::Widget) -> Vec<adw::ExpanderRow> {
@@ -418,6 +424,11 @@ fn chooser_sequence(
         return;
     }
     let row = rows.remove(0);
+    // The disc page's choosers are named for what they choose; Settings' by position.
+    let slug = (scope == "disc-page")
+        .then(|| chooser_role(&row))
+        .flatten()
+        .unwrap_or_else(|| format!("chooser-{index}"));
     row.set_expanded(true);
     glib::timeout_add_local_once(SETTLE, move || {
         scroll_to(row.upcast_ref());
@@ -479,11 +490,7 @@ fn chooser_sequence(
                     options.iter().all(|w| w.height() >= 40),
                     &description,
                 );
-                save(
-                    &root,
-                    &format!("{dir}/{scope}-chooser-{index}.png"),
-                    &mut gate,
-                );
+                save(&root, &format!("{dir}/{scope}-{slug}-open.png"), &mut gate);
             }
             // Capture the tail too: long language lists must remain reachable.
             if let Some(last) = options.last() {
@@ -492,7 +499,7 @@ fn chooser_sequence(
             glib::timeout_add_local_once(SETTLE, move || {
                 save(
                     &root,
-                    &format!("{dir}/{scope}-chooser-{index}-tail.png"),
+                    &format!("{dir}/{scope}-{slug}-open-end.png"),
                     &mut g.borrow_mut(),
                 );
                 row.set_expanded(false);
@@ -503,7 +510,12 @@ fn chooser_sequence(
 }
 
 // Each page in turn: show it, let it draw, check and capture it; then report and exit.
-fn settings_page(dir: String, g: Rc<RefCell<Gate>>, mut pages: Vec<&'static str>) {
+fn settings_page(
+    shell: Rc<Shell>,
+    dir: String,
+    g: Rc<RefCell<Gate>>,
+    mut pages: Vec<&'static str>,
+) {
     let Some(win) = prefs_window() else {
         g.borrow_mut()
             .check("settings-opens", false, "no Settings window");
@@ -511,7 +523,8 @@ fn settings_page(dir: String, g: Rc<RefCell<Gate>>, mut pages: Vec<&'static str>
     };
     if pages.is_empty() {
         win.close();
-        return finish(&dir, &g.borrow());
+        glib::timeout_add_local_once(SETTLE, move || super::gate_tour::start(&shell, dir, g));
+        return;
     }
     let page = pages.remove(0);
     win.set_visible_page_name(page);
@@ -541,13 +554,13 @@ fn settings_page(dir: String, g: Rc<RefCell<Gate>>, mut pages: Vec<&'static str>
             rows,
             0,
             Box::new(move || {
-                settings_page(next_dir, next_g, pages);
+                settings_page(shell, next_dir, next_g, pages);
             }),
         );
     });
 }
 
-fn finish(dir: &str, g: &Gate) {
+pub(super) fn finish(dir: &str, g: &Gate) {
     let _ = std::fs::write(format!("{dir}/gate.txt"), g.report());
     std::process::exit(if g.passed() { 0 } else { 1 });
 }
@@ -681,7 +694,7 @@ fn prefs_window() -> Option<adw::PreferencesWindow> {
         .find_map(|w| w.downcast::<adw::PreferencesWindow>().ok())
 }
 
-fn descendants(w: &gtk::Widget) -> Vec<gtk::Widget> {
+pub(super) fn descendants(w: &gtk::Widget) -> Vec<gtk::Widget> {
     let mut out = Vec::new();
     let mut child = w.first_child();
     while let Some(c) = child {
@@ -692,7 +705,7 @@ fn descendants(w: &gtk::Widget) -> Vec<gtk::Widget> {
     out
 }
 
-fn labels_under(w: &gtk::Widget) -> Vec<gtk::Label> {
+pub(super) fn labels_under(w: &gtk::Widget) -> Vec<gtk::Label> {
     descendants(w)
         .into_iter()
         .filter_map(|w| w.downcast::<gtk::Label>().ok())
@@ -731,6 +744,10 @@ pub(super) fn capture(w: &gtk::Widget) -> Option<(i32, i32, Vec<u8>)> {
 }
 
 pub(super) fn save(w: &gtk::Widget, path: &str, g: &mut Gate) {
-    let ok = texture(w).is_some_and(|t| t.save_to_png(path).is_ok());
-    g.check("capture", ok, path);
+    g.check("capture", save_png(w, path), path);
+}
+
+/// Write `w`'s render to `path`; whether it was written.
+pub(super) fn save_png(w: &gtk::Widget, path: &str) -> bool {
+    texture(w).is_some_and(|t| t.save_to_png(path).is_ok())
 }

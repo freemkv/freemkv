@@ -9,6 +9,8 @@
 mod chooser;
 #[cfg(debug_assertions)]
 mod gate;
+#[cfg(debug_assertions)]
+mod gate_tour;
 mod main_view;
 mod pick_bar;
 mod prefs;
