@@ -1089,8 +1089,12 @@ fn a_probe_result_is_applied_by_the_tick() {
 fn empty_page_copy_distinguishes_ready_empty_and_unanswered_tray() {
     let base = crate::strings::get("gui.page.empty_subtitle");
     assert_eq!(crate::ui::empty_description(None), base);
-    assert!(crate::ui::empty_description(Some(true)).contains("Disc inserted"));
-    assert!(crate::ui::empty_description(Some(false)).contains("No disc"));
+    assert_eq!(
+        crate::ui::empty_description(Some(true)),
+        "Open it from the list below."
+    );
+    assert_eq!(crate::ui::empty_description(Some(false)), base);
+    assert!(!crate::ui::empty_description(Some(false)).contains("No disc"));
     assert_eq!(crate::ui::empty_heading(None), "Open a source");
     assert_eq!(crate::ui::empty_heading(Some(true)), "Disc inserted");
     assert_eq!(

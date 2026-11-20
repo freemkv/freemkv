@@ -5659,14 +5659,9 @@ pub(crate) fn empty_heading(disc_present: Option<bool>) -> String {
 pub(crate) fn empty_description(disc_present: Option<bool>) -> String {
     let base = crate::strings::get("gui.page.empty_subtitle");
     match disc_present {
-        Some(true) => {
-            crate::strings::get_or("gui.page.disc_ready", "Disc inserted — ready to open.")
-        }
-        Some(false) => format!(
-            "{base}\n\n{}",
-            crate::strings::get_or("gui.page.no_disc", "No disc detected.")
-        ),
-        None => base,
+        Some(true) => crate::strings::get_or("gui.page.disc_ready", "Open it from the list below."),
+        // The heading already says no disc is in the drive.
+        Some(false) | None => base,
     }
 }
 
