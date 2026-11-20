@@ -143,6 +143,7 @@ fn home_page(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>, done: Box<dyn
                 rows == want,
                 format!("{rows} drive rows for {want} drives"),
             );
+            page_buttons_visible(&me, "home", &mut gate);
             save(&win, &format!("{dir}/home-drives.png"), &mut gate);
         }
         me.app_mut(|a| {
@@ -857,4 +858,59 @@ fn texture_with(root: &gtk::Widget, pop: &gtk::Popover) -> Option<gdk::Texture> 
 /// Write the window with the popover showing to `path`; whether it was written.
 fn save_png_with(root: &gtk::Widget, pop: &gtk::Popover, path: &str) -> bool {
     texture_with(root, pop).is_some_and(|t| t.save_to_png(path).is_ok())
+}
+
+/// Whether `button` sits inside a scrolled list of the page (not the status page's own
+/// scrolling), where being scrolled out of view is normal.
+fn in_page_scroller(button: &gtk::Widget) -> bool {
+    let mut parent = button.parent();
+    while let Some(w) = parent {
+        if w.is::<gtk::ScrolledWindow>() && !w.parent().is_some_and(|p| p.is::<adw::StatusPage>()) {
+            return true;
+        }
+        parent = w.parent();
+    }
+    false
+}
+
+/// With the log shown, every button of the visible page is drawn whole inside the page's
+/// pane and the window: the log gives way, never the page.
+pub(super) fn page_buttons_visible(shell: &Rc<Shell>, label: &str, g: &mut Gate) {
+    let Some(main) = shell.main.borrow().clone() else {
+        return;
+    };
+    if shell.app.borrow().view().log_hidden {
+        return;
+    }
+    let Some(page) = main.stack.visible_child() else {
+        return;
+    };
+    let window: gtk::Widget = shell.window.clone().upcast();
+    let (pane, win) = (main.stack.width() as f32, window.height() as f32);
+    let (pane_h, win_w) = (main.stack.height() as f32, window.width() as f32);
+    let hidden: Vec<String> = descendants(&page)
+        .into_iter()
+        .filter(|w| w.is::<gtk::Button>() && w.is_mapped() && !in_page_scroller(w))
+        .filter(|w| {
+            let in_window = w.compute_bounds(&window);
+            let in_pane = w.compute_bounds(&main.stack);
+            let fits = |b: Option<gtk::graphene::Rect>, bw: f32, bh: f32| {
+                b.is_some_and(|b| {
+                    b.height() > 0.0
+                        && b.width() > 0.0
+                        && b.x() >= -0.5
+                        && b.y() >= -0.5
+                        && b.x() + b.width() <= bw + 0.5
+                        && b.y() + b.height() <= bh + 0.5
+                })
+            };
+            !(fits(in_window, win_w, win) && fits(in_pane, pane, pane_h))
+        })
+        .map(|w| w.widget_name().to_string())
+        .collect();
+    g.check(
+        "page-buttons-visible",
+        hidden.is_empty(),
+        format!("{label}: {} clipped buttons {hidden:?}", hidden.len()),
+    );
 }

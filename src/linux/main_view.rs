@@ -41,7 +41,7 @@ const LOG_HEIGHT: i32 = 120;
 pub(super) struct MainView {
     shell: std::rc::Weak<Shell>,
     pub root: gtk::Box,
-    stack: gtk::Stack,
+    pub(super) stack: gtk::Stack,
     /// The page over the log.
     paned: gtk::Paned,
     pub(super) pick_bar: PickBar,
@@ -452,6 +452,12 @@ impl MainView {
     /// Assign the view. Computes nothing the core already decided.
     pub(super) fn render(&self, v: &View, memo: &mut Memo) {
         self.stack.set_visible_child_name(glue::page_name(v.page));
+        // The log gives way, never the page: its buttons stay inside the top pane.
+        let need = self
+            .stack
+            .visible_child()
+            .map_or(0, |p| status_content_height(&p));
+        self.stack.set_size_request(-1, need);
         self.open_disc.set_visible(v.home_drives.is_empty());
         self.empty
             .set_title(&crate::ui::empty_heading(v.disc_present));
@@ -554,7 +560,7 @@ impl MainView {
             .subtitle(subtitle)
             .use_markup(false)
             .build();
-        row.add_prefix(&gtk::Image::from_icon_name("drive-optical-symbolic"));
+        row.add_prefix(&gtk::Image::from_icon_name("media-optical-symbolic"));
 
         // An empty tray has nothing to open. A drive whose status could not be read keeps
         // Open, so a failed presence check never locks the user out of the drive.
@@ -658,4 +664,20 @@ impl MainView {
         let mark = self.log_end.clone();
         glib::idle_add_local_once(move || tv.scroll_to_mark(&mark, 0.0, false, 0.0, 1.0));
     }
+}
+
+/// A status page scrolls its content internally, so its own minimum height ignores the
+/// content. This is the content's height, which the paned must keep for the page.
+fn status_content_height(page: &gtk::Widget) -> i32 {
+    if !page.is::<adw::StatusPage>() {
+        return 0;
+    }
+    let content = page
+        .first_child()
+        .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
+        .and_then(|s| s.child())
+        .and_then(|v| v.downcast::<gtk::Viewport>().ok())
+        .and_then(|v| v.child());
+    let width = if page.width() > 0 { page.width() } else { -1 };
+    content.map_or(0, |c| c.measure(gtk::Orientation::Vertical, width).1 + 24)
 }

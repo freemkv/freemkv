@@ -329,6 +329,7 @@ fn run(shell: Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>, mut shots: VecDeque<
     };
     (step.setup)(&shell);
     glib::timeout_add_local_once(SETTLE, move || {
+        super::gate::page_buttons_visible(&shell, &step.name, &mut g.borrow_mut());
         let path = format!("{dir}/{}.png", step.name);
         match (step.target)(&shell) {
             Some(w) if save_png(&w, &path) => {}
