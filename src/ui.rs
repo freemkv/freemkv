@@ -220,10 +220,9 @@ pub fn automatic_titles(
         .unwrap_or_default()
 }
 
-// The Settings default selection a main-window title mode is remembered as (#99), or `None`
-// to leave the saved one as it is. A mode Settings offers is remembered as itself. The
-// main-window-only "No titles" is not: it is a one-off clearing of the ticks, not a default
-// to open every disc with.
+// The Settings default a main-window title mode is remembered as (#99), or `None` to keep
+// the saved one. A mode Settings offers is remembered as itself; "No titles" is not, as it
+// is a one-off clearing of the ticks, not a default for every disc.
 fn saved_selection(mode: &str) -> Option<&'static str> {
     enum_options("selection")
         .into_iter()
@@ -3025,11 +3024,9 @@ impl App {
         app
     }
 
-    // #100: the launch line above is written before any window exists, and on Linux it has
-    // not shown since 1.8.6 (why GTK drops it is not pinned down). Until then the launch
-    // probe rewrote the log once it had opened the loaded disc; with the ready screen the
-    // launch only lists drives, so nothing did. Restate the line when that listing answers,
-    // so every shell repaints the log with its window up. Only while nothing else was said.
+    // #100: the launch line is written before any window exists and has not shown on Linux
+    // since 1.8.6 (cause not pinned down). Restate it when the launch drive listing answers,
+    // so every shell repaints the log with its window up; only while nothing else was said.
     fn restate_ready(&mut self) {
         let ready = ready_line();
         if self.log_first == 0 && self.log.len() == 1 && self.log[0].text == ready {
@@ -4049,9 +4046,8 @@ impl App {
     }
 
     // Re-tick for a bar pick; with "Remember title, audio and subtitle choices" on, also
-    // record it in Settings and save (off, it stays in `pick_prefs`, out of any later save).
-    // The title mode is recorded the same way, as Settings' default selection (see
-    // `saved_selection`).
+    // record it in Settings and save (off, it stays in `pick_prefs`). The title mode is
+    // recorded the same way, as Settings' default selection (see `saved_selection`).
     fn persist_picks(
         &mut self,
         record: impl FnOnce(&mut crate::settings::Settings, &LangPrefs),
@@ -4928,10 +4924,9 @@ impl App {
             .as_ref()
             .map(|st| *st.prog.lock().unwrap_or_else(|e| e.into_inner()))
             .unwrap_or_default();
-        // The two bars, as MakeMKV draws them (#103; the arithmetic is `engine::Bars`'s):
-        // top: the title being processed, 100% when it ends, back to 0% for the next;
-        // bottom: the whole job across every selected title, weighted by bytes (a single
-        // title's mirrors the top bar and stays hidden).
+        // The two bars (#103; arithmetic in `engine::Bars`): top is the current title, 100%
+        // when it ends and 0% for the next; bottom is the whole job, weighted by bytes (for a
+        // single title it mirrors the top bar and stays hidden).
         let pct = p.title_pct;
         let overall = p.batch_pct.unwrap_or(pct);
         let elapsed = self.run_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);

@@ -2764,11 +2764,9 @@ fn three_titles_show_the_title_and_the_whole_job_at_each_boundary() {
     b.assert_full_only_at_end();
 }
 
-// #103: a multi-pass run reads every title off the disc before it muxes any. The top bar
-// still follows one title at a time through that read (100% as a title's share of it ends,
-// 0% as the next one's begins). The bottom bar gives the read 85% of the job, so it stands
-// near a third and two thirds as the first and second titles are read, whatever navigation
-// data the read stages alongside the titles; the muxes share the last 15%.
+// #103: multi-pass reads every title before muxing any. The top bar follows one title at a
+// time through that read; the bottom bar gives the read 85% of the job (whatever navigation
+// data it stages alongside) and the muxes the last 15%.
 #[test]
 fn a_staged_three_title_read_shows_one_title_at_a_time() {
     let mut b = Bars::new(&[1000, 1000, 1000]);

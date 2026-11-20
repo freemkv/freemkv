@@ -1618,10 +1618,9 @@ impl Bars {
         self.sizes.iter().map(|&(_, s)| s).sum()
     }
 
-    // #103: the staging read covers every selected title in one pass, before any mux. Its
-    // bytes map onto the planned titles in plan order, by size, so the top bar still follows
-    // one title at a time instead of the whole read. `None` outside that first pass, or
-    // while a size or the read's total is unknown.
+    // #103: the staging read covers every title before any mux; its bytes map onto the
+    // planned titles in order, by size, so the top bar follows one title at a time. `None`
+    // outside that first pass, or while a size or the read's total is unknown.
     fn read_slice(&self) -> Option<ReadSlice> {
         let r = self
             .read
