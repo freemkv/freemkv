@@ -117,6 +117,19 @@ fn tree_cell(
     Some((overlay, exp, check, label, lines))
 }
 
+/// The native expand/collapse arrow (css name "expander") inside a `TreeExpander`.
+pub(super) fn expander_arrow(exp: &gtk::TreeExpander) -> Option<gtk::Widget> {
+    let content = exp.child();
+    let mut w = exp.first_child();
+    while let Some(c) = w {
+        if content.as_ref() != Some(&c) && c.css_name() == "expander" && c.is_visible() {
+            return Some(c);
+        }
+        w = c.next_sibling();
+    }
+    None
+}
+
 impl TitleTree {
     pub(super) fn new(on_select: RowFn, on_toggle: RowFn) -> Self {
         let rows: Rc<RefCell<Vec<Row>>> = Rc::default();
@@ -175,6 +188,8 @@ impl TitleTree {
             li.set_child(Some(&overlay));
         });
         let (b_rows, b_bound, b_branches) = (rows.clone(), bound.clone(), branches.clone());
+        // Arrow centre offset from the expander's start edge, shared by all rows.
+        let b_arrow: Rc<Cell<Option<f64>>> = Rc::default();
         f.connect_bind(move |_, li| {
             let Some(li) = li.downcast_ref::<gtk::ListItem>() else {
                 return;
@@ -207,6 +222,7 @@ impl TitleTree {
             let path = b_branches.borrow().get(idx).cloned().unwrap_or_default();
             let weak_exp = exp.downgrade();
             let weak_overlay = overlay.downgrade();
+            let arrow_seen = b_arrow.clone();
             lines.set_draw_func(move |area, cr, width, height| {
                 let (Some(exp), Some(overlay)) = (weak_exp.upgrade(), weak_overlay.upgrade())
                 else {
@@ -222,13 +238,26 @@ impl TitleTree {
                     return;
                 };
                 let rtl = exp.direction() == gtk::TextDirection::Rtl;
-                // Measure the native arrow slot rather than assuming its size:
-                // the theme, font and display scale may all change it.
-                let arrow = if rtl {
-                    (e.x() + e.width() - c.x() - c.width()) / 2.0
-                } else {
-                    (c.x() - e.x()) / 2.0
-                } as f64;
+                // Measure the native arrow's own centre (not half the gap to the
+                // content, which includes space the glyph doesn't occupy). Leaves
+                // have no arrow; reuse the last measured offset so levels line up.
+                let arrow = match expander_arrow(&exp).and_then(|a| a.compute_bounds(&overlay)) {
+                    Some(a) if a.width() > 0.0 => {
+                        let centre = f64::from(a.x() + a.width() / 2.0);
+                        let off = if rtl {
+                            f64::from(e.x() + e.width()) - centre
+                        } else {
+                            centre - f64::from(e.x())
+                        };
+                        arrow_seen.set(Some(off));
+                        off
+                    }
+                    _ => arrow_seen.get().unwrap_or(if rtl {
+                        f64::from((e.x() + e.width() - c.x() - c.width()) / 2.0)
+                    } else {
+                        f64::from((c.x() - e.x()) / 2.0)
+                    }),
+                };
                 let x = |level: usize| {
                     let p = level as f64 * INDENT as f64 + arrow;
                     if rtl { width as f64 - p } else { p }

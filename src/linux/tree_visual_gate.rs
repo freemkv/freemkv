@@ -265,6 +265,34 @@ fn check_cells(
                         },
                     )
                 });
+            // The downward branch of an expanded row must pass through the
+            // centre of the native arrow, not merely exist.
+            if row.is_expanded()
+                && let Some(lines) = lines.as_ref()
+                && let Some(arrow) = super::expander_arrow(exp)
+                && let Some(a) = arrow.compute_bounds(lines)
+                && let Some((width, height, pixels)) =
+                    super::super::gate::capture(lines.upcast_ref())
+                && lines.width() > 0
+            {
+                let centre = (a.x() + a.width() / 2.0) / lines.width() as f32 * width as f32;
+                let cx = centre.floor() as i64;
+                let y = (height as usize).saturating_sub(2);
+                let inked = |x: i64| {
+                    (0..width as i64).contains(&x)
+                        && pixels
+                            .get((y * width as usize + x as usize) * 4 + 3)
+                            .is_some_and(|a| *a > 0)
+                };
+                g.check(
+                    "tree-branch-centred-on-arrow",
+                    (cx - 1..=cx + 1).any(inked),
+                    format!(
+                        "{scenario}: row {idx:?}, depth {}, arrow centre x {centre:.1}",
+                        row.depth()
+                    ),
+                );
+            }
             g.check(
                 "tree-connector-has-ink",
                 ink,
