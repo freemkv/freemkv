@@ -96,7 +96,8 @@ fn column(row: &adw::ExpanderRow) -> gtk::ListBox {
 /// The row of four equal choosers (Kind, Titles, Audio, Subtitles) and the review banner.
 pub(super) struct PickBar {
     pub widget: gtk::Box,
-    /// The four chooser columns, side by side with equal widths.
+    /// The four chooser columns, side by side with equal widths (read by the debug gate).
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub(super) row: gtk::Box,
     kind_column: gtk::ListBox,
     kinds_list: gtk::StringList,

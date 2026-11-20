@@ -167,11 +167,6 @@ fn tree(sc: &Scanned, sel_mode: &str, min_secs: f64) -> Tree {
     Tree::from_scan(sc, sel_mode, min_secs, &LangPrefs::default())
 }
 
-/// The same tree, built with preferred-language defaults.
-fn tree_prefs(sc: &Scanned, sel_mode: &str, prefs: &LangPrefs) -> Tree {
-    Tree::from_scan(sc, sel_mode, 0.0, prefs)
-}
-
 /// A Movie disc's tree under Automatic: the main feature starts ticked.
 fn movie_tree(sc: &Scanned, min_secs: f64) -> Tree {
     Tree::from_scan_as(
@@ -749,10 +744,9 @@ fn nothing_ticked_falls_back_to_the_first_row() {
 
 #[test]
 fn the_default_selection_setting_decides_what_starts_ticked() {
-    // Three modes, three different answers, all on the same disc. Automatic on
-    // a Movie (and on a disc without episode evidence) means title 1; "All
-    // titles" means every title; "Longest title" means the longest, which here
-    // is NOT title 1.
+    // Three modes, three answers on one disc: Automatic on a Movie (or a disc without
+    // episode evidence) means title 1; "All titles" means every title; "Longest title"
+    // means the longest, which here is NOT title 1.
     let sc = disc(&[(600.0, 1), (5400.0, 1), (900.0, 1)]);
 
     let main = movie_tree(&sc, 0.0);

@@ -1441,11 +1441,11 @@ fn source_stem(sources: Option<&[String]>, indices: &[usize], idx: usize) -> Opt
     (!clash).then_some(stem)
 }
 
-fn build_jobs(
+fn build_jobs<'a>(
     titles: &Option<Vec<libfreemkv::DiscTitle>>,
     is_disc: bool,
     title_nums: &[usize],
-    layout: impl Into<JobLayout<'_>>,
+    layout: impl Into<JobLayout<'a>>,
     dest: &str,
     parsed_dest: &libfreemkv::StreamUrl,
     out: &Output,

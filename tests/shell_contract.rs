@@ -24,6 +24,7 @@ use freemkv::ui::{App, Cmd, Effect, MenuAction, MenuEntry, MenuGroupId, menu_lay
 fn kind(e: &Effect) -> &'static str {
     match e {
         Effect::PickSource => "PickSource",
+        Effect::PickSourceFolder => "PickSourceFolder",
         Effect::PickOutputDir => "PickOutputDir",
         Effect::Reveal(_) => "Reveal",
         Effect::OpenUrl(_) => "OpenUrl",
@@ -69,6 +70,7 @@ macro_rules! every_cmd {
 }
 every_cmd!(
     Open,
+    OpenFolder,
     Close,
     SetOutput,
     Run,
@@ -113,6 +115,7 @@ fn in_menu_bar(cmd: &Cmd) -> bool {
         | Cmd::TestKeyserver(_)
         | Cmd::QuitRequested => false,
         Cmd::Open
+        | Cmd::OpenFolder
         | Cmd::Close
         | Cmd::SetOutput
         | Cmd::Run
@@ -137,6 +140,7 @@ fn in_menu_bar(cmd: &Cmd) -> bool {
 fn expected_default_kinds(cmd: &Cmd) -> Vec<&'static str> {
     match cmd {
         Cmd::Open => vec!["PickSource"],
+        Cmd::OpenFolder => vec!["PickSourceFolder"],
         Cmd::SetOutput => vec!["PickOutputDir"],
         Cmd::Settings => vec!["ShowSettings"],
         Cmd::About => vec!["ShowAbout"],
