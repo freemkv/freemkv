@@ -257,8 +257,11 @@ fn chooser_activation(shell: &Rc<Shell>, g: Rc<RefCell<Gate>>, done: Box<dyn FnO
         return done();
     };
     let expected = formats[index];
-    let was_expanded = row.is_expanded();
-    row.set_expanded(true);
+    let Some(pop) = popover_of(&row) else {
+        return done();
+    };
+    let was_open = pop.is_visible();
+    pop.popup();
     scroll_to(row.upcast_ref());
     let me = shell.clone();
     glib::timeout_add_local_once(SETTLE, move || {
@@ -295,7 +298,9 @@ fn chooser_activation(shell: &Rc<Shell>, g: Rc<RefCell<Gate>>, done: Box<dyn FnO
                 // This diagnostic changes only the in-memory format. Restore it
                 // even on failure so the existing captures retain their fixture.
                 me.app_mut(|app| app.format = original);
-                row.set_expanded(was_expanded);
+                if !was_open {
+                    pop.popdown();
+                }
                 glib::timeout_add_local_once(SETTLE, done);
             });
         });
@@ -310,13 +315,17 @@ fn main_chooser_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
         rows.len() == 5,
         format!("{} of 5 selectors", rows.len()),
     );
+    let tree = shell.main.borrow().as_ref().map(|m| m.tree.widget.clone());
     let me = shell.clone();
     let next_dir = dir.clone();
     let next_g = g.clone();
     chooser_sequence(
         root,
         dir,
-        "disc-page".into(),
+        Scope {
+            name: "disc-page".into(),
+            tree: tree.map(|t| t.upcast()),
+        },
         g,
         rows,
         0,
@@ -378,7 +387,7 @@ fn menu_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
 }
 
 /// Which disc-page chooser `row` is, for its capture's name: the same in every language.
-fn chooser_role(row: &adw::ExpanderRow) -> Option<String> {
+fn chooser_role(row: &adw::ActionRow) -> Option<String> {
     let title = row.title().to_string();
     let [_, _, kind, _, _, _] = crate::ui::details_labels();
     let [titles, audio, subtitles] = crate::ui::pick_labels();
@@ -394,10 +403,10 @@ fn chooser_role(row: &adw::ExpanderRow) -> Option<String> {
     .map(|(_, role)| role.to_string())
 }
 
-fn chooser_rows(root: &gtk::Widget) -> Vec<adw::ExpanderRow> {
+fn chooser_rows(root: &gtk::Widget) -> Vec<adw::ActionRow> {
     descendants(root)
         .into_iter()
-        .filter_map(|w| w.downcast::<adw::ExpanderRow>().ok())
+        .filter_map(|w| w.downcast::<adw::ActionRow>().ok())
         .filter(|w| w.is_mapped() && w.has_css_class("freemkv-chooser"))
         .collect()
 }
@@ -417,14 +426,52 @@ fn scroll_to(widget: &gtk::Widget) {
     }
 }
 
-/// Expand each real control, measure its option geometry and capture the actual
-/// window. Never infer success from widget types or a nonempty inventory alone.
+/// Where a run of choosers lives: its capture prefix and, on the disc page, the title tree.
+struct Scope {
+    name: String,
+    tree: Option<gtk::Widget>,
+}
+
+/// The popover holding a chooser field's options.
+fn popover_of(row: &adw::ActionRow) -> Option<gtk::Popover> {
+    descendants(row.upcast_ref())
+        .into_iter()
+        .find_map(|w| w.downcast::<gtk::Popover>().ok())
+}
+
+/// Where `pop` sits in `root`'s coordinates, whatever shadow the window's surface carries.
+fn popover_origin(pop: &gtk::Popover, root: &gtk::Widget) -> Option<(f32, f32)> {
+    let popup = pop.surface()?.downcast::<gdk::Popup>().ok()?;
+    let (dx, dy) = root.native()?.surface_transform();
+    Some((
+        (f64::from(popup.position_x()) - dx) as f32,
+        (f64::from(popup.position_y()) - dy) as f32,
+    ))
+}
+
+/// Scroll `widget` to the top of its nearest scrolled window only.
+fn scroll_within(widget: &gtk::Widget) {
+    let mut parent = widget.parent();
+    while let Some(w) = parent {
+        if let Some(scroll) = w.downcast_ref::<gtk::ScrolledWindow>() {
+            if let Some(bounds) = widget.compute_bounds(scroll) {
+                let adjustment = scroll.vadjustment();
+                adjustment.set_value(adjustment.value() + f64::from(bounds.y()));
+            }
+            return;
+        }
+        parent = w.parent();
+    }
+}
+
+/// Open each real control's popover, measure its option geometry and capture the actual
+/// window with the popover showing. Never infer success from widget types alone.
 fn chooser_sequence(
     root: gtk::Widget,
     dir: String,
-    scope: String,
+    scope: Scope,
     g: Rc<RefCell<Gate>>,
-    mut rows: Vec<adw::ExpanderRow>,
+    mut rows: Vec<adw::ActionRow>,
     index: usize,
     done: Box<dyn FnOnce()>,
 ) {
@@ -434,37 +481,47 @@ fn chooser_sequence(
     }
     let row = rows.remove(0);
     // The disc page's choosers are named for what they choose; Settings' by position.
-    let slug = (scope == "disc-page")
+    let slug = (scope.name == "disc-page")
         .then(|| chooser_role(&row))
         .flatten()
         .unwrap_or_else(|| format!("chooser-{index}"));
-    row.set_expanded(true);
+    let Some(pop) = popover_of(&row) else {
+        g.borrow_mut()
+            .check("chooser-options-present", false, "chooser has no popover");
+        return chooser_sequence(root, dir, scope, g, rows, index + 1, done);
+    };
+    scroll_to(row.upcast_ref());
     glib::timeout_add_local_once(SETTLE, move || {
-        scroll_to(row.upcast_ref());
+        let tree_before = scope
+            .tree
+            .as_ref()
+            .and_then(|t| t.compute_bounds(&root).map(|b| (b, t.height())));
+        pop.popup();
         glib::timeout_add_local_once(SETTLE, move || {
-            let options: Vec<_> = descendants(row.upcast_ref())
+            let options: Vec<_> = descendants(pop.upcast_ref())
                 .into_iter()
                 .filter(|w| w.has_css_class("freemkv-choice"))
                 .collect();
-            let bounds = row.compute_bounds(&root);
-            let header = labels_under(row.upcast_ref())
-                .into_iter()
-                .find(|label| label.text() == row.title());
-            let header_bounds = header.and_then(|label| label.compute_bounds(&root));
-            let below = options
-                .first()
-                .and_then(|option| option.compute_bounds(&root))
-                .zip(header_bounds)
-                .is_some_and(|(option, header)| option.y() >= header.y() + header.height());
-            let full_width = bounds.is_some_and(|bounds| {
-                options.iter().all(|option| {
-                    option
-                        .compute_bounds(&root)
-                        .is_some_and(|b| b.width() >= bounds.width() - 32.0)
-                })
+            let field = row.compute_bounds(&root);
+            let field_width = row.width() as f32;
+            let below = pop.is_mapped()
+                && pop.position() == gtk::PositionType::Bottom
+                && !pop.has_arrow()
+                && (pop.width() as f32 - field_width).abs() <= 40.0
+                && popover_origin(&pop, &root)
+                    .zip(field)
+                    .is_some_and(|((x, y), f)| {
+                        let bottom = f.y() + f.height();
+                        y >= bottom - 24.0 && y <= bottom + 24.0 && (x - f.x()).abs() <= 24.0
+                    });
+            let full_width = options.iter().all(|option| {
+                option
+                    .compute_bounds(&pop)
+                    .is_some_and(|b| b.width() >= field_width - 48.0)
             });
             let description = format!(
-                "{scope} #{index}: {:?}, {} options",
+                "{}: #{index}: {:?}, {} options",
+                scope.name,
                 row.title(),
                 options.len()
             );
@@ -484,14 +541,13 @@ fn chooser_sequence(
                     &description,
                 );
                 if row.has_css_class("freemkv-single-choice") {
-                    let active = descendants(row.upcast_ref())
+                    let active = descendants(pop.upcast_ref())
                         .iter()
                         .filter_map(|w| w.downcast_ref::<gtk::CheckButton>())
                         .filter(|check| check.is_active())
                         .count();
                     gate.check("chooser-single-selection", active == 1, &description);
                 }
-
                 gate.check("chooser-expands-below", below, &description);
                 gate.check("chooser-options-full-width", full_width, &description);
                 gate.check(
@@ -499,19 +555,30 @@ fn chooser_sequence(
                     options.iter().all(|w| w.height() >= 40),
                     &description,
                 );
-                save(&root, &format!("{dir}/{scope}-{slug}-open.png"), &mut gate);
+                if let (Some(tree), Some((before, height))) = (&scope.tree, tree_before) {
+                    let after = tree.compute_bounds(&root);
+                    gate.check(
+                        "disc-tree-stays-put",
+                        after.is_some_and(|a| {
+                            (a.x() - before.x()).abs() < 0.5
+                                && (a.y() - before.y()).abs() < 0.5
+                                && tree.height() == height
+                        }),
+                        &description,
+                    );
+                }
+                let shot = format!("{dir}/{}-{slug}-open.png", scope.name);
+                gate.check("capture", save_png_with(&root, &pop, &shot), &shot);
             }
             // Capture the tail too: long language lists must remain reachable.
             if let Some(last) = options.last() {
-                scroll_to(last);
+                scroll_within(last);
             }
             glib::timeout_add_local_once(SETTLE, move || {
-                save(
-                    &root,
-                    &format!("{dir}/{scope}-{slug}-open-end.png"),
-                    &mut g.borrow_mut(),
-                );
-                row.set_expanded(false);
+                let shot = format!("{dir}/{}-{slug}-open-end.png", scope.name);
+                let ok = save_png_with(&root, &pop, &shot);
+                g.borrow_mut().check("capture", ok, &shot);
+                pop.popdown();
                 chooser_sequence(root, dir, scope, g, rows, index + 1, done);
             });
         });
@@ -558,7 +625,10 @@ fn settings_page(
         chooser_sequence(
             root,
             dir,
-            scope,
+            Scope {
+                name: scope,
+                tree: None,
+            },
             g,
             rows,
             0,
@@ -649,8 +719,8 @@ fn settings_checks(win: &adw::PreferencesWindow, page: &str, dir: &str, g: &mut 
     // Every dropdown on the page shows its choice in full under its title.
     for row in all
         .iter()
-        .filter_map(|w| w.downcast_ref::<adw::ExpanderRow>())
-        .filter(|r| r.is_mapped())
+        .filter_map(|w| w.downcast_ref::<adw::ActionRow>())
+        .filter(|r| r.is_mapped() && r.has_css_class("freemkv-chooser"))
     {
         let choice = row.subtitle().to_string();
         let label = labels_under(row.upcast_ref())
@@ -759,4 +829,32 @@ pub(super) fn save(w: &gtk::Widget, path: &str, g: &mut Gate) {
 /// Write `w`'s render to `path`; whether it was written.
 pub(super) fn save_png(w: &gtk::Widget, path: &str) -> bool {
     texture(w).is_some_and(|t| t.save_to_png(path).is_ok())
+}
+
+// A render of `root` with `pop`'s own surface drawn over it where it is on screen.
+fn texture_with(root: &gtk::Widget, pop: &gtk::Popover) -> Option<gdk::Texture> {
+    let snap = gtk::Snapshot::new();
+    gtk::WidgetPaintable::new(Some(root)).snapshot(
+        &snap,
+        f64::from(root.width()),
+        f64::from(root.height()),
+    );
+    if let Some((x, y)) = popover_origin(pop, root) {
+        snap.save();
+        snap.translate(&gtk::graphene::Point::new(x, y));
+        gtk::WidgetPaintable::new(Some(pop)).snapshot(
+            &snap,
+            f64::from(pop.width()),
+            f64::from(pop.height()),
+        );
+        snap.restore();
+    }
+    let node = snap.to_node()?;
+    let area = gtk::graphene::Rect::new(0.0, 0.0, root.width() as f32, root.height() as f32);
+    Some(root.native()?.renderer()?.render_texture(node, Some(&area)))
+}
+
+/// Write the window with the popover showing to `path`; whether it was written.
+fn save_png_with(root: &gtk::Widget, pop: &gtk::Popover, path: &str) -> bool {
+    texture_with(root, pop).is_some_and(|t| t.save_to_png(path).is_ok())
 }

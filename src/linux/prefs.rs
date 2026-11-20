@@ -18,11 +18,11 @@ use crate::ui::Cmd;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// A multi-select language picker: an expander row with one tick per
+/// A multi-select language picker: a popover field with one tick per
 /// language. The stored string lives on the picker, so nothing reaches
 /// `Settings` until the window commits.
 struct LangRow {
-    row: adw::ExpanderRow,
+    row: chooser::Field,
     value: RefCell<String>,
     checks: RefCell<Vec<(String, gtk::CheckButton)>>,
     painting: Cell<bool>,
@@ -30,7 +30,7 @@ struct LangRow {
 
 impl LangRow {
     fn new(title: &str) -> Rc<Self> {
-        let row = chooser::expander(&row_title(title));
+        let row = chooser::Field::new(&row_title(title));
         Rc::new(LangRow {
             row,
             value: RefCell::new(String::new()),
@@ -149,7 +149,7 @@ impl Form {
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let r = Choice::new(&row_title(label), &gtk::StringList::new(&refs));
         r.row.set_widget_name(key);
-        grp.add(&r.row);
+        grp.add(&r.row.row);
         self.combos.push((key, r.clone()));
         r
     }
@@ -157,7 +157,7 @@ impl Form {
     fn langs(&mut self, grp: &adw::PreferencesGroup, key: &'static str, label: &str) {
         let l = LangRow::new(label);
         l.row.set_widget_name(key);
-        grp.add(&l.row);
+        grp.add(&l.row.row);
         self.langs.push((key, l));
     }
 

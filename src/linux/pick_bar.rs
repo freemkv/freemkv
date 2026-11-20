@@ -1,7 +1,7 @@
 //! The disc page's controls over the title tree: the details line (Name, Year, and for TV
 //! Season, Disc and First episode, from `DetailsView`), and one row of four equal choosers,
 //! Kind, Titles, Audio and Subtitles (Kind from `DetailsView`, the rest from `PickView`).
-//! Each chooser expands below its own column and pushes the tree down while open. A choice
+//! Each chooser opens a popover below its own column, leaving the tree where it is. A choice
 //! only reports WHICH entry was picked, or what was typed; what it means, and the re-ticked
 //! tree, are the core's.
 
@@ -19,10 +19,10 @@ use std::rc::Rc;
 
 type Shown = Rc<RefCell<Option<PickView>>>;
 
-/// An inline chooser listing the core's entries as tick boxes. It stays open, so
+/// A chooser listing the core's entries as tick boxes in a popover. It stays open, so
 /// several languages can be ticked in one go.
 struct PickMenu {
-    row: adw::ExpanderRow,
+    row: chooser::Field,
     rows: RefCell<Vec<adw::ActionRow>>,
     checks: RefCell<Vec<gtk::CheckButton>>,
     /// The entries' labels, tags and separators the list was built from.
@@ -33,7 +33,7 @@ struct PickMenu {
 impl PickMenu {
     fn new(on_pick: Rc<dyn Fn(isize)>) -> Self {
         PickMenu {
-            row: chooser::expander(""),
+            row: chooser::Field::new(""),
             rows: RefCell::default(),
             checks: RefCell::default(),
             shape: RefCell::default(),
@@ -84,7 +84,7 @@ impl PickMenu {
 
 /// One column of the chooser row: the chooser on its own boxed list, top-aligned so a
 /// neighbour that expands does not stretch it, and one line tall while closed.
-fn column(row: &adw::ExpanderRow) -> gtk::ListBox {
+fn column(row: &chooser::Field) -> gtk::ListBox {
     row.set_title_lines(1);
     row.set_subtitle_lines(1);
     let list = chooser::surface(row);

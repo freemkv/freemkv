@@ -1,4 +1,4 @@
-//! The Linux selection surface: full-width rows expanding below their field.
+//! The Linux selection surface: single-line fields opening a popover below them.
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -6,15 +6,86 @@ use libadwaita::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-pub(super) fn expander(title: &str) -> adw::ExpanderRow {
-    let row = adw::ExpanderRow::builder()
-        .title(title)
-        .use_markup(false)
-        .build();
-    row.add_css_class("freemkv-chooser");
-    row.set_title_lines(0);
-    row.set_subtitle_lines(0);
-    row
+/// The tallest the option list grows before it scrolls inside the popover.
+const MAX_HEIGHT: i32 = 360;
+
+/// A single-line field showing title and current value. Its options open in a popover
+/// directly below it, so opening never changes the layout around the field.
+pub(super) struct Field {
+    pub row: adw::ActionRow,
+    pub popover: gtk::Popover,
+    list: gtk::ListBox,
+}
+
+impl std::ops::Deref for Field {
+    type Target = adw::ActionRow;
+    fn deref(&self) -> &adw::ActionRow {
+        &self.row
+    }
+}
+
+impl Field {
+    pub fn new(title: &str) -> Self {
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .use_markup(false)
+            .activatable(true)
+            .build();
+        row.add_css_class("freemkv-chooser");
+        row.set_title_lines(0);
+        row.set_subtitle_lines(0);
+        row.add_suffix(&gtk::Image::from_icon_name("pan-down-symbolic"));
+
+        let list = gtk::ListBox::new();
+        list.set_selection_mode(gtk::SelectionMode::None);
+        let scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(MAX_HEIGHT)
+            .child(&list)
+            .build();
+        let popover = gtk::Popover::builder()
+            .has_arrow(false)
+            .position(gtk::PositionType::Bottom)
+            .child(&scroll)
+            .build();
+        popover.add_css_class("freemkv-chooser-popover");
+        popover.set_parent(&row);
+
+        let weak = popover.downgrade();
+        row.connect_activated(move |_| {
+            if let Some(pop) = weak.upgrade() {
+                pop.popup();
+            }
+        });
+        let sized = row.downgrade();
+        popover.connect_show(move |pop| {
+            if let Some(row) = sized.upgrade() {
+                pop.set_size_request(row.width(), -1);
+            }
+        });
+        let focus = row.downgrade();
+        popover.connect_closed(move |_| {
+            if let Some(row) = focus.upgrade() {
+                row.grab_focus();
+            }
+        });
+        let pop = popover.clone();
+        row.connect_destroy(move |_| pop.unparent());
+        Field { row, popover, list }
+    }
+
+    pub fn add_row(&self, row: &adw::ActionRow) {
+        self.list.append(row);
+    }
+
+    pub fn remove(&self, row: &adw::ActionRow) {
+        self.list.remove(row);
+    }
+
+    pub fn close(&self) {
+        self.popover.popdown();
+    }
 }
 
 pub(super) fn option(label: &str, check: &gtk::CheckButton) -> adw::ActionRow {
@@ -30,17 +101,17 @@ pub(super) fn option(label: &str, check: &gtk::CheckButton) -> adw::ActionRow {
 }
 
 /// Standalone rows need a ListBox to receive the same layout as PreferencesGroup.
-pub(super) fn surface(row: &adw::ExpanderRow) -> gtk::ListBox {
+pub(super) fn surface(row: &Field) -> gtk::ListBox {
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
     list.add_css_class("boxed-list");
-    list.append(row);
+    list.append(&row.row);
     list
 }
 
 type Changed = Box<dyn Fn(&Choice)>;
 pub(super) struct Choice {
-    pub row: adw::ExpanderRow,
+    pub row: Field,
     model: gtk::StringList,
     rows: RefCell<Vec<(adw::ActionRow, gtk::CheckButton)>>,
     selected: Cell<u32>,
@@ -50,7 +121,7 @@ pub(super) struct Choice {
 impl Choice {
     pub fn new(title: &str, model: &gtk::StringList) -> Rc<Self> {
         let me = Rc::new(Self {
-            row: expander(title),
+            row: Field::new(title),
             model: model.clone(),
             rows: RefCell::default(),
             selected: Cell::new(gtk::INVALID_LIST_POSITION),
@@ -82,6 +153,7 @@ impl Choice {
                 }
                 let changed = me.selected.get() != at;
                 me.set_selected(at);
+                me.row.close();
                 if changed {
                     for cb in me.changed.borrow().iter() {
                         cb(&me);

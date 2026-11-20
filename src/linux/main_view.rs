@@ -247,7 +247,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     out_hint.set_max_width_chars(24);
     out_hint.set_valign(gtk::Align::Center);
     // The format chooser stays compact: one line while closed, a fixed column wide, and,
-    // like the choosers over the tree, expanding below itself.
+    // like the choosers over the tree, opening a popover below itself.
     fmt_drop.row.set_title_lines(1);
     fmt_drop.row.set_subtitle_lines(1);
     let fmt_column = chooser::surface(&fmt_drop.row);
