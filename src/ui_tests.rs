@@ -385,7 +385,7 @@ fn episode_disc() -> Scanned {
         sub.title = ti;
         sc.rows.push(sub);
     }
-    sc.selection_model = freemkv_engine::SelectionModel::from_titles(&model_titles);
+    sc.selection_model = freemkv_engine::SelectionModel::from_titles(&model_titles).into_owned();
     sc.title_count = model_titles.len();
     sc
 }
@@ -1911,7 +1911,8 @@ fn probe_scan() -> Scanned {
             let mut title = libfreemkv::DiscTitle::empty();
             title.duration_secs = 600.0;
             title
-        }]),
+        }])
+        .into_owned(),
         label: "PROBE_DISC".to_string(),
         volume_id: "PROBE_DISC".to_string(),
         rows: vec![crate::engine::Row {
@@ -2192,7 +2193,8 @@ fn app_with_titles(codecs: &[&str]) -> App {
     sc.selection_model = freemkv_engine::SelectionModel::from_titles(&vec![
             libfreemkv::DiscTitle::empty();
             codecs.len()
-        ]);
+        ])
+    .into_owned();
     sc.video_codecs = codecs.iter().map(|c| c.to_string()).collect();
     let mut app = App::new();
     app.video_codecs = sc.video_codecs.clone();
@@ -4645,7 +4647,7 @@ fn scan_of(titles: &[libfreemkv::DiscTitle], label: &str) -> Scanned {
         (t.depth, t.pid, t.title, t.duration_secs) = (1, None, ti, title.duration_secs);
         sc.rows.push(t);
     }
-    sc.selection_model = freemkv_engine::SelectionModel::from_titles(titles);
+    sc.selection_model = freemkv_engine::SelectionModel::from_titles(titles).into_owned();
     sc.title_count = titles.len();
     (sc.label, sc.volume_id) = (label.to_string(), label.to_string());
     sc

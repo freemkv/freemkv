@@ -207,7 +207,7 @@ fn split_langs(s: &str) -> Vec<String> {
 /// The titles `selection` ticks by itself under `prefs`' audio and presentation languages: the
 /// engine's executable pick. A selection that needs review ticks nothing.
 pub fn automatic_titles(
-    model: &freemkv_engine::SelectionModel,
+    model: &freemkv_engine::SelectionModel<'_>,
     selection: &freemkv_engine::Selection,
     prefs: &LangPrefs,
 ) -> Vec<usize> {

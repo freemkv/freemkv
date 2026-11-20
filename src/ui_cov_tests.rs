@@ -35,7 +35,8 @@ fn one_title() -> Scanned {
             let mut title = libfreemkv::DiscTitle::empty();
             title.duration_secs = 600.0;
             title
-        }]),
+        }])
+        .into_owned(),
         label: "COV_DISC".to_string(),
         volume_id: "COV_DISC".to_string(),
         rows: vec![crate::engine::Row {

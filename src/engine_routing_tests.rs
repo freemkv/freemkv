@@ -529,7 +529,8 @@ fn shared_pid_disc() -> crate::engine::Scanned {
         selection_model: freemkv_engine::SelectionModel::from_titles(&[
             libfreemkv::DiscTitle::empty(),
             libfreemkv::DiscTitle::empty(),
-        ]),
+        ])
+        .into_owned(),
         label: "SHARED".into(),
         volume_id: "SHARED".into(),
         rows,

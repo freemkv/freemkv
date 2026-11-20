@@ -68,7 +68,7 @@ pub struct Scanned {
     pub volume_id: String,
     pub rows: Vec<Row>,
     /// Engine selection evidence in canonical scan order, independent of display rows.
-    pub selection_model: fe::SelectionModel,
+    pub selection_model: fe::SelectionModel<'static>,
     pub key_summary: String,
     pub title_count: usize,
     /// Video codec name per title, indexed by canonical title index. Lets the
@@ -527,7 +527,7 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         None => "unencrypted".into(),
     };
     Ok(Scanned {
-        selection_model: fe::SelectionModel::from_titles(std::slice::from_ref(t)),
+        selection_model: fe::SelectionModel::from_titles(std::slice::from_ref(t)).into_owned(),
         label: name,
         // A container source has no volume id; `run_stream` names its output
         // from the file's own stem instead.
@@ -787,7 +787,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
     });
 
     // "Episode" marks a member of the authored roster the Episodes pick uses, only when it holds.
-    let selection_model = fe::SelectionModel::from_titles(&disc.titles);
+    let selection_model = fe::SelectionModel::from_titles(&disc.titles).into_owned();
     let roster = selection_model
         .select(&fe::Selection::Episodes, &fe::StreamFilter::All, None)
         .is_ok();

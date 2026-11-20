@@ -50,7 +50,8 @@ fn synthetic_disc() -> Scanned {
                 title.duration_secs = secs;
                 title
             },
-        )),
+        ))
+        .into_owned(),
         label: "TEST_DISC".into(),
         volume_id: "TEST_DISC".into(),
         rows,

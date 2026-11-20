@@ -15,7 +15,7 @@ use freemkv::ui::*;
 // Shaped like `engine::scan_disc`'s output. `title` is the CANONICAL disc
 // title index, deliberately not the row position.
 
-fn selection_model(durations: &[f64]) -> freemkv_engine::SelectionModel {
+fn selection_model(durations: &[f64]) -> freemkv_engine::SelectionModel<'static> {
     let titles: Vec<_> = durations
         .iter()
         .map(|&secs| {
@@ -24,7 +24,7 @@ fn selection_model(durations: &[f64]) -> freemkv_engine::SelectionModel {
             title
         })
         .collect();
-    freemkv_engine::SelectionModel::from_titles(&titles)
+    freemkv_engine::SelectionModel::from_titles(&titles).into_owned()
 }
 
 fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> ScanRow {
