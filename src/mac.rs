@@ -5011,7 +5011,7 @@ impl Controller {
         );
         check(
             "menu-clear-log",
-            self.drive_menu("View", "Clear log") && view().log.is_empty(),
+            self.drive_menu("View", "Clear Log") && view().log.is_empty(),
             "View ▸ Clear log emptied it",
         );
         // The item is a toggle and its title follows the state, so drive it by
@@ -5280,7 +5280,7 @@ impl Controller {
             );
             check(
                 "menu-blocked-while-running",
-                !self.drive_menu("File", "Start rip"),
+                !self.drive_menu("File", "Start Rip"),
                 "File ▸ Start rip is refused mid-run",
             );
             let cancelled = self.drive_click_button("Cancel");

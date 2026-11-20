@@ -1319,8 +1319,8 @@ pub fn not_disc_folder_notice() -> String {
 }
 
 /// The View ▸ log menu item's label, which follows STATE rather than naming
-/// one fixed action: "Show log" only while the log is hidden, "Hide log" while
-/// it is on screen. It is one toggle, so a label that always said "Show log"
+/// one fixed action: "Show Log" only while the log is hidden, "Hide Log" while
+/// it is on screen. It is one toggle, so a label that always said "Show Log"
 /// was wrong half the time.
 ///
 /// Lives here, not in a shell, because both menus are built from it — that is
@@ -1328,9 +1328,9 @@ pub fn not_disc_folder_notice() -> String {
 #[must_use]
 pub fn log_menu_label(log_hidden: bool) -> String {
     if log_hidden {
-        crate::strings::get_or("gui.menu.show_log", "Show log")
+        crate::strings::get_or("gui.menu.show_log", "Show Log")
     } else {
-        crate::strings::get_or("gui.menu.hide_log", "Hide log")
+        crate::strings::get_or("gui.menu.hide_log", "Hide Log")
     }
 }
 
@@ -1446,8 +1446,8 @@ pub struct MenuGroup {
 /// each `MenuAction` to their native handler, and place [`MenuGroupId::App`]
 /// wherever their platform's convention says.
 ///
-/// `log_hidden` selects the live label for the log toggle — "Show log" or
-/// "Hide log" — so a shell can rebuild its menu after the log is toggled
+/// `log_hidden` selects the live label for the log toggle — "Show Log" or
+/// "Hide Log" — so a shell can rebuild its menu after the log is toggled
 /// without recomputing the layout itself.
 pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
     let g = |k: &str, fallback: &str| crate::strings::get_or(k, fallback);
@@ -1500,7 +1500,7 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                 ),
                 item(
                     MenuAction::OpenDisc,
-                    g("gui.menu.open_disc", "Open disc…"),
+                    g("gui.menu.open_disc", "Open Disc…"),
                     Some(Accel::primary("d")),
                 ),
                 item(
@@ -1511,18 +1511,18 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                 sep(),
                 item(
                     MenuAction::Cmd(Cmd::SetOutput),
-                    g("gui.menu.set_output", "Set output folder…"),
+                    g("gui.menu.set_output", "Set Output Folder…"),
                     None,
                 ),
                 item(
                     MenuAction::Cmd(Cmd::Run),
-                    g("gui.menu.start_rip", "Start rip"),
+                    g("gui.menu.start_rip", "Start Rip"),
                     Some(Accel::primary("r")),
                 ),
                 sep(),
                 item(
                     MenuAction::Cmd(Cmd::Eject),
-                    g("gui.menu.eject", "Eject disc"),
+                    g("gui.menu.eject", "Eject Disc"),
                     Some(Accel::primary("e")),
                 ),
             ],
@@ -1583,7 +1583,7 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                 ),
                 item(
                     MenuAction::Cmd(Cmd::ClearLog),
-                    g("gui.menu.clear_log", "Clear log"),
+                    g("gui.menu.clear_log", "Clear Log"),
                     Some(Accel::primary("k")),
                 ),
             ],
@@ -1601,7 +1601,7 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                 ),
                 item(
                     MenuAction::Cmd(Cmd::CheckUpdates),
-                    g("gui.menu.check_updates", "Check for updates…"),
+                    g("gui.menu.check_updates", "Check for Updates…"),
                     None,
                 ),
             ],
