@@ -26,23 +26,23 @@ fn hostile_disc() -> Disc {
         color_space: ColorSpace::Bt709,
         display_aspect: None,
         secondary: true,
-        label: HOSTILE.to_string(),
+        label: HOSTILE.into(),
         measured_cicp: None,
     });
     let audio = Stream::Audio(AudioStream {
         pid: 0x1100,
         codec: Codec::TrueHd,
         channels: AudioChannels::Unknown,
-        language: HOSTILE.to_string(),
+        language: HOSTILE.into(),
         sample_rate: SampleRate::Unknown,
         secondary: true,
         purpose: LabelPurpose::Commentary,
-        label: HOSTILE.to_string(),
+        label: HOSTILE.into(),
     });
     let subtitle = Stream::Subtitle(SubtitleStream {
         pid: 0x1200,
         codec: Codec::Pgs,
-        language: HOSTILE.to_string(),
+        language: HOSTILE.into(),
         forced: true,
         qualifier: LabelQualifier::None,
         codec_data: None,
