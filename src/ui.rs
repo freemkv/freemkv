@@ -2531,6 +2531,11 @@ pub struct HomeDrive {
     pub present: Option<bool>,
 }
 
+/// The launch's log line: `freemkv X.Y.Z — ready`.
+pub fn ready_line() -> String {
+    crate::strings::fmt("gui.log.ready", &[("version", env!("CARGO_PKG_VERSION"))])
+}
+
 /// A ready-screen drive row's text: the drive and whether it holds a disc.
 pub fn home_drive_label(drive: &HomeDrive) -> String {
     let status = match drive.present {
@@ -2816,6 +2821,9 @@ impl App {
         {
             return Vec::new();
         }
+        if launch {
+            self.restate_ready();
+        }
         let before = (self.home_drives.clone(), self.disc_present);
         let fx = self.apply_home_drives(answer, launch);
         // A watch that found the drives as they were redraws nothing.
@@ -2914,11 +2922,21 @@ impl App {
             save_fn: SAVE_SETTINGS,
             reported_bad: 0,
         };
-        app.say(
-            LogKind::Result,
-            &crate::strings::fmt("gui.log.ready", &[("version", env!("CARGO_PKG_VERSION"))]),
-        );
+        app.say(LogKind::Result, &ready_line());
         app
+    }
+
+    // #100: the launch line above is written before any window exists, and on Linux it has
+    // not shown since 1.8.6 (why GTK drops it is not pinned down). Until then the launch
+    // probe rewrote the log once it had opened the loaded disc; with the ready screen the
+    // launch only lists drives, so nothing did. Restate the line when that listing answers,
+    // so every shell repaints the log with its window up. Only while nothing else was said.
+    fn restate_ready(&mut self) {
+        let ready = ready_line();
+        if self.log_first == 0 && self.log.len() == 1 && self.log[0].text == ready {
+            self.clear_log();
+            self.say(LogKind::Result, &ready);
+        }
     }
 
     // Newest lines kept on screen: unbounded growth during a multi-hour rip both eats memory

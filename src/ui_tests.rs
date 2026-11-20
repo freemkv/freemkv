@@ -3904,7 +3904,7 @@ fn a_queued_save_writes_the_latest_settings() {
     assert_eq!(written.last(), Some(&app.settings.audio_langs));
 }
 
-// ── The ready screen's watch (#101) ──
+// ── The ready screen's watch (#101) and the launch's ready line (#100) ──
 
 // The scripted tray of the one drive `scripted_home` lists; only #101's test moves it.
 static HOME_TRAY: AtomicBool = AtomicBool::new(false);
@@ -3915,6 +3915,15 @@ fn scripted_home() -> Vec<HomeDrive> {
         display: "/dev/sr0  FAKE WATCH (rev 1.00)".into(),
         legacy_label: "FAKE WATCH".into(),
         present: Some(HOME_TRAY.load(Ordering::SeqCst)),
+    }]
+}
+
+fn an_empty_drive() -> Vec<HomeDrive> {
+    vec![HomeDrive {
+        device: "/dev/sr1".into(),
+        display: "/dev/sr1  FAKE EMPTY (rev 1.00)".into(),
+        legacy_label: "FAKE EMPTY".into(),
+        present: Some(false),
     }]
 }
 
@@ -3993,6 +4002,20 @@ fn a_disc_inserted_after_launch_updates_the_ready_screen() {
         "{}",
         home_status(&app)
     );
+}
+
+#[test]
+fn the_launch_says_freemkv_is_ready_once_its_drives_are_listed() {
+    let ready = ready_line();
+    assert!(ready.contains(env!("CARGO_PKG_VERSION")), "{ready}");
+    let fresh = App::new();
+    let painted = fresh.view().log_first;
+    let app = launched_home(an_empty_drive);
+    let v = app.view();
+    let lines: Vec<_> = v.log.iter().map(|l| (l.kind, l.text.as_str())).collect();
+    assert_eq!(lines, vec![(LogKind::Result, ready.as_str())]);
+    // Restated, not kept: every shell repaints the line with its window up.
+    assert_ne!(v.log_first, painted, "the launch line was never repainted");
 }
 
 #[test]
