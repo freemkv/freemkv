@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Linux: restore the native application menu (File/Edit/View/Help submenus) from 1.8.9; dropdown changes from #86 are unchanged (#95). (app only: Linux GTK interface)
+
 ## [1.8.10] — 2026-11-17
 
 ### Added

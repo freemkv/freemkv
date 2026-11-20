@@ -235,45 +235,27 @@ fn menu_checks(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
                 "opening the menu must not move or shrink the main content",
             );
             gate.check(
-                "menu-compact-width",
-                root.width() >= 360 && root.width() < me.window.width() / 2,
-                format!("menu {}px, window {}px", root.width(), me.window.width()),
+                "menu-native",
+                me.menu_btn.menu_model().is_some() && root.is::<gtk::PopoverMenu>(),
+                "primary menu must be a native GtkPopoverMenu built from a menu model",
             );
         }
         save(&root, &format!("{dir}/menu.png"), &mut g.borrow_mut());
-        let rows = chooser_rows(me.menu_list.upcast_ref());
-        g.borrow_mut().check(
-            "menu-chooser-inventory",
-            rows.len() == 4,
-            format!("{} of 4 submenus", rows.len()),
-        );
-        let next_dir = dir.clone();
-        let next_g = g.clone();
-        chooser_sequence(
-            root,
+        me.menu_btn.set_active(false);
+        // Settings with a destination long enough to be cut off.
+        let mut st = me.app.borrow().settings_form().clone();
+        st.dest_dir = LONG_DEST.into();
+        super::prefs::show(&me, &st, None);
+        settings_page(
             dir,
-            "menu".into(),
             g,
-            rows,
-            0,
-            Box::new(move || {
-                me.menu_btn.set_active(false);
-                // Settings with a destination long enough to be cut off.
-                let mut st = me.app.borrow().settings_form().clone();
-                st.dest_dir = LONG_DEST.into();
-                super::prefs::show(&me, &st, None);
-                settings_page(
-                    next_dir,
-                    next_g,
-                    vec![
-                        "gui.tab.output",
-                        "gui.tab.selection",
-                        "gui.tab.recovery",
-                        "gui.tab.keys",
-                        "gui.tab.advanced",
-                    ],
-                );
-            }),
+            vec![
+                "gui.tab.output",
+                "gui.tab.selection",
+                "gui.tab.recovery",
+                "gui.tab.keys",
+                "gui.tab.advanced",
+            ],
         );
     });
 }
@@ -323,7 +305,7 @@ fn chooser_sequence(
         glib::timeout_add_local_once(SETTLE, move || {
             let options: Vec<_> = descendants(row.upcast_ref())
                 .into_iter()
-                .filter(|w| w.has_css_class("freemkv-choice") || w.has_css_class("freemkv-command"))
+                .filter(|w| w.has_css_class("freemkv-choice"))
                 .collect();
             let bounds = row.compute_bounds(&root);
             let header = labels_under(row.upcast_ref())
