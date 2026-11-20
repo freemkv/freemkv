@@ -220,20 +220,29 @@ fn empty_page_is_centred_at_every_dpi() {
                 details_labels: None,
             },
         );
-        // The headline shares the window's horizontal centre, and the
-        // button PAIR straddles it symmetrically: equal gaps either side,
-        // so their midpoint is the centre.
+        // The headline shares the window's horizontal centre, and the three
+        // buttons are centred on it: equal widths, equal gaps, so the row's
+        // midpoint is the centre (within a pixel of rounding).
         assert_eq!(l.empty_head.x + l.empty_head.w / 2, w / 2, "dpi {dpi}");
         assert_eq!(l.btn_open_disc.w, l.btn_open.w, "dpi {dpi}");
+        assert_eq!(l.btn_open_folder.w, l.btn_open.w, "dpi {dpi}");
+        let mid =
+            l.btn_open_disc.x + (l.btn_open_folder.x + l.btn_open_folder.w - l.btn_open_disc.x) / 2;
+        assert!((mid - w / 2).abs() <= 1, "dpi {dpi}: row centre {mid}");
         assert_eq!(
-            l.btn_open_disc.x + (l.btn_open.x + l.btn_open.w - l.btn_open_disc.x) / 2,
-            w / 2,
+            l.btn_open.x - (l.btn_open_disc.x + l.btn_open_disc.w),
+            l.btn_open_folder.x - (l.btn_open.x + l.btn_open.w),
             "dpi {dpi}"
         );
         // Same row, and they never overlap.
         assert_eq!(l.btn_open_disc.y, l.btn_open.y, "dpi {dpi}");
+        assert_eq!(l.btn_open_folder.y, l.btn_open.y, "dpi {dpi}");
         assert!(
             l.btn_open_disc.x + l.btn_open_disc.w <= l.btn_open.x,
+            "dpi {dpi}"
+        );
+        assert!(
+            l.btn_open.x + l.btn_open.w <= l.btn_open_folder.x,
             "dpi {dpi}"
         );
     }
@@ -253,9 +262,11 @@ fn empty_page_is_centred_at_every_dpi() {
     // log_h = 1520 * 0.24 = 364; top_h = 1520 - 364 - 48 - 8 = 1100; cy = 24 + 550.
     assert_eq!(l.empty_head, Rect::new(16, 474, 2328, 52));
     assert_eq!(l.empty_sub, Rect::new(16, 530, 2328, 40));
-    // cw/2 = 1180, gap = 32 → 1180 - 16 - 360 = 804, and 1180 + 16 = 1196.
-    assert_eq!(l.btn_open_disc, Rect::new(804, 606, 360, 60));
-    assert_eq!(l.btn_open, Rect::new(1196, 606, 360, 60));
+    // cw/2 = 1180, w = 360, gap = 32 → file at 1180 - 180 = 1000, disc at
+    // 1000 - 32 - 360 = 608, folder at 1000 + 360 + 32 = 1392.
+    assert_eq!(l.btn_open_disc, Rect::new(608, 606, 360, 60));
+    assert_eq!(l.btn_open, Rect::new(1000, 606, 360, 60));
+    assert_eq!(l.btn_open_folder, Rect::new(1392, 606, 360, 60));
 }
 
 #[test]

@@ -281,6 +281,16 @@ impl Shell {
         for e in effects {
             match e {
                 Effect::PickSource => self.pick_source(),
+                Effect::PickSourceFolder => {
+                    let me = self.clone();
+                    self.pick(
+                        true,
+                        &crate::strings::get("gui.panel.folder_msg"),
+                        false,
+                        "",
+                        move |p| me.open_path(&p),
+                    );
+                }
                 Effect::PickOutputDir => {
                     let initial = self.app.borrow().output_dir.clone();
                     let me = self.clone();

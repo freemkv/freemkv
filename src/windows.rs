@@ -63,6 +63,8 @@ const ID_PICK_SUBS: u16 = 1018;
 /// The disc details row's Movie / TV choice, and its first text box (the rest follow).
 const ID_DETAILS_KIND: u16 = 1019;
 const ID_DETAILS_EDIT: u16 = 1020;
+/// "Open folder…" on the empty page, beside "Open file or ISO…".
+const ID_OPEN_FOLDER_EMPTY: u16 = 1021;
 
 // Menu command ids. `cmd_for` maps these to core commands, so the enable/
 // disable rule lives in `ui::blocked_while_running` and cannot disagree with
@@ -85,6 +87,7 @@ const IDM_CLEAR_LOG: u16 = 2015;
 const IDM_DOCS: u16 = 2016;
 const IDM_CHECK_UPDATES: u16 = 2017;
 const IDM_ABOUT: u16 = 2018;
+const IDM_OPEN_FOLDER: u16 = 2019;
 
 // First command id of a language checklist popup; entry *i* is `+ i`. Well
 // clear of the `IDM_*` block: the checklist uses `TPM::RETURNCMD`, which
@@ -96,6 +99,7 @@ const IDM_LANG_BASE: u16 = 3000;
 /// drifting list.
 const MENU_CMD_IDS: &[u16] = &[
     IDM_OPEN,
+    IDM_OPEN_FOLDER,
     IDM_OPEN_DISC,
     IDM_CLOSE,
     IDM_SET_OUTPUT,
@@ -120,6 +124,7 @@ fn cmd_for(id: u16) -> Option<Cmd> {
     Some(match id {
         // Opening a disc is an Open for menu-enable purposes (blocked mid-rip).
         IDM_OPEN | IDM_OPEN_DISC => Cmd::Open,
+        IDM_OPEN_FOLDER => Cmd::OpenFolder,
         IDM_CLOSE => Cmd::Close,
         IDM_SET_OUTPUT => Cmd::SetOutput,
         IDM_START_RIP => Cmd::Run,
@@ -641,6 +646,7 @@ struct Shell {
     /// about, not only "Open file or ISO…".
     btn_open_disc: gui::Button,
     btn_open: gui::Button,
+    btn_open_folder: gui::Button,
     home_list: gui::ListBox,
     home_open: gui::Button,
     home_prefer: gui::Button,
@@ -806,6 +812,16 @@ impl Shell {
                 width: s.px(180),
                 height: s.px(30),
                 ctrl_id: ID_OPEN_EMPTY,
+                ..Default::default()
+            },
+        );
+        let btn_open_folder = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: &crate::strings::get_or("gui.btn.open_folder", "Open folder…"),
+                width: s.px(180),
+                height: s.px(30),
+                ctrl_id: ID_OPEN_FOLDER_EMPTY,
                 ..Default::default()
             },
         );
@@ -1176,6 +1192,7 @@ impl Shell {
             lbl_empty_sub,
             btn_open_disc,
             btn_open,
+            btn_open_folder,
             home_list,
             home_open,
             home_prefer,
@@ -1247,6 +1264,7 @@ fn idm_for_action(action: &crate::ui::MenuAction) -> Option<u16> {
     use crate::ui::{Cmd, MenuAction};
     Some(match action {
         MenuAction::Cmd(Cmd::Open) => IDM_OPEN,
+        MenuAction::Cmd(Cmd::OpenFolder) => IDM_OPEN_FOLDER,
         MenuAction::OpenDisc => IDM_OPEN_DISC,
         MenuAction::Cmd(Cmd::Close) => IDM_CLOSE,
         MenuAction::Cmd(Cmd::SetOutput) => IDM_SET_OUTPUT,
@@ -1402,6 +1420,7 @@ impl Shell {
         put(&self.lbl_empty_sub, l.empty_sub);
         put(&self.btn_open_disc, l.btn_open_disc);
         put(&self.btn_open, l.btn_open);
+        put(&self.btn_open_folder, l.btn_open_folder);
         put(&self.home_list, l.home_list);
         put(&self.home_open, l.home_open);
         put(&self.home_prefer, l.home_prefer);
@@ -1963,6 +1982,7 @@ impl Shell {
             p == Page::Empty && v.home_drives.is_empty(),
         );
         show(&self.btn_open, p == Page::Empty);
+        show(&self.btn_open_folder, p == Page::Empty);
         let homes_visible = p == Page::Empty && !v.home_drives.is_empty();
         show(&self.home_list, homes_visible);
         show(&self.home_open, homes_visible);
@@ -2506,6 +2526,14 @@ impl Shell {
                         self.perform(fx);
                     }
                 }
+                Effect::PickSourceFolder => {
+                    if let Some(p) =
+                        self.pick(true, &crate::strings::get("gui.panel.folder_msg"), false)
+                    {
+                        let fx = self.app_mut(|a| a.open(&p));
+                        self.perform(fx);
+                    }
+                }
                 Effect::PickOutputDir => {
                     if let Some(p) =
                         self.pick(true, &crate::strings::get("gui.panel.output_msg"), false)
@@ -2835,6 +2863,11 @@ impl Shell {
         let me = self.clone();
         self.btn_open.on().bn_clicked(move || {
             me.act(Cmd::Open);
+            Ok(())
+        });
+        let me = self.clone();
+        self.btn_open_folder.on().bn_clicked(move || {
+            me.act(Cmd::OpenFolder);
             Ok(())
         });
         // The empty page's "Open disc" — the SAME method File ▸ Open disc
@@ -4365,6 +4398,13 @@ impl Shell {
             .hwnd()
             .SetWindowText(&g("gui.btn.open_disc"));
         let _ = self.btn_open.hwnd().SetWindowText(&g("gui.btn.open_file"));
+        let _ = self
+            .btn_open_folder
+            .hwnd()
+            .SetWindowText(&crate::strings::get_or(
+                "gui.btn.open_folder",
+                "Open folder…",
+            ));
         let _ = self
             .home_open
             .hwnd()

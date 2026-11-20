@@ -10,6 +10,7 @@ fn the_menu_reaches_every_command_the_core_defines() {
     // `Cancel` (progress page button) are excluded — neither is a menu item.
     let sels = [
         sel!(onOpenFiles:),
+        sel!(onOpenFolder:),
         sel!(onOpenDisc:),
         sel!(onCloseDisc:),
         sel!(onBrowseOutput:),
@@ -36,6 +37,7 @@ fn the_menu_reaches_every_command_the_core_defines() {
     );
     for want in [
         Cmd::Open,
+        Cmd::OpenFolder,
         Cmd::Close,
         Cmd::SetOutput,
         Cmd::Run,
@@ -67,6 +69,13 @@ fn opening_a_disc_is_an_open_for_enablement_purposes() {
     assert_eq!(cmd_for(sel!(onOpenFiles:)), Some(Cmd::Open));
     assert_eq!(cmd_for(sel!(onOpenDisc:)), Some(Cmd::Open));
     assert!(crate::ui::blocked_while_running(&Cmd::Open));
+    // File ▸ Open Folder (#105) is its own command, greyed mid-rip the same way.
+    assert_eq!(cmd_for(sel!(onOpenFolder:)), Some(Cmd::OpenFolder));
+    assert_eq!(
+        selector_for_action(&crate::ui::MenuAction::Cmd(Cmd::OpenFolder)),
+        Some((sel!(onOpenFolder:), true))
+    );
+    assert!(crate::ui::blocked_while_running(&Cmd::OpenFolder));
 }
 
 #[test]

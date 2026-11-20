@@ -1275,6 +1275,45 @@ pub fn is_openable_file(path: &str) -> bool {
             .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
 }
 
+/// The top-level folders that make a folder a disc tree.
+const DISC_TREE_DIRS: [&str; 2] = ["BDMV", "VIDEO_TS"];
+
+fn is_disc_tree_dir(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|n| DISC_TREE_DIRS.iter().any(|d| n.eq_ignore_ascii_case(d)))
+}
+
+/// The root of the disc tree a picked or dropped folder names, or `None` when
+/// it is not one. A folder holding `BDMV` or `VIDEO_TS` (any case) is its own
+/// root, the same rule the engine's `dir://` scan applies before it builds the
+/// image (libfreemkv's `dirimage` plan, which is not public); a `BDMV` or
+/// `VIDEO_TS` folder itself resolves to its parent, the root a user meant.
+pub fn disc_folder_root(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let holds_tree = std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| is_disc_tree_dir(&e.file_name()) && e.path().is_dir())
+    });
+    if holds_tree {
+        return Some(dir.to_path_buf());
+    }
+    if dir.file_name().is_some_and(is_disc_tree_dir) {
+        return dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
+    }
+    None
+}
+
+/// The Notice for a folder that [`disc_folder_root`] refuses.
+pub fn not_disc_folder_notice() -> String {
+    crate::strings::get_or(
+        "gui.log.not_disc_folder",
+        "That folder isn't a disc folder: choose the one containing BDMV or VIDEO_TS.",
+    )
+}
+
 /// The View ▸ log menu item's label, which follows STATE rather than naming
 /// one fixed action: "Show log" only while the log is hidden, "Hide log" while
 /// it is on screen. It is one toggle, so a label that always said "Show log"
@@ -1451,6 +1490,11 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                     Some(Accel::primary("o")),
                 ),
                 item(
+                    MenuAction::Cmd(Cmd::OpenFolder),
+                    g("gui.menu.open_folder", "Open Folder…"),
+                    Some(Accel::primary_shift("O")),
+                ),
+                item(
                     MenuAction::OpenDisc,
                     g("gui.menu.open_disc", "Open disc…"),
                     Some(Accel::primary("d")),
@@ -1590,6 +1634,8 @@ pub enum Cmd {
     /// from [`output_formats`], so an unrecognized title cannot enter the model.
     SetFormat(&'static str),
     Open,
+    /// File ▸ Open Folder: pick an extracted disc folder, the CLI's `dir://` source.
+    OpenFolder,
     Close,
     SetOutput,
     Run,
@@ -2207,6 +2253,9 @@ fn eject_action(source: &str) -> EjectAction {
 pub enum Effect {
     /// Show a file picker limited to `SOURCE_EXTS`; on choose → `Cmd::Open`.
     PickSource,
+    /// Show a folder picker for a disc folder; on choose → [`App::open`], which
+    /// accepts only a disc tree (see [`disc_folder_root`]).
+    PickSourceFolder,
     /// Show a folder picker; on choose → set the output directory.
     PickOutputDir,
     /// Reveal a path in the platform file manager.
@@ -3090,6 +3139,7 @@ impl App {
         }
         match cmd {
             Cmd::Open => vec![Effect::PickSource],
+            Cmd::OpenFolder => vec![Effect::PickSourceFolder],
             Cmd::SetOutput => vec![Effect::PickOutputDir],
             Cmd::Close => {
                 if self.source.is_empty() && self.probe.is_none() && !self.opening() {
@@ -3482,6 +3532,10 @@ impl App {
         if self.ejecting.is_some() {
             return vec![Effect::Redraw];
         }
+        let Some(path) = self.folder_source(path) else {
+            return vec![Effect::Redraw];
+        };
+        let path = path.as_str();
         self.home_generation = self.home_generation.wrapping_add(1);
         self.home_discovery = None;
         self.opening = None;
@@ -3507,6 +3561,10 @@ impl App {
         if self.running() || self.opening() || self.ejecting.is_some() {
             return vec![];
         }
+        let Some(path) = self.folder_source(path) else {
+            return vec![Effect::Redraw];
+        };
+        let path = path.as_str();
         self.home_generation = self.home_generation.wrapping_add(1);
         self.home_discovery = None;
         if let Some(fx) = self.wait_for_probe(path, true) {
@@ -3515,6 +3573,23 @@ impl App {
         self.stop_opens();
         self.probe = None;
         self.spawn_open(path)
+    }
+
+    // The source a picked or dropped path opens as. A local folder must be a disc tree (it
+    // opens as `dir://`, BDMV / VIDEO_TS itself as its parent); any other folder is refused
+    // with a Notice (`None`). Drives, files and URLs pass through untouched.
+    fn folder_source(&mut self, path: &str) -> Option<String> {
+        let dir = std::path::Path::new(path);
+        if crate::engine::is_disc_source(path) || !dir.is_dir() {
+            return Some(path.to_owned());
+        }
+        match disc_folder_root(dir) {
+            Some(root) => Some(root.to_string_lossy().into_owned()),
+            None => {
+                self.say(LogKind::Notice, &not_disc_folder_notice());
+                None
+            }
+        }
     }
 
     // Park a drive open behind an outstanding probe; `poll_probe` resumes it.

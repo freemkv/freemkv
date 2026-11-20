@@ -2312,6 +2312,7 @@ fn every_cmd_the_shells_dispatch_from_a_menu_is_reachable_from_the_layout() {
     // the shells' expectations.
     let expected: &[Cmd] = &[
         Cmd::Open,
+        Cmd::OpenFolder,
         Cmd::Close,
         Cmd::SetOutput,
         Cmd::Run,
@@ -5150,4 +5151,162 @@ fn a_home_drive_ejects_from_the_ready_screen() {
     open.source = "/m/Film.iso".into();
     assert_eq!(open.eject_home_drive(0), vec![Effect::Redraw]);
     assert!(open.ejecting.is_none());
+}
+
+// ── #105: open a disc folder, the CLI's `dir://` source ─────────────────────
+
+thread_local! {
+    static SCANNED_PATHS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// Records the path Open scans, then fails, so no preflight touches the folder.
+fn recorded_open(
+    path: &str,
+    _: &KeyConfig,
+    _: &OpenToken,
+    _: OpenTicks,
+) -> Result<Scanned, String> {
+    SCANNED_PATHS.with(|p| p.borrow_mut().push(path.to_owned()));
+    Err("recorded".into())
+}
+
+fn scanned_paths() -> Vec<String> {
+    SCANNED_PATHS.with(|p| p.take())
+}
+
+#[test]
+fn open_folder_asks_the_shell_for_a_folder_picker() {
+    let mut app = App::new();
+    assert_eq!(
+        app.dispatch(Cmd::OpenFolder),
+        vec![Effect::PickSourceFolder]
+    );
+    assert!(blocked_while_running(&Cmd::OpenFolder));
+}
+
+#[test]
+fn every_shell_menu_offers_open_folder_right_after_open() {
+    let layout = menu_layout(false);
+    let file = layout
+        .iter()
+        .find(|g| g.id == MenuGroupId::File)
+        .expect("a File group");
+    let items: Vec<&MenuItem> = file
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            MenuEntry::Item(mi) => Some(mi),
+            MenuEntry::Separator => None,
+        })
+        .collect();
+    let at = items
+        .iter()
+        .position(|mi| mi.action == MenuAction::Cmd(Cmd::OpenFolder))
+        .expect("File has Open Folder");
+    assert!(at > 0, "Open Folder comes after Open");
+    assert_eq!(items[at - 1].action, MenuAction::Cmd(Cmd::Open));
+    let accel = items[at].accel.expect("Open Folder has a shortcut");
+    assert!(accel.primary && accel.shift && !accel.alt, "{accel:?}");
+    assert!(accel.key.eq_ignore_ascii_case("o"), "{accel:?}");
+    // No other command shares the shortcut.
+    let same = layout
+        .iter()
+        .flat_map(|g| g.entries.iter())
+        .filter_map(|e| match e {
+            MenuEntry::Item(mi) => mi.accel,
+            MenuEntry::Separator => None,
+        })
+        .filter(|a| {
+            a.primary == accel.primary
+                && a.shift == accel.shift
+                && a.alt == accel.alt
+                && a.key.eq_ignore_ascii_case(accel.key)
+        })
+        .count();
+    assert_eq!(same, 1, "{accel:?} is bound twice");
+    // Linux: a gio action in the hamburger, greyed mid-rip like Open.
+    let ma = MenuAction::Cmd(Cmd::OpenFolder);
+    assert_eq!(crate::linux_glue::action_name_for(&ma), Some("open-folder"));
+    assert_eq!(crate::linux_glue::gating_cmd(&ma), Some(Cmd::OpenFolder));
+    // Windows: a row of the File menu, with a bound key.
+    let win = crate::win_menu::win_menus(&layout, "Exit");
+    assert!(
+        win[0].entries.iter().any(|e| matches!(
+            e,
+            crate::win_menu::WinEntry::Item { action, accel: Some(_), .. } if *action == ma
+        )),
+        "Windows File menu lacks Open Folder"
+    );
+    assert!(
+        crate::win_menu::accel_table(&win)
+            .iter()
+            .any(|(a, _)| *a == ma)
+    );
+}
+
+#[test]
+fn a_folder_holding_a_disc_tree_opens_as_itself() {
+    for tree in ["BDMV", "VIDEO_TS", "bdmv", "Video_TS"] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(tree)).unwrap();
+        let path = root.path().to_str().unwrap();
+        assert_eq!(
+            disc_folder_root(root.path()).as_deref(),
+            Some(root.path()),
+            "{tree}"
+        );
+        let mut app = App::new();
+        app.scan = recorded_open;
+        app.open(path);
+        assert_eq!(scanned_paths(), vec![path.to_string()], "{tree}");
+        assert!(!logged(&app, &not_disc_folder_notice()), "{tree}");
+    }
+}
+
+#[test]
+fn picking_bdmv_or_video_ts_itself_opens_its_parent() {
+    for tree in ["BDMV", "VIDEO_TS", "video_ts"] {
+        let root = tempfile::tempdir().unwrap();
+        let inner = root.path().join(tree);
+        std::fs::create_dir_all(inner.join("STREAM")).unwrap();
+        let parent = root.path().to_str().unwrap().to_string();
+        let mut app = App::new();
+        app.scan = recorded_open;
+        app.open(inner.to_str().unwrap());
+        assert_eq!(scanned_paths(), vec![parent.clone()], "{tree}");
+        let mut app = App::new();
+        app.scan = recorded_open;
+        app.open_async(inner.to_str().unwrap());
+        // The background open (Linux) accepts it too and starts its worker.
+        assert!(app.opening(), "{tree}");
+        assert!(!logged(&app, &not_disc_folder_notice()), "{tree}");
+    }
+}
+
+#[test]
+fn a_folder_that_is_not_a_disc_tree_is_refused_with_a_notice() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("Movies")).unwrap();
+    // A FILE named BDMV is not a disc tree.
+    std::fs::write(root.path().join("BDMV"), b"").unwrap();
+    assert_eq!(disc_folder_root(root.path()), None);
+    let path = root.path().to_str().unwrap();
+    let notice = not_disc_folder_notice();
+    let mut app = App::new();
+    app.scan = recorded_open;
+    assert_eq!(app.open(path), vec![Effect::Redraw]);
+    assert!(scanned_paths().is_empty(), "a refused folder was scanned");
+    assert!(app.source.is_empty());
+    assert!(
+        app.log
+            .iter()
+            .any(|l| l.kind == LogKind::Notice && l.text == notice),
+        "{:?}",
+        app.log
+    );
+    // The background open (Linux, and every shell's drop) applies the same rule.
+    let mut app = App::new();
+    assert_eq!(app.open_async(path), vec![Effect::Redraw]);
+    assert!(!app.opening());
+    assert!(logged(&app, &notice));
 }

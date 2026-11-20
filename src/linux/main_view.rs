@@ -153,10 +153,18 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     open_file.add_css_class("pill");
     let me = shell.clone();
     open_file.connect_clicked(move |_| me.act(Cmd::Open));
+    let open_folder = gtk::Button::with_label(&crate::strings::get_or(
+        "gui.btn.open_folder",
+        "Open folder…",
+    ));
+    open_folder.add_css_class("pill");
+    let me = shell.clone();
+    open_folder.connect_clicked(move |_| me.act(Cmd::OpenFolder));
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     buttons.set_halign(gtk::Align::Center);
     buttons.append(&open_disc);
     buttons.append(&open_file);
+    buttons.append(&open_folder);
     let drives = adw::PreferencesGroup::builder()
         .title(crate::strings::get_or("gui.home.drives", "Drives"))
         .build();

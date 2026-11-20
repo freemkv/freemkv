@@ -18,6 +18,7 @@ use crate::ui::{Accel, Cmd, LogKind, MenuAction, Page, Row};
 /// and the keyboard shortcuts cannot name different things.
 pub const ACTIONS: &[(&str, MenuAction)] = &[
     ("open", MenuAction::Cmd(Cmd::Open)),
+    ("open-folder", MenuAction::Cmd(Cmd::OpenFolder)),
     ("open-disc", MenuAction::OpenDisc),
     ("close", MenuAction::Cmd(Cmd::Close)),
     ("set-output", MenuAction::Cmd(Cmd::SetOutput)),

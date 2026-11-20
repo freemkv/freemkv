@@ -74,6 +74,8 @@ fn cmd_for(a: Sel) -> Option<crate::ui::Cmd> {
     use crate::ui::Cmd;
     Some(if a == sel!(onOpenFiles:) {
         Cmd::Open
+    } else if a == sel!(onOpenFolder:) {
+        Cmd::OpenFolder
     } else if a == sel!(onOpenDisc:) {
         // Opening a disc is an Open for menu-enable purposes (blocked mid-rip).
         Cmd::Open
@@ -930,6 +932,12 @@ define_class!(
             self.act(crate::ui::Cmd::Open);
         }
 
+        /// File ▸ Open Folder, and the empty state's "Open folder" button.
+        #[unsafe(method(onOpenFolder:))]
+        fn on_open_folder(&self, _s: Option<&AnyObject>) {
+            self.act(crate::ui::Cmd::OpenFolder);
+        }
+
         /// File ▸ Open disc, and the empty state's "Open disc" button — the
         /// SAME method, so the two entry points cannot behave differently.
         #[unsafe(method(onOpenDisc:))]
@@ -1449,6 +1457,13 @@ impl Controller {
                 E::PickSource => {
                     if let Some(p) =
                         self.pick(false, true, &crate::strings::get("gui.panel.source_msg"))
+                    {
+                        self.step(|a| a.open(&p));
+                    }
+                }
+                E::PickSourceFolder => {
+                    if let Some(p) =
+                        self.pick(true, false, &crate::strings::get("gui.panel.folder_msg"))
                     {
                         self.step(|a| a.open(&p));
                     }
@@ -2422,6 +2437,7 @@ fn selector_for_action(action: &crate::ui::MenuAction) -> Option<(Sel, bool)> {
     // (selector, target_controller). target=false means responder chain (nil).
     Some(match action {
         MenuAction::Cmd(Cmd::Open) => (sel!(onOpenFiles:), true),
+        MenuAction::Cmd(Cmd::OpenFolder) => (sel!(onOpenFolder:), true),
         MenuAction::OpenDisc => (sel!(onOpenDisc:), true),
         MenuAction::Cmd(Cmd::Close) => (sel!(onCloseDisc:), true),
         MenuAction::Cmd(Cmd::SetOutput) => (sel!(onBrowseOutput:), true),
@@ -2643,16 +2659,16 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             page_empty.addSubview(&head);
             page_empty.addSubview(&sub);
         }
-        // BOTH ways in, side by side — the empty page used to offer only
-        // "Open file or ISO…", so opening a disc needed the menu bar.
-        // Straddles the centre with a fixed gap, the result page's pattern.
+        // EVERY way in, side by side — the empty page used to offer only
+        // "Open file or ISO…", so opening a disc or a folder needed the menu
+        // bar. The file button sits on the centre, the others a fixed gap out.
         const EB_W: f64 = 160.0;
         const EB_GAP: f64 = 16.0;
         let eb_y = eh * 0.55 - 70.0;
         let b_disc = btn(
             mtm,
             &crate::strings::get("gui.btn.open_disc"),
-            r(W / 2.0 - EB_GAP / 2.0 - EB_W, eb_y, EB_W, 30.0),
+            r(W / 2.0 - EB_W * 1.5 - EB_GAP, eb_y, EB_W, 30.0),
             c,
             // The SAME selector File ▸ Open disc uses — one code path.
             sel!(onOpenDisc:),
@@ -2660,12 +2676,21 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         let b = btn(
             mtm,
             &crate::strings::get("gui.btn.open_file"),
-            r(W / 2.0 + EB_GAP / 2.0, eb_y, EB_W, 30.0),
+            r(W / 2.0 - EB_W / 2.0, eb_y, EB_W, 30.0),
             c,
             sel!(onOpenFiles:),
         );
+        let b_folder = btn(
+            mtm,
+            &crate::strings::get_or("gui.btn.open_folder", "Open folder…"),
+            r(W / 2.0 + EB_W / 2.0 + EB_GAP, eb_y, EB_W, 30.0),
+            c,
+            // The SAME selector File ▸ Open Folder uses.
+            sel!(onOpenFolder:),
+        );
         page_empty.addSubview(&b_disc);
         page_empty.addSubview(&b);
+        page_empty.addSubview(&b_folder);
         *c.ivars().empty_open_disc.borrow_mut() = Some(b_disc.clone());
 
         let home_scroll = NSScrollView::initWithFrame(
@@ -2693,7 +2718,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
                 objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable,
             );
         }
-        for v in [&b_disc, &b] {
+        for v in [&b_disc, &b, &b_folder] {
             mask(
                 v,
                 objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin

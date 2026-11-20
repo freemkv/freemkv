@@ -108,6 +108,7 @@ fn the_menu_reaches_every_command_the_core_defines() {
     let reachable: Vec<Cmd> = MENU_CMD_IDS.iter().filter_map(|id| cmd_for(*id)).collect();
     for want in [
         Cmd::Open,
+        Cmd::OpenFolder,
         Cmd::Close,
         Cmd::SetOutput,
         Cmd::Run,

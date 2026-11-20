@@ -164,10 +164,12 @@ pub struct MainLayout {
     // empty page
     pub empty_head: Rect,
     pub empty_sub: Rect,
-    /// "Open disc" — the left half of the empty state's button pair.
+    /// "Open disc" — the left of the empty state's three buttons.
     pub btn_open_disc: Rect,
-    /// "Open file or ISO…" — the right half.
+    /// "Open file or ISO…" — the middle, on the centre line.
     pub btn_open: Rect,
+    /// "Open folder…" — the right.
+    pub btn_open_folder: Rect,
     pub home_list: Rect,
     pub home_open: Rect,
     pub home_prefer: Rect,
@@ -278,15 +280,16 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
     let cy = top_y + top_h / 2;
     let empty_head = Rect::new(pad, cy - s.px(50), cw - pad * 2, s.px(26));
     let empty_sub = Rect::new(pad, cy - s.px(22), cw - pad * 2, s.px(20));
-    // TWO buttons: the empty page offers "Open disc" as well as "Open file or
-    // ISO…" so its own headline's source is reachable without the menu bar. The
-    // pair straddles the centre with a fixed gap (result page's pattern), symmetric.
+    // THREE buttons: the empty page offers "Open disc" and "Open folder…" as well
+    // as "Open file or ISO…", so every source kind is reachable without the menu
+    // bar. The file button sits on the centre, the others a fixed gap either side.
     let open_w = s.px(180);
     let open_gap = s.px(16);
     let open_y = cy + s.px(16);
     let open_h = s.px(30);
-    let btn_open_disc = Rect::new(cw / 2 - open_gap / 2 - open_w, open_y, open_w, open_h);
-    let btn_open = Rect::new(cw / 2 + open_gap / 2, open_y, open_w, open_h);
+    let btn_open = Rect::new(cw / 2 - open_w / 2, open_y, open_w, open_h);
+    let btn_open_disc = Rect::new(btn_open.x - open_gap - open_w, open_y, open_w, open_h);
+    let btn_open_folder = Rect::new(btn_open.x + open_w + open_gap, open_y, open_w, open_h);
     let home_y = open_y + open_h + s.px(12);
     let home_list = Rect::new(cw / 2 - s.px(325), home_y, s.px(440), s.px(122));
     let home_open = Rect::new(cw / 2 + s.px(125), home_y, s.px(200), s.px(30));
@@ -413,6 +416,7 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
         empty_sub,
         btn_open_disc,
         btn_open,
+        btn_open_folder,
         home_list,
         home_open,
         home_prefer,
