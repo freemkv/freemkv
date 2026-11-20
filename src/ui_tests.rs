@@ -5222,12 +5222,19 @@ fn every_shell_menu_offers_open_folder_right_after_open() {
         })
         .count();
     assert_eq!(same, 1, "{accel:?} is bound twice");
+    // The Linux and Windows menu modules are not part of the macOS binary's crate.
+    #[cfg(not(target_os = "macos"))]
+    open_folder_reaches_linux_and_windows_menus(&layout);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_folder_reaches_linux_and_windows_menus(layout: &[crate::ui::MenuGroup]) {
     // Linux: a gio action in the hamburger, greyed mid-rip like Open.
     let ma = MenuAction::Cmd(Cmd::OpenFolder);
     assert_eq!(crate::linux_glue::action_name_for(&ma), Some("open-folder"));
     assert_eq!(crate::linux_glue::gating_cmd(&ma), Some(Cmd::OpenFolder));
     // Windows: a row of the File menu, with a bound key.
-    let win = crate::win_menu::win_menus(&layout, "Exit");
+    let win = crate::win_menu::win_menus(layout, "Exit");
     assert!(
         win[0].entries.iter().any(|e| matches!(
             e,
