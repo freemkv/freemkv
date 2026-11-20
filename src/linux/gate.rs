@@ -285,7 +285,8 @@ fn chooser_activation(shell: &Rc<Shell>, g: Rc<RefCell<Gate>>, done: Box<dyn FnO
                 "chooser-activation-single-selection",
                 active == 1
                     && checks[index].is_active()
-                    && row.subtitle() == crate::ui::format_label(expected),
+                    && row.subtitle().as_deref()
+                        == Some(crate::ui::format_label(expected).as_str()),
                 format!("{active} active ticks after repaint, expected {expected:?}"),
             );
             // Toggling the current option off must keep that option selected.
@@ -725,7 +726,7 @@ fn settings_checks(win: &adw::PreferencesWindow, page: &str, dir: &str, g: &mut 
         .filter_map(|w| w.downcast_ref::<adw::ActionRow>())
         .filter(|r| r.is_mapped() && r.has_css_class("freemkv-chooser"))
     {
-        let choice = row.subtitle().to_string();
+        let choice = row.subtitle().map(|s| s.to_string()).unwrap_or_default();
         let label = labels_under(row.upcast_ref())
             .into_iter()
             .find(|l| l.is_mapped() && l.text() == choice);
