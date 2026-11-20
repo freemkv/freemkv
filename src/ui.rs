@@ -4223,22 +4223,25 @@ impl App {
                 );
                 self.say(LogKind::Detail, &{
                     let n = sc.title_count.to_string();
-                    let args = [
-                        ("label", sc.label.as_str()),
-                        ("n", n.as_str()),
-                        ("keys", sc.key_summary.as_str()),
-                    ];
                     if sc.title_count == 1 {
                         crate::strings::fmt_or(
                             "gui.log.opened_one",
                             "{label} opened — {n} title, keys: {keys}",
-                            &args,
+                            &[
+                                ("label", sc.label.as_str()),
+                                ("n", n.as_str()),
+                                ("keys", sc.key_summary.as_str()),
+                            ],
                         )
                     } else {
                         crate::strings::fmt_or(
                             "gui.log.opened",
                             "{label} opened — {n} titles, keys: {keys}",
-                            &args,
+                            &[
+                                ("label", sc.label.as_str()),
+                                ("n", n.as_str()),
+                                ("keys", sc.key_summary.as_str()),
+                            ],
                         )
                     }
                 });

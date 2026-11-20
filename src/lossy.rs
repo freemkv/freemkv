@@ -17,18 +17,17 @@
 /// The "N streams could not be delivered" header, singular for one stream.
 pub fn undelivered_header(n: usize) -> String {
     let count = n.to_string();
-    let args = [("count", count.as_str())];
     if n == 1 {
         crate::strings::fmt_or(
             "mux.undelivered_header_one",
             "Note: {count} stream could not be delivered and was left out:",
-            &args,
+            &[("count", count.as_str())],
         )
     } else {
         crate::strings::fmt_or(
             "mux.undelivered_header",
             "Note: {count} streams could not be delivered and were left out:",
-            &args,
+            &[("count", count.as_str())],
         )
     }
 }
@@ -76,22 +75,25 @@ pub fn excluded_lines(dest: &str, title: &libfreemkv::DiscTitle) -> Vec<String> 
     let container = container_name(&url);
     let reasons: Vec<libfreemkv::SkipReason> = report.skipped.iter().map(|&(_, r)| r).collect();
     let count = report.skipped.len().to_string();
-    let args = [
-        ("count", count.as_str()),
-        ("container", container),
-        ("keep", keep_for(&reasons)),
-    ];
     let header = if report.skipped.len() == 1 {
         crate::strings::fmt_or(
             "mux.excluded_header_one",
             "Note: {count} track can't be stored in {container} and will be left out (use {keep}:// to keep it):",
-            &args,
+            &[
+                ("count", count.as_str()),
+                ("container", container),
+                ("keep", keep_for(&reasons)),
+            ],
         )
     } else {
         crate::strings::fmt_or(
             "mux.excluded_header",
             "Note: {count} tracks can't be stored in {container} and will be left out (use {keep}:// to keep them):",
-            &args,
+            &[
+                ("count", count.as_str()),
+                ("container", container),
+                ("keep", keep_for(&reasons)),
+            ],
         )
     };
     let mut lines = vec![header];
