@@ -40,9 +40,10 @@ pub(super) fn start(shell: &Rc<Shell>, dir: String) {
         let (me, dir) = (me.clone(), dir.clone());
         // Its free space is measured off this thread; the render below shows the answer.
         me.app_mut(|a| a.output_dir = crate::gui_gate::REVIEW_DEST.into());
+        // Repaint with that folder first, so the settle below covers the redraw.
+        me.render();
         // The disc page as it opens, log and all, before anything is moved for a check.
         glib::timeout_add_local_once(SETTLE, move || {
-            me.render();
             let _ = std::fs::create_dir_all(&dir);
             let g = Rc::new(RefCell::new(Gate::default()));
             disc_page(&me, &dir, &mut g.borrow_mut());

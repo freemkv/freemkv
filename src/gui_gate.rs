@@ -200,7 +200,7 @@ pub fn show_rip(app: &mut App, rip: Rip) {
             r"C:\Users\me\Videos\Movie_t1.mkv",
         )
     } else {
-        ("/media/iso/Movie.iso", "/home/me/Videos/Movie_t1.mkv")
+        ("/media/iso/Movie.iso", "/srv/videos/Movie_t1.mkv")
     };
     app.info = Some(InfoRows {
         source: source.into(),
@@ -253,7 +253,7 @@ pub fn notices(app: &mut App) {
     let dropped = if cfg!(windows) {
         r"C:\Users\me\Downloads\notes.txt"
     } else {
-        "/home/me/Downloads/notes.txt"
+        "/srv/downloads/notes.txt"
     };
     app.say(
         LogKind::Notice,
