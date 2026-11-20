@@ -1843,13 +1843,13 @@ pub fn bar_caption(pct: f64, elapsed_secs: u64, eta_secs: Option<u64>) -> String
 }
 
 /// The saving captions once Stop is pressed (stop design v5 §3.2 (A), ST-I2's strings):
-/// "Finishing …" when every title is already written; else "Stopping …".
+/// "Finishing…" when every title is already written; else "Stopping…".
 /// `None` while no Stop is pending.
 pub fn stop_caption(stopping: bool, titles_done: usize, run_titles: usize) -> Option<String> {
     match (stopping, titles_done >= run_titles.max(1)) {
         (false, _) => None,
-        (true, true) => Some(crate::strings::get_or("stop.finishing", "Finishing …")),
-        (true, false) => Some(crate::strings::get_or("stop.stopping", "Stopping …")),
+        (true, true) => Some(crate::strings::get_or("stop.finishing", "Finishing…")),
+        (true, false) => Some(crate::strings::get_or("stop.stopping", "Stopping…")),
     }
 }
 
@@ -3487,7 +3487,7 @@ impl App {
         }
         self.say(
             LogKind::Result,
-            &get_or("gui.log.fetching_keydb", "Fetching keydb …"),
+            &get_or("gui.log.fetching_keydb", "Fetching keydb…"),
         );
         let fetch = self.keydb_fn;
         let spawned = spawn_worker("keydb-update", move || {
@@ -3606,7 +3606,7 @@ impl App {
             probe.token.halt.cancel();
             self.say(
                 LogKind::Detail,
-                &crate::strings::get_or("stop.waiting_for_drive", "Waiting for the drive …"),
+                &crate::strings::get_or("stop.waiting_for_drive", "Waiting for the drive…"),
             );
         }
         self.pending = Some(PendingOpen {

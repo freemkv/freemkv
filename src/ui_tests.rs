@@ -2933,7 +2933,7 @@ fn whole_disc_progress_is_one_operation_despite_selected_episode_count() {
                     assert_eq!(v.bar_current, 40.0, "Stop must not invent completion");
                     assert_eq!(
                         v.saving_current,
-                        crate::strings::get_or("stop.stopping", "Stopping …")
+                        crate::strings::get_or("stop.stopping", "Stopping…")
                     );
                 }
             }

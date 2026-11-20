@@ -130,7 +130,7 @@ fn watch(flag: &'static AtomicBool, say: bool) -> libfreemkv::Halt {
             if flag.load(Ordering::Acquire) {
                 watched.cancel();
                 if say {
-                    eprintln!("{}", crate::strings::get_or("stop.stopping", "Stopping …"));
+                    eprintln!("{}", crate::strings::get_or("stop.stopping", "Stopping…"));
                 }
                 return;
             }
