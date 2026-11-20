@@ -151,6 +151,16 @@ objc2-user-notifications = { optional = true, version = "=0.3", default-features
 ] }
 block2 = { version = "=0.6", optional = true }
 
+# Every shipped binary (CLI, desktop app, server image) builds with this one profile;
+# dependency manifests' [profile] sections are ignored, so the engine's is inert here.
+# Thin LTO gives the cross-crate inlining the AES and demux loops need at a fraction of
+# fat LTO's link time, which CI pays on every release-profile build and test run.
+# panic stays "unwind": the server, the GUI and the key path recover with catch_unwind.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+
 [dev-dependencies]
 # `test_util` fixtures (`aacs_state`, …) for this crate's tests (keys-upfront
 # KU-P1). CI resolves it through the sibling path patch.

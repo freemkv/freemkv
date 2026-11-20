@@ -25,10 +25,7 @@ FROM rust:1.98.1-alpine AS build-native
 RUN apk add --no-cache musl-dev gcc make cmake git
 WORKDIR /build
 COPY . .
-# The daemon's release profile (thin LTO, one codegen unit), set here rather
-# than in Cargo.toml so the CLI and app release builds are unchanged.
-ENV CARGO_PROFILE_RELEASE_LTO=thin \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+# The release profile (thin LTO, one codegen unit) is Cargo.toml's [profile.release].
 # SIBLING_REF=dev builds against the sibling crates' branch tips (see build-server.sh).
 ARG SIBLING_REF=
 # Version label shown by the server (e.g. 1.7.7-dev.<sha>); empty = the crate version.
@@ -57,8 +54,6 @@ COPY . .
 RUN tc=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1) \
  && rustup toolchain install "$tc" --profile minimal --target armv7-unknown-linux-musleabihf \
  && rustup default "$tc"
-ENV CARGO_PROFILE_RELEASE_LTO=thin \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 ARG SIBLING_REF=
 ARG AUTORIP_BUILD_LABEL=
 RUN sh docker/build-server.sh armv7-unknown-linux-musleabihf
