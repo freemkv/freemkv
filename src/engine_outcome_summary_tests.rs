@@ -3,7 +3,7 @@ use std::io::ErrorKind;
 
 /// A hard failure is never a success, even when earlier titles wrote.
 /// This is the silent-success regression: `written > 0` used to take the
-/// "N title(s) written" arm and lose the failure entirely.
+/// "N titles written" arm and lose the failure entirely.
 #[test]
 fn failure_after_good_titles_is_an_error_that_keeps_the_count() {
     let out = fe::RipOutcome::Failed {
@@ -14,7 +14,7 @@ fn failure_after_good_titles_is_an_error_that_keeps_the_count() {
     };
     let r = summarize_outcome(&out, 2, 0, 3, "/out");
     let msg = r.expect_err("a rip stopped by a full disk must not report success");
-    assert!(msg.contains("2 of 3 title(s) written"), "{msg}");
+    assert!(msg.contains("2 of 3 titles written"), "{msg}");
     assert!(msg.contains("title 3 failed"), "{msg}");
     assert!(msg.contains("full"), "{msg}");
 }
@@ -72,7 +72,7 @@ fn success_and_cancel_are_unchanged() {
     let ok = fe::RipOutcome::Ok { titles_written: 2 };
     assert_eq!(
         summarize_outcome(&ok, 2, 0, 2, "/out").unwrap(),
-        "2 title(s) written to /out"
+        "2 titles written to /out"
     );
     assert_eq!(
         summarize_outcome(&ok, 0, 0, 2, "/out").unwrap(),
@@ -81,29 +81,29 @@ fn success_and_cancel_are_unchanged() {
     // Never "Nothing was written" while a partial file sits in the folder.
     let cancelled = summarize_outcome(&ok, 0, 1, 2, "/out").unwrap();
     assert!(cancelled.starts_with("Cancelled"), "{cancelled}");
-    assert!(cancelled.contains("1 partial file(s) kept"), "{cancelled}");
+    assert!(cancelled.contains("1 partial file kept"), "{cancelled}");
 
     // A title cancelled after earlier ones wrote still names its partial file.
     let last_cancelled = summarize_outcome(&ok, 1, 1, 2, "/out").unwrap();
     assert!(
-        last_cancelled.starts_with("1 title(s) written"),
+        last_cancelled.starts_with("1 title written"),
         "{last_cancelled}"
     );
     assert!(
-        last_cancelled.contains("1 partial file(s) kept in /out"),
+        last_cancelled.contains("1 partial file kept in /out"),
         "{last_cancelled}"
     );
 
     let halted = summarize_outcome(&fe::RipOutcome::Halted, 1, 0, 3, "/out").unwrap();
-    assert_eq!(halted, "Cancelled — 1 of 3 title(s) completed");
+    assert_eq!(halted, "Cancelled — 1 of 3 titles completed");
 }
 
 /// A halt that left a partial file keeps both facts.
 #[test]
 fn halt_with_partial_keeps_both() {
     let msg = summarize_outcome(&fe::RipOutcome::Halted, 1, 1, 3, "/out").unwrap();
-    assert!(msg.contains("1 of 3 title(s) completed"), "{msg}");
-    assert!(msg.contains("1 partial file(s) kept in /out"), "{msg}");
+    assert!(msg.contains("1 of 3 titles completed"), "{msg}");
+    assert!(msg.contains("1 partial file kept in /out"), "{msg}");
 }
 
 // ── round-2 concurrency audit: cancel vs. a completed worker ────────────
@@ -370,7 +370,7 @@ fn a_lossy_extraction_reports_the_unreadable_span_in_mib() {
     let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
     assert_eq!(
         msg,
-        "Decrypted file tree written to /out/Disc — 3 file(s), 3.0 MiB unreadable"
+        "Decrypted file tree written to /out/Disc — 3 files, 3.0 MiB unreadable"
     );
 }
 
@@ -378,7 +378,7 @@ fn a_lossy_extraction_reports_the_unreadable_span_in_mib() {
 fn a_completed_extraction_reports_written() {
     let res = extract_result(false, 3, 0);
     let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
-    assert_eq!(msg, "Decrypted file tree written to /out/Disc — 3 file(s)");
+    assert_eq!(msg, "Decrypted file tree written to /out/Disc — 3 files");
 }
 
 #[test]
@@ -458,11 +458,26 @@ fn a_kept_key_file_is_named_in_every_whole_disc_summary() {
     });
     let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
     assert!(
-        msg.starts_with("Decrypted file tree written to /out/Disc — 3 file(s)\n"),
+        msg.starts_with("Decrypted file tree written to /out/Disc — 3 files\n"),
         "{msg}"
     );
     assert!(
         msg.contains("keeps its AACS folder") && !msg.contains("SCAA"),
         "{msg}"
     );
+}
+
+/// One of a thing reads as a singular, more than one as a plural.
+#[test]
+fn counts_read_as_singular_and_plural() {
+    let ok = fe::RipOutcome::Ok { titles_written: 1 };
+    assert_eq!(
+        summarize_outcome(&ok, 1, 0, 1, "/out").unwrap(),
+        "1 title written to /out"
+    );
+    let cancelled = summarize_outcome(&fe::RipOutcome::Halted, 0, 2, 3, "/out").unwrap();
+    assert!(cancelled.contains("2 partial files kept"), "{cancelled}");
+    let res = extract_result(false, 1, 0);
+    let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
+    assert_eq!(msg, "Decrypted file tree written to /out/Disc — 1 file");
 }

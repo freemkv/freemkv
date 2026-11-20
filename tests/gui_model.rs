@@ -1430,7 +1430,7 @@ fn dismissing_the_result_returns_to_the_titles_when_a_disc_is_still_open() {
     let mut app = App::new();
     app.tree = tree(&two_title_disc(), "All titles", 0.0);
     app.source = "/media/Disc.iso".into();
-    app.result_summary = "2 title(s) written".into();
+    app.result_summary = "2 titles written".into();
     app.page = Page::Result;
     app.dismiss_result();
     assert_eq!(app.page, Page::Titles);
@@ -1439,7 +1439,7 @@ fn dismissing_the_result_returns_to_the_titles_when_a_disc_is_still_open() {
 #[test]
 fn dismissing_the_result_returns_to_the_empty_page_when_nothing_is_open() {
     let mut app = App::new();
-    app.result_summary = "2 title(s) written".into();
+    app.result_summary = "2 titles written".into();
     app.page = Page::Result;
     app.dismiss_result();
     assert_eq!(app.page, Page::Empty);
@@ -1628,7 +1628,7 @@ fn the_result_heading_comes_from_the_verdict_not_the_summary_text() {
         app.view().result_heading
     };
 
-    let finished = heading(RunOutcome::Completed, "2 title(s) written to /out");
+    let finished = heading(RunOutcome::Completed, "2 titles written to /out");
     let failed = heading(RunOutcome::Failed, "The disc has no decryption key");
     let cancelled = heading(RunOutcome::Cancelled, "Cancelled — 1 of 3 completed");
 
@@ -1641,7 +1641,7 @@ fn the_result_heading_comes_from_the_verdict_not_the_summary_text() {
     for misleading in [
         "Recovery aborted — too much unreadable data to mux a complete title",
         "the mux did not fail cleanly",
-        "2 title(s) written to /out",
+        "2 titles written to /out",
         "finished",
         "",
     ] {

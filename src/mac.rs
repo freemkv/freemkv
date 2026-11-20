@@ -3540,7 +3540,7 @@ pub fn run() {
     }
     if cfg!(debug_assertions) && std::env::var("FMKV_PAGE").as_deref() == Ok("result") {
         c.app_mut(|a| a.page = crate::ui::Page::Result);
-        c.app_mut(|a| a.result_summary = "2 title(s) written".into());
+        c.app_mut(|a| a.result_summary = "2 titles written".into());
     }
     if let Ok(which) = dev_env("FMKV_WIN") {
         let w = match which.as_str() {
@@ -4871,7 +4871,7 @@ impl Controller {
             let text = self.drive_log();
             check(
                 "log-names-the-disc",
-                text.contains("opened") && text.contains("title(s)"),
+                text.contains("opened") && text.contains("title"),
                 &format!("log first line: {:?}", text.lines().next().unwrap_or("")),
             );
             check(
@@ -5316,7 +5316,7 @@ impl Controller {
         check("progress-page", view().page == Page::Progress, "shown");
         snap("05-progress");
         self.app_mut(|a| {
-            a.result_summary = "2 title(s) written".into();
+            a.result_summary = "2 titles written".into();
             a.page = Page::Result;
         });
         check("result-page", view().page == Page::Result, "shown");

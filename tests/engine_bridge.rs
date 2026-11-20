@@ -181,7 +181,7 @@ fn stream_scan_reports_a_duration() {
     };
     let sc = engine::scan_stream(&m).unwrap();
     let title = sc.rows.iter().find(|r| r.depth == 1).unwrap();
-    assert!(title.desc.contains("track(s)"), "got {}", title.desc);
+    assert!(title.desc.contains("track"), "got {}", title.desc);
     assert!(
         title.desc.contains(':'),
         "duration missing in {}",

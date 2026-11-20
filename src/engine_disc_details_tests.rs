@@ -181,7 +181,7 @@ fn layer_lines_name_the_source_and_the_break() {
 fn disc_details_carry_the_layer_source_and_break() {
     let lines = disc_details(&dvd9(Some(2_084_960)), "x");
     assert!(
-        lines.contains(&"Capacity: 0.0 GB, 2 layer(s) (drive-reported)".to_string()),
+        lines.contains(&"Capacity: 0.0 GB, 2 layers (drive-reported)".to_string()),
         "{lines:?}"
     );
     assert!(

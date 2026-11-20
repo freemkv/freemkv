@@ -4221,17 +4221,27 @@ impl App {
                         &[("version", env!("CARGO_PKG_VERSION"))],
                     ),
                 );
-                self.say(
-                    LogKind::Detail,
-                    &crate::strings::fmt(
-                        "gui.log.opened",
-                        &[
-                            ("label", &sc.label),
-                            ("n", &sc.title_count.to_string()),
-                            ("keys", &sc.key_summary),
-                        ],
-                    ),
-                );
+                self.say(LogKind::Detail, &{
+                    let n = sc.title_count.to_string();
+                    let args = [
+                        ("label", sc.label.as_str()),
+                        ("n", n.as_str()),
+                        ("keys", sc.key_summary.as_str()),
+                    ];
+                    if sc.title_count == 1 {
+                        crate::strings::fmt_or(
+                            "gui.log.opened_one",
+                            "{label} opened — {n} title, keys: {keys}",
+                            &args,
+                        )
+                    } else {
+                        crate::strings::fmt_or(
+                            "gui.log.opened",
+                            "{label} opened — {n} titles, keys: {keys}",
+                            &args,
+                        )
+                    }
+                });
                 // The `info -v` detail block (format, capacity, region, MKB
                 // version, disc hash, VID, key state, titles) — so the desktop
                 // app surfaces the same disc facts the CLI prints.
@@ -4778,10 +4788,22 @@ impl App {
         // once, when the count first rises, rather than burying it.
         if p.sectors_bad > self.reported_bad {
             self.reported_bad = p.sectors_bad;
-            self.say(
-                LogKind::Notice,
-                &crate::strings::fmt("gui.log.unreadable", &[("n", &p.sectors_bad.to_string())]),
-            );
+            self.say(LogKind::Notice, &{
+                let n = p.sectors_bad.to_string();
+                if p.sectors_bad == 1 {
+                    crate::strings::fmt_or(
+                        "gui.log.unreadable_one",
+                        "{n} unreadable sector so far",
+                        &[("n", n.as_str())],
+                    )
+                } else {
+                    crate::strings::fmt_or(
+                        "gui.log.unreadable",
+                        "{n} unreadable sectors so far",
+                        &[("n", n.as_str())],
+                    )
+                }
+            });
         }
         // `Acquire`, pairing with the worker's `Release` store in
         // `SignalDone::drop`: seeing `true` guarantees the `summary`/`outcome`

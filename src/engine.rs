@@ -1,6 +1,7 @@
 //! Bridge to `freemkv-engine`. Everything the UI knows about discs, keys and
 //! rips comes through here — no engine types leak into the AppKit shell.
 
+use crate::strings::plural;
 use freemkv_engine as fe;
 use libfreemkv::whole_disc::DecryptedNames;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -491,7 +492,11 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         format: String::new(),
         notes: chapters_note(t.chapters.len()),
         // The running time is the row's Length cell, not part of this text.
-        desc: format!("{} track(s)", t.streams.len()),
+        desc: format!(
+            "{} {}",
+            t.streams.len(),
+            plural(t.streams.len(), "track", "tracks")
+        ),
         depth: 1,
         checkable: true,
         title: 0,
@@ -702,8 +707,9 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str) -> Vec<String> {
     if disc.capacity_bytes > 0 {
         let gb = disc.capacity_bytes as f64 / 1_000_000_000.0;
         d.push(format!(
-            "Capacity: {gb:.1} GB, {} layer(s) ({})",
+            "Capacity: {gb:.1} GB, {} {} ({})",
             disc.layers,
+            plural(usize::from(disc.layers), "layer", "layers"),
             layer_source(disc)
         ));
     }
@@ -2120,7 +2126,10 @@ pub fn summarize_outcome(
     // Never report "Nothing was written" while a partial file is on disk.
     let with_partial = |lead: String| {
         if partial > 0 {
-            format!("{lead} — {partial} partial file(s) kept in {dest_dir}")
+            format!(
+                "{lead} — {partial} partial {} kept in {dest_dir}",
+                plural(partial, "file", "files")
+            )
         } else {
             lead
         }
@@ -2129,14 +2138,18 @@ pub fn summarize_outcome(
     // what survived as well as what stopped it.
     let so_far = || {
         if written > 0 {
-            format!("{written} of {total} title(s) written to {dest_dir}, then ")
+            format!(
+                "{written} of {total} {} written to {dest_dir}, then ",
+                plural(total, "title", "titles")
+            )
         } else {
             String::new()
         }
     };
     match outcome {
         fe::RipOutcome::Halted => Ok(with_partial(format!(
-            "Cancelled — {written} of {total} title(s) completed"
+            "Cancelled — {written} of {total} {} completed",
+            plural(total, "title", "titles")
         ))),
         fe::RipOutcome::NoKey => Err(with_partial(format!(
             "{}the disc has no decryption key — every remaining title would \
@@ -2159,7 +2172,8 @@ pub fn summarize_outcome(
         }
         fe::RipOutcome::Ok { .. } if written == 0 => Ok("Nothing was written".to_string()),
         fe::RipOutcome::Ok { .. } => Ok(with_partial(format!(
-            "{written} title(s) written to {dest_dir}"
+            "{written} {} written to {dest_dir}",
+            plural(written, "title", "titles")
         ))),
     }
 }
@@ -2186,11 +2200,7 @@ pub fn summarize_stream(outcome: &libfreemkv::MuxOutcome, target: &str, dest_dir
             // Container-agnostic wording (like the CLI's `lossy_lines`): an
             // undelivered stream isn't mp4-specific, so `mp4.excluded_header`'s
             // "in an MP4" phrasing is wrong for mkv/m2ts. English until catalog.
-            crate::strings::fmt_or(
-                "mux.undelivered_header",
-                "Note: {count} stream(s) could not be delivered and were left out:",
-                &[("count", &n.to_string())]
-            )
+            crate::lossy::undelivered_header(n)
         )
     } else {
         // Bytes lost inside the tracks: no stream is missing, so the
@@ -2297,21 +2307,24 @@ fn extract_line(res: &libfreemkv::ExtractResult, dest: &std::path::Path) -> Stri
     let n = res.files.len();
     if res.halted {
         format!(
-            "Cancelled — {n} file(s) extracted to {} before stopping",
+            "Cancelled — {n} {} extracted to {} before stopping",
+            plural(n, "file", "files"),
             dest.display()
         )
     } else if res.bytes_unreadable > 0 {
         format!(
-            "Decrypted file tree written to {} — {} file(s), {:.1} MiB unreadable",
+            "Decrypted file tree written to {} — {} {}, {:.1} MiB unreadable",
             dest.display(),
             n,
+            plural(n, "file", "files"),
             res.bytes_unreadable as f64 / 1_048_576.0
         )
     } else {
         format!(
-            "Decrypted file tree written to {} — {} file(s)",
+            "Decrypted file tree written to {} — {} {}",
             dest.display(),
-            n
+            n,
+            plural(n, "file", "files")
         )
     }
 }
@@ -3564,10 +3577,11 @@ fn verify_title_identity(
             found.describe()
         )),
         None => Err(format!(
-            "Title {} ({}) is no longer on the disc — the rescan lists only {} title(s).",
+            "Title {} ({}) is no longer on the disc — the rescan lists only {} {}.",
             idx + 1,
             expected.describe(),
-            scanned.len()
+            scanned.len(),
+            plural(scanned.len(), "title", "titles")
         )),
     }
 }

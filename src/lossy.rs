@@ -14,17 +14,32 @@
 /// not a failure. The dropped-bytes line reuses `dir.file_lossy`; the
 /// undelivered-streams header uses a container-agnostic `mux.undelivered_header`
 /// (English fallback until the catalog ships it), since loss isn't mp4-specific.
+/// The "N streams could not be delivered" header, singular for one stream.
+pub fn undelivered_header(n: usize) -> String {
+    let count = n.to_string();
+    let args = [("count", count.as_str())];
+    if n == 1 {
+        crate::strings::fmt_or(
+            "mux.undelivered_header_one",
+            "Note: {count} stream could not be delivered and was left out:",
+            &args,
+        )
+    } else {
+        crate::strings::fmt_or(
+            "mux.undelivered_header",
+            "Note: {count} streams could not be delivered and were left out:",
+            &args,
+        )
+    }
+}
+
 pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String> {
     let mut lines = Vec::new();
     if !outcome.undelivered_streams.is_empty() {
         // Container-agnostic: `undelivered_streams` can come from ANY sink, so
         // the MP4-only excluded header's "in an MP4" phrasing is wrong for non-mp4. Use
         // a generic header (English until the catalog), twin of `summarize_stream`.
-        lines.push(crate::strings::fmt_or(
-            "mux.undelivered_header",
-            "Note: {count} stream(s) could not be delivered and were left out:",
-            &[("count", &outcome.undelivered_streams.len().to_string())],
-        ));
+        lines.push(undelivered_header(outcome.undelivered_streams.len()));
         lines.extend(
             outcome
                 .undelivered_streams
@@ -60,14 +75,26 @@ pub fn excluded_lines(dest: &str, title: &libfreemkv::DiscTitle) -> Vec<String> 
     }
     let container = container_name(&url);
     let reasons: Vec<libfreemkv::SkipReason> = report.skipped.iter().map(|&(_, r)| r).collect();
-    let mut lines = vec![crate::strings::fmt(
-        "mux.excluded_header",
-        &[
-            ("count", &report.skipped.len().to_string()),
-            ("container", container),
-            ("keep", keep_for(&reasons)),
-        ],
-    )];
+    let count = report.skipped.len().to_string();
+    let args = [
+        ("count", count.as_str()),
+        ("container", container),
+        ("keep", keep_for(&reasons)),
+    ];
+    let header = if report.skipped.len() == 1 {
+        crate::strings::fmt_or(
+            "mux.excluded_header_one",
+            "Note: {count} track can't be stored in {container} and will be left out (use {keep}:// to keep it):",
+            &args,
+        )
+    } else {
+        crate::strings::fmt_or(
+            "mux.excluded_header",
+            "Note: {count} tracks can't be stored in {container} and will be left out (use {keep}:// to keep them):",
+            &args,
+        )
+    };
+    let mut lines = vec![header];
     for (idx, reason) in &report.skipped {
         lines.push(format!(
             "    - {} {}: {}",

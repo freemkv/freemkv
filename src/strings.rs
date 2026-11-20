@@ -30,6 +30,13 @@ pub fn fmt_or(key: &str, english: &str, args: &[(&str, &str)]) -> String {
     s
 }
 
+/// `one` when `n` is 1, else `many`: the noun after a count, so a message reads
+/// "1 title" and "2 titles" rather than "title(s)".
+#[allow(dead_code)]
+pub fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
+}
+
 /// Localized sentence for an engine selection-review reason. Exhaustive over the engine's
 /// enum, so a new reason fails to compile until it has text.
 // The GUI and server render reviews; the CLI binary compiles this module but has none to show.

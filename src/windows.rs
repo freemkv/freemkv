@@ -4935,7 +4935,7 @@ impl Shell {
         let text = self.drive_log();
         check(
             "log-names-the-disc",
-            text.contains("opened") && text.contains("title(s)"),
+            text.contains("opened") && text.contains("title"),
             &format!("log first line: {:?}", text.lines().next().unwrap_or("")),
         );
         check(
@@ -5431,7 +5431,7 @@ impl Shell {
                 }
                 "result" => {
                     self.app_mut(|a| {
-                        a.result_summary = "2 title(s) written".into();
+                        a.result_summary = "2 titles written".into();
                         a.page = Page::Result;
                     });
                 }

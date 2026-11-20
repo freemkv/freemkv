@@ -229,7 +229,7 @@ pub fn end_rip(app: &mut App, page: Page) {
 /// kind of English line the engine writes there.
 pub fn show_result(app: &mut App, outcome: RunOutcome) {
     app.result_summary = match outcome {
-        RunOutcome::Completed => "2 title(s) written",
+        RunOutcome::Completed => "2 titles written",
         RunOutcome::Cancelled => "Cancelled after 1 of 2 titles; the finished title was kept",
         RunOutcome::Failed => "No key for this disc: title 1 could not be decrypted",
     }
