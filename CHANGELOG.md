@@ -7,6 +7,7 @@
 - Linux: title-tree branch lines are now centred on the expand/collapse arrows (#97). (app only: Linux GTK interface)
 - Linux: restore the native application menu (File/Edit/View/Help submenus) from 1.8.9; dropdown changes from #86 are unchanged (#95). (app only: Linux GTK interface)
 - Multi-pass rips of several titles show the title being read on the top progress bar, which reaches 100% and restarts for each title, instead of one bar for the whole read. The bottom bar covers the whole job and counts the disc read as 85% of it, so it stands near a third once the first of three episodes is read. The caption names the phase and the title: "Reading title 2 of 3", then "Writing MKV 1 of 3" (#103). (app only: all desktop interfaces)
+- The Titles mode picked in the main window is remembered across restarts as the default selection, like the audio and subtitle picks; the Settings switch now reads "Remember title, audio and subtitle choices" (#99). (app only: all desktop interfaces)
 - The start screen notices a disc inserted or removed after launch: each drive's status and the heading update within a couple of seconds, without a restart (#101). (app only: all desktop interfaces)
 - The "freemkv X.Y.Z — ready" line shows in the log again after launch; since 1.8.6 the Linux app no longer displayed it (#100). (app only: all desktop interfaces)
 

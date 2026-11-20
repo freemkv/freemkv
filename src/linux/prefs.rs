@@ -282,7 +282,7 @@ pub(super) fn show(shell: &Rc<Shell>, st: &crate::settings::Settings, page_name:
         "persist_stream_preferences",
         &crate::strings::get_or(
             "gui.set.persist_stream_preferences",
-            "Remember audio and subtitle choices",
+            "Remember title, audio and subtitle choices",
         ),
     );
     window.add(&page(

@@ -213,6 +213,17 @@ pub fn automatic_titles(
         .unwrap_or_default()
 }
 
+// The Settings default selection a main-window title mode is remembered as (#99), or `None`
+// to leave the saved one as it is. A mode Settings offers is remembered as itself. The
+// main-window-only "No titles" is not: it is a one-off clearing of the ticks, not a default
+// to open every disc with.
+fn saved_selection(mode: &str) -> Option<&'static str> {
+    enum_options("selection")
+        .into_iter()
+        .map(|(canon, _)| canon)
+        .find(|canon| *canon == mode)
+}
+
 // The title mode, language preferences and minimum title length an opened disc starts with.
 // Episodes is a per-disc choice offered when a roster exists, never inherited.
 fn open_picks(settings: &crate::settings::Settings) -> (String, LangPrefs, f64) {
@@ -3792,7 +3803,11 @@ impl App {
     /// The selection bar's title choice: one of [`PICK_TITLES`]' modes.
     pub fn pick_titles(&mut self, mode: &str) -> Vec<Effect> {
         self.pick_mode = mode.to_string();
-        self.repick()
+        // #99: remembered like the language picks, as Settings' default selection.
+        match saved_selection(mode) {
+            Some(saved) => self.persist_picks(|s, _| s.selection = saved.to_string()),
+            None => self.repick(),
+        }
     }
 
     /// Toggle one audio language in the selection bar; `None` is "All" (no narrowing).
@@ -3900,9 +3915,10 @@ impl App {
         })
     }
 
-    // Re-tick for a bar pick; with "Remember audio and subtitle choices" on, also record it
-    // in Settings and save (off, it stays in `pick_prefs`, out of any later save). Title
-    // mode is never remembered: it is disc-driven.
+    // Re-tick for a bar pick; with "Remember title, audio and subtitle choices" on, also
+    // record it in Settings and save (off, it stays in `pick_prefs`, out of any later save).
+    // The title mode is recorded the same way, as Settings' default selection (see
+    // `saved_selection`).
     fn persist_picks(
         &mut self,
         record: impl FnOnce(&mut crate::settings::Settings, &LangPrefs),
@@ -3931,6 +3947,10 @@ impl App {
             || edited.forced_sub_langs != before.forced_sub_langs;
         if edited.audio_langs == before.audio_langs {
             edited.audio_langs = cur.audio_langs.clone();
+        }
+        // A main-window title mode remembered meanwhile (#99).
+        if edited.selection == before.selection {
+            edited.selection = cur.selection.clone();
         }
         // The ready screen's "Use at startup" may also have changed these meanwhile.
         if edited.startup_mode == before.startup_mode {

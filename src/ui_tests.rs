@@ -3178,6 +3178,42 @@ fn settings_commit_takes_picks_the_form_did_change() {
     assert_eq!(merged.audio_langs, "fra");
 }
 
+// #99: the bar's title mode is remembered across a restart the way its language picks are,
+// as Settings' default selection. The main-window-only modes leave the saved one alone.
+#[test]
+fn the_title_mode_is_remembered_as_the_default_selection() {
+    let mut app = picking(pick_disc());
+    let form = app.settings.clone();
+    app.pick_titles("All titles");
+    assert_eq!(app.settings.selection, "All titles");
+    app.pick_titles("Main film only");
+    assert_eq!(app.settings.selection, "Main film only");
+    app.pick_titles("Longest title");
+    assert_eq!(app.settings.selection, "Longest title");
+    // "No titles" is a one-off clearing of the ticks, never a default to open with.
+    app.pick_titles("No titles");
+    assert_eq!(app.pick_mode, "No titles");
+    assert!(app.tree.ticked_titles().is_empty());
+    assert_eq!(app.settings.selection, "Longest title");
+    // A Settings form opened before the picks does not undo them.
+    let merged = app.commit_settings(&form, form.clone());
+    assert_eq!(merged.selection, "Longest title");
+
+    // After a restart the next disc opens in the remembered mode.
+    let mut restarted = App::new();
+    restarted.settings = app.settings.clone();
+    restarted.apply_scan("/b.iso", Ok(pick_disc()), true);
+    assert_eq!(restarted.view().pick.unwrap().title, "Longest title");
+
+    // With remembering off, the mode stays out of Settings, as the languages do.
+    let mut off = picking(pick_disc());
+    off.settings.persist_stream_preferences = false;
+    let saved = off.settings.selection.clone();
+    off.pick_titles("All titles");
+    assert_eq!(off.pick_mode, "All titles");
+    assert_eq!(off.settings.selection, saved);
+}
+
 // The Settings form's presentation language is checked on commit: a tag that is not a
 // language keeps the previous value and says why, in every shell.
 #[test]

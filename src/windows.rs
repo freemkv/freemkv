@@ -3615,7 +3615,7 @@ impl Prefs {
             "persist_stream_preferences",
             r.check(&crate::strings::get_or(
                 "gui.set.persist_stream_preferences",
-                "Remember audio and subtitle choices",
+                "Remember title, audio and subtitle choices",
             )),
         ));
         r.note(&g("gui.set.lang_prefs_note"));

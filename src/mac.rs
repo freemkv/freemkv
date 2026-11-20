@@ -4255,7 +4255,7 @@ fn build_prefs(
         "persist_stream_preferences",
         &crate::strings::get_or(
             "gui.set.persist_stream_preferences",
-            "Remember audio and subtitle choices",
+            "Remember title, audio and subtitle choices",
         ),
         true,
     );
