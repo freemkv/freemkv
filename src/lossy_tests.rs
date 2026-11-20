@@ -16,7 +16,7 @@ fn video(codec: libfreemkv::Codec) -> libfreemkv::Stream {
         color_space: libfreemkv::ColorSpace::Bt709,
         display_aspect: None,
         secondary: false,
-        label: String::new(),
+        label: Default::default(),
         measured_cicp: None,
     })
 }
@@ -29,7 +29,7 @@ fn audio(pid: u16, codec: libfreemkv::Codec) -> libfreemkv::Stream {
         sample_rate: libfreemkv::SampleRate::S48,
         secondary: false,
         purpose: libfreemkv::LabelPurpose::Normal,
-        label: String::new(),
+        label: Default::default(),
     })
 }
 

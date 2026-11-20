@@ -296,11 +296,11 @@ fn preferred_pids(
                         pid,
                         codec: libfreemkv::Codec::Unknown(0),
                         channels: libfreemkv::AudioChannels::Unknown,
-                        language: r.lang.clone(),
+                        language: r.lang.as_str().into(),
                         sample_rate: libfreemkv::SampleRate::Unknown,
                         secondary: false,
                         purpose: libfreemkv::LabelPurpose::Normal,
-                        label: String::new(),
+                        label: Default::default(),
                     }));
             }
             // Everything else that carries a PID is a subtitle: the scan gives
@@ -317,7 +317,7 @@ fn preferred_pids(
                     .push(libfreemkv::Stream::Subtitle(libfreemkv::SubtitleStream {
                         pid,
                         codec: libfreemkv::Codec::Unknown(0),
-                        language: r.lang.clone(),
+                        language: r.lang.as_str().into(),
                         forced: r.forced,
                         qualifier: libfreemkv::LabelQualifier::None,
                         codec_data: None,

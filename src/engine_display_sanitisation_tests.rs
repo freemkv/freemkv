@@ -94,12 +94,12 @@ fn benign_disc() -> Disc {
         t.playlist = BENIGN.to_string();
         for st in &mut t.streams {
             match st {
-                Stream::Video(v) => v.label = BENIGN.to_string(),
+                Stream::Video(v) => v.label = BENIGN.into(),
                 Stream::Audio(a) => {
-                    a.label = BENIGN.to_string();
-                    a.language = BENIGN.to_string();
+                    a.label = BENIGN.into();
+                    a.language = BENIGN.into();
                 }
-                Stream::Subtitle(s) => s.language = BENIGN.to_string(),
+                Stream::Subtitle(s) => s.language = BENIGN.into(),
             }
         }
         for c in &mut t.chapters {

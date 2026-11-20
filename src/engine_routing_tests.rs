@@ -867,7 +867,7 @@ fn the_gui_note_comes_from_the_output_opening() {
         sample_rate: libfreemkv::SampleRate::S48,
         secondary: false,
         purpose: libfreemkv::LabelPurpose::Normal,
-        label: String::new(),
+        label: Default::default(),
     });
     let title = libfreemkv::DiscTitle {
         streams: vec![truehd],

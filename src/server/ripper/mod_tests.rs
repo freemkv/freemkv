@@ -62,7 +62,7 @@ fn video_2d() -> libfreemkv::Stream {
         color_space: libfreemkv::disc::ColorSpace::Bt709,
         display_aspect: None,
         secondary: false,
-        label: String::new(),
+        label: Default::default(),
         measured_cicp: None,
     })
 }

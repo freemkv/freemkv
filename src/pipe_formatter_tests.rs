@@ -18,7 +18,7 @@ fn video() -> libfreemkv::Stream {
         color_space: libfreemkv::ColorSpace::Bt2020,
         display_aspect: None,
         secondary: false,
-        label: String::new(),
+        label: Default::default(),
         measured_cicp: None,
     })
 }
@@ -32,7 +32,7 @@ fn audio(codec: libfreemkv::Codec) -> libfreemkv::Stream {
         sample_rate: libfreemkv::SampleRate::S48,
         secondary: false,
         purpose: libfreemkv::LabelPurpose::Normal,
-        label: String::new(),
+        label: Default::default(),
     })
 }
 
@@ -182,7 +182,7 @@ fn print_excluded_names_the_tracks_the_container_cannot_carry() {
                 color_space: libfreemkv::ColorSpace::Bt709,
                 display_aspect: None,
                 secondary: false,
-                label: String::new(),
+                label: Default::default(),
                 measured_cicp: None,
             }),
             audio(libfreemkv::Codec::Ac3),

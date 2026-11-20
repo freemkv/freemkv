@@ -432,7 +432,7 @@ fn audio(pid: u16, lang: &str) -> libfreemkv::Stream {
         sample_rate: libfreemkv::SampleRate::S48,
         secondary: false,
         purpose: libfreemkv::LabelPurpose::Normal,
-        label: String::new(),
+        label: Default::default(),
     })
 }
 

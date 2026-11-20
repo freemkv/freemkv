@@ -38,7 +38,7 @@ fn bd(id: u16, minutes: f64, items: &[(&str, u32, u32)]) -> DiscTitle {
             color_space: ColorSpace::Bt709,
             display_aspect: None,
             secondary: false,
-            label: String::new(),
+            label: Default::default(),
             measured_cicp: None,
         }),
         Stream::Audio(AudioStream {
@@ -49,7 +49,7 @@ fn bd(id: u16, minutes: f64, items: &[(&str, u32, u32)]) -> DiscTitle {
             sample_rate: SampleRate::S48,
             secondary: false,
             purpose: LabelPurpose::Normal,
-            label: String::new(),
+            label: Default::default(),
         }),
     ];
     t

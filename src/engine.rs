@@ -335,8 +335,8 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
             // Language / forcedness as DATA: the matcher needs the disc's own tags.
             let (lang, forced) = match st {
                 libfreemkv::Stream::Video(_) => (String::new(), false),
-                libfreemkv::Stream::Audio(a) => (a.language.clone(), false),
-                libfreemkv::Stream::Subtitle(s) => (s.language.clone(), s.forced),
+                libfreemkv::Stream::Audio(a) => (a.language.to_string(), false),
+                libfreemkv::Stream::Subtitle(s) => (s.language.to_string(), s.forced),
             };
             // libfreemkv's `StreamSelection::apply` keeps the extension iff its base is kept,
             // so its row is never a choice: it mirrors base PID 0xC0|n.

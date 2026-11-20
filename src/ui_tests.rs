@@ -348,7 +348,7 @@ fn episode_disc() -> Scanned {
         title.duration_secs = 2600.0;
         title.clips.push(libfreemkv::Clip {
             marks_on_pes_clock: true,
-            clip_id: format!("presentation-{}", ti / 2),
+            clip_id: format!("presentation-{}", ti / 2).into(),
             in_time: 0,
             out_time: 2600 * 45_000,
             duration_secs: 2600.0,
@@ -367,7 +367,7 @@ fn episode_disc() -> Scanned {
                 sample_rate: libfreemkv::SampleRate::S48,
                 secondary: false,
                 purpose: libfreemkv::LabelPurpose::Normal,
-                label: String::new(),
+                label: Default::default(),
             }));
         title.selection_evidence.episodes = libfreemkv::disc::EpisodeEvidence::Authored {
             roster: "fixture:episode-menu".into(),

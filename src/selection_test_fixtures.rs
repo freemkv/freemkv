@@ -45,7 +45,7 @@ fn titles(clips: fn(&str) -> Vec<String>) -> Vec<DiscTitle> {
                 sample_rate: SampleRate::S48,
                 secondary: false,
                 purpose: LabelPurpose::Normal,
-                label: String::new(),
+                label: Default::default(),
             }));
             title
         })

@@ -153,23 +153,23 @@ fn synthetic_disc() -> Disc {
         color_space: ColorSpace::Bt709,
         display_aspect: None,
         secondary: false,
-        label: String::new(),
+        label: Default::default(),
         measured_cicp: None,
     });
     let audio = Stream::Audio(AudioStream {
         pid: 0x1100,
         codec: Codec::TrueHd,
         channels: AudioChannels::Unknown,
-        language: "eng".to_string(),
+        language: "eng".into(),
         sample_rate: SampleRate::Unknown,
         secondary: false,
         purpose: LabelPurpose::Normal,
-        label: String::new(),
+        label: Default::default(),
     });
     let subtitle = Stream::Subtitle(SubtitleStream {
         pid: 0x1200,
         codec: Codec::Pgs,
-        language: "eng".to_string(),
+        language: "eng".into(),
         forced: false,
         qualifier: LabelQualifier::None,
         codec_data: None,
@@ -492,7 +492,7 @@ fn video(codec: Codec, resolution: Resolution) -> VideoStream {
         color_space: ColorSpace::Bt709,
         display_aspect: None,
         secondary: false,
-        label: String::new(),
+        label: Default::default(),
         measured_cicp: None,
     }
 }
@@ -502,11 +502,11 @@ fn audio(codec: Codec, channels: AudioChannels, language: &str) -> AudioStream {
         pid: 0x1100,
         codec,
         channels,
-        language: language.to_string(),
+        language: language.into(),
         sample_rate: SampleRate::Unknown,
         secondary: false,
         purpose: LabelPurpose::Normal,
-        label: String::new(),
+        label: Default::default(),
     }
 }
 
@@ -514,7 +514,7 @@ fn subtitle(language: &str) -> SubtitleStream {
     SubtitleStream {
         pid: 0x1200,
         codec: Codec::Pgs,
-        language: language.to_string(),
+        language: language.into(),
         forced: false,
         qualifier: LabelQualifier::None,
         codec_data: None,
@@ -552,7 +552,7 @@ fn format_video_assembles_codec_resolution_and_only_the_flags_present() {
     // A secondary non-DV stream with a label shows the sanitized label.
     let mut labelled = video(Codec::H264, Resolution::R1080p);
     labelled.secondary = true;
-    labelled.label = "PiP\x1b[2J".to_string();
+    labelled.label = "PiP\x1b[2J".into();
     let out = format_video(&labelled, false);
     assert!(out.contains("PiP") && !out.contains('\x1b'), "got {out}");
 }
@@ -572,7 +572,7 @@ fn format_audio_renders_lang_codec_channels_and_tags() {
     let mut tagged = audio(Codec::Ac3, AudioChannels::Stereo, "fra");
     tagged.purpose = LabelPurpose::Commentary;
     tagged.secondary = true;
-    tagged.label = "Director".to_string();
+    tagged.label = "Director".into();
     assert_eq!(
         format_audio(&tagged, false),
         "French DD stereo (Commentary, Secondary, Director)"

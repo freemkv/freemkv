@@ -192,7 +192,7 @@ pub(crate) fn mpg_source_fixture(path: &std::path::Path) {
                 color_space: ColorSpace::Bt470bg,
                 display_aspect: None,
                 secondary: false,
-                label: String::new(),
+                label: Default::default(),
                 measured_cicp: None,
             }),
             Stream::Subtitle(SubtitleStream {

@@ -62,7 +62,7 @@ fn title(id: u16, program: &str, secs: f64, language: &str) -> DiscTitle {
         sample_rate: SampleRate::S48,
         secondary: false,
         purpose: LabelPurpose::Normal,
-        label: String::new(),
+        label: Default::default(),
     }));
     title
 }

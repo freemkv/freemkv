@@ -180,7 +180,7 @@ fn stream_info_lines_render_purpose_secondary_and_label_tags() {
             sample_rate: SampleRate::S48,
             secondary: false,
             purpose,
-            label: String::new(),
+            label: Default::default(),
         });
         let line = stream_info_lines(&[a]).join("\n");
         assert!(line.contains(needle), "{purpose:?} → {line:?}");
@@ -262,23 +262,23 @@ fn stream_info_lines_strip_terminal_escapes_from_every_disc_controlled_field() {
         color_space: ColorSpace::Bt709,
         display_aspect: None,
         secondary: false,
-        label: hostile.to_string(),
+        label: hostile.to_string().into(),
         measured_cicp: None,
     });
     let audio = libfreemkv::Stream::Audio(AudioStream {
         pid: 0x1100,
         codec: Codec::TrueHd,
         channels: AudioChannels::Unknown,
-        language: hostile.to_string(),
+        language: hostile.into(),
         sample_rate: SampleRate::Unknown,
         secondary: false,
         purpose: LabelPurpose::Normal,
-        label: hostile.to_string(),
+        label: hostile.to_string().into(),
     });
     let subtitle = libfreemkv::Stream::Subtitle(SubtitleStream {
         pid: 0x1200,
         codec: Codec::Pgs,
-        language: hostile.to_string(),
+        language: hostile.into(),
         forced: false,
         qualifier: libfreemkv::LabelQualifier::None,
         codec_data: None,

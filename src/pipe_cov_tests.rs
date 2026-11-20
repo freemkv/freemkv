@@ -367,7 +367,7 @@ fn stream_info_shows_labels_purposes_and_secondary_audio() {
                 sample_rate: SampleRate::S48,
                 secondary: true,
                 purpose: LabelPurpose::Commentary,
-                label: String::new(),
+                label: Default::default(),
             }),
         ],
         ..libfreemkv::DiscTitle::empty()
