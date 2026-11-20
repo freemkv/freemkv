@@ -25,6 +25,11 @@ const SETTLE: Duration = Duration::from_millis(800);
 
 /// Wait (up to a minute) for the fixture's scan, then run the gate.
 pub(super) fn start(shell: &Rc<Shell>, dir: String) {
+    // The same pixels on every run, for the screenshot diff: a steady caret, no transitions.
+    if let Some(s) = gtk::Settings::default() {
+        s.set_gtk_cursor_blink(false);
+        s.set_gtk_enable_animations(false);
+    }
     let me = shell.clone();
     let mut waited = Duration::ZERO;
     glib::timeout_add_local(Duration::from_millis(200), move || {
@@ -33,8 +38,11 @@ pub(super) fn start(shell: &Rc<Shell>, dir: String) {
             return glib::ControlFlow::Continue;
         }
         let (me, dir) = (me.clone(), dir.clone());
+        // Its free space is measured off this thread; the render below shows the answer.
+        me.app_mut(|a| a.output_dir = crate::gui_gate::REVIEW_DEST.into());
         // The disc page as it opens, log and all, before anything is moved for a check.
         glib::timeout_add_local_once(SETTLE, move || {
+            me.render();
             let _ = std::fs::create_dir_all(&dir);
             let g = Rc::new(RefCell::new(Gate::default()));
             disc_page(&me, &dir, &mut g.borrow_mut());

@@ -5501,6 +5501,8 @@ impl Shell {
     fn gate(&self, dir: &str) -> crate::gui_gate::Gate {
         use crate::gui_gate::{Gate, Region, has_ink};
         let mut g = Gate::default();
+        // A folder whose free space reads the same on every run, for the screenshot diff.
+        self.app_mut(|a| a.output_dir = crate::gui_gate::REVIEW_DEST.into());
         self.relayout_now();
         pump(600);
         let s = lay::Scale::new(window_dpi(self.wnd.hwnd()));

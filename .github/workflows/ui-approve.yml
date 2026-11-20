@@ -1,0 +1,61 @@
+name: ui-approve
+
+# Sign off the desktop UI: the run the ui-screenshots gallery shows becomes the approved
+# baseline (baseline/ on that branch) that every later run is diffed against. Manual only;
+# see "Reviewing UI screenshots" in CONTRIBUTING.md.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: >-
+          The commit the gallery shows (a prefix will do). The approval is refused if the
+          gallery has moved on to another run since. Blank approves whatever it shows.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  approve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    # Shared with ci.yml's ui-gallery: one writer of the branch at a time.
+    concurrency:
+      group: ui-screenshots
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: Check out the ui-screenshots branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git clone -q --depth 1 --branch ui-screenshots --single-branch "$url" site
+      - name: Make the gallery's run the baseline
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          cargo run --release -q --manifest-path freemkv/tools/ui-review/Cargo.toml -- approve \
+            --site site --sha "$SHA" --summary "$GITHUB_STEP_SUMMARY"
+      - name: Publish as one bot commit
+        run: |
+          set -euo pipefail
+          export GIT_AUTHOR_NAME='github-actions[bot]'
+          export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          approved=$(sed -n 's/^sha=//p' site/baseline/approved.txt)
+          git -C site add -A
+          tree=$(git -C site write-tree)
+          commit=$(git -C site commit-tree "$tree" -m "Approve the UI screenshots of ${approved:0:12}")
+          git -C site push -q --force origin "$commit:refs/heads/ui-screenshots"

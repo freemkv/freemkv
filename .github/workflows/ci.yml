@@ -708,9 +708,11 @@ jobs:
       - run: cargo test --manifest-path tools/ui-review/Cargo.toml
 
   # The ui-screenshots gallery: on a dev push or a manual run, the gui-gate captures of both
-  # platforms go to the ui-screenshots branch as <platform>/<lang>-<scale>/<name>.png with an
-  # index.md. Even after a red gate, so its captures can be looked at. Never fails on a change.
-  # The branch is one parentless commit, so it never accumulates history.
+  # platforms go to the ui-screenshots branch as <platform>/<lang>-<scale>/<name>.png, are
+  # diffed against the approved baseline/ (ui-approve.yml), and index.md lists the changed
+  # screens first. A change is a warning and a summary line, never a failure. Runs after a red
+  # gate too, so its captures can be looked at. The branch is one parentless commit: the
+  # latest run plus the baseline, never any history.
   ui-gallery:
     needs: [gui-gate]
     if: "${{ always() && needs.gui-gate.result != 'skipped' && needs.gui-gate.result != 'cancelled' && ((github.event_name == 'push' && github.ref == 'refs/heads/dev') || github.event_name == 'workflow_dispatch') }}"
@@ -718,7 +720,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
-    # One writer of the branch at a time; a newer run waits rather than racing it.
+    # Shared with ui-approve.yml: one writer of the branch at a time, the next one waits.
     concurrency:
       group: ui-screenshots
       cancel-in-progress: false

@@ -23,6 +23,15 @@ pub const LONG_DEST: &str = if cfg!(windows) {
     "/mnt/library/Videos/freemkv/Archive 2026"
 };
 
+/// The output folder the disc page shows during the gate, so its free-space line reads the
+/// same on every run and the screenshot diff does not flag it: Windows has no such drive
+/// ("—"), and on Linux the nearest existing folder is `/proc`, which never has any free space.
+pub const REVIEW_DEST: &str = if cfg!(windows) {
+    r"R:\Videos\freemkv"
+} else {
+    "/proc/freemkv/Videos"
+};
+
 /// A rectangle of a captured image, in top-down pixel coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Region {

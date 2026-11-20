@@ -3,17 +3,23 @@
 //! The GUI gate (`tests/gui_gate.py`, `src/gui_gate.rs`) captures every screen of the Linux and
 //! Windows apps, per language and scale, into the `gui-gate-<platform>` artifacts. This tool
 //! lays one run's captures out as `<platform>/<lang>-<scale>/<name>.png` in a checkout of the
-//! `ui-screenshots` branch and writes the gallery, `index.md`, that links them for sign-off.
+//! `ui-screenshots` branch, compares each with the approved one under `baseline/` (`diff`),
+//! and writes the gallery, `index.md`: the changed screens first, then everything.
 //!
 //! ```text
 //! ui-review publish --shots DIR --site DIR --repo OWNER/NAME --branch REF --sha SHA
-//!                   --date DATE --run URL [--summary FILE]
+//!                   --date DATE --run URL [--summary FILE] [TOLERANCES]
+//! ui-review approve --site DIR [--sha SHA] [--summary FILE] [TOLERANCES]
+//! TOLERANCES: [--threshold 0.1] [--min-pixels 24]
 //! ```
 //!
-//! `--shots` holds the downloaded artifacts (`gui-gate-linux/en-100/*.png`, …); `--site` is
-//! the branch's work tree, whose run is replaced. `--summary` gets a Markdown summary (CI
-//! passes `$GITHUB_STEP_SUMMARY`).
+//! `publish`: `--shots` holds the downloaded artifacts (`gui-gate-linux/en-100/*.png`, …);
+//! `--site` is the branch's work tree, whose run is replaced and whose baseline is kept.
+//! `approve`: the run on the branch becomes the baseline; with `--sha`, only if it is that
+//! commit's run. `--summary` gets a Markdown summary (CI passes `$GITHUB_STEP_SUMMARY`).
+//! A changed screen is reported, never an error: the exit code is for broken input only.
 
+mod diff;
 mod gallery;
 
 use std::collections::HashMap;
@@ -30,6 +36,9 @@ pub struct RunInfo {
     pub run: String,
 }
 
+const USAGE: &str = "usage: ui-review publish --shots DIR --site DIR --repo R --branch B --sha S \
+                     --date D --run URL | ui-review approve --site DIR [--sha S]";
+
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -41,9 +50,7 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
-    let (command, flags) = args.split_first().ok_or(
-        "usage: ui-review publish --shots DIR --site DIR --repo R --sha S --date D --run URL",
-    )?;
+    let (command, flags) = args.split_first().ok_or(USAGE)?;
     let flags = parse_flags(flags)?;
     let get = |k: &str| {
         flags
@@ -51,7 +58,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
             .cloned()
             .ok_or_else(|| format!("--{k} is required"))
     };
-    match command.as_str() {
+    let opt = tolerances(&flags)?;
+    let site = PathBuf::from(get("site")?);
+    let summary = match command.as_str() {
         "publish" => {
             let info = RunInfo {
                 repo: get("repo")?,
@@ -60,17 +69,46 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 date: get("date")?,
                 run: get("run")?,
             };
-            let site = PathBuf::from(get("site")?);
-            let summary = gallery::publish(&PathBuf::from(get("shots")?), &site, &info)
-                .map_err(|e| e.to_string())?;
-            print!("{summary}");
-            if let Some(path) = flags.get("summary") {
-                append(path, &summary).map_err(|e| format!("{path}: {e}"))?;
+            let shots = PathBuf::from(get("shots")?);
+            let (summary, report) =
+                gallery::publish(&shots, &site, &info, opt).map_err(|e| e.to_string())?;
+            // An annotation on the run: seen without opening the summary, and not a failure.
+            if !report.changed.is_empty() {
+                println!(
+                    "::warning title=UI screenshots changed::{} captures differ from the approved \
+                     baseline; review them in the ui-screenshots gallery",
+                    report.changed.len()
+                );
             }
-            Ok(())
+            summary
         }
-        other => Err(format!("unknown command {other:?}")),
+        "approve" => gallery::approve(&site, flags.get("sha").map(String::as_str), opt)
+            .map_err(|e| e.to_string())?,
+        other => return Err(format!("unknown command {other:?}; {USAGE}")),
+    };
+    print!("{summary}");
+    if let Some(path) = flags.get("summary") {
+        append(path, &summary).map_err(|e| format!("{path}: {e}"))?;
     }
+    Ok(())
+}
+
+/// The diff's tolerances, the defaults unless given.
+fn tolerances(flags: &HashMap<String, String>) -> Result<diff::Options, String> {
+    let mut opt = diff::Options::default();
+    if let Some(t) = flags.get("threshold") {
+        opt.threshold = t
+            .parse()
+            .ok()
+            .filter(|t| (0.0..=1.0).contains(t))
+            .ok_or_else(|| format!("--threshold {t:?}: a number from 0 to 1"))?;
+    }
+    if let Some(n) = flags.get("min-pixels") {
+        opt.min_pixels = n
+            .parse()
+            .map_err(|_| format!("--min-pixels {n:?}: a whole number"))?;
+    }
+    Ok(opt)
 }
 
 /// `--key value` pairs.
