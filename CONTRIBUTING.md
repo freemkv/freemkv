@@ -42,6 +42,44 @@ work from front-end code. Every line in the `Unreleased` section of `CHANGELOG.m
 names the front ends it covers — `(CLI, app, server)` — or says why it reaches only
 some: `(CLI only: an exit code)`. `tests/changelog_coverage.rs` checks it.
 
+## Reviewing UI screenshots
+
+CI's `gui-gate` job runs a debug build of the Linux and Windows apps over a synthetic disc,
+in English, German and Arabic (right to left) at two scales. After its checks it visits every
+screen and state and captures each one: the ready screen with fake drives, the disc page
+with each chooser open, the review banner, every menu, About, Settings, the file pickers, a
+rip in progress and each result. The tour lives in `src/linux/gate_tour.rs` and in
+`review_tour` in `src/windows.rs`, with the shared model states in `src/gui_gate.rs`. A
+capture it can't take becomes a `GATE NOTE` line in that run's `gate.txt`, and the build
+still passes.
+
+On every push to `dev` (or a manual run of CI), the `ui-gallery` job publishes the captures
+to the `ui-screenshots` branch as `<platform>/<lang>-<scale>/<name>.png`. It compares each
+one with the approved set in `baseline/` and writes the gallery:
+
+<https://github.com/freemkv/freemkv/blob/ui-screenshots/index.md>
+
+The gallery lists the changed screens first, each with the baseline, the new capture and a
+highlight (red: changed pixels; yellow: anti-aliasing, ignored; magenta: area only one
+capture has). Then it lists new and missing screens, then every screen. A changed screen
+never fails CI: it shows as a warning on the run and in the `ui-gallery` job summary.
+
+To sign off:
+
+1. Open the gallery and check the commit at the top is the one you mean to approve.
+2. Review the changed screens. If one is wrong, fix the app and push. The next run
+   replaces the gallery.
+3. When it is right, run the **ui-approve** workflow (Actions → ui-approve → Run workflow),
+   with that commit's SHA, or a prefix of it, as `sha`. It copies the gallery's run into
+   `baseline/`, and later runs are diffed against it. If the gallery has moved on to a
+   newer run, the approval is refused.
+
+The branch is a single bot commit that holds only the latest run and the baseline, so it
+never grows a history. The diff tool is `tools/ui-review` (`cargo test --manifest-path
+tools/ui-review/Cargo.toml`). Its tolerances, `--threshold` (0.1) and `--min-pixels` (24),
+are set so font-rendering noise passes and a one-word change does not. macOS isn't part of
+the gate yet.
+
 ## Developer Certificate of Origin (DCO)
 
 Contributions to freemkv are accepted under the
