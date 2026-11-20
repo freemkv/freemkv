@@ -6,6 +6,8 @@ on:
     # release-candidate checks), and main only ever receives the release commit.
     branches: [dev]
   pull_request:
+  # A manual run, chiefly to refresh the ui-screenshots gallery (ui-gallery) for a ref.
+  workflow_dispatch:
 
 # Rapid dev pushes supersede their own in-progress runs instead of stacking.
 concurrency:
@@ -13,8 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 # Least privilege by default: every job here only reads the repo (checkout,
-# build, lint, test). No job publishes a release, writes to the repo, or needs
-# OIDC, so nothing elevates this.
+# build, lint, test). No job publishes a release or needs OIDC. The one writer
+# is ui-gallery, which elevates itself to contents: write for the ui-screenshots
+# branch alone, on dev pushes and manual runs.
 permissions:
   contents: read
 
@@ -620,7 +623,8 @@ jobs:
   # The desktop app checks itself (tests/gui_gate.py) over a synthetic Blu-ray folder, in
   # English, German and Arabic at 100% and 150%: the title tree's Length and Size columns
   # render whole, as do the Settings destination path and every dropdown's choice, with no
-  # crash on the way. A debug build, the only one with the FMKV_* hooks.
+  # crash on the way. A debug build, the only one with the FMKV_* hooks. Then it captures
+  # every screen and state for the ui-screenshots gallery (ui-gallery).
   gui-gate:
     if: "${{ !(github.event_name == 'push' && github.ref_type == 'branch' && github.event.commits[0] != null && github.event.commits[1] == null && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, ': bump version')) }}"
     strategy:
@@ -685,6 +689,81 @@ jobs:
             ${{ runner.temp }}/gui-gate/*/*gate.txt
           overwrite: true
           if-no-files-found: warn
+
+  # tools/ui-review, which publishes the gallery: its own crate, so linted and tested here.
+  ui-review-tool:
+    if: "${{ !(github.event_name == 'push' && github.ref_type == 'branch' && github.event.commits[0] != null && github.event.commits[1] == null && startsWith(github.event.head_commit.message, 'v') && contains(github.event.head_commit.message, ': bump version')) }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - run: cargo fmt --check --manifest-path tools/ui-review/Cargo.toml
+      - run: cargo clippy --manifest-path tools/ui-review/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path tools/ui-review/Cargo.toml
+
+  # The ui-screenshots gallery: on a dev push or a manual run, the gui-gate captures of both
+  # platforms go to the ui-screenshots branch as <platform>/<lang>-<scale>/<name>.png with an
+  # index.md. Even after a red gate, so its captures can be looked at. Never fails on a change.
+  # The branch is one parentless commit, so it never accumulates history.
+  ui-gallery:
+    needs: [gui-gate]
+    if: "${{ always() && needs.gui-gate.result != 'skipped' && needs.gui-gate.result != 'cancelled' && ((github.event_name == 'push' && github.ref == 'refs/heads/dev') || github.event_name == 'workflow_dispatch') }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    # One writer of the branch at a time; a newer run waits rather than racing it.
+    concurrency:
+      group: ui-screenshots
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gui-gate-*
+          path: shots
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: Check out the ui-screenshots branch (created on first use)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$url" ui-screenshots >/dev/null; then
+            git clone -q --depth 1 --branch ui-screenshots --single-branch "$url" site
+          else
+            git init -q -b ui-screenshots site
+            git -C site remote add origin "$url"
+          fi
+      - name: Lay out the captures and write the gallery
+        run: |
+          set -euo pipefail
+          cargo run --release -q --manifest-path freemkv/tools/ui-review/Cargo.toml -- publish \
+            --shots shots --site site --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME" \
+            --sha "$GITHUB_SHA" --date "$(date -u '+%Y-%m-%d %H:%M UTC')" \
+            --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Publish as one bot commit
+        run: |
+          set -euo pipefail
+          export GIT_AUTHOR_NAME='github-actions[bot]'
+          export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          git -C site add -A
+          tree=$(git -C site write-tree)
+          commit=$(git -C site commit-tree "$tree" -m "UI screenshots for ${GITHUB_SHA:0:12}")
+          git -C site push -q --force origin "$commit:refs/heads/ui-screenshots"
 
   # freemkv-i18n's drift guard over THIS checkout's src/: every key freemkv looks up
   # with a compiled-in English fallback must ship in en.json with the same text.

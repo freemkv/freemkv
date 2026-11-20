@@ -8,3 +8,5 @@ __pycache__/
 /siblings/
 /snap/local/
 /freemkv_*.snap
+# The ui-screenshots tool builds apart from the crate (CI only).
+/tools/*/target

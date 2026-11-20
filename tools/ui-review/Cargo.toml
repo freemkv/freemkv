@@ -1,0 +1,16 @@
+[package]
+name = "freemkv-ui-review"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Publishes the GUI gate's captures to the ui-screenshots gallery (CI only)"
+
+# Its own workspace: a CI tool, never part of the freemkv build or its dependency graph.
+[workspace]
+
+[[bin]]
+name = "ui-review"
+path = "src/main.rs"
+
+[dependencies]
