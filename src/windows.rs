@@ -551,6 +551,8 @@ struct Memo {
     details: Option<crate::ui::DetailsView>,
     /// The free-space line last shown.
     free_line: Option<String>,
+    /// The page the controls were last shown for.
+    page: Option<Page>,
 }
 
 // One row signature: the core's, so every shell redraws on the same changes.
@@ -1974,6 +1976,9 @@ impl Shell {
 
         // ── pages ──
         let p = v.page;
+        // A page change repaints the whole window, so no control of the page left behind
+        // survives as a ghost under the new one.
+        let page_changed = self.memo.borrow().page != Some(p);
         for c in [&self.lbl_empty_head, &self.lbl_empty_sub] {
             show(c, p == Page::Empty);
         }
@@ -2046,6 +2051,10 @@ impl Shell {
         }
         for c in [&self.btn_reveal, &self.btn_done] {
             show(c, on_result);
+        }
+        if page_changed {
+            self.memo.borrow_mut().page = Some(p);
+            let _ = self.wnd.hwnd().InvalidateRect(None, true);
         }
 
         // ── tree ──
@@ -5871,6 +5880,70 @@ impl Shell {
         pump(500);
     }
 
+    // Every page control, with the page it belongs to.
+    fn page_hwnds(&self) -> Vec<(Page, &w::HWND)> {
+        let mut all: Vec<(Page, &w::HWND)> = vec![
+            (Page::Empty, self.lbl_empty_head.hwnd()),
+            (Page::Empty, self.lbl_empty_sub.hwnd()),
+            (Page::Empty, self.btn_open_disc.hwnd()),
+            (Page::Empty, self.btn_open.hwnd()),
+            (Page::Empty, self.btn_open_folder.hwnd()),
+            (Page::Empty, self.home_list.hwnd()),
+            (Page::Empty, self.home_open.hwnd()),
+            (Page::Empty, self.home_prefer.hwnd()),
+            (Page::Titles, self.tree.hwnd()),
+            (Page::Titles, self.tree_head.hwnd()),
+            (Page::Titles, self.cmb_pick_titles.hwnd()),
+            (Page::Titles, self.btn_pick_audio.hwnd()),
+            (Page::Titles, self.btn_pick_subs.hwnd()),
+            (Page::Titles, self.lbl_pick_banner.hwnd()),
+            (Page::Titles, self.cmb_details_kind.hwnd()),
+            (Page::Titles, self.lbl_out.hwnd()),
+            (Page::Titles, self.cmb_format.hwnd()),
+            (Page::Titles, self.edit_out.hwnd()),
+            (Page::Titles, self.btn_browse.hwnd()),
+            (Page::Titles, self.btn_run.hwnd()),
+            (Page::Titles, self.btn_eject.hwnd()),
+            (Page::Titles, self.lbl_free.hwnd()),
+            (Page::Progress, self.grp_prog.hwnd()),
+            (Page::Progress, self.lbl_saving_cur.hwnd()),
+            (Page::Progress, self.lbl_cur.hwnd()),
+            (Page::Progress, self.bar_cur.hwnd()),
+            (Page::Progress, self.lbl_saving_all.hwnd()),
+            (Page::Progress, self.lbl_all.hwnd()),
+            (Page::Progress, self.bar_all.hwnd()),
+            (Page::Progress, self.btn_cancel.hwnd()),
+            (Page::Result, self.lbl_result_head.hwnd()),
+            (Page::Result, self.lbl_result_line.hwnd()),
+            (Page::Result, self.btn_reveal.hwnd()),
+            (Page::Result, self.btn_done.hwnd()),
+        ];
+        all.extend(self.lbl_pick.iter().map(|c| (Page::Titles, c.hwnd())));
+        all.extend(self.lbl_details.iter().map(|c| (Page::Titles, c.hwnd())));
+        all.extend(
+            self.edit_details
+                .iter()
+                .map(|(_, c)| (Page::Titles, c.hwnd())),
+        );
+        all.extend(self.lbl_keys.iter().map(|c| (Page::Progress, c.hwnd())));
+        all.extend(self.lbl_vals.iter().map(|c| (Page::Progress, c.hwnd())));
+        all
+    }
+
+    // The gate check: no control of another page is visible on `page`.
+    fn check_page_isolation(&self, name: &str, page: Page, g: &mut crate::gui_gate::Gate) {
+        let stray = self
+            .page_hwnds()
+            .into_iter()
+            .filter(|(p, h)| *p != page && h.IsWindowVisible())
+            .count();
+        g.check(
+            "no-control-from-another-page",
+            stray == 0,
+            format!("{name}: {stray} control(s) of another page visible"),
+        );
+    }
+
     // A dropdown open, captured as its list.
     fn tour_dropdown(
         &self,
@@ -5926,6 +5999,7 @@ impl Shell {
             a.disc_present = present;
         });
         self.tour_settle();
+        self.check_page_isolation("disc-page", Page::Titles, g);
         tour_shot(dir, "disc-page", &main, g);
         self.tour_dropdown(&self.cmb_details_kind, dir, "disc-page-kind-open", g);
         self.tour_dropdown(&self.cmb_pick_titles, dir, "disc-page-titles-open", g);
@@ -6025,6 +6099,7 @@ impl Shell {
             self.tour_log(log);
             self.app_mut(|a| fx::show_rip(a, rip));
             self.tour_settle();
+            self.check_page_isolation(name, Page::Progress, g);
             tour_shot(dir, name, &main, g);
         }
         self.app_mut(|a| fx::end_rip(a, Page::Titles));
@@ -6039,6 +6114,7 @@ impl Shell {
             self.tour_log(log);
             self.app_mut(|a| fx::show_result(a, outcome));
             self.tour_settle();
+            self.check_page_isolation(name, Page::Result, g);
             tour_shot(dir, name, &main, g);
         }
     }
