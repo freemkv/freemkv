@@ -4424,12 +4424,12 @@ impl App {
         // Named by the Settings row's own label, minus its trailing colon.
         let bad = [
             (
-                crate::strings::get_or("gui.set.max_passes", "Max recovery passes :"),
+                crate::strings::get_or("gui.set.max_passes", "Max recovery passes:"),
                 &self.settings.max_passes,
                 self.settings.max_passes.trim().parse::<u32>().is_ok(),
             ),
             (
-                crate::strings::get_or("gui.set.abort_lost", "Abort on lost seconds :"),
+                crate::strings::get_or("gui.set.abort_lost", "Abort on lost seconds:"),
                 &self.settings.abort_lost_secs,
                 self.settings.abort_lost_secs.trim().parse::<u64>().is_ok(),
             ),
