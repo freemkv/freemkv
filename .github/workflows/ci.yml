@@ -658,7 +658,7 @@ jobs:
         timeout-minutes: 5
         if: matrix.os == 'linux'
         run: |
-          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus locales
+          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus locales adwaita-icon-theme hicolor-icon-theme
           sudo locale-gen en_US.UTF-8 de_DE.UTF-8 ar_SA.UTF-8
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -831,7 +831,7 @@ jobs:
       - name: Install GTK4 + libadwaita development headers
         timeout-minutes: 5
         run: |
-          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus locales
+          bash freemkv/.github/scripts/install-linux-deps.sh libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus locales adwaita-icon-theme hicolor-icon-theme
           sudo locale-gen en_US.UTF-8 de_DE.UTF-8 ar_SA.UTF-8
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:

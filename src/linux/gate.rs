@@ -45,6 +45,7 @@ pub(super) fn start(shell: &Rc<Shell>, dir: String) {
         // The disc page as it opens, log and all, before anything is moved for a check.
         glib::timeout_add_local_once(SETTLE, move || {
             let _ = std::fs::create_dir_all(&dir);
+            register_app_icon(&dir);
             let g = Rc::new(RefCell::new(Gate::default()));
             disc_page(&me, &dir, &mut g.borrow_mut());
             // Give both fixture titles room before checking their rendered cells.
@@ -159,6 +160,7 @@ fn home_page(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>, done: Box<dyn
 
 fn run(shell: &Rc<Shell>, dir: String, g: Rc<RefCell<Gate>>) {
     environment(shell, &mut g.borrow_mut());
+    icons_resolve(&mut g.borrow_mut());
     titles(shell, &dir, &mut g.borrow_mut());
 
     let Some(main) = shell.main.borrow().clone() else {
@@ -912,5 +914,50 @@ pub(super) fn page_buttons_visible(shell: &Rc<Shell>, label: &str, g: &mut Gate)
         "page-buttons-visible",
         hidden.is_empty(),
         format!("{label}: {} clipped buttons {hidden:?}", hidden.len()),
+    );
+}
+
+/// Every icon name the shell asks the theme for; `icons-resolve` fails on a wrong one.
+const ICONS: &[&str] = &[
+    "pan-down-symbolic",
+    "media-optical-symbolic",
+    "folder-symbolic",
+    "folder-open-symbolic",
+    "document-open-symbolic",
+    "folder-videos-symbolic",
+    "object-select-symbolic",
+    "folder-download-symbolic",
+    "network-transmit-receive-symbolic",
+    "dialog-password-symbolic",
+    "preferences-system-symbolic",
+    "view-more-symbolic",
+    "open-menu-symbolic",
+    "org.freemkv.FreeMKV",
+];
+
+/// Make the app icon resolve without an install: write it into an icon-theme folder under
+/// the gate's output and add that to the search path.
+fn register_app_icon(dir: &str) {
+    let apps = format!("{dir}/icons/hicolor/scalable/apps");
+    let svg = include_str!("../../res/freemkv-icon.svg");
+    if std::fs::create_dir_all(&apps).is_ok()
+        && std::fs::write(format!("{apps}/org.freemkv.FreeMKV.svg"), svg).is_ok()
+        && let Some(display) = gdk::Display::default()
+    {
+        gtk::IconTheme::for_display(&display).add_search_path(format!("{dir}/icons"));
+    }
+}
+
+fn icons_resolve(g: &mut Gate) {
+    let theme = gdk::Display::default().map(|d| gtk::IconTheme::for_display(&d));
+    let missing: Vec<&str> = ICONS
+        .iter()
+        .copied()
+        .filter(|name| !theme.as_ref().is_some_and(|t| t.has_icon(name)))
+        .collect();
+    g.check(
+        "icons-resolve",
+        theme.is_some() && missing.is_empty(),
+        format!("missing from the icon theme: {missing:?}"),
     );
 }
