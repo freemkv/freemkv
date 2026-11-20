@@ -4254,6 +4254,7 @@ fn build_prefs(
         "",
         220.0,
     );
+    t.note(mtm, &crate::ui::presentation_language_hint(), tw);
     t.langs(
         mtm,
         "audio_langs",
