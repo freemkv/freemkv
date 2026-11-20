@@ -104,7 +104,7 @@ fn info_reads_every_stream_container() {
 // with the same label." The DVD MPEG-2 extension track shows its sentinel label raw.
 fn mp2_extension_pair() -> Vec<libfreemkv::Stream> {
     use libfreemkv::{AudioChannels, AudioStream, Codec, LabelPurpose, SampleRate, Stream};
-    let mk = |pid: u16, label: &str| {
+    let mk = |pid: u16, label: &'static str| {
         Stream::Audio(AudioStream {
             pid,
             codec: Codec::Mp2,

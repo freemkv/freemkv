@@ -253,7 +253,7 @@ fn no_stream_row_text_carries_an_unsafe_display_char() {
 /// foreign 0xD3 without the sentinel label stays an ordinary choice.
 #[test]
 fn an_mp2_extension_stream_row_mirrors_its_base_pid() {
-    let mk = |pid: u16, label: &str| {
+    let mk = |pid: u16, label: &'static str| {
         Stream::Audio(AudioStream {
             pid,
             codec: Codec::Mp2,
