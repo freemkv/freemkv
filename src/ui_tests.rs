@@ -3904,6 +3904,97 @@ fn a_queued_save_writes_the_latest_settings() {
     assert_eq!(written.last(), Some(&app.settings.audio_langs));
 }
 
+// ── The ready screen's watch (#101) ──
+
+// The scripted tray of the one drive `scripted_home` lists; only #101's test moves it.
+static HOME_TRAY: AtomicBool = AtomicBool::new(false);
+
+fn scripted_home() -> Vec<HomeDrive> {
+    vec![HomeDrive {
+        device: "/dev/sr0".into(),
+        display: "/dev/sr0  FAKE WATCH (rev 1.00)".into(),
+        legacy_label: "FAKE WATCH".into(),
+        present: Some(HOME_TRAY.load(Ordering::SeqCst)),
+    }]
+}
+
+// A launched ready screen: the shell's launch listing has answered.
+fn launched_home(home: fn() -> Vec<HomeDrive>) -> App {
+    let mut app = App::new();
+    // Never auto-open: these tests watch the ready screen itself.
+    app.settings.startup_mode = String::new();
+    app.home_fn = home;
+    app.presence_every = std::time::Duration::ZERO;
+    assert!(app.discover_home().contains(&Effect::StartTicking));
+    tick_home_until(&mut app, |a| !a.home_drives.is_empty());
+    app
+}
+
+// Ticks until `done`; true when a tick on the way asked for a redraw.
+fn tick_home_until(app: &mut App, done: impl Fn(&App) -> bool) -> bool {
+    let mut redrawn = false;
+    for _ in 0..2_000 {
+        let fx = app.tick();
+        assert!(
+            !fx.contains(&Effect::StopTicking),
+            "the watch stopped: {fx:?}"
+        );
+        redrawn |= fx.contains(&Effect::Redraw);
+        if done(app) {
+            return redrawn;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("the ready screen never updated");
+}
+
+fn home_status(app: &App) -> String {
+    let v = app.view();
+    assert_eq!(
+        v.page,
+        Page::Empty,
+        "a disc on the ready screen is shown, not opened"
+    );
+    assert_eq!(v.home_drives.len(), 1);
+    home_drive_label(&v.home_drives[0])
+}
+
+#[test]
+fn a_disc_inserted_after_launch_updates_the_ready_screen() {
+    let loaded = crate::strings::get_or("gui.home.loaded", "Disc inserted");
+    let empty = crate::strings::get_or("gui.home.empty", "Empty");
+    HOME_TRAY.store(false, Ordering::SeqCst);
+    let mut app = launched_home(scripted_home);
+    assert_eq!(app.view().disc_present, Some(false));
+    assert!(home_status(&app).ends_with(&empty), "{}", home_status(&app));
+
+    // Inserted after launch: the drive row and the heading follow, no restart.
+    HOME_TRAY.store(true, Ordering::SeqCst);
+    let redrawn = tick_home_until(&mut app, |a| a.view().disc_present == Some(true));
+    assert!(redrawn, "the shell was never asked to redraw");
+    assert!(
+        home_status(&app).ends_with(&loaded),
+        "{}",
+        home_status(&app)
+    );
+    assert_eq!(
+        empty_heading(app.view().disc_present),
+        empty_heading(Some(true))
+    );
+
+    // Removed, then inserted again.
+    HOME_TRAY.store(false, Ordering::SeqCst);
+    tick_home_until(&mut app, |a| a.view().disc_present == Some(false));
+    assert!(home_status(&app).ends_with(&empty), "{}", home_status(&app));
+    HOME_TRAY.store(true, Ordering::SeqCst);
+    tick_home_until(&mut app, |a| a.view().disc_present == Some(true));
+    assert!(
+        home_status(&app).ends_with(&loaded),
+        "{}",
+        home_status(&app)
+    );
+}
+
 #[test]
 fn home_drive_choice_obeys_explicit_source_and_unique_loaded_drive() {
     let drives = || {

@@ -2465,7 +2465,8 @@ pub struct App {
     presence: Option<(String, std::sync::mpsc::Receiver<Option<bool>>)>,
     /// When the disc watch last asked; `None` asks on the next tick.
     presence_at: Option<std::time::Instant>,
-    /// The disc watch's cadence: [`PRESENCE_EVERY`], zero in tests.
+    /// The disc watch's and the ready screen's watch's cadence: [`PRESENCE_EVERY`],
+    /// zero in tests.
     presence_every: std::time::Duration,
     /// The media-presence check the worker runs — a seam so tests never touch a drive.
     presence_fn: fn(&str) -> Option<bool>,
@@ -2489,6 +2490,9 @@ pub struct App {
     home_discovery: Option<(u64, bool, std::sync::mpsc::Receiver<Vec<HomeDrive>>)>,
     home_generation: u64,
     home_fn: fn() -> Vec<HomeDrive>,
+    /// When the ready screen last listed its drives; its watch lists them again every
+    /// `presence_every`. `None` until the launch's own listing answers.
+    home_at: Option<std::time::Instant>,
     /// A Settings write in flight, and whether its success is reported.
     saving: Option<(std::sync::mpsc::Receiver<Result<(), String>>, bool)>,
     /// Another write of the latest settings after the one in flight (and whether reported).
@@ -2783,9 +2787,24 @@ impl App {
         let answer = match self.home_discovery.as_ref().map(|(_, _, rx)| rx.try_recv()) {
             Some(Ok(drives)) => drives,
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Vec::new(),
-            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return Vec::new(),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            None => {
+                // #101: the ready screen lists its drives again on the watch's cadence,
+                // so a disc inserted or removed after launch shows without a restart.
+                let due = self
+                    .home_at
+                    .is_some_and(|t| t.elapsed() >= self.presence_every);
+                if due && self.watching_home() {
+                    self.home_at = Some(std::time::Instant::now());
+                    // Already ticking: the tick is what got here.
+                    let _ = self.discover_home_with_auto(false);
+                }
+                return Vec::new();
+            }
         };
-        let (generation, auto_open) = self
+        self.home_at = Some(std::time::Instant::now());
+        // Only the launch's own listing may auto-open (`discover_home`).
+        let (generation, launch) = self
             .home_discovery
             .take()
             .map(|(generation, auto_open, _)| (generation, auto_open))
@@ -2797,7 +2816,27 @@ impl App {
         {
             return Vec::new();
         }
-        self.apply_home_drives(answer, auto_open)
+        let before = (self.home_drives.clone(), self.disc_present);
+        let fx = self.apply_home_drives(answer, launch);
+        // A watch that found the drives as they were redraws nothing.
+        if !launch
+            && fx == [Effect::Redraw]
+            && before == (self.home_drives.clone(), self.disc_present)
+        {
+            return Vec::new();
+        }
+        fx
+    }
+
+    // The ready screen's watch runs while it lists drives and nothing else uses them.
+    fn watching_home(&self) -> bool {
+        self.page == Page::Empty
+            && self.source.is_empty()
+            && !self.home_drives.is_empty()
+            && self.run.is_none()
+            && self.probe.is_none()
+            && !self.opening()
+            && self.ejecting.is_none()
     }
 
     pub fn new() -> Self {
@@ -2864,6 +2903,7 @@ impl App {
             home_discovery: None,
             home_generation: 0,
             home_fn: HOME_DISCOVERY,
+            home_at: None,
             saving: None,
             save_queued: None,
             settings_unsaved: false,
@@ -4526,8 +4566,9 @@ impl App {
             // here would strand the result with nothing left to collect it.
             let mut fx = probe_fx;
             if !self.workers_out() {
-                // An idle disc keeps the tick for its watch, without a redraw per tick.
-                if self.presence.is_none() && !self.watching_disc() {
+                // An idle disc, or the ready screen's drive list, keeps the tick for its
+                // watch, without a redraw per tick.
+                if self.presence.is_none() && !self.watching_disc() && !self.watching_home() {
                     fx.push(Effect::StopTicking);
                 }
             } else if fx.is_empty() {
