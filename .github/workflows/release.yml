@@ -217,6 +217,18 @@ jobs:
           MACOS_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
         run: bash macos/bundle.sh release ${{ matrix.target }}
 
+      # Rehearsal only: keep the dev/qa build for a week so a candidate can be tried locally.
+      - name: Keep the rehearsal app
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        run: ditto -c -k --keepParent target/freemkv.app "$RUNNER_TEMP/${{ matrix.asset }}-app.zip"
+      - name: Upload the rehearsal app
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.asset }}-app
+          path: ${{ runner.temp }}/${{ matrix.asset }}-app.zip
+          retention-days: 7
+
       # ── Notarization ──────────────────────────────────────────────────────
       #
       # Apple scans the upload and issues a ticket; stapling attaches that
