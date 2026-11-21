@@ -1,0 +1,5 @@
+repo=freemkv/freemkv
+branch=dev
+sha=a94a651ca80b501408e387b85d95e59a98d7fee8
+date=2026-11-21 06:46 UTC
+run=https://github.com/freemkv/freemkv/actions/runs/44876062205

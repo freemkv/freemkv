@@ -1,0 +1,215 @@
+GATE PASS disc-tree-fills-page — title tree 393px of 704px window content
+GATE PASS disc-choosers-one-row — 4 choosers, (y, width) [(96.0, 283.0), (96.0, 283.0), (96.0, 282.0), (96.0, 282.0)]
+GATE PASS disc-choosers-equal-width — 4 choosers, (y, width) [(96.0, 283.0), (96.0, 283.0), (96.0, 282.0), (96.0, 282.0)]
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page.png
+GATE PASS gate-applied-language — requested en, rendered menu label "File"
+GATE PASS gate-applied-direction — requested RTL=false, GTK RTL=false
+GATE PASS gate-applied-scale — requested 1, GTK scale factor 1
+GATE PASS icons-resolve — missing from the icon theme: []
+GATE PASS fixture-opens — page Titles, 2 titles
+GATE PASS titles-carry-length-and-size — [("2:17:00", "6 MB"), ("12:30", "6 MB")]
+GATE PASS column-text-shown-whole — header "Length": whole
+GATE PASS column-text-has-ink — header "Length"
+GATE PASS column-text-shown-whole — header "Size": whole
+GATE PASS column-text-has-ink — header "Size"
+GATE PASS column-text-shown-whole — cell "2:17:00": whole
+GATE PASS column-text-has-ink — cell "2:17:00"
+GATE PASS column-text-shown-whole — cell "6 MB": whole
+GATE PASS column-text-has-ink — cell "6 MB"
+GATE PASS column-text-shown-whole — cell "12:30": whole
+GATE PASS column-text-has-ink — cell "12:30"
+GATE PASS column-text-shown-whole — cell "6 MB": whole
+GATE PASS column-text-has-ink — cell "6 MB"
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/titles.png
+GATE PASS tree-visual-scenarios — see tree-gate.txt and tree-*.png
+GATE PASS chooser-activation-present — 13 checkbuttons, 13 formats
+GATE PASS chooser-activation-updates-model — selected "Selected titles → M2TS", app format "Selected titles → M2TS"
+GATE PASS chooser-activation-single-selection — 1 active ticks after repaint, expected "Selected titles → M2TS"
+GATE PASS chooser-current-option-stays-selected — 1 active ticks after toggling the current option
+GATE PASS main-chooser-inventory — 5 of 5 selectors
+GATE PASS chooser-options-present — disc-page: #0: "Kind", 3 options
+GATE PASS chooser-labels-keep-words — disc-page: #0: "Kind", 3 options
+GATE PASS chooser-single-selection — disc-page: #0: "Kind", 3 options
+GATE PASS chooser-single-choice-radio — disc-page: #0: "Kind", 3 options; 3 radio indicators
+GATE PASS chooser-expands-below — disc-page: #0: "Kind", 3 options; mapped true, popover 325px (261px content) at Some((-13.0, 129.0)), field 279px ending at Some((8.0, 150.0))
+GATE PASS chooser-options-full-width — disc-page: #0: "Kind", 3 options
+GATE PASS chooser-options-spacious — disc-page: #0: "Kind", 3 options
+GATE PASS disc-tree-stays-put — disc-page: #0: "Kind", 3 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-kind-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-kind-open-end.png
+GATE PASS chooser-options-present — disc-page: #1: "Titles", 4 options
+GATE PASS chooser-labels-keep-words — disc-page: #1: "Titles", 4 options
+GATE PASS chooser-single-selection — disc-page: #1: "Titles", 4 options
+GATE PASS chooser-single-choice-radio — disc-page: #1: "Titles", 4 options; 4 radio indicators
+GATE PASS chooser-expands-below — disc-page: #1: "Titles", 4 options; mapped true, popover 325px (261px content) at Some((278.0, 129.0)), field 279px ending at Some((299.0, 150.0))
+GATE PASS chooser-options-full-width — disc-page: #1: "Titles", 4 options
+GATE PASS chooser-options-spacious — disc-page: #1: "Titles", 4 options
+GATE PASS disc-tree-stays-put — disc-page: #1: "Titles", 4 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-titles-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-titles-open-end.png
+GATE PASS chooser-options-present — disc-page: #2: "Audio", 2 options
+GATE PASS chooser-labels-keep-words — disc-page: #2: "Audio", 2 options
+GATE PASS chooser-multi-choice-checks — disc-page: #2: "Audio", 2 options; 0 radio indicators
+GATE PASS chooser-expands-below — disc-page: #2: "Audio", 2 options; mapped true, popover 324px (260px content) at Some((569.0, 129.0)), field 278px ending at Some((590.0, 150.0))
+GATE PASS chooser-options-full-width — disc-page: #2: "Audio", 2 options
+GATE PASS chooser-options-spacious — disc-page: #2: "Audio", 2 options
+GATE PASS disc-tree-stays-put — disc-page: #2: "Audio", 2 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-audio-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-audio-open-end.png
+GATE PASS chooser-options-present — disc-page: #3: "Subtitles", 3 options
+GATE PASS chooser-labels-keep-words — disc-page: #3: "Subtitles", 3 options
+GATE PASS chooser-multi-choice-checks — disc-page: #3: "Subtitles", 3 options; 0 radio indicators
+GATE PASS chooser-expands-below — disc-page: #3: "Subtitles", 3 options; mapped true, popover 324px (260px content) at Some((859.0, 129.0)), field 278px ending at Some((880.0, 150.0))
+GATE PASS chooser-options-full-width — disc-page: #3: "Subtitles", 3 options
+GATE PASS chooser-options-spacious — disc-page: #3: "Subtitles", 3 options
+GATE PASS disc-tree-stays-put — disc-page: #3: "Subtitles", 3 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-subtitles-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-subtitles-open-end.png
+GATE PASS chooser-options-present — disc-page: #4: "Default output:", 13 options
+GATE PASS chooser-labels-keep-words — disc-page: #4: "Default output:", 13 options
+GATE PASS chooser-single-selection — disc-page: #4: "Default output:", 13 options
+GATE PASS chooser-single-choice-radio — disc-page: #4: "Default output:", 13 options; 13 radio indicators
+GATE PASS chooser-expands-below — disc-page: #4: "Default output:", 13 options; mapped true, popover 302px (238px content) at Some((774.0, 721.0)), field 256px ending at Some((795.0, 742.0))
+GATE PASS chooser-options-full-width — disc-page: #4: "Default output:", 13 options
+GATE PASS chooser-options-spacious — disc-page: #4: "Default output:", 13 options
+GATE PASS disc-tree-stays-put — disc-page: #4: "Default output:", 13 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-format-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/disc-page-format-open-end.png
+GATE PASS home-one-row-per-drive — 3 drive rows for 3 drives
+GATE PASS page-buttons-visible — home: 0 clipped buttons [] in a 1154x630 pane
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/home-drives.png
+GATE PASS menu-keeps-content-in-place — opening the menu must not move or shrink the main content
+GATE PASS menu-native — primary menu must be a native GtkPopoverMenu built from a menu model
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/menu.png
+GATE PASS dropdown-choice-reads-whole — gui.tab.output "Default output": "Selected titles → MKV" whole
+GATE PASS dropdown-choice-reads-whole — gui.tab.output "At startup": "Show drives" whole
+GATE PASS long-destination-reads-whole — 272 px of path in a 454 px field
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-output.png
+GATE PASS settings-chooser-inventory — gui.tab.output: 2 of 2
+GATE PASS chooser-options-present — settings-output: #0: "Default output", 13 options
+GATE PASS chooser-labels-keep-words — settings-output: #0: "Default output", 13 options
+GATE PASS chooser-single-selection — settings-output: #0: "Default output", 13 options
+GATE PASS chooser-single-choice-radio — settings-output: #0: "Default output", 13 options; 13 radio indicators
+GATE PASS chooser-expands-below — settings-output: #0: "Default output", 13 options; mapped true, popover 604px (540px content) at Some((73.0, 92.0)), field 558px ending at Some((94.0, 113.0))
+GATE PASS chooser-options-full-width — settings-output: #0: "Default output", 13 options
+GATE PASS chooser-options-spacious — settings-output: #0: "Default output", 13 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-output-chooser-0-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-output-chooser-0-open-end.png
+GATE PASS chooser-options-present — settings-output: #1: "At startup", 3 options
+GATE PASS chooser-labels-keep-words — settings-output: #1: "At startup", 3 options
+GATE PASS chooser-single-selection — settings-output: #1: "At startup", 3 options
+GATE PASS chooser-single-choice-radio — settings-output: #1: "At startup", 3 options; 3 radio indicators
+GATE PASS chooser-expands-below — settings-output: #1: "At startup", 3 options; mapped true, popover 604px (540px content) at Some((73.0, 303.0)), field 558px ending at Some((94.0, 324.0))
+GATE PASS chooser-options-full-width — settings-output: #1: "At startup", 3 options
+GATE PASS chooser-options-spacious — settings-output: #1: "At startup", 3 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-output-chooser-1-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-output-chooser-1-open-end.png
+GATE PASS dropdown-choice-reads-whole — gui.tab.selection "Default selection": "Automatic" whole
+GATE PASS dropdown-choice-reads-whole — gui.tab.selection "Preferred audio languages": "Any" whole
+GATE PASS dropdown-choice-reads-whole — gui.tab.selection "Preferred subtitle languages": "Any" whole
+GATE PASS dropdown-choice-reads-whole — gui.tab.selection "Preferred forced-subtitle languages": "Any" whole
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection.png
+GATE PASS settings-chooser-inventory — gui.tab.selection: 4 of 4
+GATE PASS chooser-options-present — settings-selection: #0: "Default selection", 3 options
+GATE PASS chooser-labels-keep-words — settings-selection: #0: "Default selection", 3 options
+GATE PASS chooser-single-selection — settings-selection: #0: "Default selection", 3 options
+GATE PASS chooser-single-choice-radio — settings-selection: #0: "Default selection", 3 options; 3 radio indicators
+GATE PASS chooser-expands-below — settings-selection: #0: "Default selection", 3 options; mapped true, popover 604px (540px content) at Some((73.0, 163.0)), field 558px ending at Some((94.0, 184.0))
+GATE PASS chooser-options-full-width — settings-selection: #0: "Default selection", 3 options
+GATE PASS chooser-options-spacious — settings-selection: #0: "Default selection", 3 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection-chooser-0-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection-chooser-0-open-end.png
+GATE PASS chooser-options-present — settings-selection: #1: "Preferred audio languages", 38 options
+GATE PASS chooser-labels-keep-words — settings-selection: #1: "Preferred audio languages", 38 options
+GATE PASS chooser-multi-choice-checks — settings-selection: #1: "Preferred audio languages", 38 options; 0 radio indicators
+GATE PASS chooser-expands-below — settings-selection: #1: "Preferred audio languages", 38 options; mapped true, popover 604px (540px content) at Some((73.0, 421.0)), field 558px ending at Some((94.0, 442.0))
+GATE PASS chooser-options-full-width — settings-selection: #1: "Preferred audio languages", 38 options
+GATE PASS chooser-options-spacious — settings-selection: #1: "Preferred audio languages", 38 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection-chooser-1-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection-chooser-1-open-end.png
+GATE PASS chooser-options-present — settings-selection: #2: "Preferred subtitle languages", 38 options
+GATE PASS chooser-labels-keep-words — settings-selection: #2: "Preferred subtitle languages", 38 options
+GATE PASS chooser-multi-choice-checks — settings-selection: #2: "Preferred subtitle languages", 38 options; 0 radio indicators
+GATE PASS chooser-expands-below — settings-selection: #2: "Preferred subtitle languages", 38 options; mapped true, popover 604px (540px content) at Some((73.0, 476.0)), field 558px ending at Some((94.0, 497.0))
+GATE PASS chooser-options-full-width — settings-selection: #2: "Preferred subtitle languages", 38 options
+GATE PASS chooser-options-spacious — settings-selection: #2: "Preferred subtitle languages", 38 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection-chooser-2-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection-chooser-2-open-end.png
+GATE PASS chooser-options-present — settings-selection: #3: "Preferred forced-subtitle languages", 38 options
+GATE PASS chooser-labels-keep-words — settings-selection: #3: "Preferred forced-subtitle languages", 38 options
+GATE PASS chooser-multi-choice-checks — settings-selection: #3: "Preferred forced-subtitle languages", 38 options; 0 radio indicators
+GATE PASS chooser-expands-below — settings-selection: #3: "Preferred forced-subtitle languages", 38 options; mapped true, popover 604px (540px content) at Some((73.0, 531.0)), field 558px ending at Some((94.0, 552.0))
+GATE PASS chooser-options-full-width — settings-selection: #3: "Preferred forced-subtitle languages", 38 options
+GATE PASS chooser-options-spacious — settings-selection: #3: "Preferred forced-subtitle languages", 38 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection-chooser-3-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-selection-chooser-3-open-end.png
+GATE PASS dropdown-choice-reads-whole — gui.tab.recovery "Rip mode": "Multi-pass" whole
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-recovery.png
+GATE PASS settings-chooser-inventory — gui.tab.recovery: 1 of 1
+GATE PASS chooser-options-present — settings-recovery: #0: "Rip mode", 2 options
+GATE PASS chooser-labels-keep-words — settings-recovery: #0: "Rip mode", 2 options
+GATE PASS chooser-single-selection — settings-recovery: #0: "Rip mode", 2 options
+GATE PASS chooser-single-choice-radio — settings-recovery: #0: "Rip mode", 2 options; 2 radio indicators
+GATE PASS chooser-expands-below — settings-recovery: #0: "Rip mode", 2 options; mapped true, popover 604px (540px content) at Some((73.0, 174.0)), field 558px ending at Some((94.0, 195.0))
+GATE PASS chooser-options-full-width — settings-recovery: #0: "Rip mode", 2 options
+GATE PASS chooser-options-spacious — settings-recovery: #0: "Rip mode", 2 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-recovery-chooser-0-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-recovery-chooser-0-open-end.png
+GATE PASS dropdown-choice-reads-whole — gui.tab.keys "Key source": "Local keydb only" whole
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-keys.png
+GATE PASS settings-chooser-inventory — gui.tab.keys: 1 of 1
+GATE PASS chooser-options-present — settings-keys: #0: "Key source", 3 options
+GATE PASS chooser-labels-keep-words — settings-keys: #0: "Key source", 3 options
+GATE PASS chooser-single-selection — settings-keys: #0: "Key source", 3 options
+GATE PASS chooser-single-choice-radio — settings-keys: #0: "Key source", 3 options; 3 radio indicators
+GATE PASS chooser-expands-below — settings-keys: #0: "Key source", 3 options; mapped true, popover 604px (540px content) at Some((73.0, 129.0)), field 558px ending at Some((94.0, 150.0))
+GATE PASS chooser-options-full-width — settings-keys: #0: "Key source", 3 options
+GATE PASS chooser-options-spacious — settings-keys: #0: "Key source", 3 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-keys-chooser-0-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-keys-chooser-0-open-end.png
+GATE PASS dropdown-choice-reads-whole — gui.tab.advanced "Interface language": "Auto" whole
+GATE PASS dropdown-choice-reads-whole — gui.tab.advanced "Log detail": "Normal" whole
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-advanced.png
+GATE PASS settings-chooser-inventory — gui.tab.advanced: 2 of 2
+GATE PASS chooser-options-present — settings-advanced: #0: "Interface language", 30 options
+GATE PASS chooser-labels-keep-words — settings-advanced: #0: "Interface language", 30 options
+GATE PASS chooser-single-selection — settings-advanced: #0: "Interface language", 30 options
+GATE PASS chooser-single-choice-radio — settings-advanced: #0: "Interface language", 30 options; 30 radio indicators
+GATE PASS chooser-expands-below — settings-advanced: #0: "Interface language", 30 options; mapped true, popover 604px (540px content) at Some((73.0, 143.0)), field 558px ending at Some((94.0, 164.0))
+GATE PASS chooser-options-full-width — settings-advanced: #0: "Interface language", 30 options
+GATE PASS chooser-options-spacious — settings-advanced: #0: "Interface language", 30 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-advanced-chooser-0-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-advanced-chooser-0-open-end.png
+GATE PASS chooser-options-present — settings-advanced: #1: "Log detail", 4 options
+GATE PASS chooser-labels-keep-words — settings-advanced: #1: "Log detail", 4 options
+GATE PASS chooser-single-selection — settings-advanced: #1: "Log detail", 4 options
+GATE PASS chooser-single-choice-radio — settings-advanced: #1: "Log detail", 4 options; 4 radio indicators
+GATE PASS chooser-expands-below — settings-advanced: #1: "Log detail", 4 options; mapped true, popover 604px (540px content) at Some((73.0, 392.0)), field 558px ending at Some((94.0, 413.0))
+GATE PASS chooser-options-full-width — settings-advanced: #1: "Log detail", 4 options
+GATE PASS chooser-options-spacious — settings-advanced: #1: "Log detail", 4 options
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-advanced-chooser-1-open.png
+GATE PASS capture — /home/runner/work/_temp/gui-gate/en-100/settings-advanced-chooser-1-open-end.png
+GATE PASS page-buttons-visible — home-drive-actions-open: 0 clipped buttons [] in a 1154x630 pane
+GATE PASS page-buttons-visible — home-no-drives: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — home-no-disc: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — disc-page-review-banner: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — disc-page-notices: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — menu-file: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — menu-edit: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — menu-view: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — menu-help: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — about: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — shortcuts: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — open-file-dialog: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — open-folder-dialog: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — output-folder-dialog: 0 clipped buttons [] in a 1154x559 pane
+GATE PASS page-buttons-visible — rip-single: 0 clipped buttons [] in a 1154x258 pane
+GATE PASS page-buttons-visible — rip-multi: 0 clipped buttons [] in a 1154x299 pane
+GATE PASS page-buttons-visible — rip-multi-reading: 0 clipped buttons [] in a 1154x299 pane
+GATE PASS page-buttons-visible — rip-stopping: 0 clipped buttons [] in a 1154x299 pane
+GATE PASS page-buttons-visible — rip-confirm-quit: 0 clipped buttons [] in a 1154x299 pane
+GATE PASS page-buttons-visible — result-finished: 0 clipped buttons [] in a 1154x169 pane
+GATE PASS page-buttons-visible — result-cancelled: 0 clipped buttons [] in a 1154x199 pane
+GATE PASS page-buttons-visible — result-failed: 0 clipped buttons [] in a 1154x199 pane
+GATE PASS page-buttons-visible — result-finished-toast: 0 clipped buttons [] in a 1154x199 pane
+GATE OK: 214 checks
