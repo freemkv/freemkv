@@ -509,16 +509,18 @@ fn chooser_sequence(
             let field = row.compute_bounds(&root);
             let field_width = row.width() as f32;
             let origin = popover_origin(&pop, &root);
+            // The popover's own width counts its shadow margin; its child is what the user sees.
+            let content = pop.child().map_or(0, |c| c.width()) as f32;
             let below = pop.is_mapped()
                 && pop.position() == gtk::PositionType::Bottom
                 && !pop.has_arrow()
-                && (pop.width() as f32 - field_width).abs() <= 40.0
+                && (content - field_width).abs() <= 40.0
                 && origin.zip(field).is_some_and(|((x, y), f)| {
                     let bottom = f.y() + f.height();
                     y >= bottom - 24.0 && y <= bottom + 24.0 && (x - f.x()).abs() <= 24.0
                 });
             let placement = format!(
-                "mapped {}, popover {}px at {origin:?}, field {field_width}px ending at {:?}",
+                "mapped {}, popover {}px ({content}px content) at {origin:?}, field {field_width}px ending at {:?}",
                 pop.is_mapped(),
                 pop.width(),
                 field.map(|f| (f.x(), f.y() + f.height())),
