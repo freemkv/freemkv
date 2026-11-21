@@ -508,16 +508,21 @@ fn chooser_sequence(
                 .collect();
             let field = row.compute_bounds(&root);
             let field_width = row.width() as f32;
+            let origin = popover_origin(&pop, &root);
             let below = pop.is_mapped()
                 && pop.position() == gtk::PositionType::Bottom
                 && !pop.has_arrow()
                 && (pop.width() as f32 - field_width).abs() <= 40.0
-                && popover_origin(&pop, &root)
-                    .zip(field)
-                    .is_some_and(|((x, y), f)| {
-                        let bottom = f.y() + f.height();
-                        y >= bottom - 24.0 && y <= bottom + 24.0 && (x - f.x()).abs() <= 24.0
-                    });
+                && origin.zip(field).is_some_and(|((x, y), f)| {
+                    let bottom = f.y() + f.height();
+                    y >= bottom - 24.0 && y <= bottom + 24.0 && (x - f.x()).abs() <= 24.0
+                });
+            let placement = format!(
+                "mapped {}, popover {}px at {origin:?}, field {field_width}px ending at {:?}",
+                pop.is_mapped(),
+                pop.width(),
+                field.map(|f| (f.x(), f.y() + f.height())),
+            );
             let full_width = options.iter().all(|option| {
                 option
                     .compute_bounds(&pop)
@@ -552,7 +557,11 @@ fn chooser_sequence(
                         .count();
                     gate.check("chooser-single-selection", active == 1, &description);
                 }
-                gate.check("chooser-expands-below", below, &description);
+                gate.check(
+                    "chooser-expands-below",
+                    below,
+                    format!("{description}; {placement}"),
+                );
                 gate.check("chooser-options-full-width", full_width, &description);
                 gate.check(
                     "chooser-options-spacious",
@@ -909,12 +918,21 @@ pub(super) fn page_buttons_visible(shell: &Rc<Shell>, label: &str, g: &mut Gate)
             };
             !(fits(in_window, win_w, win) && fits(in_pane, pane, pane_h))
         })
-        .map(|w| w.widget_name().to_string())
+        .map(|w| {
+            let text = w.downcast_ref::<gtk::Button>().and_then(|b| b.label());
+            let bounds = w
+                .compute_bounds(&main.stack)
+                .map(|b| (b.x(), b.y(), b.width(), b.height()));
+            format!("{} {text:?} at {bounds:?}", w.widget_name())
+        })
         .collect();
     g.check(
         "page-buttons-visible",
         hidden.is_empty(),
-        format!("{label}: {} clipped buttons {hidden:?}", hidden.len()),
+        format!(
+            "{label}: {} clipped buttons {hidden:?} in a {pane}x{pane_h} pane",
+            hidden.len()
+        ),
     );
 }
 
