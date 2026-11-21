@@ -158,7 +158,18 @@ impl Choice {
             let weak = Rc::downgrade(self);
             check.connect_toggled(move |check| {
                 let Some(me) = weak.upgrade() else { return };
-                if me.painting.get() || !check.is_active() {
+                if me.painting.get() {
+                    return;
+                }
+                if !check.is_active() {
+                    // Switching options turns the old one off first; only a lone "off" restores.
+                    let weak = Rc::downgrade(&me);
+                    gtk::glib::idle_add_local_once(move || {
+                        let Some(me) = weak.upgrade() else { return };
+                        if !me.rows.borrow().iter().any(|(_, c)| c.is_active()) {
+                            me.set_selected(me.selected.get());
+                        }
+                    });
                     return;
                 }
                 let changed = me.selected.get() != at;
