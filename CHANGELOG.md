@@ -4,7 +4,7 @@
 
 ### Added
 
-- `--source-names` names each title's file after the title's own source when several titles make several files: `disc_00024.mkv` for `00024.mpls` instead of `disc_t1.mkv`. A title with no source name, or one that shares it with another selected title, keeps `_t<N>` (#78). (CLI only: a rip flag)
+- `--source-names` names each title's file after the title's own source when several titles make several files: `disc_00024.mkv` for `00024.mpls` instead of `disc_t1.mkv`. A title with no source name, or one that shares it with another selected title, keeps `_t<N>`. Contributed by @max-powers-87 (#78). (CLI only: a rip flag)
 - Open a disc folder from the desktop app (File > Open Folder…, or the home screen), like the CLI's dir:// source (#105). (app only: all desktop interfaces)
 
 ### Changed
