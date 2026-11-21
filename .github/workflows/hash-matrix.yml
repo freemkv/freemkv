@@ -107,7 +107,10 @@ jobs:
         run: |
           case "${{ matrix.os }}" in
             ubuntu-*)  sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg ;;
-            macos-*)   brew install ffmpeg ;;
+            # Brew has no old-version bottles: fail loudly once it moves past the reference 9.0.x.
+            macos-*)   brew install ffmpeg
+                       v="$(ffmpeg -hide_banner -version | sed -n 1p)"; [[ $v == "ffmpeg version 9.0."* ]] \
+                         || { echo "::error::brew FFmpeg left 9.0.x; the AC-3 known answers need 9.0.2"; exit 1; } ;;
             # FFmpeg 9.1.0's AC-3 decode differs from the known answers; pin the reference decoder.
             windows-*) choco install ffmpeg --version 9.0.2 -y --no-progress ;;
           esac
@@ -310,7 +313,10 @@ jobs:
         run: |
           case "${{ matrix.os }}" in
             ubuntu-*) sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg ;;
-            macos-*) brew install ffmpeg ;;
+            # Brew has no old-version bottles: fail loudly once it moves past the reference 9.0.x.
+            macos-*) brew install ffmpeg
+                     v="$(ffmpeg -hide_banner -version | sed -n 1p)"; [[ $v == "ffmpeg version 9.0."* ]] \
+                       || { echo "::error::brew FFmpeg left 9.0.x; the AC-3 known answers need 9.0.2"; exit 1; } ;;
             # FFmpeg 9.1.0's AC-3 decode differs from the known answers; pin the reference decoder.
             windows-*) choco install ffmpeg --version 9.0.2 -y --no-progress ;;
           esac
