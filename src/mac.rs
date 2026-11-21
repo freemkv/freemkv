@@ -124,6 +124,16 @@ fn dev_env(key: &str) -> Result<String, std::env::VarError> {
     }
 }
 
+// AppKit animates a bar's fill, so a reset to 0 for the next title would sweep back from
+// full; toggling indeterminate drops the old fill at once. Rises still animate as before.
+fn set_bar(b: &NSProgressIndicator, value: f64) {
+    if value + 0.5 < b.doubleValue() {
+        b.setIndeterminate(true);
+        b.setIndeterminate(false);
+    }
+    b.setDoubleValue(value);
+}
+
 fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
 }
@@ -1755,10 +1765,10 @@ impl Controller {
                 }
             }
             if let Some(b) = iv.bar_cur.borrow().as_ref() {
-                b.setDoubleValue(v.bar_current);
+                set_bar(b, v.bar_current);
             }
             if let Some(b) = iv.bar_all.borrow().as_ref() {
-                b.setDoubleValue(v.bar_overall);
+                set_bar(b, v.bar_overall);
             }
             if let Some(l) = iv.lbl_cur.borrow().as_ref() {
                 l.setStringValue(&NSString::from_str(&v.caption_current));
@@ -2819,9 +2829,11 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         let [name, year, kind, season, disc, first] = crate::ui::details_labels();
         let mut x = 0.0;
         let mut fields = Vec::new();
+        // Sized to the drawn text, so "Name:" and "Season:" are never clipped in any language.
         let label = |s: &str, x: &mut f64| {
-            let lw = 8.0 + 7.0 * s.chars().count() as f64;
-            let l = text(mtm, &format!("{s}:"), r(*x, 6.0, lw, 17.0), false, false);
+            let l = text(mtm, &format!("{s}:"), r(*x, 6.0, 40.0, 17.0), false, false);
+            l.sizeToFit();
+            let lw = l.frame().size.width;
             details_row.addSubview(&l);
             *x += lw + 4.0;
         };
@@ -2837,8 +2849,15 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         boxes(&name, F::Name, 240.0, &mut x);
         boxes(&year, F::Year, 52.0, &mut x);
         {
-            let lw = 8.0 + 7.0 * kind.chars().count() as f64;
-            let l = text(mtm, &format!("{kind}:"), r(x, 6.0, lw, 17.0), false, false);
+            let l = text(
+                mtm,
+                &format!("{kind}:"),
+                r(x, 6.0, 40.0, 17.0),
+                false,
+                false,
+            );
+            l.sizeToFit();
+            let lw = l.frame().size.width;
             details_row.addSubview(&l);
             x += lw + 4.0;
             let p = {
@@ -3226,7 +3245,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         let p2 = {
             NSProgressIndicator::initWithFrame(
                 NSProgressIndicator::alloc(mtm),
-                r(PAD, bar2_y, W - PAD * 2.0 - 34.0, 20.0),
+                r(PAD, bar2_y, W - PAD * 2.0, 20.0),
             )
         };
         unsafe {
