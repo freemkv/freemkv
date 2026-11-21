@@ -108,8 +108,10 @@ jobs:
           case "${{ matrix.os }}" in
             ubuntu-*)  sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg ;;
             macos-*)   brew install ffmpeg ;;
-            windows-*) choco install ffmpeg -y --no-progress ;;
+            # FFmpeg 9.1.0's AC-3 decode differs from the known answers; pin the reference decoder.
+            windows-*) choco install ffmpeg --version 9.0.2 -y --no-progress ;;
           esac
+          ffmpeg -hide_banner -version | sed -n 1p
       - name: Exact toolchain (freemkv rust-version)
         shell: bash
         run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
@@ -309,8 +311,10 @@ jobs:
           case "${{ matrix.os }}" in
             ubuntu-*) sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg ;;
             macos-*) brew install ffmpeg ;;
-            windows-*) choco install ffmpeg -y --no-progress ;;
+            # FFmpeg 9.1.0's AC-3 decode differs from the known answers; pin the reference decoder.
+            windows-*) choco install ffmpeg --version 9.0.2 -y --no-progress ;;
           esac
+          ffmpeg -hide_banner -version | sed -n 1p
       - name: Exact toolchain (freemkv rust-version)
         if: steps.creds.outputs.have == 'true'
         shell: bash
