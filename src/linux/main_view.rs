@@ -452,12 +452,6 @@ impl MainView {
     /// Assign the view. Computes nothing the core already decided.
     pub(super) fn render(&self, v: &View, memo: &mut Memo) {
         self.stack.set_visible_child_name(glue::page_name(v.page));
-        // The log gives way, never the page: its buttons stay inside the top pane.
-        let need = self
-            .stack
-            .visible_child()
-            .map_or(0, |p| status_content_height(&p));
-        self.stack.set_size_request(-1, need);
         self.open_disc.set_visible(v.home_drives.is_empty());
         self.empty
             .set_title(&crate::ui::empty_heading(v.disc_present));
@@ -482,6 +476,13 @@ impl MainView {
             self.drives.set_visible(!v.home_drives.is_empty());
             memo.home = Some(home);
         }
+        // Measured after the heading and drive rows above are set, so it is this view's
+        // height: the log gives way, never the page, and its buttons stay in the top pane.
+        let need = self
+            .stack
+            .visible_child()
+            .map_or(0, |p| status_content_height(&p));
+        self.stack.set_size_request(-1, need);
         // While ripping and on the result page the log takes the spare height; elsewhere the
         // page does and the log keeps its own. Re-laid out only when that changes, so a drag
         // holds until then.
