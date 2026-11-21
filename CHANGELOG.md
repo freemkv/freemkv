@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.8.11] — UNRELEASED
 
 ### Added
 
@@ -12,6 +12,9 @@
 - Linux: the disc page puts the title tree first again. Name and Year sit on one line (Season, Disc and First episode join it for a TV disc), Kind, Titles, Audio and Subtitles are four equal choosers in one row that each open below themselves, the tree takes the remaining height, and the output folder, format, Eject and Rip Now share one line under it. The log sits under a draggable divider, short by default; View ▸ Hide log still hides it (#98). (app only: Linux GTK interface)
 - Linux: the start screen lists the drives as rows: the drive model, its device and whether it holds a disc, Open (only with a disc), and a menu with Use at startup and Eject. The rows update as discs are inserted or removed (#102, #101). (app only: Linux GTK interface)
 - The Titles choice is now Automatic, Longest title, All titles or None, and Kind decides what Automatic takes: the main feature for a Movie, the episodes for a TV series, and the existing main-film-or-episodes guess while Kind is Auto and the disc label does not say. A saved "Main film / episodes", "Main film only" or "Episodes" loads as Automatic (#99). (app only: all desktop interfaces)
+- Linux: every chooser opens in a popover directly below its field, at its width, instead of expanding in place. Single-choice fields show radio buttons and multi-choice fields (Audio, Subtitles, languages) show checkboxes. (app only: Linux GTK interface)
+- Lower memory use and CPU time across scanning, ripping and muxing: fewer copies and clones of stream data, labels and titles, and release binaries built with thin LTO and one codegen unit. (CLI, app, server)
+- English copy: title-case menu items, real singular and plural instead of "(s)", and no space before colons. (CLI, app, server)
 
 ### Fixed
 
@@ -21,6 +24,9 @@
 - The Titles mode picked in the main window is remembered across restarts as the default selection, like the audio and subtitle picks; the Settings switch now reads "Remember title, audio and subtitle choices" (#99). (app only: all desktop interfaces)
 - The start screen notices a disc inserted or removed after launch: each drive's status and the heading update within a couple of seconds, without a restart (#101). (app only: all desktop interfaces)
 - The "freemkv X.Y.Z — ready" line shows in the log again after launch; since 1.8.6 the Linux app no longer displayed it (#100). (app only: all desktop interfaces)
+- macOS: a progress bar starting the next title drops straight to zero instead of sweeping back from full, the two bars are the same width, and the Name and Season labels are no longer clipped. (app only: macOS interface)
+- A page's buttons stay inside the top pane when the log is shown, and the start screen's status no longer repeats its heading. (app only: all desktop interfaces)
+- ISO and folder rips log the title's size, or no size when it is unknown, instead of "~0 B". (CLI, app)
 
 ## [1.8.10] — 2026-11-17
 
