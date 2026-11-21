@@ -26,7 +26,7 @@
 - The "freemkv X.Y.Z — ready" line shows in the log again after launch; since 1.8.6 the Linux app no longer displayed it (#100). (app only: all desktop interfaces)
 - macOS: a progress bar starting the next title drops straight to zero instead of sweeping back from full, the two bars are the same width, and the Name and Season labels are no longer clipped. (app only: macOS interface)
 - A page's buttons stay inside the top pane when the log is shown, and the start screen's status no longer repeats its heading. (app only: all desktop interfaces)
-- ISO and folder rips log the title's size, or no size when it is unknown, instead of "~0 B". (CLI, app)
+- ISO and folder rips log the title's size, or no size when it is unknown, instead of "~0 B". (CLI, app, server)
 
 ## [1.8.10] — 2026-11-17
 
