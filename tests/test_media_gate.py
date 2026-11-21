@@ -531,7 +531,7 @@ class FingerprintTests(unittest.TestCase):
             'rust-version': lambda: self.ws.edit('freemkv', 'Cargo.toml', '"1.98.1"', '"1.98.2"'),
             'resolver': lambda: self.ws.edit('freemkv', 'Cargo.toml', '[package]\n', '[package]\nresolver = "2"\n'),
             'profile': lambda: self.ws.write('freemkv', 'Cargo.toml', real('Cargo.toml') +
-                                             '\n[profile.release]\nlto = true\n'),
+                                             '\n[profile.release.package."*"]\nopt-level = 2\n'),
             'new non-GUI dep': lambda: self.ws.edit('freemkv', 'Cargo.toml', 'libc = "0.2"', 'libc = "0.2"\nrayon = "1"'),
             'lib feature spec': lambda: self.ws.edit('libfreemkv', 'Cargo.toml', 'serde_json = "1"',
                                                      'serde_json = { version = "1", features = ["raw_value"] }'),
