@@ -142,13 +142,23 @@ impl Choice {
         for (row, _) in self.rows.borrow_mut().drain(..) {
             self.row.remove(&row);
         }
+        let mut leader: Option<gtk::CheckButton> = None;
         for at in 0..self.model.n_items() {
+            // Grouped check buttons draw as stock radio buttons: one choice, not several.
             let check = gtk::CheckButton::new();
+            check.set_group(leader.as_ref());
+            leader.get_or_insert_with(|| check.clone());
             let row = option(self.model.string(at).as_deref().unwrap_or(""), &check);
             let weak = Rc::downgrade(self);
-            check.connect_toggled(move |_| {
+            row.connect_activated(move |_| {
+                if let Some(me) = weak.upgrade() {
+                    me.row.close();
+                }
+            });
+            let weak = Rc::downgrade(self);
+            check.connect_toggled(move |check| {
                 let Some(me) = weak.upgrade() else { return };
-                if me.painting.get() {
+                if me.painting.get() || !check.is_active() {
                     return;
                 }
                 let changed = me.selected.get() != at;

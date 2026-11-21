@@ -551,13 +551,26 @@ fn chooser_sequence(
                     }),
                     &description,
                 );
+                let under = descendants(pop.upcast_ref());
+                let radios = under.iter().filter(|w| w.css_name() == "radio").count();
                 if row.has_css_class("freemkv-single-choice") {
-                    let active = descendants(pop.upcast_ref())
+                    let active = under
                         .iter()
                         .filter_map(|w| w.downcast_ref::<gtk::CheckButton>())
                         .filter(|check| check.is_active())
                         .count();
                     gate.check("chooser-single-selection", active == 1, &description);
+                    gate.check(
+                        "chooser-single-choice-radio",
+                        radios == options.len(),
+                        format!("{description}; {radios} radio indicators"),
+                    );
+                } else {
+                    gate.check(
+                        "chooser-multi-choice-checks",
+                        radios == 0,
+                        format!("{description}; {radios} radio indicators"),
+                    );
                 }
                 gate.check(
                     "chooser-expands-below",
