@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.8.10"
+version = "1.8.11"
 dependencies = [
  "block2",
  "freemkv-engine",
@@ -418,8 +418,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.8.10"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.10#2c2b426c058a03d2140576f891d655eeb5fce6b1"
+version = "1.8.11"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.8.11#2e77d1b276275ff118e4c6303b3f7675bcc6000f"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -434,16 +434,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.8.10"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.10#47568fa990a5699815654397bbe00a453bfb7d4b"
+version = "1.8.11"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.8.11#4a48f54b0d194e31feae34c8bfa49712d980bcab"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.8.10"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.10#96cf993c36f6143345c9fe00821ac303238b8602"
+version = "1.8.11"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.8.11#cb4b235dc5658442b47434b6848b313bb75346da"
 dependencies = [
  "base64",
  "flate2",
@@ -456,8 +456,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.8.10"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.10#03933fc05ea6c97751b79f44eb19a274d3441c1f"
+version = "1.8.11"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.8.11#dbe4a0b9cf2a67f449612e5b9dad9ad58e01983a"
 dependencies = [
  "aes",
  "anyhow",
@@ -1052,8 +1052,8 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libfreemkv"
-version = "1.8.10"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.10#c0c5fffbc0a2fff8c8f1d8e75279b73f855ab3f5"
+version = "1.8.11"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.8.11#61fa081c3b183eeeea4842c01d7e37597d882f87"
 dependencies = [
  "aes",
  "base64",
