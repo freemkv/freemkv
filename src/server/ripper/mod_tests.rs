@@ -80,7 +80,7 @@ fn video_mvc_dependent() -> libfreemkv::Stream {
         color_space: libfreemkv::disc::ColorSpace::Bt709,
         display_aspect: None,
         secondary: true,
-        label: libfreemkv::disc::MVC_DEPENDENT_LABEL.to_string(),
+        label: libfreemkv::disc::MVC_DEPENDENT_LABEL.into(),
         measured_cicp: None,
     })
 }

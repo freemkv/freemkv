@@ -706,7 +706,7 @@ mod tests {
                 let mut t = title(episode + alternate as f64, start + alternate * 10_000);
                 t.clips = vec![libfreemkv::Clip {
                     marks_on_pes_clock: true,
-                    clip_id: episode_name.to_ascii_lowercase(),
+                    clip_id: episode_name.to_ascii_lowercase().into(),
                     in_time: 0,
                     out_time: (episode * 45_000.0) as u32,
                     duration_secs: episode,
