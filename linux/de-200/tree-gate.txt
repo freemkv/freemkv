@@ -1,0 +1,254 @@
+GATE PASS tree-css-provider-released — dropping a tree must release its display-wide CSS provider
+GATE PASS tree-has-multiple-titles — light-default
+GATE PASS tree-cell-model-bound — light-default: row Some(0)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-default: row Some(0), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — light-default: row Some(0), depth 0, arrow centre x 8.0
+GATE PASS tree-connector-has-ink — light-default: row Some(0), depth 0
+GATE PASS tree-cell-model-bound — light-default: row Some(1)
+GATE PASS tree-branch-centred-on-arrow — light-default: row Some(1), depth 1, arrow centre x 28.0
+GATE PASS tree-connector-has-ink — light-default: row Some(1), depth 1
+GATE PASS tree-cell-model-bound — light-default: row Some(2)
+GATE PASS tree-connector-has-ink — light-default: row Some(2), depth 2
+GATE PASS tree-cell-model-bound — light-default: row Some(3)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-default: row Some(3), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-default: row Some(3), depth 2
+GATE PASS tree-cell-model-bound — light-default: row Some(28)
+GATE PASS tree-branch-centred-on-arrow — light-default: row Some(28), depth 1, arrow centre x 28.0
+GATE PASS tree-connector-has-ink — light-default: row Some(28), depth 1
+GATE PASS tree-cell-model-bound — light-default: row Some(29)
+GATE PASS tree-connector-has-ink — light-default: row Some(29), depth 2
+GATE PASS tree-cell-model-bound — light-default: row Some(30)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-default: row Some(30), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-default: row Some(30), depth 2
+GATE PASS capture — /home/runner/work/_temp/gui-gate/de-200/tree-light-default.png
+GATE PASS tree-has-multiple-titles — light-chapters-expanded
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(0)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(0), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — light-chapters-expanded: row Some(0), depth 0, arrow centre x 8.0
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(0), depth 0
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(1)
+GATE PASS tree-branch-centred-on-arrow — light-chapters-expanded: row Some(1), depth 1, arrow centre x 28.0
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(1), depth 1
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(2)
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(2), depth 2
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(3)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(3), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — light-chapters-expanded: row Some(3), depth 2, arrow centre x 48.0
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(3), depth 2
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(4)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(4), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(4), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(5)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(5), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(5), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(6)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(6), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(6), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(7)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(7), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(7), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(8)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(8), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(8), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(9)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(9), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(9), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(10)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(10), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(10), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(11)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(11), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(11), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(12)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(12), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(12), depth 3
+GATE PASS tree-cell-model-bound — light-chapters-expanded: row Some(13)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-chapters-expanded: row Some(13), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-chapters-expanded: row Some(13), depth 3
+GATE PASS tree-content-follows-depth — [(0, 26.0), (1, 46.0), (2, 66.0), (2, 66.0), (3, 86.0), (3, 86.0), (3, 86.0), (3, 86.0), (3, 86.0), (3, 86.0), (3, 86.0), (3, 86.0), (3, 86.0), (3, 86.0)]
+GATE PASS tree-has-nested-chapters — light-chapters-expanded
+GATE PASS capture — /home/runner/work/_temp/gui-gate/de-200/tree-light-chapters-expanded.png
+GATE PASS tree-has-multiple-titles — light-title-collapsed
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(0)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(0), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — light-title-collapsed: row Some(0), depth 0, arrow centre x 8.0
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(0), depth 0
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(1)
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(1), depth 1
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(28)
+GATE PASS tree-branch-centred-on-arrow — light-title-collapsed: row Some(28), depth 1, arrow centre x 28.0
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(28), depth 1
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(29)
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(29), depth 2
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(30)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(30), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — light-title-collapsed: row Some(30), depth 2, arrow centre x 48.0
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(30), depth 2
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(31)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(31), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(31), depth 3
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(32)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(32), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(32), depth 3
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(33)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(33), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(33), depth 3
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(34)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(34), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(34), depth 3
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(35)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(35), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(35), depth 3
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(36)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(36), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(36), depth 3
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(37)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(37), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(37), depth 3
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(38)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(38), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(38), depth 3
+GATE PASS tree-cell-model-bound — light-title-collapsed: row Some(39)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-title-collapsed: row Some(39), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-title-collapsed: row Some(39), depth 3
+GATE PASS tree-title-collapsed — light-title-collapsed
+GATE PASS capture — /home/runner/work/_temp/gui-gate/de-200/tree-light-title-collapsed.png
+GATE PASS tree-has-multiple-titles — light-scroll-bottom
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(40)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(40), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(40), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(41)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(41), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(41), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(42)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(42), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(42), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(43)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(43), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(43), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(44)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(44), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(44), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(45)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(45), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(45), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(46)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(46), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(46), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(47)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(47), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(47), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(48)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(48), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(48), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(49)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(49), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(49), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(50)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(50), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(50), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(51)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(51), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(51), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(52)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(52), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(52), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(53)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(53), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(53), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-bottom: row Some(54)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-bottom: row Some(54), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-bottom: row Some(54), depth 3
+GATE PASS tree-scroll-exercises-recycling — light-scroll-bottom
+GATE PASS capture — /home/runner/work/_temp/gui-gate/de-200/tree-light-scroll-bottom.png
+GATE PASS tree-has-multiple-titles — light-scroll-return
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(0)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(0), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — light-scroll-return: row Some(0), depth 0, arrow centre x 8.0
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(0), depth 0
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(1)
+GATE PASS tree-branch-centred-on-arrow — light-scroll-return: row Some(1), depth 1, arrow centre x 28.0
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(1), depth 1
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(2)
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(2), depth 2
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(3)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(3), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — light-scroll-return: row Some(3), depth 2, arrow centre x 48.0
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(3), depth 2
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(4)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(4), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(4), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(5)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(5), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(5), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(6)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(6), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(6), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(7)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(7), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(7), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(8)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(8), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(8), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(9)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(9), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(9), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(10)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(10), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(10), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(11)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(11), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(11), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(12)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(12), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(12), depth 3
+GATE PASS tree-cell-model-bound — light-scroll-return: row Some(13)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — light-scroll-return: row Some(13), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — light-scroll-return: row Some(13), depth 3
+GATE PASS capture — /home/runner/work/_temp/gui-gate/de-200/tree-light-scroll-return.png
+GATE PASS tree-has-multiple-titles — dark-expanded
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(0)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(0), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — dark-expanded: row Some(0), depth 0, arrow centre x 8.0
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(0), depth 0
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(1)
+GATE PASS tree-branch-centred-on-arrow — dark-expanded: row Some(1), depth 1, arrow centre x 28.0
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(1), depth 1
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(2)
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(2), depth 2
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(3)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(3), label/content start gap Some(0.0) px
+GATE PASS tree-branch-centred-on-arrow — dark-expanded: row Some(3), depth 2, arrow centre x 48.0
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(3), depth 2
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(4)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(4), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(4), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(5)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(5), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(5), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(6)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(6), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(6), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(7)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(7), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(7), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(8)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(8), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(8), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(9)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(9), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(9), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(10)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(10), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(10), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(11)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(11), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(11), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(12)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(12), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(12), depth 3
+GATE PASS tree-cell-model-bound — dark-expanded: row Some(13)
+GATE PASS tree-nonselectable-has-no-checkbox-slot — dark-expanded: row Some(13), label/content start gap Some(0.0) px
+GATE PASS tree-connector-has-ink — dark-expanded: row Some(13), depth 3
+GATE PASS capture — /home/runner/work/_temp/gui-gate/de-200/tree-dark-expanded.png
+GATE OK: 253 checks

@@ -1,0 +1,52 @@
+GATE PASS fixture-opens — page Titles, 2 titles
+GATE PASS titles-carry-length-and-size — [("2:17:00", "6 MB"), ("12:30", "6 MB")]
+GATE PASS header-texts — ["", "Item", "Language", "Format", "Notes", "Length", "Size"]
+GATE PASS columns-laid-out — Some(TreeColumns { tick: Span { x: 0, w: 126 }, cols: [Span { x: 126, w: 165 }, Span { x: 291, w: 114 }, Span { x: 405, w: 225 }, Span { x: 630, w: 180 }, Span { x: 810, w: 99 }, Span { x: 909, w: 99 }] })
+GATE PASS header-text-fits — "Item": 36 px in a 165 px header item
+GATE PASS header-text-fits — "Language": 77 px in a 114 px header item
+GATE PASS header-text-fits — "Format": 57 px in a 225 px header item
+GATE PASS header-text-fits — "Notes": 47 px in a 180 px header item
+GATE PASS header-text-fits — "Length": 54 px in a 99 px header item
+GATE PASS header-text-fits — "Size": 31 px in a 95 px header item
+GATE PASS cell-fits-its-column — "2:17:00": 58 px in a 99 px column
+GATE PASS cell-fits-its-column — "6 MB": 41 px in a 99 px column
+GATE PASS cell-fits-its-column — "12:30": 44 px in a 99 px column
+GATE PASS cell-fits-its-column — "6 MB": 41 px in a 99 px column
+GATE PASS header-has-ink — Region { x: 20, y: 159, w: 1004, h: 36 }
+GATE PASS length-cell-has-ink — Some(Region { x: 113, y: 229, w: 99, h: 32 })
+GATE PASS tree-direction-follows-the-language — mirrored true, right-to-left language true
+GATE PASS capture-titles — D:\a\_temp\gui-gate\ar-150/titles.bmp
+GATE PASS long-destination-reads-whole — 485 px of path in a 866 px field
+GATE PASS dropdown-choice-reads-whole — container: "Selected titles → MKV" is 171 px in a 457 px box
+GATE PASS dropdown-list-shows-every-choice — container: longest choice 282 px, list 480 px
+GATE PASS dropdown-choice-reads-whole — startup_mode: "Show drives" is 96 px in a 457 px box
+GATE PASS dropdown-list-shows-every-choice — startup_mode: longest choice 166 px, list 480 px
+GATE PASS dropdown-choice-reads-whole — selection: "Automatic" is 82 px in a 337 px box
+GATE PASS dropdown-list-shows-every-choice — selection: longest choice 97 px, list 360 px
+GATE PASS dropdown-choice-reads-whole — rip_mode: "Multi-pass" is 83 px in a 337 px box
+GATE PASS dropdown-list-shows-every-choice — rip_mode: longest choice 89 px, list 360 px
+GATE PASS dropdown-choice-reads-whole — key_source: "Local keydb only" is 133 px in a 367 px box
+GATE PASS dropdown-list-shows-every-choice — key_source: longest choice 191 px, list 390 px
+GATE PASS dropdown-choice-reads-whole — language: "Auto" is 39 px in a 307 px box
+GATE PASS dropdown-list-shows-every-choice — language: longest choice 186 px, list 330 px
+GATE PASS dropdown-choice-reads-whole — log_level: "Normal" is 59 px in a 247 px box
+GATE PASS dropdown-list-shows-every-choice — log_level: longest choice 65 px, list 270 px
+GATE PASS capture-settings — D:\a\_temp\gui-gate\ar-150/settings-output.bmp
+GATE PASS open-dropdown-has-ink — container: D:\a\_temp\gui-gate\ar-150/settings-output-container-open.bmp
+GATE PASS capture-settings — D:\a\_temp\gui-gate\ar-150/settings-selection.bmp
+GATE PASS capture-settings — D:\a\_temp\gui-gate\ar-150/settings-recovery.bmp
+GATE PASS capture-settings — D:\a\_temp\gui-gate\ar-150/settings-keys.bmp
+GATE PASS open-dropdown-has-ink — key_source: D:\a\_temp\gui-gate\ar-150/settings-keys-key-source-open.bmp
+GATE PASS capture-settings — D:\a\_temp\gui-gate\ar-150/settings-advanced.bmp
+GATE PASS open-dropdown-has-ink — language: D:\a\_temp\gui-gate\ar-150/settings-advanced-language-open.bmp
+GATE PASS no-control-from-another-page — disc-page: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — rip-single: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — rip-multi: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — rip-multi-reading: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — rip-multi-log-hidden: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — rip-stopping: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — result-finished: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — result-finished-log-hidden: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — result-cancelled: 0 control(s) of another page visible
+GATE PASS no-control-from-another-page — result-failed: 0 control(s) of another page visible
+GATE OK: 51 checks
