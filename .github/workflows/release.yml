@@ -2,6 +2,9 @@ name: Release
 
 on:
   push:
+    # A docs-only push runs nothing heavy: promote and the release gate fall back to
+    # the last commit this ran on (see their docs_base).
+    paths-ignore: ['.github/release-notes/**', '.github/ISSUE_TEMPLATE/**', '.github/QA.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'CODE_OF_CONDUCT.md', 'GOVERNANCE.md', 'ROADMAP.md', 'RELEASE.md', 'TROUBLESHOOTING.md', 'fuzz/README.md']
     tags:
       - 'v*'
       # NOT the release-candidate tags. Every push to `qa` stamps a

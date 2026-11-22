@@ -151,7 +151,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 revisions['bdemu'] = 'a' * 40
             if scenario in ('failure', 'cancelled', 'skipped'):
                 jobs[-1]['conclusion'] = scenario
-            documents = {'/tmp/qa-shas': '\n'.join(r + ' ' + 'a' * 40 for r in repos),
+            documents = {'/tmp/media-shas': '\n'.join(r + ' ' + 'a' * 40 for r in repos),
                          '/tmp/media-jobs.json': json.dumps({'jobs': jobs}),
                          '/tmp/media-evidence/revisions.json': json.dumps(revisions)}
             with self.subTest(scenario=scenario), patch('builtins.open', side_effect=lambda name: io.StringIO(documents[name])):
@@ -308,6 +308,39 @@ class ReleasePreflightTests(GhHarness):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('freemkv: no qa run', result.stdout)
 
+    def docs_push(self, files, guard='success'):
+        # freemkv qa moved a -> e; e changed `files` only, so no build workflow ran on it.
+        a, e = 'a' * 40, 'e' * 40
+        routes = self.routes()
+        routes['repos/freemkv/freemkv/git/ref/heads/qa'] = {'object': {'sha': e}}
+        routes[f'repos/freemkv/freemkv/compare/{e}...{a}'] = {'status': 'behind'}
+        routes[f'repos/freemkv/freemkv/commits?sha={e}&per_page=30'] = [{'sha': e}, {'sha': a}]
+        routes[f'repos/freemkv/freemkv/compare/{a}...{e}'] = {'files': [{'filename': f} for f in files]}
+        routes[f'repos/freemkv/freemkv/actions/runs?head_sha={e}&per_page=100'] = {
+            'workflow_runs': [dict(green_runs('dev', ('leak-guard',))[0], conclusion=guard)]}
+        return routes
+
+    def test_a_docs_only_push_is_gated_by_the_last_built_commit(self):
+        result, _ = self.preflight(self.docs_push(['CHANGELOG.md', '.github/release-notes/1.8.12.md']))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('changes only docs since aaaaaaa', result.stdout)
+
+    def test_a_docs_push_does_not_hide_code_a_red_base_or_a_red_guard(self):
+        result, _ = self.preflight(self.docs_push(['CHANGELOG.md', 'src/main.rs']))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('freemkv: qa eeeeeee has no run of: CI', result.stdout)
+        routes = self.docs_push(['README.md'])
+        result, _ = self.preflight(routes)
+        self.assertNotEqual(result.returncode, 0, 'README feeds doc tests: not docs-only')
+        routes = self.docs_push(['CHANGELOG.md'])
+        routes[f"repos/freemkv/freemkv/actions/runs?head_sha={'a' * 40}&per_page=100"]['workflow_runs'][1]['conclusion'] = 'failure'
+        result, _ = self.preflight(routes)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not green', result.stdout)
+        result, _ = self.preflight(self.docs_push(['CHANGELOG.md'], guard='failure'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not green (leak-guard)', result.stdout)
+
     def test_only_the_latest_run_of_each_workflow_gates(self):
         routes = self.routes()
         key = f"repos/freemkv/freemkv/actions/runs?head_sha={'a' * 40}&per_page=100"
@@ -364,6 +397,23 @@ class PromoteTests(GhHarness):
                 result, _ = self.check(routes)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f'bdemu: cannot read {branch}', result.stdout)
+
+    def test_a_docs_only_dev_push_is_gated_by_the_last_built_commit(self):
+        d, f = 'd' * 40, 'f' * 40
+        for files, ok in ((['CHANGELOG.md', '.github/release-notes/1.8.12.md'], True), (['build.rs'], False)):
+            routes = self.routes()
+            routes['repos/freemkv/freemkv/git/ref/heads/dev'] = {'object': {'sha': f}}
+            routes[f"repos/freemkv/freemkv/compare/{'a' * 40}...{f}"] = {'status': 'ahead'}
+            routes[f"repos/freemkv/freemkv/compare/{f}...{'a' * 40}"] = {'status': 'behind'}
+            routes[f'repos/freemkv/freemkv/contents/Cargo.toml?ref={f}'] = routes[f'repos/freemkv/freemkv/contents/Cargo.toml?ref={d}']
+            routes[f'repos/freemkv/freemkv/actions/runs?head_sha={f}&per_page=100'] = {'workflow_runs': green_runs('dev', ('leak-guard',))}
+            routes[f'repos/freemkv/freemkv/commits?sha={f}&per_page=30'] = [{'sha': f}, {'sha': d}]
+            routes[f'repos/freemkv/freemkv/compare/{d}...{f}'] = {'files': [{'filename': n} for n in files]}
+            with self.subTest(files=files):
+                result, _ = self.check(routes)
+                self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+                if ok:
+                    self.assertIn('changes only docs since ddddddd', result.stdout)
 
     def test_superseded_failed_run_does_not_block(self):
         routes = self.routes()

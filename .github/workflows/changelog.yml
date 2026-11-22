@@ -1,0 +1,28 @@
+name: changelog
+
+# CI ignores a push that changes only documentation (its docs paths-ignore), so a
+# CHANGELOG-only push would skip tests/changelog_coverage.rs. That test is plain std
+# Rust, so it compiles on its own in seconds: no dependencies, no crate build.
+on:
+  push:
+    branches: [dev]
+    paths: ['CHANGELOG.md', 'tests/changelog_coverage.rs']
+  pull_request:
+    paths: ['CHANGELOG.md', 'tests/changelog_coverage.rs']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Every unreleased CHANGELOG line names its front ends
+        run: |
+          CARGO_MANIFEST_DIR="$PWD" rustc --edition 2024 --test tests/changelog_coverage.rs -o "$RUNNER_TEMP/changelog_coverage"
+          "$RUNNER_TEMP/changelog_coverage"

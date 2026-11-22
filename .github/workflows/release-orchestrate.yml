@@ -80,12 +80,14 @@ jobs:
           # before it was tagged, and the cascade re-checks that every repo is still at its
           # release point, so only branch coherence is checked here.
           resume=false
-          if [ "$PRERELEASE" != true ] && gh api "repos/freemkv/freemkv/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+          if [ "$PRERELEASE" != true ] && [ -n "${VERSION:-}" ] \
+             && gh api "repos/freemkv/freemkv/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
             resume=true
             echo "::notice::v$VERSION is already tagged: resuming (qa-green and media gates passed before the tags)"
           fi
           fail=0
           : > /tmp/qa-shas
+          : > /tmp/media-shas
           # Prints the branch sha. Status 1 = no such branch (404); 2 = lookup failed (see ref_err).
           # gh prints an error body to stdout, so trust the output only when it is a sha.
           ref_sha() {
@@ -95,6 +97,32 @@ jobs:
             grep -q 'HTTP 404' /tmp/ref.err && return 1 || return 2
           }
           ref_err() { echo "::error::$1: cannot read $2 ($(tr '\n' ' ' </tmp/ref.err))"; }
+          runs_at() {
+            gh api "repos/freemkv/$1/actions/runs?head_sha=$2&per_page=100" \
+              -q '[.workflow_runs[] | {name, head_branch, status, conclusion, created_at}]'
+          }
+          # The build workflows ignore a push that changes only these paths (their docs
+          # paths-ignore). Keep the lists in promote.yml and release-orchestrate.yml the same.
+          DOCS_RE='^(\.github/(release-notes|ISSUE_TEMPLATE)/.*|\.github/QA\.md|(CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|GOVERNANCE|ROADMAP|RELEASE|TROUBLESHOOTING)\.md|fuzz/README\.md)$'
+          # docs_base <repo> <sha> <name-regex>: the newest commit at or before <sha> that a
+          # workflow whose run name matches ran on (freemkv names its qa runs "qa <sha>"),
+          # when every change after it is documentation only. Fails otherwise.
+          docs_base() {
+            local c n files
+            for c in $(gh api "repos/freemkv/$1/commits?sha=$2&per_page=30" -q '.[].sha' 2>/dev/null); do
+              [[ "$c" =~ ^[0-9a-f]{40}$ ]] || return 1
+              n=$(gh api "repos/freemkv/$1/actions/runs?head_sha=$c&per_page=100" \
+                    -q "[.workflow_runs[] | select(.name | test(\"$3\"))] | length" 2>/dev/null) || return 1
+              if [ "$n" != 0 ]; then
+                if [ "$c" != "$2" ]; then
+                  files=$(gh api "repos/freemkv/$1/compare/$c...$2" -q '.files[].filename' 2>/dev/null) || return 1
+                  [ -n "$files" ] && ! grep -qvE "$DOCS_RE" <<<"$files" || return 1
+                fi
+                echo "$c"; return 0
+              fi
+            done
+            return 1
+          }
           for r in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
                    freemkv-engine bdemu freemkv; do
             st=0; sha=$(ref_sha "$r" qa) || st=$?
@@ -103,9 +131,18 @@ jobs:
             # qa and dev runs of this exact sha gate: CI and the builds run on dev, which qa
             # fast-forwards to, and qa adds qa.yml (main's scheduled runs never gate). Only the
             # newest run of each workflow counts: a superseded or re-dispatched run must not gate.
+            # After a docs-only push CI (dev) or qa.yml (qa) has no run on the sha, so the
+            # runs of the last commit they ran on gate instead, as does its media evidence.
+            msha=$sha
             if ! $resume; then
-            runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$sha&per_page=100" \
-                     -q '[.workflow_runs[] | {name, head_branch, status, conclusion, created_at}]')
+            own=$(runs_at "$r" "$sha"); runs=$own
+            for wf in '^CI$' '^qa( |$)'; do
+              echo "$own" | jq -e --arg w "$wf" 'any(.[]; .name | test($w))' >/dev/null && continue
+              base=$(docs_base "$r" "$sha" "$wf") || continue
+              runs=$(jq -s 'add' <<<"$runs $(runs_at "$r" "$base")")
+              [ "$wf" = '^CI$' ] || msha=$base
+              echo "  $r: ${sha:0:7} changes only docs since ${base:0:7}; the runs there gate"
+            done
             gating=$(echo "$runs" | jq --arg re "$NON_GATING" \
                        '[.[] | select((.head_branch == "qa" or .head_branch == "dev") and (.name | test($re) | not))] | group_by(.name) | map(max_by(.created_at))')
             [ "$(echo "$gating" | jq 'length')" != "0" ] || { echo "::error::$r: no qa run for ${sha:0:7}"; fail=1; continue; }
@@ -130,7 +167,7 @@ jobs:
               done
               [ -z "$absent" ] || { echo "::error::$r: qa ${sha:0:7} has no run of: $absent"; fail=1; continue; }
             fi
-            fi
+            fi  # resume
 
             # main COHERENCE (F1): main must be an ANCESTOR of the qa sha we are
             # about to tag, so qa→main is a clean push. If main carries commits qa
@@ -162,13 +199,15 @@ jobs:
             fi
 
             echo "$r $sha" >> /tmp/qa-shas
+            echo "$r $msha" >> /tmp/media-shas
             echo "  ok $r: qa ${sha:0:7} green, main and dev coherent"
           done
           [ "$fail" = "0" ] || { echo "::error::refusing to release — qa not green / main or dev not coherent across the set"; exit 1; }
 
           if [ "$SKIP_MEDIA" = true ] || $resume; then exit 0; fi
-          # Require the bounded media gate at this exact candidate, including every OS.
-          fsha=$(gh api repos/freemkv/freemkv/git/ref/heads/qa -q .object.sha)
+          # Require the bounded media gate at this exact candidate (or, after a docs-only qa
+          # push, the commit it last ran on), including every OS.
+          fsha=$(awk '$1 == "freemkv" {print $2}' /tmp/media-shas)
           rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=100" \
                   -q 'first(.workflow_runs[]|select(.name=="hash-matrix" and .head_branch=="qa" and .conclusion=="success")).id // empty')
           [ -n "$rid" ] || { echo "::error::No successful media gate at $fsha"; exit 1; }
@@ -177,7 +216,7 @@ jobs:
           python3 - <<'PYMEDIA'
           import json
           jobs = {j["name"]: j["conclusion"] for j in json.load(open("/tmp/media-jobs.json"))["jobs"]}
-          candidate = dict(line.split() for line in open("/tmp/qa-shas") if line.strip())
+          candidate = dict(line.split() for line in open("/tmp/media-shas") if line.strip())
           revisions = json.load(open("/tmp/media-evidence/revisions.json"))
           expected = {"freemkv", "libfreemkv", "freemkv-engine", "freemkv-keysources", "freemkv-i18n", "freemkv-unlock"}
           if set(revisions) != expected or any(revisions[r] != candidate.get(r) for r in expected):

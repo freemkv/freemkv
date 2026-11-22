@@ -101,6 +101,32 @@ jobs:
             grep -q 'HTTP 404' /tmp/ref.err && return 1 || return 2
           }
           ref_err() { echo "::error::$1: cannot read $2 ($(tr '\n' ' ' </tmp/ref.err))"; }
+          runs_at() {
+            gh api "repos/freemkv/$1/actions/runs?head_sha=$2&per_page=100" \
+              -q '[.workflow_runs[] | {name, head_branch, status, conclusion, created_at}]'
+          }
+          # The build workflows ignore a push that changes only these paths (their docs
+          # paths-ignore). Keep the lists in promote.yml and release-orchestrate.yml the same.
+          DOCS_RE='^(\.github/(release-notes|ISSUE_TEMPLATE)/.*|\.github/QA\.md|(CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|GOVERNANCE|ROADMAP|RELEASE|TROUBLESHOOTING)\.md|fuzz/README\.md)$'
+          # docs_base <repo> <sha> <name-regex>: the newest commit at or before <sha> that a
+          # workflow whose run name matches ran on (freemkv names its qa runs "qa <sha>"),
+          # when every change after it is documentation only. Fails otherwise.
+          docs_base() {
+            local c n files
+            for c in $(gh api "repos/freemkv/$1/commits?sha=$2&per_page=30" -q '.[].sha' 2>/dev/null); do
+              [[ "$c" =~ ^[0-9a-f]{40}$ ]] || return 1
+              n=$(gh api "repos/freemkv/$1/actions/runs?head_sha=$c&per_page=100" \
+                    -q "[.workflow_runs[] | select(.name | test(\"$3\"))] | length" 2>/dev/null) || return 1
+              if [ "$n" != 0 ]; then
+                if [ "$c" != "$2" ]; then
+                  files=$(gh api "repos/freemkv/$1/compare/$c...$2" -q '.files[].filename' 2>/dev/null) || return 1
+                  [ -n "$files" ] && ! grep -qvE "$DOCS_RE" <<<"$files" || return 1
+                fi
+                echo "$c"; return 0
+              fi
+            done
+            return 1
+          }
           for r in $REPOS; do
             st=0; dev=$(ref_sha "$r" dev) || st=$?
             [ "$st" -ne 2 ] || { ref_err "$r" dev; fail=1; continue; }
@@ -159,8 +185,15 @@ jobs:
             fi
 
             # Only the newest run of each workflow per branch counts: a superseded or re-dispatched run must not gate.
-            runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$dev&per_page=100" \
-                     -q '[.workflow_runs[] | {name, head_branch, status, conclusion, created_at}]')
+            runs=$(runs_at "$r" "$dev")
+            # A docs-only push runs no CI: the last commit CI ran on gates, if only docs changed since.
+            if ! echo "$runs" | jq -e 'any(.[]; .name == "CI")' >/dev/null; then
+              if ! base=$(docs_base "$r" "$dev" '^CI$'); then
+                echo "::error::$r: no CI run for dev ${dev:0:7}, and it changes more than docs since the last one"; fail=1; continue
+              fi
+              runs=$(jq -s 'add' <<<"$runs $(runs_at "$r" "$base")")
+              echo "  $r: dev ${dev:0:7} changes only docs since ${base:0:7}; its CI gates"
+            fi
             gating=$(echo "$runs" | jq --arg re "$NON_GATING" \
                        '[.[] | select(.name | test($re) | not)] | group_by([.name, .head_branch]) | map(max_by(.created_at))')
 
@@ -213,12 +246,40 @@ jobs:
           # error (re-run promote), never a silent "fresh".
           now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           is_time() { [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; }
+          # The build workflows ignore a push that changes only these paths (their docs
+          # paths-ignore). Keep the lists in promote.yml and release-orchestrate.yml the same.
+          DOCS_RE='^(\.github/(release-notes|ISSUE_TEMPLATE)/.*|\.github/QA\.md|(CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|GOVERNANCE|ROADMAP|RELEASE|TROUBLESHOOTING)\.md|fuzz/README\.md)$'
+          # docs_base <repo> <sha> <name-regex>: the newest commit at or before <sha> that a
+          # workflow whose run name matches ran on (freemkv names its qa runs "qa <sha>"),
+          # when every change after it is documentation only. Fails otherwise.
+          docs_base() {
+            local c n files
+            for c in $(gh api "repos/freemkv/$1/commits?sha=$2&per_page=30" -q '.[].sha' 2>/dev/null); do
+              [[ "$c" =~ ^[0-9a-f]{40}$ ]] || return 1
+              n=$(gh api "repos/freemkv/$1/actions/runs?head_sha=$c&per_page=100" \
+                    -q "[.workflow_runs[] | select(.name | test(\"$3\"))] | length" 2>/dev/null) || return 1
+              if [ "$n" != 0 ]; then
+                if [ "$c" != "$2" ]; then
+                  files=$(gh api "repos/freemkv/$1/compare/$c...$2" -q '.files[].filename' 2>/dev/null) || return 1
+                  [ -n "$files" ] && ! grep -qvE "$DOCS_RE" <<<"$files" || return 1
+                fi
+                echo "$c"; return 0
+              fi
+            done
+            return 1
+          }
           moved_at() {
-            local sha t
+            local sha t base
             sha=$(gh api "repos/freemkv/$1/git/ref/heads/qa" -q .object.sha) || return 1
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
             t=$(gh api "repos/freemkv/$1/actions/runs?head_sha=$sha&branch=qa&per_page=100" \
                   -q '[.workflow_runs[].created_at] | min // empty') || return 1
+            # A docs-only qa push runs nothing, and moved nothing a dependent's qa tests:
+            # the repo moved when the last commit its qa ran on arrived.
+            if [ -z "$t" ] && base=$(docs_base "$1" "$sha" '^qa( |$)'); then
+              t=$(gh api "repos/freemkv/$1/actions/runs?head_sha=$base&branch=qa&per_page=100" \
+                    -q '[.workflow_runs[].created_at] | min // empty') || return 1
+            fi
             [ -z "$t" ] || is_time "$t" || return 1
             echo "${t:-$now}"
           }
