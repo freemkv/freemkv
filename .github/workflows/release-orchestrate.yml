@@ -60,6 +60,7 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           SKIP_MEDIA: ${{ inputs.skip_media }}
           PRERELEASE: ${{ inputs.prerelease }}
+          VERSION: ${{ inputs.version }}
           NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate)$|^[a-z_]+ in /\. - Update #[0-9]+$'
         run: |
           set -uo pipefail
@@ -74,6 +75,15 @@ jobs:
             n=$(gh api "repos/freemkv/freemkv/actions/workflows/promote.yml/runs?status=$s&per_page=1" -q .total_count)
             [ "$n" = 0 ] || { echo "::error::a promote run is $s — wait for it to finish, then retry"; exit 1; }
           done
+          # A re-dispatch after the tags are public is a resume: qa now holds the version-bump
+          # commits, whose builds ran on the tag, not on qa. The candidate passed this gate
+          # before it was tagged, and the cascade re-checks that every repo is still at its
+          # release point, so only branch coherence is checked here.
+          resume=false
+          if [ "$PRERELEASE" != true ] && gh api "repos/freemkv/freemkv/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            resume=true
+            echo "::notice::v$VERSION is already tagged: resuming (qa-green and media gates passed before the tags)"
+          fi
           fail=0
           : > /tmp/qa-shas
           # Prints the branch sha. Status 1 = no such branch (404); 2 = lookup failed (see ref_err).
@@ -93,6 +103,7 @@ jobs:
             # qa and dev runs of this exact sha gate: CI and the builds run on dev, which qa
             # fast-forwards to, and qa adds qa.yml (main's scheduled runs never gate). Only the
             # newest run of each workflow counts: a superseded or re-dispatched run must not gate.
+            if ! $resume; then
             runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$sha&per_page=100" \
                      -q '[.workflow_runs[] | {name, head_branch, status, conclusion, created_at}]')
             gating=$(echo "$runs" | jq --arg re "$NON_GATING" \
@@ -118,6 +129,7 @@ jobs:
                 echo "$gating" | jq -e --arg w "$w" 'any(.[]; .name == $w)' >/dev/null || absent="${absent:+$absent, }$w"
               done
               [ -z "$absent" ] || { echo "::error::$r: qa ${sha:0:7} has no run of: $absent"; fail=1; continue; }
+            fi
             fi
 
             # main COHERENCE (F1): main must be an ANCESTOR of the qa sha we are
@@ -154,7 +166,7 @@ jobs:
           done
           [ "$fail" = "0" ] || { echo "::error::refusing to release — qa not green / main or dev not coherent across the set"; exit 1; }
 
-          if [ "$SKIP_MEDIA" = true ]; then exit 0; fi
+          if [ "$SKIP_MEDIA" = true ] || $resume; then exit 0; fi
           # Require the bounded media gate at this exact candidate, including every OS.
           fsha=$(gh api repos/freemkv/freemkv/git/ref/heads/qa -q .object.sha)
           rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=100" \
